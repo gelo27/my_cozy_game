@@ -1,0 +1,8 @@
+{
+  "name": "Farm \u0026 House Builder",
+  "description": "Robust 3rd-person modular character controller with Rapier physics, dynamic rigidbody impulse correction, slope anti-slide, raycast ground detection, camera occlusion raycasting, and test playground.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,184 @@
+import * as THREE from 'three';
+import { BuildingSceneExportData } from '../building/types/BuildingTypes';
+import { TerrainSaveData } from './TerrainSystem';
+import { PropSaveData } from './PropSystem';
+import { PetSaveData } from '../gameplay/PetSystem';
+import { WeatherType } from './WeatherSystem';
+import { worldSettings } from './WorldSettings';
+import type { GameWorld } from '../engine/GameEngine';
+import type { CropState } from '../farming/types/FarmingTypes';
+
+export const SAVE_VERSION = 2;
+const KEY_PREFIX = 'cozyfarm.save.';
+export const AUTOSAVE_SLOT = 'auto';
+
+export interface WorldSaveData {
+  version: number;
+  savedAt: string;
+  terrain: TerrainSaveData;
+  waterLevel: number;
+  timeOfDay: number;
+  weather: WeatherType;
+  props: PropSaveData[];
+  buildings: BuildingSceneExportData | null;
+  crops: { x: number; z: number; crop: CropState }[];
+  inventory: { items: Record<string, number>; equipped: string | null };
+  player: [number, number, number];
+  vehicle: { p: [number, number, number]; yaw: number } | null;
+  pets: PetSaveData[];
+}
+
+export interface SaveSlotInfo {
+  slot: string;
+  savedAt: string;
+  sizeKb: number;
+}
+
+/**
+ * Whole-world save/load. Slots live in localStorage (a typical world is ~120 KB);
+ * files can be exported/imported as JSON for sharing levels between developers.
+ */
+export class SaveSystem {
+  constructor(private readonly world: GameWorld) {}
+
+  public capture(): WorldSaveData {
+    const w = this.world;
+    const items: Record<string, number> = {};
+    for (const item of w.inventoryManager.getItems()) items[item.id] = item.count;
+    const p = w.character.getPosition();
+    const vt = w.vehicle.body.translation();
+    const vr = w.vehicle.body.rotation();
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(new THREE.Quaternion(vr.x, vr.y, vr.z, vr.w));
+    return {
+      version: SAVE_VERSION,
+      savedAt: new Date().toISOString(),
+      terrain: w.terrain.serialize(),
+      waterLevel: worldSettings.waterLevel,
+      timeOfDay: worldSettings.timeOfDay,
+      weather: w.weather.weather,
+      props: w.props.serialize(),
+      buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
+      crops: w.farmingManager.serializeCrops(),
+      inventory: { items, equipped: w.inventoryManager.getEquippedItemId() },
+      player: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
+      vehicle: { p: [vt.x, vt.y + 0.3, vt.z], yaw: Math.atan2(fwd.x, fwd.z) },
+      pets: w.gameplay.pets.serialize(),
+    };
+  }
+
+  public apply(data: WorldSaveData): void {
+    const w = this.world;
+    worldSettings.waterLevel = data.waterLevel;
+    worldSettings.timeOfDay = data.timeOfDay;
+    w.weather.setWeather(data.weather);
+    w.terrain.deserialize(data.terrain);
+    w.props.deserialize(data.props);
+
+    const bm = w.character.buildAbility?.buildingManager;
+    if (bm) {
+      bm.clear();
+      if (data.buildings) bm.importScene(data.buildings);
+      bm.flushPendingRegeneration();
+    }
+    w.farmingManager.deserializeCrops(data.crops ?? []);
+
+    const inv = w.inventoryManager;
+    for (const item of inv.getItems()) {
+      const count = data.inventory.items[item.id];
+      if (count === undefined) continue;
+      if (count > item.count) inv.addItem(item.id, count - item.count);
+      else if (count < item.count) inv.removeItem(item.id, item.count - count);
+    }
+    if (data.inventory.equipped !== inv.getEquippedItemId()) inv.equipItem(data.inventory.equipped);
+
+    w.character.respawn(new THREE.Vector3(...data.player).add(new THREE.Vector3(0, 0.3, 0)));
+    if (data.vehicle) {
+      const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), data.vehicle.yaw);
+      w.vehicle.body.setTranslation({ x: data.vehicle.p[0], y: data.vehicle.p[1], z: data.vehicle.p[2] }, true);
+      w.vehicle.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+      w.vehicle.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    }
+    if (data.pets?.length) w.gameplay.pets.deserialize(data.pets);
+  }
+
+  // ---------------------------------------------------------------- slots
+
+  public save(slot: string): boolean {
+    try {
+      localStorage.setItem(KEY_PREFIX + slot, JSON.stringify(this.capture()));
+      return true;
+    } catch (err) {
+      console.warn('[SaveSystem] save failed', err);
+      return false;
+    }
+  }
+
+  public load(slot: string): boolean {
+    const data = SaveSystem.read(slot);
+    if (!data) return false;
+    this.apply(data);
+    return true;
+  }
+
+  public static read(slot: string): WorldSaveData | null {
+    try {
+      const raw = localStorage.getItem(KEY_PREFIX + slot);
+      if (!raw) return null;
+      const data = JSON.parse(raw) as WorldSaveData;
+      return data.version === SAVE_VERSION ? data : null;
+    } catch {
+      return null;
+    }
+  }
+
+  public static delete(slot: string): void {
+    try {
+      localStorage.removeItem(KEY_PREFIX + slot);
+    } catch {
+      // storage unavailable
+    }
+  }
+
+  public static listSlots(): SaveSlotInfo[] {
+    const out: SaveSlotInfo[] = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key?.startsWith(KEY_PREFIX)) continue;
+        const raw = localStorage.getItem(key) ?? '';
+        let savedAt = '';
+        try {
+          savedAt = (JSON.parse(raw) as WorldSaveData).savedAt;
+        } catch {
+          // corrupt slot
+        }
+        out.push({ slot: key.slice(KEY_PREFIX.length), savedAt, sizeKb: Math.round(raw.length / 1024) });
+      }
+    } catch {
+      // storage unavailable (private mode)
+    }
+    return out.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+  }
+
+  public exportFile(name = 'world'): void {
+    const blob = new Blob([JSON.stringify(this.capture())], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${name}.world.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  public importFile(file: File): Promise<boolean> {
+    return file.text().then((text) => {
+      try {
+        const data = JSON.parse(text) as WorldSaveData;
+        if (data.version !== SAVE_VERSION || !data.terrain) return false;
+        this.apply(data);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+}

@@ -1,0 +1,55 @@
+export interface Recipe {
+  id: string;
+  dishId: string;
+  name: string;
+  ingredients: { itemId: string; count: number }[];
+  /** Any fish counts for "fish_any". */
+  seconds: number;
+}
+
+export const RECIPES: Recipe[] = [
+  { id: 'bread', dishId: 'dish_bread', name: 'Хліб', ingredients: [{ itemId: 'crate_wheat', count: 2 }], seconds: 3 },
+  {
+    id: 'salad',
+    dishId: 'dish_salad',
+    name: 'Овочевий салат',
+    ingredients: [
+      { itemId: 'crate_carrot', count: 1 },
+      { itemId: 'crate_tomato', count: 1 },
+    ],
+    seconds: 2,
+  },
+  {
+    id: 'soup',
+    dishId: 'dish_soup',
+    name: 'Овочевий суп',
+    ingredients: [
+      { itemId: 'crate_carrot', count: 1 },
+      { itemId: 'crate_tomato', count: 1 },
+      { itemId: 'crate_wheat', count: 1 },
+    ],
+    seconds: 4,
+  },
+  { id: 'grilled_fish', dishId: 'dish_grilled_fish', name: 'Риба на грилі', ingredients: [{ itemId: 'fish_any', count: 1 }], seconds: 3 },
+  {
+    id: 'fish_stew',
+    dishId: 'dish_fish_stew',
+    name: 'Рибна юшка',
+    ingredients: [
+      { itemId: 'fish_any', count: 2 },
+      { itemId: 'crate_carrot', count: 1 },
+    ],
+    seconds: 5,
+  },
+];
+
+export const FISH_IDS = ['fish_carp', 'fish_perch', 'fish_catfish', 'fish_golden'];
+
+/** Seconds of the speed buff and its multiplier when a dish is eaten. */
+export const DISH_BUFF: Record<string, { seconds: number; speed: number }> = {
+  dish_bread: { seconds: 60, speed: 1.15 },
+  dish_salad: { seconds: 90, speed: 1.2 },
+  dish_soup: { seconds: 120, speed: 1.25 },
+  dish_grilled_fish: { seconds: 90, speed: 1.2 },
+  dish_fish_stew: { seconds: 180, speed: 1.35 },
+};
