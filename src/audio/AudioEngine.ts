@@ -20,6 +20,10 @@ class AudioEngine {
   private master: GainNode | null = null;
   private pendingPos: SoundPos | null = null;
   private pendingRef = 0;
+  /** Low-pass on the master bus: wide open in air, closes underwater. */
+  private muffle: BiquadFilterNode | null = null;
+  private underwater = false;
+  private readonly listenerPos = new THREE.Vector3();
   private readonly hrtf = !isMobileDevice();
   private static readonly _fwd = new THREE.Vector3();
   private static readonly _up = new THREE.Vector3();
@@ -45,7 +49,11 @@ class AudioEngine {
       this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.9;
-      this.master.connect(this.ctx.destination);
+      this.muffle = this.ctx.createBiquadFilter();
+      this.muffle.type = 'lowpass';
+      this.muffle.frequency.value = 20000;
+      this.muffle.Q.value = 0.5;
+      this.master.connect(this.muffle).connect(this.ctx.destination);
     }
   }
 
@@ -64,15 +72,18 @@ class AudioEngine {
     return this;
   }
 
-  /** A panner at `pos` feeding the master bus (also used by ambient loops). */
-  public createPanner(pos: SoundPos, refDistance = 3): PannerNode | null {
+  /**
+   * A panner at `pos` feeding the master bus (also used by ambient loops). Volume is full up to
+   * `refDistance` and falls linearly to silence at `maxDistance`, so far sounds really go quiet.
+   */
+  public createPanner(pos: SoundPos, refDistance = 3, maxDistance = refDistance * 12): PannerNode | null {
     if (!this.ctx || !this.master) return null;
     const p = this.ctx.createPanner();
     p.panningModel = this.hrtf ? 'HRTF' : 'equalpower';
-    p.distanceModel = 'inverse';
+    p.distanceModel = 'linear';
     p.refDistance = refDistance;
-    p.maxDistance = 200;
-    p.rolloffFactor = 1.2;
+    p.maxDistance = maxDistance;
+    p.rolloffFactor = 1;
     this.setPannerPos(p, pos);
     p.connect(this.master);
     return p;
@@ -93,8 +104,21 @@ class AudioEngine {
     return this.master;
   }
 
+  /**
+   * Underwater everything turns dull and a bit quieter, like real hearing through water:
+   * the master low-pass glides down to ~350 Hz.
+   */
+  public setUnderwater(underwater: boolean): void {
+    if (underwater === this.underwater || !this.ctx || !this.muffle || !this.master) return;
+    this.underwater = underwater;
+    const t = this.ctx.currentTime;
+    this.muffle.frequency.setTargetAtTime(underwater ? 350 : 20000, t, underwater ? 0.06 : 0.15);
+    this.master.gain.setTargetAtTime(underwater ? 0.65 : 0.9, t, 0.1);
+  }
+
   /** Moves the listener to the camera. Call once per frame. */
   public updateListener(camera: THREE.Camera): void {
+    this.listenerPos.copy(camera.position);
     const ctx = this.context;
     if (!ctx) return;
     const l = ctx.listener;
@@ -121,7 +145,15 @@ class AudioEngine {
   private output(): AudioNode {
     const pos = this.pendingPos;
     this.pendingPos = null;
-    if (pos) {
+    if (pos && this.ctx) {
+      // Out of earshot: play into a muted node instead of building a panner chain
+      const dx = pos.x - this.listenerPos.x, dy = pos.y - this.listenerPos.y, dz = pos.z - this.listenerPos.z;
+      const max = this.pendingRef * 12;
+      if (dx * dx + dy * dy + dz * dz > max * max) {
+        const mute = this.ctx.createGain();
+        mute.gain.value = 0;
+        return mute;
+      }
       const p = this.createPanner(pos, this.pendingRef);
       if (p) {
         // Let the panner be collected once the sound has finished

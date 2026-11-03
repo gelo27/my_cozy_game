@@ -9,11 +9,12 @@ const SPLASH_RADIUS = 14;
 
 const OCCLUSION_GLSL = `
   uniform sampler2D uOcc;
-  uniform float uOccCell, uOccN, uOccOn;
+  uniform float uOccCell, uOccN, uOccOn, uWaterY;
+  // Highest surface that stops a drop: roofs / ground from the roof map, or the water plane
   float roofAt(vec2 xz) {
-    if (uOccOn < 0.5) return -1e4;
+    if (uOccOn < 0.5) return uWaterY;
     vec2 cell = floor(xz / uOccCell);
-    return texture2D(uOcc, (mod(cell, uOccN) + 0.5) / uOccN).r;
+    return max(texture2D(uOcc, (mod(cell, uOccN) + 0.5) / uOccN).r, uWaterY);
   }
 `;
 
@@ -43,6 +44,7 @@ export class Precipitation {
       uOccCell: { value: 1 },
       uOccN: { value: 1 },
       uOccOn: { value: 0 },
+      uWaterY: { value: -1e4 },
     });
 
     // ---------------------------------------------------------------- drops
@@ -234,7 +236,9 @@ export class Precipitation {
     return this.drops.visible;
   }
 
-  public update(dt: number, cameraPos: THREE.Vector3, amount: number, snow: number, brightness: number, storm: number, pixelRatio: number): void {
+  public update(dt: number, cameraPos: THREE.Vector3, amount: number, snow: number, brightness: number, storm: number, pixelRatio: number, waterY: number): void {
+    this.dropMat.uniforms.uWaterY.value = waterY;
+    this.splashMat.uniforms.uWaterY.value = waterY;
     const visible = amount > 0.02;
     this.drops.visible = visible;
     this.splashes.visible = visible && snow < 0.5;

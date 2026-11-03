@@ -236,7 +236,7 @@ export class GameEngine {
           const out: ExtraLight[] = [];
           for (const piece of buildingManager.getAllPieces()) {
             const light = FURNITURE_LIGHTS[piece.type];
-            if (light) out.push({ x: piece.position.x, y: piece.position.y + light.yOffset, z: piece.position.z, range: light.range, halo: light.halo });
+            if (light) out.push({ x: piece.position.x, y: piece.position.y + light.yOffset, z: piece.position.z, range: light.range, halo: light.halo, intensity: light.intensity });
           }
           return out;
         },
@@ -505,6 +505,7 @@ export class GameEngine {
     if (!w) return;
     const camera = this.camera.camera;
     audioEngine.updateListener(camera);
+    audioEngine.setUnderwater(camera.position.y < worldSettings.waterLevel || !!w.character.oxygenAbility?.isUnderwater);
     this.listenerPos.copy(camera.position);
     if (!audioEngine.context) return;
 

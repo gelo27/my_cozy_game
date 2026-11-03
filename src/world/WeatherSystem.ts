@@ -243,7 +243,7 @@ export class WeatherSystem {
     if (p.precipitation !== 'none') this.snowMix = p.precipitation === 'snow' ? 1 : 0;
     const bright = (0.3 + daylight * 0.7) * (0.55 + cur.light * 0.45) + this.flash;
     const storm = this.weather === 'storm' ? 1 : 0;
-    this.precipitation.update(dt, cameraPos, cur.amount, this.snowMix, bright, storm, Math.min(window.devicePixelRatio || 1, 1.5));
+    this.precipitation.update(dt, cameraPos, cur.amount, this.snowMix, bright, storm, Math.min(window.devicePixelRatio || 1, 1.5), worldSettings.waterLevel);
     if (this.precipitation.active) this.occlusion?.update(cameraPos);
   }
 

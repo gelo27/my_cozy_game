@@ -18,6 +18,8 @@ export interface AmbientState {
 
 /** Seconds of looping noise; long enough that the loop point is not audible. */
 const NOISE_SECONDS = 2.5;
+/** The campfire falls silent at this distance (m). */
+const FIRE_EARSHOT = 14;
 
 /**
  * Looping ambience built from a couple of shared noise buffers (no files):
@@ -50,15 +52,15 @@ export class AmbientAudio {
       this.roofMix += ((s.underRoof ? 1 : 0) - this.roofMix) * 0.08;
       const cutoff = 4200 * (1 - this.roofMix) + 520 * this.roofMix;
       this.rain.filter.frequency.setTargetAtTime(cutoff, t, 0.1);
-      this.rain.gain.gain.setTargetAtTime(s.rain * (0.32 + this.roofMix * 0.1), t, 0.3);
+      this.rain.gain.gain.setTargetAtTime(s.rain * (0.1 + this.roofMix * 0.03), t, 0.3);
     }
 
     // Wind
     if (s.wind > 0.01 && !this.wind) this.wind = this.startWind(ctx, bus);
-    if (this.wind) this.wind.gain.gain.setTargetAtTime(s.wind * 0.22 * (1 - this.roofMix * 0.6), t, 0.5);
+    if (this.wind) this.wind.gain.gain.setTargetAtTime(s.wind * 0.07 * (1 - this.roofMix * 0.6), t, 0.5);
 
     // Campfire: the loop only exists while a fire is close enough to hear
-    if (s.campfire && s.campfire.distanceToSquared(s.listener) < 30 * 30) {
+    if (s.campfire && s.campfire.distanceToSquared(s.listener) < FIRE_EARSHOT * FIRE_EARSHOT) {
       if (!this.fire) this.fire = this.startFire(ctx, s.campfire);
       if (this.fire) audioEngine.setPannerPos(this.fire.panner, s.campfire);
     } else if (this.fire) {
@@ -74,7 +76,7 @@ export class AmbientAudio {
         this.engine.osc.frequency.setTargetAtTime(48 + k * 95, t, 0.12);
         this.engine.sub.frequency.setTargetAtTime(24 + k * 47, t, 0.12);
         this.engine.filter.frequency.setTargetAtTime(380 + k * 900, t, 0.15);
-        this.engine.gain.gain.setTargetAtTime(0.07 + k * 0.08, t, 0.15);
+        this.engine.gain.gain.setTargetAtTime(0.04 + k * 0.05, t, 0.15);
         audioEngine.setPannerPos(this.engine.panner, s.engine.position);
       }
     } else if (this.engine) {
@@ -90,7 +92,7 @@ export class AmbientAudio {
     const dist = 150 + Math.random() * 450;
     const a = Math.random() * Math.PI * 2;
     const pos = { x: listener.x + Math.cos(a) * 60, y: listener.y + 25, z: listener.z + Math.sin(a) * 60 };
-    const panner = audioEngine.createPanner(pos, 60);
+    const panner = audioEngine.createPanner(pos, 60, 2000);
     if (!panner) return;
     const t = ctx.currentTime + dist / 343;
     const src = ctx.createBufferSource();
@@ -152,19 +154,19 @@ export class AmbientAudio {
   }
 
   private startFire(ctx: AudioContext, pos: THREE.Vector3) {
-    const panner = audioEngine.createPanner(pos, 2.5);
+    const panner = audioEngine.createPanner(pos, 1.5, FIRE_EARSHOT);
     if (!panner) return null;
     const src = this.loop(ctx, this.getCrackle(ctx));
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(0, ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 1);
+    gain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + 1);
     src.connect(gain).connect(panner);
     src.start();
     return { src, gain, panner };
   }
 
   private startEngine(ctx: AudioContext, pos: THREE.Vector3) {
-    const panner = audioEngine.createPanner(pos, 4);
+    const panner = audioEngine.createPanner(pos, 4, 40);
     if (!panner) return null;
     const osc = ctx.createOscillator();
     osc.type = 'sawtooth';

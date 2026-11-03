@@ -104,6 +104,8 @@ export interface ExtraLight {
   z: number;
   range: number;
   halo: number;
+  /** Multiplier on the warm lamp colour (street lamps are 1). */
+  intensity: number;
 }
 
 interface LightSource {
@@ -213,7 +215,7 @@ export class NightLighting {
     const fireFlicker = 0.85 + 0.15 * Math.sin(this.time * 17) * Math.sin(this.time * 7.3);
     this.bulbMaterials.fire.color.setRGB(1, 0.5 + 0.12 * fireFlicker, 0.16);
     for (const m of this.glowBulbs) m.color.copy(this.bulbMaterials.lamp.color);
-    for (const m of this.glowShades) m.emissive.setRGB(0.55 * night, 0.4 * night, 0.2 * night);
+    for (const m of this.glowShades) m.emissive.setRGB(0.3 * night, 0.22 * night, 0.11 * night);
 
     let rebuild = false;
     if (this.props.revision !== this.lastPropsRevision) {
@@ -297,11 +299,11 @@ export class NightLighting {
     }
     for (const l of this.extraProvider?.() ?? []) {
       const pos = new THREE.Vector3(l.x, l.y, l.z);
-      this.sources.push({ pos, range: l.range, color: LAMP_COLOR, flicker: 0, seed: Math.random() });
+      this.sources.push({ pos, range: l.range, color: LAMP_COLOR.clone().multiplyScalar(l.intensity), flicker: 0, seed: Math.random() });
       if (h < MAX_HALOS) {
         this.haloPos.set([pos.x, pos.y, pos.z], h * 3);
         this.haloSize[h] = l.halo;
-        this.haloColor.set([0.55, 0.44, 0.27], h * 3);
+        this.haloColor.set([0.55, 0.44, 0.27].map((c) => c * (0.4 + l.intensity)), h * 3);
         h++;
       }
     }

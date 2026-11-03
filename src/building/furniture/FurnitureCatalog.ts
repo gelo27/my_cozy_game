@@ -34,9 +34,9 @@ export function isCeilingFurniture(type: BuildingPieceType): boolean {
  * Light emitted by lamp furniture, relative to the piece pivot (bounding-box centre).
  * Read by the night lighting.
  */
-export const FURNITURE_LIGHTS: Partial<Record<BuildingPieceType, { yOffset: number; range: number; halo: number }>> = {
-  [BuildingPieceType.FURN_CHANDELIER]: { yOffset: 0.02, range: 9.5, halo: 2.2 },
-  [BuildingPieceType.FURN_TABLE_LAMP]: { yOffset: 0.08, range: 5.5, halo: 1.3 },
+export const FURNITURE_LIGHTS: Partial<Record<BuildingPieceType, { yOffset: number; range: number; halo: number; intensity: number }>> = {
+  [BuildingPieceType.FURN_CHANDELIER]: { yOffset: 0.02, range: 6.5, halo: 1.4, intensity: 0.45 },
+  [BuildingPieceType.FURN_TABLE_LAMP]: { yOffset: 0.08, range: 3.5, halo: 0.8, intensity: 0.32 },
 };
 
 const FURNITURE_SET = new Set(FURNITURE_TYPES);
