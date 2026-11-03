@@ -41,6 +41,13 @@ class AudioEngine {
       };
       window.addEventListener('pointerdown', unlock);
       window.addEventListener('keydown', unlock);
+
+      // Silence everything while the tab is in the background; pick up again when it comes back
+      document.addEventListener('visibilitychange', () => {
+        if (!this.ctx) return;
+        if (document.hidden) this.ctx.suspend();
+        else this.ctx.resume();
+      });
     }
   }
 
@@ -167,7 +174,7 @@ class AudioEngine {
   public playHitSound() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -195,7 +202,7 @@ class AudioEngine {
   public playOxygenPulse(critical: boolean = false) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -227,7 +234,7 @@ class AudioEngine {
   public playOxygenReplenished() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -260,7 +267,7 @@ class AudioEngine {
   public playSurfacingBreath() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -288,7 +295,7 @@ class AudioEngine {
   public playAxeSwing() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -324,7 +331,7 @@ class AudioEngine {
   public playWoodChopHit(isFatal: boolean = false) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -390,7 +397,7 @@ class AudioEngine {
   public playTreeFallCreak() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -431,7 +438,7 @@ class AudioEngine {
   public playTreeImpact() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -482,7 +489,7 @@ class AudioEngine {
   public playLogSplit() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -508,7 +515,7 @@ class AudioEngine {
   public playBuildPlace(isWood: boolean = true) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -559,7 +566,7 @@ class AudioEngine {
   public playDoorToggle(isOpen: boolean = true) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -601,7 +608,7 @@ class AudioEngine {
   public playBuildSnap() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -626,7 +633,7 @@ class AudioEngine {
   public playBuildDemolish() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -651,7 +658,7 @@ class AudioEngine {
   public playBuildSelect() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -676,7 +683,7 @@ class AudioEngine {
   public playPaintBrush() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -728,7 +735,7 @@ class AudioEngine {
   public playPaintPick() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -753,7 +760,7 @@ class AudioEngine {
   public playWatering() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -806,7 +813,7 @@ class AudioEngine {
   public playPlantSeed() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -831,7 +838,7 @@ class AudioEngine {
   public playHarvest() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
