@@ -28,8 +28,11 @@ import { GATHERING_CONFIG, ROCK_SPOTS, TREE_SPOTS } from '../gathering/Gathering
 import { GatherPrompt } from '../character/abilities/GatheringAbility';
 import { ConsoleLogEntry } from '../components/ConsoleFooter';
 import { VehicleController } from '../vehicle/VehicleController';
+import { MopedController } from '../vehicle/MopedController';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
+import { RiverSystem } from '../world/rivers/RiverSystem';
+import { riverWorld } from '../world/rivers/RiverWorld';
 import { WeatherSystem } from '../world/WeatherSystem';
 import { PropSystem, PROP_GLOW_MATERIALS } from '../world/PropSystem';
 import { NightLighting, installGlobalNightLights } from '../world/NightLighting';
@@ -37,6 +40,7 @@ import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
 import { isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState } from '../gameplay/GameplayManager';
 import { EditorController } from '../editor/EditorController';
+import { ExplorationManager } from '../explore/ExplorationManager';
 
 export const SPAWN_POSITION = new THREE.Vector3(0, 2.0, 5.0);
 
@@ -77,6 +81,8 @@ export interface GameEngineCallbacks {
   onWireframeToggled(enabled: boolean): void;
   /** `undefined` toggles, `false` closes (Escape). */
   onInventoryHotkey(open?: boolean): void;
+  /** `undefined` toggles the island map, `false` closes it. */
+  onMapHotkey(open?: boolean): void;
   onGameplayHud(state: GameplayHudState): void;
   onNotify(text: string, type?: 'success' | 'info' | 'warning'): void;
   onModeChange(mode: EngineMode): void;
@@ -91,6 +97,7 @@ export interface GameWorld {
   debugRenderer: DebugRenderer;
   terrain: TerrainSystem;
   water: WaterSystem;
+  rivers: RiverSystem;
   weather: WeatherSystem;
   props: PropSystem;
   nightLighting: NightLighting;
@@ -101,6 +108,8 @@ export interface GameWorld {
   rocks: RockField;
   particleManager: ParticleManager;
   vehicle: VehicleController;
+  moped: MopedController;
+  exploration: ExplorationManager;
   gameplay: GameplayManager;
   editor: EditorController;
   saves: SaveSystem;
@@ -126,6 +135,9 @@ export class GameEngine {
   private readonly ambient = new AmbientAudio();
   private campfireTimer = 0;
   private nearestCampfire: THREE.Vector3 | null = null;
+  private waterTimer = 0;
+  private readonly waterSoundPos = new THREE.Vector3();
+  private waterSound: { position: THREE.Vector3; loud: number; fall: boolean } | null = null;
   private readonly listenerPos = new THREE.Vector3();
 
   // Adaptive resolution: drops the pixel ratio when frames run long, restores it when there is headroom
@@ -188,6 +200,14 @@ export class GameEngine {
     this.renderer.domElement.parentElement?.removeChild(this.renderer.domElement);
   }
 
+  private readonly headingDir = new THREE.Vector3();
+
+  /** Camera compass bearing in radians: 0 = north (-Z), PI/2 = east (+X). */
+  public getHeading = (): number => {
+    const d = this.camera.camera.getWorldDirection(this.headingDir);
+    return Math.atan2(d.x, -d.z);
+  };
+
   /** Toggles Rapier collider wireframe rendering and returns the new state. */
   public toggleWireframe(): boolean {
     return this.world?.debugRenderer.toggle() ?? false;
@@ -217,6 +237,7 @@ export class GameEngine {
       const terrain = new TerrainSystem(scene, physics);
       terrain.commit();
       const water = new WaterSystem(scene);
+      const rivers = new RiverSystem(scene, terrain);
       const weather = new WeatherSystem(scene);
       weather.onLightning = () => this.ambient.thunder(this.listenerPos);
       weather.setOcclusion(new PrecipitationOcclusion(physics, WeatherSystem.PRECIP_BOX));
@@ -233,10 +254,11 @@ export class GameEngine {
       const inventoryManager = new InventoryManager();
       const farmingManager = new FarmingManager(scene, particleManager);
       buildingManager.setFarmingManager(farmingManager);
-      // Lamp furniture inside buildings feeds the night lighting
+      // Lamp furniture inside buildings and the landmarks' torches feed the night lighting
+      let exploration: ExplorationManager | null = null;
       nightLighting.setExtraLights(
         () => {
-          const out: ExtraLight[] = [];
+          const out: ExtraLight[] = exploration ? exploration.getLights() : [];
           for (const piece of buildingManager.getAllPieces()) {
             const light = FURNITURE_LIGHTS[piece.type];
             if (light) out.push({ x: piece.position.x, y: piece.position.y + light.yOffset, z: piece.position.z, range: light.range, halo: light.halo, intensity: light.intensity });
@@ -268,6 +290,9 @@ export class GameEngine {
       character.setGatheringSystems(forest, rocks, inventoryManager, propTrees);
 
       const vehicle = new VehicleController(physics, scene, new THREE.Vector3(7, 1.2, 2), -Math.PI / 2);
+      const mopedSpawn = new THREE.Vector3(2.4, 0, -1.6);
+      mopedSpawn.y = terrain.getHeight(mopedSpawn.x, mopedSpawn.z) + 0.45;
+      const moped = new MopedController(physics, scene, terrain, mopedSpawn, -Math.PI / 2);
       const gameplay = new GameplayManager(scene, character, inventoryManager, props, weather, terrain, particleManager);
       gameplay.onNotify = (text, type) => callbacks.onNotify(text, type);
 
@@ -288,7 +313,23 @@ export class GameEngine {
         isOpen: (id) => !!buildingManager.getPiece(id)?.isOpen,
         toggle: (id, from) => buildingManager.toggleDoor(id, from),
       });
-      const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props);
+      exploration = new ExplorationManager(scene, physics, terrain, props, rocks, inventoryManager, gameplay, weather, nightLighting, particleManager);
+      exploration.onNotify = (text, type) => callbacks.onNotify(text, type);
+      exploration.onItems = (items) => callbacks.onResourcesGathered(items);
+      const explorer = exploration;
+      gameplay.explore = {
+        get prompt() {
+          return explorer.prompt;
+        },
+        get fading() {
+          return explorer.fading;
+        },
+        get inCave() {
+          return explorer.inCave;
+        },
+        interact: () => explorer.interact(character, this.camera),
+      };
+      const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers);
       const debugRenderer = new DebugRenderer(physics, scene);
 
       this.world = {
@@ -297,6 +338,7 @@ export class GameEngine {
         debugRenderer,
         terrain,
         water,
+        rivers,
         weather,
         props,
         nightLighting,
@@ -307,6 +349,8 @@ export class GameEngine {
         rocks,
         particleManager,
         vehicle,
+        moped,
+        exploration,
         gameplay,
         editor,
         saves: null as unknown as SaveSystem,
@@ -316,6 +360,7 @@ export class GameEngine {
       // Resume the last session, or dress a fresh world
       if (!this.world.saves.load(AUTOSAVE_SLOT)) {
         props.populateDefault();
+        exploration.clearSiteProps();
         gameplay.pets.spawnDefaults(SPAWN_POSITION);
       } else {
         callbacks.onLog('info', 'Відновлено останнє автозбереження.');
@@ -354,7 +399,7 @@ export class GameEngine {
     const frameStart = performance.now();
 
     const w = this.world;
-    const { character, farmingManager, forest, rocks, particleManager, debugRenderer, vehicle, terrain, editor } = w;
+    const { character, farmingManager, forest, rocks, particleManager, debugRenderer, vehicle, moped, terrain, editor } = w;
     const { input: inputManager, camera: tpCamera, physics, callbacks } = this;
     const editing = this.mode === 'editor';
 
@@ -370,18 +415,23 @@ export class GameEngine {
     if (!editing && !isDraggingWall && !isPaintingWithLMB && (mouseDelta.x !== 0 || mouseDelta.y !== 0)) {
       tpCamera.handleMouseInput(mouseDelta.x, mouseDelta.y);
       vehicle.notifyMouseLook();
+      moped.notifyMouseLook();
     }
     const mouseScroll = inputManager.consumeMouseScroll();
     if (mouseScroll !== 0 && !editing) tpCamera.handleZoom(mouseScroll);
 
-    // Vehicle forces are applied before the physics step
-    const isDriving = !editing && vehicle.update(dt, inputManager, tpCamera, character);
+    // Vehicle forces are applied before the physics step; one interact press enters one vehicle
+    const truckDriving = !editing && vehicle.update(dt, inputManager, tpCamera, character);
+    const mopedDriving = !editing && !truckDriving && moped.update(dt, inputManager, tpCamera, character, !vehicle.isPlayerNear);
+    const isDriving = truckDriving || mopedDriving;
+    const ride = truckDriving ? vehicle : mopedDriving ? moped : null;
 
     const pStart = performance.now();
     if (dt > 0) physics.step(dt);
     const stepTime = performance.now() - pStart;
     this.lastStepMs = stepTime;
     vehicle.syncVisuals(dt);
+    moped.syncVisuals(dt);
 
     if (!editing && !isDriving) character.update(dt, inputManager, tpCamera);
     character.buildAbility?.buildingManager?.flushPendingRegeneration();
@@ -395,24 +445,26 @@ export class GameEngine {
     w.props.update();
     w.props.updateVisibility(this.camera.camera.position);
     w.water.update(dt, this.camera.camera.position);
+    w.rivers.update(dt, w.weather.nightFactor);
     if (editing) {
       editor.update(rawDt);
     } else {
       tpCamera.isHoldingObject = character.telemetry.isHoldingObject;
       tpCamera.isBuilding = character.telemetry.isBuildModeActive || isPaintingMode;
-      const cameraTargetPos = isDriving ? vehicle.getPosition() : character.getPosition();
-      tpCamera.update(dt, cameraTargetPos, physics, isDriving ? vehicle.collider : character.collider);
+      const cameraTargetPos = ride ? ride.getPosition() : character.getPosition();
+      tpCamera.update(dt, cameraTargetPos, physics, ride ? ride.collider : character.collider);
     }
     w.weather.update(dt, tpCamera.camera.position);
     w.nightLighting.setViewportHeight(this.renderer.domElement.height);
-    w.nightLighting.update(dt, tpCamera.camera.position, editing ? null : isDriving ? vehicle.getPosition() : character.getPosition());
+    w.nightLighting.update(dt, tpCamera.camera.position, editing ? null : ride ? ride.getPosition() : character.getPosition());
     farmingManager.rainIntensity = w.weather.rainIntensity;
-    this.updateAudio(dt, editing ? tpCamera.camera.position : isDriving ? vehicle.getPosition() : character.getPosition(), isDriving);
+    this.updateAudio(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), ride);
 
     farmingManager.update(dt);
     forest.update(dt);
     w.propTrees.update(dt);
     rocks.update(dt);
+    w.exploration.update(dt, ride ? ride.getPosition() : character.getPosition(), !editing && !isDriving);
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
 
     // Push prompts to React only when they actually change (each push re-renders the HUD tree)
@@ -522,12 +574,12 @@ export class GameEngine {
   }
 
   /** Listener at the camera; ambience (rain, wind, campfire, engine) around the player. */
-  private updateAudio(dt: number, playerPos: THREE.Vector3, isDriving: boolean): void {
+  private updateAudio(dt: number, playerPos: THREE.Vector3, ride: VehicleController | MopedController | null): void {
     const w = this.world;
     if (!w) return;
     const camera = this.camera.camera;
     audioEngine.updateListener(camera);
-    audioEngine.setUnderwater(camera.position.y < worldSettings.waterLevel || !!w.character.oxygenAbility?.isUnderwater);
+    audioEngine.setUnderwater(camera.position.y < riverWorld.waterLevelAt(camera.position.x, camera.position.z) || !!w.character.oxygenAbility?.isUnderwater);
     this.listenerPos.copy(camera.position);
     if (!audioEngine.context) return;
 
@@ -539,14 +591,32 @@ export class GameEngine {
     }
     const weather = w.weather;
     const storm = weather.weather === 'storm' ? 1 : 0;
+    const outdoors = w.exploration.inCave ? 0 : 1;
+    this.waterTimer -= dt;
+    if (this.waterTimer <= 0) {
+      this.waterTimer = 0.4;
+      const src = w.rivers.soundSource(playerPos, this.waterSoundPos);
+      this.waterSound = src && !w.exploration.inCave ? { position: this.waterSoundPos, loud: src.loud, fall: src.fall } : null;
+    }
     this.ambient.update({
       listener: this.listenerPos,
-      rain: weather.rainIntensity * (1 - weather.snowAmount),
-      wind: Math.max(storm * 0.9, weather.snowAmount * 0.7, weather.weather === 'rain' ? 0.25 : 0),
-      underRoof: weather.isSheltered(playerPos),
+      water: this.waterSound,
+      rain: weather.rainIntensity * (1 - weather.snowAmount) * outdoors,
+      wind: Math.max(storm * 0.9, weather.snowAmount * 0.7, weather.weather === 'rain' ? 0.25 : 0) * outdoors,
+      underRoof: !outdoors || weather.isSheltered(playerPos),
       campfire: this.nearestCampfire,
-      engine: isDriving ? { position: w.vehicle.getPosition(), speedKmh: w.vehicle.speedKmh } : null,
+      engine: ride
+        ? { position: ride.getPosition(), speedKmh: ride.speedKmh, kind: ride === w.moped ? 'scooter' : 'truck' }
+        : null,
     });
+  }
+
+  /** Brings the scooter to the player (V key / HUD button). Not underground or while riding. */
+  public callMoped(): void {
+    const w = this.world;
+    if (!w || w.moped.isPlayerInside || w.vehicle.isPlayerInside || this.mode !== 'play') return;
+    const ok = !w.exploration.inCave && w.moped.callTo(w.character);
+    this.callbacks.onNotify(t(ok ? 'moped.called' : 'moped.cantCall'), ok ? 'info' : 'warning');
   }
 
   private consumeKeyG(): boolean {
@@ -572,10 +642,15 @@ export class GameEngine {
       this.keyG = true;
     } else if (e.code === 'KeyH' && DEV_TOOLS_ENABLED) {
       this.callbacks.onWireframeToggled(this.toggleWireframe());
+    } else if (e.code === 'KeyV' && !e.repeat) {
+      this.callMoped();
+    } else if (e.code === 'KeyM' && !e.repeat) {
+      this.callbacks.onMapHotkey();
     } else if (e.code === 'KeyQ') {
       this.callbacks.onInventoryHotkey();
     } else if (e.code === 'Escape') {
       this.callbacks.onInventoryHotkey(false);
+      this.callbacks.onMapHotkey(false);
       if (this.world?.gameplay.panel) this.world.gameplay.openPanel(null);
     }
   };
@@ -612,6 +687,8 @@ export class GameEngine {
       editor: (on = true) => this.setMode(on ? 'editor' : 'play'),
       stats: () => ({ ...this.renderer.info.render, ...this.renderer.info.memory }),
       npcPath: (on = true) => w.gameplay.companion?.setDebug(on),
+      /** Rivers: defs, samples (`riverWorld.get(id)`), water queries. */
+      rivers: riverWorld,
     };
   }
 }

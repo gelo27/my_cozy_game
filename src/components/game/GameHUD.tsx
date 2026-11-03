@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Backpack, Hammer, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Coins, Zap, Settings2, Heart,
+  Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Coins, Zap, Settings2, Heart,
 } from 'lucide-react';
 import { GameplayHudState } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
@@ -27,7 +27,9 @@ interface GameHUDProps {
   onOpenBackpack(): void;
   onToggleBuild(): void;
   onOpenEditor(): void;
-  onAction(action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'treat'): void;
+  onOpenMap(): void;
+  onCallMoped(): void;
+  onAction(action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'explore' | 'treat'): void;
 }
 
 /** Hotbar shows what the player can hold; 1-8 keys or a tap equips. */
@@ -39,7 +41,7 @@ function useHotbar(inventory: InventoryManager): { items: InventoryItem[]; equip
 }
 
 export const GameHUD: React.FC<GameHUDProps> = ({
-  hud, inventory, hidden, devToolsEnabled, onOpenBackpack, onToggleBuild, onOpenEditor, onAction,
+  hud, inventory, hidden, devToolsEnabled, onOpenBackpack, onToggleBuild, onOpenEditor, onOpenMap, onCallMoped, onAction,
 }) => {
   const { items, equipped } = useHotbar(inventory);
   const lang = useLang();
@@ -99,6 +101,12 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         >
           {lang === 'en' ? 'EN' : 'UA'}
         </button>
+        <HudButton label={t('hud.map')} hotkey="M" onClick={onOpenMap}>
+          <MapIcon className="w-5 h-5" />
+        </HudButton>
+        <HudButton label={t('hud.callMoped')} hotkey="V" onClick={onCallMoped}>
+          <Bike className="w-5 h-5" />
+        </HudButton>
         <HudButton label={t('hud.backpack')} hotkey="Q" onClick={onOpenBackpack}>
           <Backpack className="w-5 h-5" />
         </HudButton>

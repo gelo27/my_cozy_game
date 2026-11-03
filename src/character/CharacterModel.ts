@@ -77,6 +77,10 @@ export class CharacterModel {
 
   private currentFacingAngle: number = 0;
 
+  /** Seated on a scooter: thighs forward, hands on the handlebar (layered over IDLE). */
+  public isRiding = false;
+  private rig: THREE.Object3D | null = null;
+
   // Squash & Stretch Spring Physics (Feet-anchored, Mario Odyssey style)
   public currentSquashY: number = 1.0;
   private squashVelocity: number = 0;
@@ -217,6 +221,7 @@ export class CharacterModel {
       this.customModelGroup.remove(this.customModelGroup.children[0]);
     }
     this.customModelGroup.add(cloned);
+    this.rig = cloned;
 
     // Re-equip current weapon / prop if one was already set
     if (this.activeWeapon > 0) {
@@ -719,6 +724,38 @@ export class CharacterModel {
 
     if (this.mixer) {
       this.mixer.update(dt);
+    }
+    if (this.isRiding) this.applyRidingPose();
+  }
+
+  private static readonly _poseQ = new THREE.Quaternion();
+  private static readonly _parentQ = new THREE.Quaternion();
+  private static readonly _rootQ = new THREE.Quaternion();
+  private static readonly _rootInv = new THREE.Quaternion();
+  private static readonly _xAxis = new THREE.Vector3(1, 0, 0);
+
+  /**
+   * Rotates limb bones about the character's own sideways axis on top of whatever the mixer posed.
+   * Working in model space keeps this independent of the rig's odd bone rolls.
+   */
+  private applyRidingPose(): void {
+    if (!this.rig) return;
+    this.rig.updateMatrixWorld(true);
+    const rootQ = this.group.getWorldQuaternion(CharacterModel._rootQ);
+    const rootInv = CharacterModel._rootInv.copy(rootQ).invert();
+    const pose: [string, number][] = [
+      ['leg_1_right', -1.05],
+      ['leg_1_left', -1.05],
+      ['arm_1_right', -1.15],
+      ['arm_1_left', -1.15],
+    ];
+    for (const [name, angle] of pose) {
+      const bone = this.rig.getObjectByName(name);
+      if (!bone?.parent) continue;
+      // R_world = root * R_model * root^-1; local' = parent^-1 * R_world * parent * local
+      const world = CharacterModel._poseQ.setFromAxisAngle(CharacterModel._xAxis, angle).premultiply(rootQ).multiply(rootInv);
+      const parentQ = bone.parent.getWorldQuaternion(CharacterModel._parentQ);
+      bone.quaternion.premultiply(parentQ).premultiply(world).premultiply(parentQ.invert());
     }
   }
 

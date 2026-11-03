@@ -3,7 +3,7 @@ import * as THREE from 'three';
 /** Inventory item ids of the gathering tools. */
 export type GatherTool = 'axe' | 'pickaxe';
 
-export type RockKind = 'stone' | 'iron';
+export type RockKind = 'stone' | 'iron' | 'copper' | 'gold' | 'crystal';
 
 export interface ResourceDrop {
   itemId: string;
@@ -41,6 +41,27 @@ export const ROCK_TYPES: Record<RockKind, { name: string; hits: number; drops: R
       { itemId: 'iron_ore', min: 2, max: 3 },
       { itemId: 'stone', min: 1, max: 2 },
     ],
+  },
+  copper: {
+    name: 'Мідна руда',
+    hits: 6,
+    drops: [
+      { itemId: 'copper_ore', min: 2, max: 4 },
+      { itemId: 'stone', min: 1, max: 2 },
+    ],
+  },
+  gold: {
+    name: 'Золота руда',
+    hits: 8,
+    drops: [
+      { itemId: 'gold_ore', min: 1, max: 3 },
+      { itemId: 'stone', min: 1, max: 2 },
+    ],
+  },
+  crystal: {
+    name: 'Кристал',
+    hits: 5,
+    drops: [{ itemId: 'crystal', min: 1, max: 2 }],
   },
 };
 

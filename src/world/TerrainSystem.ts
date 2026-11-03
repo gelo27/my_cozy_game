@@ -6,6 +6,7 @@ import { COLLISION_GROUPS } from '../config/constants';
 import { TerrainTileType, TILE_DEFINITIONS } from '../terrain/types/TerrainTypes';
 import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, worldSettings } from './WorldSettings';
 import { islandHeight } from './IslandGenerator';
+import { riverWorld, GridRect } from './rivers/RiverWorld';
 
 const N = WORLD_SIZE; // cells per side (1 m cells)
 const V = N + 1; // vertices per side
@@ -286,10 +287,15 @@ export class TerrainSystem {
 
   private static base(): { heights: Int16Array; tiles: Uint8Array } {
     if (TerrainSystem.baseCache) return TerrainSystem.baseCache;
-    const heights = new Int16Array(V * V);
+    // Natural island first; rivers are carved into it (they read the natural ground for their levels)
+    const natural = new Float32Array(V * V);
     for (let iz = 0; iz <= N; iz++) {
-      for (let ix = 0; ix <= N; ix++) heights[iz * V + ix] = Math.round(islandHeight(ix - WORLD_HALF, iz - WORLD_HALF) * 100);
+      for (let ix = 0; ix <= N; ix++) natural[iz * V + ix] = islandHeight(ix - WORLD_HALF, iz - WORLD_HALF);
     }
+    riverWorld.setNatural(natural);
+    const carved = riverWorld.computeRegion({ x0: 0, z0: 0, x1: N, z1: N });
+    const heights = new Int16Array(V * V);
+    for (let i = 0; i < heights.length; i++) heights[i] = Math.round(carved[i] * 100);
     const tiles = new Uint8Array(N * N).fill(TerrainTileType.GRASS);
     // Dirt path from spawn towards the pond
     for (let t = 0; t <= 1; t += 0.01) {
@@ -305,6 +311,27 @@ export class TerrainSystem {
     }
     TerrainSystem.baseCache = { heights, tiles };
     return TerrainSystem.baseCache;
+  }
+
+  /**
+   * Regenerates the rivers' part of the generated terrain in a rectangle (a river was edited).
+   * With `applyToLive` the current heights shift by the same amount, so the player's sculpting on
+   * top is kept; without it only the base moves (undo restores the live heights itself).
+   */
+  public refreshRivers(rect: GridRect | null, applyToLive = true): void {
+    if (!rect) return;
+    const base = TerrainSystem.base();
+    const carved = riverWorld.computeRegion(rect);
+    const w = rect.x1 - rect.x0 + 1;
+    for (let iz = rect.z0; iz <= rect.z1; iz++) {
+      for (let ix = rect.x0; ix <= rect.x1; ix++) {
+        const i = iz * V + ix;
+        const cm = Math.round(carved[(iz - rect.z0) * w + ix - rect.x0] * 100);
+        if (applyToLive) this.heights[i] += (cm - base.heights[i]) / 100;
+        base.heights[i] = cm;
+      }
+    }
+    this.markHeightsDirty(rect.x0, rect.z0, rect.x1, rect.z1);
   }
 
   private generateDefaultWorld(): void {
@@ -433,6 +460,7 @@ export class TerrainSystem {
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader);
       Object.assign(shader.uniforms, this.uniforms, {
+        tRiver: { value: riverWorld.texture },
         tSplatA: { value: this.splatA },
         tSplatB: { value: this.splatB },
         uWorldSize: { value: WORLD_SIZE },
@@ -451,12 +479,15 @@ export class TerrainSystem {
           `#include <common>
 varying vec3 vTerrWorld;
 varying float vTerrUpY;
-uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tWater, tWood, tRock, tSplatA, tSplatB;
+uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tWater, tWood, tRock, tSplatA, tSplatB, tRiver;
 uniform float uWorldSize;
 uniform float uWaterLevel;
 vec3 terrainColor() {
   vec2 suv = (vTerrWorld.xz + uWorldSize * 0.5) / uWorldSize;
   vec2 uv = vTerrWorld.xz * 0.5;
+  // Local water: the sea, or a river's surface near its channel
+  vec2 river = texture2D(tRiver, (vTerrWorld.xz + uWorldSize * 0.5 + 0.5) / (uWorldSize + 1.0)).rg;
+  float waterY = river.g > 0.5 ? max(uWaterLevel, river.r) : uWaterLevel;
   vec4 g = texture2D(tGrass, uv);
   float n = texture2D(tGrass, vTerrWorld.xz * 0.061).a - 0.5;
   vec4 wa = smoothstep(0.32, 0.68, texture2D(tSplatA, suv) + n * 0.45);
@@ -465,15 +496,18 @@ vec3 terrainColor() {
   if (wa.r > 0.001) c = mix(c, texture2D(tDirt, uv).rgb, wa.r);
   if (wa.g > 0.001) c = mix(c, texture2D(tAsphalt, uv).rgb, wa.g);
   if (wa.b > 0.001) c = mix(c, texture2D(tCobble, uv).rgb, wa.b);
-  float beach = smoothstep(uWaterLevel + 0.55, uWaterLevel + 0.15, vTerrWorld.y);
+  // Sandy shore by the sea, a narrow gravel strip along rivers
+  float beach = river.g > 0.5 ? smoothstep(waterY + 0.32, waterY + 0.08, vTerrWorld.y) : smoothstep(waterY + 0.55, waterY + 0.15, vTerrWorld.y);
   float sandW = max(wa.a, beach);
   if (sandW > 0.001) c = mix(c, texture2D(tSand, uv).rgb, sandW);
   if (wb.r > 0.001) c = mix(c, texture2D(tWater, uv).rgb, wb.r);
   if (wb.g > 0.001) c = mix(c, texture2D(tWood, uv).rgb, wb.g);
   float rock = smoothstep(0.8, 0.62, vTerrUpY);
   if (rock > 0.001) c = mix(c, texture2D(tRock, uv).rgb, rock);
-  // Wet, darker soil below the waterline
-  c *= mix(1.0, 0.62, smoothstep(uWaterLevel, uWaterLevel - 1.5, vTerrWorld.y));
+  // River beds are gravel; everything below the waterline is wet and darker
+  float underRiver = smoothstep(waterY - 0.05, waterY - 0.4, vTerrWorld.y) * step(0.5, river.g);
+  if (underRiver > 0.001) c = mix(c, texture2D(tRock, uv * 1.7).rgb * vec3(0.95, 0.9, 0.8), underRiver * 0.75);
+  c *= mix(1.0, 0.62, smoothstep(waterY, waterY - 1.5, vTerrWorld.y));
   return c;
 }`
         )

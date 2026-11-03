@@ -35,7 +35,12 @@ export class RockField {
   private rocks: RockNode[] = [];
   private stoneMaterial = new THREE.MeshLambertMaterial({ color: 0x8b8f96, flatShading: true });
   private darkStoneMaterial = new THREE.MeshLambertMaterial({ color: 0x6b6f76, flatShading: true });
-  private ironMaterial = new THREE.MeshLambertMaterial({ color: 0xc2703d, flatShading: true });
+  private oreMaterials: Partial<Record<RockKind, THREE.Material>> = {
+    iron: new THREE.MeshLambertMaterial({ color: 0xc2703d, flatShading: true }),
+    copper: new THREE.MeshLambertMaterial({ color: 0x4fa88a, flatShading: true }),
+    gold: new THREE.MeshLambertMaterial({ color: 0xf2c14e, emissive: 0x3a2800, flatShading: true }),
+    crystal: new THREE.MeshLambertMaterial({ color: 0xb69bff, emissive: 0x3a2a80, flatShading: true }),
+  };
 
   constructor(
     private physics: PhysicsWorld,
@@ -55,7 +60,7 @@ export class RockField {
     let best: RockNode | null = null;
     let bestDist = Infinity;
     for (const rock of this.rocks) {
-      if (rock.isDepleted) continue;
+      if (rock.isDepleted || Math.abs(point.y - rock.position.y) > 3) continue;
       const dist = Math.hypot(point.x - rock.position.x, point.z - rock.position.z) - rock.radius;
       if (dist <= reach && dist < bestDist) {
         best = rock;
@@ -74,9 +79,9 @@ export class RockField {
     const surface = rock.position
       .clone()
       .addScaledVector(strikeDirection.clone().setY(0).normalize(), -rock.radius * 0.8)
-      .setY(rock.radius * 0.6);
+      .setY(rock.position.y + rock.radius * 0.6);
     this.particleManager?.emitBuildPuff(surface, false, 14);
-    if (rock.kind === 'iron') this.particleManager?.emitBuildPuff(surface, true, 6);
+    if (rock.kind !== 'stone') this.particleManager?.emitBuildPuff(surface, true, 6);
 
     if (rock.health > 0) {
       audioEngine.at(surface).playBuildPlace(false);
@@ -118,6 +123,11 @@ export class RockField {
     }
   }
 
+  /** Adds a rock at a world position (y = ground height), e.g. ore veins in the mountains and caves. */
+  public addRock(position: THREE.Vector3, kind: RockKind, scale = 1): void {
+    this.createRock(this.rocks.length, position, kind, scale);
+  }
+
   private createRock(id: number, position: THREE.Vector3, kind: RockKind, scale: number): void {
     const group = new THREE.Group();
     group.name = `Rock_${kind}_${id}`;
@@ -138,14 +148,29 @@ export class RockField {
 
     const body = new THREE.Mesh(geo, id % 2 === 0 ? this.stoneMaterial : this.darkStoneMaterial);
     body.rotation.y = id * 1.3;
+    if (kind === 'crystal') body.scale.set(0.7, 0.45, 0.7);
     group.add(body);
 
-    if (kind === 'iron') {
-      // Rust-orange ore nuggets poking out of the surface
+    const oreMat = this.oreMaterials[kind];
+    if (kind === 'crystal') {
+      // A cluster of tall glowing prisms
+      const prism = new THREE.CylinderGeometry(0, 0.16, 1, 5);
+      prism.translate(0, 0.5, 0);
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2 + id;
+        const shard = new THREE.Mesh(prism, oreMat);
+        const r = i === 0 ? 0 : 0.35;
+        shard.position.set(Math.cos(a) * r, 0.2, Math.sin(a) * r);
+        shard.rotation.set(Math.sin(a) * (r ? 0.45 : 0), 0, Math.cos(a) * (r ? 0.45 : 0));
+        shard.scale.set(1, i === 0 ? 1.5 : 0.8 + (i % 3) * 0.25, 1);
+        group.add(shard);
+      }
+    } else if (oreMat) {
+      // Ore nuggets poking out of the surface
       const nuggetGeo = new THREE.OctahedronGeometry(0.2, 0);
       for (let i = 0; i < 7; i++) {
         const a = (i / 7) * Math.PI * 2 + id;
-        const nugget = new THREE.Mesh(nuggetGeo, this.ironMaterial);
+        const nugget = new THREE.Mesh(nuggetGeo, oreMat);
         nugget.position.set(Math.cos(a) * 0.78, 0.45 + (i % 3) * 0.22, Math.sin(a) * 0.78);
         nugget.rotation.set(a, a * 0.7, 0);
         nugget.scale.setScalar(0.8 + (i % 2) * 0.5);
@@ -179,7 +204,7 @@ export class RockField {
   private addCollider(rock: RockNode): void {
     const height = 1.1 * rock.baseScale;
     rock.body = this.physics.createStaticCylinder(
-      new THREE.Vector3(rock.position.x, height / 2, rock.position.z),
+      new THREE.Vector3(rock.position.x, rock.position.y + height / 2, rock.position.z),
       rock.radius * 0.85,
       height
     ).body;
@@ -195,7 +220,7 @@ export class RockField {
     }
 
     audioEngine.at(rock.position, 4).playBuildDemolish();
-    const center = rock.position.clone().setY(0.4);
+    const center = rock.position.clone().setY(rock.position.y + 0.4);
     this.particleManager?.emitBuildPuff(center, false, 36);
     this.particleManager?.emitLandDust(center, 6);
 

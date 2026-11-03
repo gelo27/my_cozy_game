@@ -6,7 +6,7 @@ import { PropSystem } from '../world/PropSystem';
 import { WeatherSystem, WeatherType } from '../world/WeatherSystem';
 import { FishingSystem, FishingState } from './FishingSystem';
 import { PetSystem, Pet } from './PetSystem';
-import { RECIPES, FISH_IDS, DISH_BUFF, Recipe } from './Recipes';
+import { RECIPES, FISH_IDS, SEA_FISH_IDS, DISH_BUFF, Recipe } from './Recipes';
 import { audioEngine } from '../audio/AudioEngine';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { t, dataName, getLang } from '../i18n/i18n';
@@ -16,7 +16,7 @@ export type GameplayPanel = 'cook' | 'shop' | null;
 export interface GameplayPrompt {
   text: string;
   key: string;
-  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc';
+  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'explore';
   secondary?: { text: string; key: string; action: 'treat' };
 }
 
@@ -31,6 +31,17 @@ export interface GameplayHudState {
   isNight: boolean;
   coins: number;
   pets: { name: string; kind: string; affection: number }[];
+  /** Doorway fade (caves, lighthouse) and whether the player is underground. */
+  fading: boolean;
+  inCave: boolean;
+}
+
+/** The exploration layer as gameplay sees it: its E-prompt and doorway state. */
+export interface ExplorePort {
+  prompt: { text: string } | null;
+  fading: boolean;
+  inCave: string | null;
+  interact(): void;
 }
 
 /**
@@ -43,6 +54,9 @@ export class GameplayManager {
   public readonly fishing: FishingSystem;
   public readonly pets: PetSystem;
   public companion: CompanionNPC | null = null;
+  public explore: ExplorePort | null = null;
+  /** Pets and the companion wait here instead of following (the cave mouth while the player is inside). */
+  public anchorOverride: THREE.Vector3 | null = null;
   /** Bumped on any change the HUD should show immediately. */
   public revision = 0;
 
@@ -76,8 +90,9 @@ export class GameplayManager {
     const pos = this.character.getPosition();
     const moving = pos.distanceToSquared(this.lastPlayerPos) > 0.0004;
     this.lastPlayerPos.copy(pos);
-    this.pets.update(dt, pos, moving);
-    this.companion?.update(dt, pos);
+    const anchor = this.anchorOverride ?? pos;
+    this.pets.update(dt, anchor, moving && !this.anchorOverride);
+    this.companion?.update(dt, anchor);
     this.updateBuff(dt);
     this.updateCooking(dt);
 
@@ -120,6 +135,9 @@ export class GameplayManager {
   private computePrompt(pos: THREE.Vector3, facing: THREE.Vector3): GameplayPrompt | null {
     if (this.fishing.busy) return null;
     if (this.character.farmingAbility?.currentPrompt || this.character.gatheringAbility?.currentPrompt) return null;
+
+    // Chests, cave doorways and beach finds come first: they sit at fixed spots
+    if (this.explore?.prompt) return { text: this.explore.prompt.text, key: 'E', action: 'explore' };
 
     // Fixed stations win over pets: pets follow the player and would otherwise hijack every prompt
     if (this.inventory.getEquippedItemId() === 'fishing_rod' && this.fishing.findCastTarget(pos, facing, this.castTarget)) {
@@ -164,6 +182,9 @@ export class GameplayManager {
         this.fishing.cast(this.rodTip, this.castTarget);
         audioEngine.playBuildSelect();
       }
+    } else if (action === 'explore') {
+      this.explore?.interact();
+      this.promptTimer = 0;
     } else if (action === 'npc' && this.companion) {
       const following = this.companion.toggleFollow();
       audioEngine.at(this.companion.getPosition()).playBuildSelect();
@@ -194,6 +215,11 @@ export class GameplayManager {
     this.revision++;
   }
 
+  public recipeName(recipeId: string): string {
+    const recipe = RECIPES.find((r) => r.id === recipeId);
+    return dataName('recipe', recipeId, recipe?.name ?? recipeId);
+  }
+
   public openPanel(panel: GameplayPanel): void {
     this.panel = panel;
     this.revision++;
@@ -201,23 +227,31 @@ export class GameplayManager {
 
   // ---------------------------------------------------------------- cooking
 
+  /** Recipes found on the island (locked ones start unknown). */
+  public readonly knownRecipes = new Set<string>();
+
+  public isRecipeKnown(recipe: Recipe): boolean {
+    return !recipe.locked || this.knownRecipes.has(recipe.id);
+  }
+
   public countIngredient(itemId: string): number {
     if (itemId === 'fish_any') return FISH_IDS.reduce((s, id) => s + this.inventory.getItemCount(id), 0);
+    if (itemId === 'fish_sea_any') return SEA_FISH_IDS.reduce((s, id) => s + this.inventory.getItemCount(id), 0);
     return this.inventory.getItemCount(itemId);
   }
 
   public canCook(recipe: Recipe): boolean {
-    return !this.cookingJob && recipe.ingredients.every((i) => this.countIngredient(i.itemId) >= i.count);
+    return !this.cookingJob && this.isRecipeKnown(recipe) && recipe.ingredients.every((i) => this.countIngredient(i.itemId) >= i.count);
   }
 
   public cook(recipeId: string): void {
     const recipe = RECIPES.find((r) => r.id === recipeId);
     if (!recipe || !this.canCook(recipe)) return;
     for (const ing of recipe.ingredients) {
-      if (ing.itemId === 'fish_any') {
+      if (ing.itemId === 'fish_any' || ing.itemId === 'fish_sea_any') {
         let left = ing.count;
         // Use the cheapest fish first
-        for (const id of FISH_IDS) {
+        for (const id of ing.itemId === 'fish_any' ? FISH_IDS : SEA_FISH_IDS) {
           while (left > 0 && this.inventory.removeItem(id, 1)) left--;
         }
       } else {
@@ -310,12 +344,14 @@ export class GameplayManager {
       isNight: this.weather.isNight(),
       coins: this.inventory.getItemCount('coins'),
       pets: this.pets.pets.map((p) => ({ name: p.name, kind: p.kind, affection: Math.round(p.affection) })),
+      fading: !!this.explore?.fading,
+      inCave: !!this.explore?.inCave,
     };
   }
 
   public get hudKey(): string {
     // Cheap change detector for throttled HUD pushes
-    return `${this.revision}|${this.fishing.revision}|${this.weather.getClockLabel()}|${this.weather.weather}|${getLang()}`;
+    return `${this.revision}|${this.fishing.revision}|${this.explore?.fading}|${this.explore?.inCave}|${this.weather.getClockLabel()}|${this.weather.weather}|${getLang()}`;
   }
 
   public dispose(): void {

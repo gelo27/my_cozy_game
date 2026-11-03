@@ -4,8 +4,12 @@ import { InputManager } from '../input/InputManager';
 import { TerrainSystem, TerrainBrushKind } from '../world/TerrainSystem';
 import { PropSystem, PROP_DEF_MAP } from '../world/PropSystem';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
+import { RiverEditTool } from './RiverEditTool';
+import type { RiverSystem } from '../world/rivers/RiverSystem';
+import { riverWorld, stringifyRivers } from '../world/rivers/RiverWorld';
+import type { RiverDef } from '../world/rivers/RiverTypes';
 
-export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint';
+export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river';
 
 export interface EditorState {
   tool: EditorTool;
@@ -28,6 +32,7 @@ interface Snapshot {
   heights: Float32Array;
   tiles: Uint8Array;
   props: ReturnType<PropSystem['serialize']>;
+  rivers: string;
 }
 
 /**
@@ -75,14 +80,23 @@ export class EditorController {
   private looking = false;
   private readonly keys = new Set<string>();
 
+  /** River / stream / waterfall authoring (tool 5). */
+  public readonly rivers: RiverEditTool;
+
   constructor(
     private readonly scene: THREE.Scene,
     private readonly camera: THREE.PerspectiveCamera,
     private readonly dom: HTMLElement,
     private readonly input: InputManager,
     private readonly terrain: TerrainSystem,
-    private readonly props: PropSystem
+    private readonly props: PropSystem,
+    riverSystem: RiverSystem
   ) {
+    this.rivers = new RiverEditTool(scene, camera, dom, riverSystem, terrain, {
+      pushUndo: () => this.pushUndo(),
+      touch: () => this.touch(),
+    });
+    this.riverSystem = riverSystem;
     const ringPts = new Float32Array(65 * 3);
     const ringGeo = new THREE.BufferGeometry();
     ringGeo.setAttribute('position', new THREE.BufferAttribute(ringPts, 3));
@@ -115,7 +129,10 @@ export class EditorController {
     dom.addEventListener('contextmenu', (e) => this.active && e.preventDefault());
   }
 
+  private readonly riverSystem: RiverSystem;
+
   public dispose(): void {
+    this.rivers.dispose();
     this.dom.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('pointermove', this.onPointerMove);
@@ -143,6 +160,7 @@ export class EditorController {
       this.keys.clear();
       this.looking = false;
     }
+    this.rivers.setVisible(active && this.state.tool === 'river');
     this.touch();
   }
 
@@ -150,6 +168,7 @@ export class EditorController {
     this.state[key] = value;
     if (key === 'tool' && value !== 'select') this.select(null);
     if (key === 'gizmoMode') this.gizmo.setMode(value as 'translate' | 'rotate');
+    if (key === 'tool') this.rivers.setVisible(this.active && value === 'river');
     this.touch();
   }
 
@@ -224,10 +243,22 @@ export class EditorController {
   // ---------------------------------------------------------------- undo
 
   private snapshot(): Snapshot {
-    return { heights: this.terrain.heights.slice(), tiles: this.terrain.tiles.slice(), props: this.props.serialize() };
+    return {
+      heights: this.terrain.heights.slice(),
+      tiles: this.terrain.tiles.slice(),
+      props: this.props.serialize(),
+      rivers: stringifyRivers(riverWorld.defs),
+    };
   }
 
   private restore(s: Snapshot): void {
+    // Rivers first: they move the generated base the live heights are stored against
+    if (s.rivers !== stringifyRivers(riverWorld.defs)) {
+      this.riverSystem.replaceAll(JSON.parse(s.rivers) as RiverDef[], false);
+      this.rivers.unsaved = true;
+      if (!riverWorld.defs.some((d) => d.id === this.rivers.selectedRiver)) this.rivers.select(null);
+      else this.rivers.select(this.rivers.selectedRiver, -1);
+    }
     this.terrain.heights.set(s.heights);
     this.terrain.tiles.set(s.tiles);
     const save = this.terrain.serialize();
@@ -269,7 +300,12 @@ export class EditorController {
     }
     if (e.button !== 0 || this.gizmo.dragging || (this.gizmo.axis && this.state.tool === 'select')) return;
     const { tool } = this.state;
-    if (tool === 'select') {
+    if (tool === 'river') {
+      if (this.rivers.busy) return;
+      this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
+      const hit = this.terrain.raycast(this.raycaster.ray, 300, new THREE.Vector3());
+      this.rivers.pointerDown(this.raycaster, hit, e.shiftKey);
+    } else if (tool === 'select') {
       this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
       const hit = this.props.pick(this.raycaster);
       this.select(hit ? hit.id : null);
@@ -314,10 +350,12 @@ export class EditorController {
     } else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyD') {
       e.preventDefault();
       this.duplicateSelected();
+    } else if (this.state.tool === 'river' && !e.ctrlKey && this.rivers.keyDown(e)) {
+      // handled by the river tool
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
       this.deleteSelected();
     } else if (!e.ctrlKey && !this.looking) {
-      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint' };
+      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river' };
       if (tools[e.code]) this.set('tool', tools[e.code]);
       if (e.code === 'KeyG') this.set('gizmoMode', 'translate');
       if (e.code === 'KeyR' && this.state.tool === 'select') this.set('gizmoMode', 'rotate');
@@ -335,6 +373,7 @@ export class EditorController {
   public update(dt: number): void {
     if (!this.active) return;
     this.updateFlyCamera(dt);
+    this.rivers.update(dt);
 
     this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
     this.hasHit = !!this.terrain.raycast(this.raycaster.ray, 300, this.hit);

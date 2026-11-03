@@ -172,6 +172,25 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     isEquippable: false,
     sellPrice: 6,
   },
+  ...mat('copper_ore', 'Мідна руда', 'Gem', '#b87333', 'Зеленкувато-мідна руда з гірських схилів.', 8),
+  ...mat('gold_ore', 'Золота руда', 'Gem', '#e8b84a', 'Рідкісна руда з золотими жилками. Трапляється високо в горах і глибоко в печерах.', 25),
+  ...mat('crystal', 'Кристал', 'Gem', '#9b7bff', 'Світний печерний кристал. Цінується в крамниці.', 40),
+  ...mat('gem_ruby', 'Рубін', 'Gem', '#e0115f', 'Старовинний самоцвіт зі скарбу.', 250),
+  ...mat('sand', 'Пісок', 'Box', '#e6d3a3', 'Чистий морський пісок з пляжу.', 1),
+  ...mat('shell', 'Мушля', 'Shell', '#f4c7b8', 'Перламутрова мушля, викинута хвилею на берег.', 6),
+  ...mat('pearl', 'Перлина', 'Gem', '#f5f1e6', 'Рідкісна перлина, знайдена в мушлі.', 150),
+  {
+    id: 'cave_mushroom',
+    name: 'Печерний гриб',
+    category: 'food',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Sprout',
+    color: '#7dd3fc',
+    description: 'Блакитний гриб, що світиться в темряві печер. Інгредієнт для рагу.',
+    isEquippable: false,
+    sellPrice: 10,
+  },
   // Fishing, cooking, pets & economy
   {
     id: 'fishing_rod',
@@ -188,11 +207,20 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
   ...fish('fish_perch', 'Окунь', '#5c8a3a', 'Смугастий окунь, активний вдень.', 18),
   ...fish('fish_catfish', 'Сом', '#5b4a3a', 'Великий нічний сом. Ловиться ввечері та вночі.', 40),
   ...fish('fish_golden', 'Золота рибка', '#f5b301', 'Рідкісна! Частіше трапляється в дощ.', 120),
+  ...fish('fish_trout', 'Форель', '#9fb7a0', 'Плямиста форель з далеких лісових озер.', 30),
+  ...fish('fish_pike', 'Щука', '#6d7f4a', 'Хижа щука далеких озер. Клює вранці та ввечері.', 55),
+  ...fish('fish_sturgeon', 'Осетер', '#8a8f99', 'Рідкісний озерний велетень. Частіше в дощ.', 160),
+  ...fish('fish_mackerel', 'Скумбрія', '#4a7fa8', 'Смугаста морська риба. Ловиться з берега моря.', 22),
+  ...fish('fish_seabass', 'Морський окунь', '#7d8fa3', 'Сріблястий морський окунь.', 45),
+  ...fish('fish_tuna', 'Тунець', '#2f4f7a', 'Рідкісний! Великий морський тунець.', 140),
+  ...fish('fish_moonfish', 'Риба-місяць', '#c9d6e8', 'Легендарна риба, що підіймається до берега лише вночі.', 300),
   ...food('dish_bread', 'Хліб', '#d9a35b', 'Пухкий домашній хліб.', 30),
   ...food('dish_salad', 'Овочевий салат', '#4caf50', 'Свіжий салат з моркви та томатів.', 45),
   ...food('dish_soup', 'Овочевий суп', '#ff9800', 'Гарячий суп, що зігріває в дощ.', 60),
   ...food('dish_grilled_fish', 'Риба на грилі', '#c8763a', 'Ароматна риба з багаття.', 35),
   ...food('dish_fish_stew', 'Рибна юшка', '#e0a040', 'Навариста юшка з риби та овочів.', 95),
+  ...food('dish_mushroom_stew', 'Грибне рагу', '#7aa0b8', 'Рагу з печерних грибів за рецептом з покинутої хатини.', 80),
+  ...food('dish_seafood_platter', 'Морська тарілка', '#3f8fb0', 'Страва доглядача маяка з морської риби.', 120),
   {
     id: 'pet_treat',
     name: 'Ласощі для тварин',
@@ -222,6 +250,10 @@ function fish(id: string, name: string, color: string, description: string, sell
   return [{ id, name, category: 'food', count: 0, maxStack: 99, iconName: 'Fish', color, description, isEquippable: false, sellPrice }];
 }
 
+function mat(id: string, name: string, iconName: string, color: string, description: string, sellPrice: number): InventoryItem[] {
+  return [{ id, name, category: 'materials', count: 0, maxStack: 999, iconName, color, description, isEquippable: false, sellPrice }];
+}
+
 function food(id: string, name: string, color: string, description: string, sellPrice: number): InventoryItem[] {
   return [{ id, name, category: 'food', count: 0, maxStack: 99, iconName: 'Soup', color, description, isEquippable: false, sellPrice }];
 }
@@ -232,6 +264,16 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'axe') return '🪓';
   if (item.id === 'pickaxe') return '⛏️';
   if (item.id === 'iron_ore') return '🔶';
+  if (item.id === 'copper_ore') return '🟤';
+  if (item.id === 'gold_ore') return '🟡';
+  if (item.id === 'crystal') return '🔮';
+  if (item.id === 'gem_ruby') return '💎';
+  if (item.id === 'sand') return '⏳';
+  if (item.id === 'shell') return '🐚';
+  if (item.id === 'pearl') return '⚪';
+  if (item.id === 'cave_mushroom') return '🍄';
+  if (item.id === 'fish_moonfish') return '🐡';
+  if (item.id === 'fish_tuna' || item.id === 'fish_sturgeon') return '🐠';
   if (item.id === 'wheat_seed') return '🌾';
   if (item.id === 'carrot_seed') return '🥕';
   if (item.id === 'tomato_seed') return '🍅';
@@ -248,6 +290,8 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'dish_soup') return '🍲';
   if (item.id === 'dish_grilled_fish') return '🍢';
   if (item.id === 'dish_fish_stew') return '🥘';
+  if (item.id === 'dish_mushroom_stew') return '🍛';
+  if (item.id === 'dish_seafood_platter') return '🍱';
   if (item.id === 'pet_treat') return '🦴';
   if (item.id === 'coins') return '💰';
   return '✨';

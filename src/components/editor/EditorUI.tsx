@@ -4,8 +4,10 @@ import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
-  PawPrint, User, Globe2, Terminal, Bug,
+  PawPrint, User, Globe2, Terminal, Bug, Spline,
 } from 'lucide-react';
+import { RiverPanel } from './RiverPanel';
+import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool } from '../../editor/EditorController';
 import { PROP_DEFS, PropCategory } from '../../world/PropSystem';
@@ -35,10 +37,6 @@ interface EditorUIProps {
   notify(text: string, type?: 'success' | 'info' | 'warn'): void;
 }
 
-const btn = 'flex items-center justify-center rounded-lg transition-colors';
-const chip = (on: boolean) =>
-  `${btn} gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold ${on ? 'bg-sky-500 text-white' : 'bg-white/5 text-zinc-300 hover:bg-white/10'}`;
-
 /**
  * The whole developer editor in one compact dock: tools on the left rail, context panel next to
  * it, and a slim top bar. Re-renders only when the editor revision or the 3 Hz stats change.
@@ -62,6 +60,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'place', icon: TreePine, label: 'Об’єкти (2)' },
     { id: 'sculpt', icon: Mountain, label: 'Рельєф (3)' },
     { id: 'paint', icon: Brush, label: 'Покриття (4)' },
+    { id: 'river', icon: Spline, label: 'Річки та водоспади (5)' },
   ];
   const tabs: { id: Tab; icon: React.ElementType; label: string }[] = [
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
@@ -141,28 +140,6 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
 
 // ------------------------------------------------------------------ panels
 
-const Section: React.FC<{ title: string; children: React.ReactNode; right?: React.ReactNode }> = ({ title, children, right }) => (
-  <div className="flex flex-col gap-1.5">
-    <div className="flex items-center text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-      <span className="flex-1">{title}</span>
-      {right}
-    </div>
-    {children}
-  </div>
-);
-
-const Slider: React.FC<{ label: string; value: number; min: number; max: number; step: number; onChange(v: number): void; fmt?(v: number): string }> = ({
-  label, value, min, max, step, onChange, fmt,
-}) => (
-  <label className="flex flex-col gap-1">
-    <span className="flex justify-between text-zinc-400">
-      <span>{label}</span>
-      <span className="text-zinc-200 tabular-nums">{fmt ? fmt(value) : value}</span>
-    </span>
-    <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} className="accent-sky-500" />
-  </label>
-);
-
 const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
   const editor = engine.world!.editor;
   const s = editor.state;
@@ -225,6 +202,8 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
       </>
     );
   }
+
+  if (s.tool === 'river') return <RiverPanel engine={engine} />;
 
   if (s.tool === 'sculpt') {
     const kinds = [
@@ -338,26 +317,6 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         </button>
       </div>
     </Section>
-  );
-};
-
-const NumberField: React.FC<{ label: string; value: number; onCommit(v: number): void }> = ({ label, value, onCommit }) => {
-  const ref = useRef<HTMLInputElement>(null);
-  return (
-    <label className="flex flex-col gap-0.5">
-      <span className="text-[10px] text-zinc-500">{label}</span>
-      <input
-        ref={ref}
-        key={value.toFixed(3)}
-        defaultValue={value.toFixed(2)}
-        onKeyDown={(e) => e.key === 'Enter' && ref.current?.blur()}
-        onBlur={(e) => {
-          const v = Number(e.target.value);
-          if (Number.isFinite(v) && Math.abs(v - value) > 1e-4) onCommit(v);
-        }}
-        className="w-full bg-black/30 border border-white/10 rounded px-1.5 py-1 text-zinc-100 tabular-nums outline-none focus:border-sky-500"
-      />
-    </label>
   );
 };
 

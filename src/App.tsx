@@ -19,6 +19,8 @@ import { GatherPromptHUD } from './components/GatherPromptHUD';
 import { GatherPrompt } from './character/abilities/GatheringAbility';
 import { GameHUD } from './components/game/GameHUD';
 import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
+import { WorldMap } from './components/game/WorldMap';
+import { Compass } from './components/game/Compass';
 import { EditorUI } from './components/editor/EditorUI';
 import { useLang, dataName } from './i18n/i18n';
 import { ErrorOverlay, JsonDropOverlay, LoadingOverlay, ToastPill } from './components/ViewportOverlays';
@@ -41,6 +43,7 @@ export default function App() {
 
   const [isWireframe, setIsWireframe] = useState(false);
   const [isInventoryOpen, setIsInventoryOpen] = useState(false);
+  const [isMapOpen, setIsMapOpen] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
   const [showCharacterInspector, setShowCharacterInspector] = useState(false);
 
@@ -69,6 +72,15 @@ export default function App() {
     });
   };
 
+  /** The map frees the cursor like the backpack. */
+  const handleToggleMap = (open?: boolean) => {
+    setIsMapOpen((prev) => {
+      const next = open ?? !prev;
+      if (next !== prev) engineRef.current?.input.setInventoryMode(next);
+      return next;
+    });
+  };
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -90,6 +102,7 @@ export default function App() {
       },
       onWireframeToggled: setIsWireframe,
       onInventoryHotkey: handleToggleInventory,
+      onMapHotkey: handleToggleMap,
       onGameplayHud: setHud,
       onNotify: (text, type) => notify(text, type),
       onModeChange: setMode,
@@ -156,6 +169,8 @@ export default function App() {
                   onOpenBackpack={() => handleToggleInventory()}
                   onToggleBuild={building.toggleBuildMode}
                   onOpenEditor={() => engine!.setMode('editor')}
+                  onOpenMap={() => handleToggleMap()}
+                  onCallMoped={() => engine!.callMoped()}
                   onAction={(a) => world.gameplay.runAction(a)}
                 />
 
@@ -210,6 +225,9 @@ export default function App() {
                   onEquipItem={(itemId: string) => character?.model.equipToolOrProp(itemId)}
                 />
 
+                {!isBuildingUI && hud && <Compass world={world} heading={engine!.getHeading} />}
+                {isMapOpen && <WorldMap world={world} heading={engine!.getHeading} onClose={() => handleToggleMap(false)} />}
+
                 {hud?.panel === 'cook' && <CookingPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'shop' && <ShopPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
               </>
@@ -217,6 +235,11 @@ export default function App() {
           </>
         )}
 
+        {/* Doorway fade (caves, lighthouse lookout) */}
+        <div
+          className="absolute inset-0 z-[45] bg-black pointer-events-none transition-opacity duration-300"
+          style={{ opacity: hud?.fading ? 1 : 0 }}
+        />
         {toast && <ToastPill toast={toast} />}
         {sceneFiles.isDragOver && <JsonDropOverlay />}
         {loading && <LoadingOverlay />}

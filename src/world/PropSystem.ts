@@ -4,6 +4,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { TerrainSystem } from './TerrainSystem';
 import { WORLD_HALF, isMobileDevice, worldSettings } from './WorldSettings';
+import { riverWorld } from './rivers/RiverWorld';
 import { coastRadius, fbm } from './IslandGenerator';
 
 /**
@@ -693,7 +694,7 @@ export class PropSystem {
         const r = Math.hypot(x, z);
         if (r < 66 || r > coastRadius(x, z) - 8) continue;
         const y = this.terrain.getHeight(x, z);
-        if (y < water + 0.5) continue;
+        if (y < water + 0.5 || y < riverWorld.waterLevelAt(x, z) + 0.5 || riverWorld.depthAt(x, z) > 0) continue;
         const slope = Math.abs(this.terrain.getHeight(x + 1, z) - y) + Math.abs(this.terrain.getHeight(x, z + 1) - y);
         const forest = fbm(x * 0.012 + 40, z * 0.012 - 13);
         const rot = rnd() * Math.PI * 2;

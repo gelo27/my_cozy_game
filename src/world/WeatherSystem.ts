@@ -88,6 +88,9 @@ export class WeatherSystem {
   private current = { light: 1, fog: 0.006, amount: 0, cover: 0.28, dark: 0, tint: new THREE.Color(1, 1, 1) };
   /** 0 by day, 1 at full night; drives night lighting. */
   public nightFactor = 0;
+  /** Target 0..1 for being underground: sunlight, sky light and precipitation fade out, fog turns black. */
+  public caveFactor = 0;
+  private caveMix = 0;
   public readonly sunDir = new THREE.Vector3(0, 1, 0);
   public readonly moonDir = new THREE.Vector3(0, -1, 0);
   private readonly skyDome: SkyDome;
@@ -243,8 +246,19 @@ export class WeatherSystem {
     if (p.precipitation !== 'none') this.snowMix = p.precipitation === 'snow' ? 1 : 0;
     const bright = (0.3 + daylight * 0.7) * (0.55 + cur.light * 0.45) + this.flash;
     const storm = this.weather === 'storm' ? 1 : 0;
-    this.precipitation.update(dt, cameraPos, cur.amount, this.snowMix, bright, storm, Math.min(window.devicePixelRatio || 1, 1.5), worldSettings.waterLevel);
+    this.caveMix += (this.caveFactor - this.caveMix) * (1 - Math.exp(-dt * 4));
+    if (this.caveMix > 0.001) this.applyCave(this.caveMix);
+    this.precipitation.update(dt, cameraPos, cur.amount * (1 - this.caveMix), this.snowMix, bright, storm, Math.min(window.devicePixelRatio || 1, 1.5), worldSettings.waterLevel);
     if (this.precipitation.active) this.occlusion?.update(cameraPos);
+  }
+
+  /** Underground: no sun or sky, a faint cold ambient, and a black fog that swallows far tunnels. */
+  private applyCave(k: number): void {
+    this.sun.intensity *= 1 - k;
+    this.ambient.intensity += (0.07 - this.ambient.intensity) * k;
+    this.hemi.intensity += (0.04 - this.hemi.intensity) * k;
+    this.fog.color.lerp(WeatherSystem._c.setRGB(0.012, 0.014, 0.02), k);
+    this.fog.density += (0.05 - this.fog.density) * k;
   }
 
   private sampleKeys(keys: [number, number][], hour: number, out: THREE.Color): THREE.Color {

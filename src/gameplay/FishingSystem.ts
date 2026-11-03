@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { worldSettings } from '../world/WorldSettings';
+import { waterLevelAt } from '../world/rivers/RiverWorld';
+import { coastRadius } from '../world/IslandGenerator';
+
+/** Which fish bite depends on the water: the farm pond, the far inland lakes, or the open sea. */
+export type FishingWater = 'pond' | 'lake' | 'sea';
 
 export type FishingPhase = 'idle' | 'cast' | 'wait' | 'bite' | 'reel' | 'caught' | 'escaped';
 
@@ -13,20 +18,38 @@ export interface FishingState {
   hitsNeeded: number;
   hits: number;
   lastFishId: string | null;
+  water: FishingWater;
 }
 
 interface FishDef {
   id: string;
+  waters: FishingWater[];
   weight: (hour: number, rain: number) => number;
   difficulty: number; // 0..1, narrows the zone and speeds the marker
 }
 
 const FISH: FishDef[] = [
-  { id: 'fish_carp', weight: () => 50, difficulty: 0.15 },
-  { id: 'fish_perch', weight: (h) => (h > 6 && h < 19 ? 32 : 6), difficulty: 0.35 },
-  { id: 'fish_catfish', weight: (h) => (h > 18 || h < 6 ? 30 : 4), difficulty: 0.6 },
-  { id: 'fish_golden', weight: (_h, rain) => 2 + rain * 8, difficulty: 0.85 },
+  { id: 'fish_carp', waters: ['pond'], weight: () => 50, difficulty: 0.15 },
+  { id: 'fish_perch', waters: ['pond', 'lake'], weight: (h) => (h > 6 && h < 19 ? 32 : 6), difficulty: 0.35 },
+  { id: 'fish_catfish', waters: ['pond'], weight: (h) => (h > 18 || h < 6 ? 30 : 4), difficulty: 0.6 },
+  { id: 'fish_golden', waters: ['pond'], weight: (_h, rain) => 2 + rain * 8, difficulty: 0.85 },
+  // Far lakes
+  { id: 'fish_trout', waters: ['lake'], weight: () => 40, difficulty: 0.3 },
+  { id: 'fish_pike', waters: ['lake'], weight: (h) => ((h > 5 && h < 9) || (h > 17 && h < 21) ? 30 : 10), difficulty: 0.6 },
+  { id: 'fish_sturgeon', waters: ['lake'], weight: (_h, rain) => 3 + rain * 6, difficulty: 0.9 },
+  // Open sea
+  { id: 'fish_mackerel', waters: ['sea'], weight: () => 45, difficulty: 0.25 },
+  { id: 'fish_seabass', waters: ['sea'], weight: () => 25, difficulty: 0.5 },
+  { id: 'fish_tuna', waters: ['sea'], weight: (_h, rain) => 5 + rain * 3, difficulty: 0.85 },
+  { id: 'fish_moonfish', waters: ['sea'], weight: (h) => (h > 21 || h < 4 ? 3 : 0), difficulty: 0.95 },
 ];
+
+/** Classifies a cast target: the sea past the coastline, lakes beyond the old farm, else the pond. */
+export function waterAt(x: number, z: number): FishingWater {
+  const r = Math.hypot(x, z);
+  if (r > coastRadius(x, z) - 32) return 'sea';
+  return r > 72 ? 'lake' : 'pond';
+}
 
 /**
  * Cast -> wait for a bite -> press in time -> reel minigame (press while the marker is inside the
@@ -41,6 +64,7 @@ export class FishingSystem {
     hitsNeeded: 2,
     hits: 0,
     lastFishId: null,
+    water: 'pond',
   };
   public revision = 0;
 
@@ -76,8 +100,9 @@ export class FishingSystem {
   public findCastTarget(playerPos: THREE.Vector3, facing: THREE.Vector3, out = new THREE.Vector3()): THREE.Vector3 | null {
     for (const d of [5, 4, 6, 3, 7]) {
       out.set(playerPos.x + facing.x * d, 0, playerPos.z + facing.z * d);
-      if (this.terrain.getHeight(out.x, out.z) < worldSettings.waterLevel - 0.25) {
-        out.y = worldSettings.waterLevel;
+      const level = waterLevelAt(out.x, out.z);
+      if (this.terrain.getHeight(out.x, out.z) < level - 0.25) {
+        out.y = level;
         return out;
       }
     }
@@ -87,6 +112,7 @@ export class FishingSystem {
   public cast(rodTip: THREE.Vector3, target: THREE.Vector3): void {
     this.castFrom.copy(rodTip);
     this.bobberPos.copy(target);
+    this.state.water = waterAt(target.x, target.z);
     this.state.phase = 'cast';
     this.timer = 0.6;
     this.bobber.visible = true;
@@ -202,13 +228,14 @@ export class FishingSystem {
 
   private rollFish(rain: number): FishDef {
     const h = worldSettings.timeOfDay;
-    const weights = FISH.map((f) => f.weight(h, rain));
+    const water = this.state.water;
+    const weights = FISH.map((f) => (f.waters.includes(water) ? f.weight(h, rain) : 0));
     let r = Math.random() * weights.reduce((a, b) => a + b, 0);
     for (let i = 0; i < FISH.length; i++) {
       r -= weights[i];
       if (r <= 0) return FISH[i];
     }
-    return FISH[0];
+    return FISH.find((f) => f.waters.includes(water)) ?? FISH[0];
   }
 
   private touch(): void {

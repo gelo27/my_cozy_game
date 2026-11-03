@@ -12,8 +12,10 @@ export interface AmbientState {
   underRoof: boolean;
   /** Nearest burning campfire within earshot, or null. */
   campfire: THREE.Vector3 | null;
+  /** Loudest nearby river or waterfall (0..1 before distance falloff), or null. */
+  water: { position: THREE.Vector3; loud: number; fall: boolean } | null;
   /** Vehicle engine while the player drives it, or null. */
-  engine: { position: THREE.Vector3; speedKmh: number } | null;
+  engine: { position: THREE.Vector3; speedKmh: number; kind: 'truck' | 'scooter' } | null;
 }
 
 /** Seconds of looping noise; long enough that the loop point is not audible. */
@@ -38,6 +40,7 @@ export class AmbientAudio {
   private wind: { src: AudioBufferSourceNode; filter: BiquadFilterNode; gain: GainNode; lfo: OscillatorNode } | null = null;
   private fire: { src: AudioBufferSourceNode; gain: GainNode; panner: PannerNode } | null = null;
   private engine: { osc: OscillatorNode; sub: OscillatorNode; filter: BiquadFilterNode; gain: GainNode; panner: PannerNode } | null = null;
+  private water: { src: AudioBufferSourceNode; filter: BiquadFilterNode; gain: GainNode; panner: PannerNode } | null = null;
   private roofMix = 0;
 
   public update(s: AmbientState): void {
@@ -68,15 +71,33 @@ export class AmbientAudio {
       this.fire = null;
     }
 
+    // Rivers babble, waterfalls roar: one panned noise loop at the loudest water within earshot
+    if (s.water) {
+      if (!this.water) this.water = this.startWater(ctx, s.water.position);
+      if (this.water) {
+        audioEngine.setPannerPos(this.water.panner, s.water.position);
+        this.water.filter.frequency.setTargetAtTime(s.water.fall ? 900 : 1900, t, 0.4);
+        this.water.filter.Q.value = s.water.fall ? 0.5 : 0.9;
+        this.water.src.playbackRate.setTargetAtTime(s.water.fall ? 0.7 : 1.15, t, 0.4);
+        this.water.gain.gain.setTargetAtTime(s.water.loud * (s.water.fall ? 0.55 : 0.28), t, 0.4);
+      }
+    } else if (this.water) {
+      this.stop(this.water.gain, [this.water.src], [this.water.panner]);
+      this.water = null;
+    }
+
     // Engine
     if (s.engine) {
       if (!this.engine) this.engine = this.startEngine(ctx, s.engine.position);
       if (this.engine) {
-        const k = Math.min(s.engine.speedKmh / 55, 1);
-        this.engine.osc.frequency.setTargetAtTime(48 + k * 95, t, 0.12);
-        this.engine.sub.frequency.setTargetAtTime(24 + k * 47, t, 0.12);
-        this.engine.filter.frequency.setTargetAtTime(380 + k * 900, t, 0.15);
-        this.engine.gain.gain.setTargetAtTime(0.04 + k * 0.05, t, 0.15);
+        // A scooter's small two-stroke buzzes about twice as high as the truck
+        const scooter = s.engine.kind === 'scooter';
+        const k = Math.min(s.engine.speedKmh / (scooter ? 60 : 55), 1);
+        const pitch = scooter ? 2.1 : 1;
+        this.engine.osc.frequency.setTargetAtTime((48 + k * 95) * pitch, t, 0.12);
+        this.engine.sub.frequency.setTargetAtTime((24 + k * 47) * pitch, t, 0.12);
+        this.engine.filter.frequency.setTargetAtTime((380 + k * 900) * (scooter ? 1.6 : 1), t, 0.15);
+        this.engine.gain.gain.setTargetAtTime((0.04 + k * 0.05) * (scooter ? 0.75 : 1), t, 0.15);
         audioEngine.setPannerPos(this.engine.panner, s.engine.position);
       }
     } else if (this.engine) {
@@ -163,6 +184,20 @@ export class AmbientAudio {
     src.connect(gain).connect(panner);
     src.start();
     return { src, gain, panner };
+  }
+
+  private startWater(ctx: AudioContext, pos: THREE.Vector3) {
+    const panner = audioEngine.createPanner(pos, 4, 60);
+    if (!panner) return null;
+    const src = this.loop(ctx, this.getNoise(ctx));
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 1500;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    src.connect(filter).connect(gain).connect(panner);
+    src.start();
+    return { src, filter, gain, panner };
   }
 
   private startEngine(ctx: AudioContext, pos: THREE.Vector3) {

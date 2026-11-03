@@ -59,7 +59,7 @@ export const CookingPanel: React.FC<PanelProps> = ({ hud, gameplay, inventory, o
           </div>
         </div>
       )}
-      {RECIPES.map((r) => {
+      {RECIPES.filter((r) => gameplay.isRecipeKnown(r)).map((r) => {
         const ok = gameplay.canCook(r);
         const dish = inventory.getItem(r.dishId);
         return (
@@ -70,7 +70,7 @@ export const CookingPanel: React.FC<PanelProps> = ({ hud, gameplay, inventory, o
               <div className="flex flex-wrap gap-1.5 mt-1">
                 {r.ingredients.map((ing) => {
                   const have = gameplay.countIngredient(ing.itemId);
-                  const name = ing.itemId === 'fish_any' ? t('cook.anyFish') : dataName('item', ing.itemId, inventory.getItem(ing.itemId)?.name ?? ing.itemId);
+                  const name = ing.itemId === 'fish_any' ? t('cook.anyFish') : ing.itemId === 'fish_sea_any' ? t('cook.anySeaFish') : dataName('item', ing.itemId, inventory.getItem(ing.itemId)?.name ?? ing.itemId);
                   return (
                     <span
                       key={ing.itemId}
@@ -94,6 +94,11 @@ export const CookingPanel: React.FC<PanelProps> = ({ hud, gameplay, inventory, o
           </div>
         );
       })}
+      {RECIPES.some((r) => !gameplay.isRecipeKnown(r)) && (
+        <div className="text-[11px] text-[#8a7556] text-center italic">
+          {t('cook.moreRecipes', { n: RECIPES.filter((r) => !gameplay.isRecipeKnown(r)).length })}
+        </div>
+      )}
       {dishes.length > 0 && (
         <>
           <div className="text-xs font-bold text-[#8a7556] mt-2">{t('cook.yourDishes')}</div>

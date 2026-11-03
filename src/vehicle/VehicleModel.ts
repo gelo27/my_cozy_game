@@ -96,31 +96,10 @@ export class VehicleModel {
       this.wheelSpinners.push(spinner);
     }
 
-    // "E" prompt bubble above the cab (sprite = always faces the camera, no per-frame lookAt)
-    this.promptSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: VehicleModel.createPromptTexture(), depthTest: false }));
-    this.promptSprite.scale.set(0.7, 0.7, 1);
+    // "E" prompt bubble above the cab
+    this.promptSprite = createPromptSprite();
     this.promptSprite.position.set(0, 2.2, 0);
-    this.promptSprite.visible = false;
-    this.promptSprite.renderOrder = 10;
     this.group.add(this.promptSprite);
-  }
-
-  private static createPromptTexture(): THREE.CanvasTexture {
-    const c = document.createElement('canvas');
-    c.width = c.height = 128;
-    const ctx = c.getContext('2d')!;
-    ctx.fillStyle = 'rgba(255,255,255,0.95)';
-    ctx.beginPath();
-    ctx.arc(64, 64, 56, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#334155';
-    ctx.font = 'bold 64px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('E', 64, 68);
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    return tex;
   }
 
   public setPromptVisible(visible: boolean): void {
@@ -138,4 +117,31 @@ export class VehicleModel {
     pivot.quaternion.copy(VehicleModel._steerQ.setFromAxisAngle(VehicleModel._up, steering));
     this.wheelSpinners[index].rotation.x = spin;
   }
+}
+
+let promptTexture: THREE.CanvasTexture | null = null;
+
+/** "E" bubble (sprite = always faces the camera, no per-frame lookAt), hidden until the player is near. */
+export function createPromptSprite(): THREE.Sprite {
+  if (!promptTexture) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const ctx = c.getContext('2d')!;
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.beginPath();
+    ctx.arc(64, 64, 56, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#334155';
+    ctx.font = 'bold 64px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('E', 64, 68);
+    promptTexture = new THREE.CanvasTexture(c);
+    promptTexture.colorSpace = THREE.SRGBColorSpace;
+  }
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: promptTexture, depthTest: false }));
+  sprite.scale.set(0.7, 0.7, 1);
+  sprite.visible = false;
+  sprite.renderOrder = 10;
+  return sprite;
 }

@@ -1,4 +1,5 @@
 import { worldSettings } from '../../world/WorldSettings';
+import { riverWorld } from '../../world/rivers/RiverWorld';
 import * as THREE from 'three';
 import { IAbility, CharacterContext } from './IAbility';
 import { OXYGEN_CONFIG, WATER_PHYSICS_CONFIG } from '../../config/constants';
@@ -69,7 +70,7 @@ export class OxygenAbility implements IAbility {
     const headY = pos.y + 0.45;
     
     // Check if character's head is submerged under water surface
-    const isSubmerged = context.isSwimming && (headY < worldSettings.waterLevel - 0.05 || context.swimDepth > 0.15);
+    const isSubmerged = context.isSwimming && (headY < riverWorld.waterLevelAt(pos.x, pos.z) - 0.05 || context.swimDepth > 0.15);
     this.isUnderwater = isSubmerged;
     context.isUnderwater = this.isUnderwater;
 

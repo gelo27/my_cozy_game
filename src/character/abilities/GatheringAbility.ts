@@ -5,11 +5,11 @@ import { ForestZone, ForestTarget } from '../../forest/ForestZone';
 import { RockField, RockNode } from '../../gathering/RockField';
 import { PropTreeField, PropTreeNode } from '../../gathering/PropTreeField';
 import { InventoryManager } from '../../inventory/InventoryManager';
-import { GATHERING_CONFIG, GatherTool, ROCK_TYPES } from '../../gathering/GatheringConfig';
+import { GATHERING_CONFIG, GatherTool, ROCK_TYPES, RockKind } from '../../gathering/GatheringConfig';
 import { audioEngine } from '../../audio/AudioEngine';
 
 export interface GatherPrompt {
-  kind: 'tree' | 'fallen' | 'stone' | 'iron';
+  kind: 'tree' | 'fallen' | RockKind;
   title: string;
   actionText: string;
   hintText: string;

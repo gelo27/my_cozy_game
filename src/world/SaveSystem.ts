@@ -7,6 +7,7 @@ import { WeatherType } from './WeatherSystem';
 import { worldSettings } from './WorldSettings';
 import type { GameWorld } from '../engine/GameEngine';
 import type { CropState } from '../farming/types/FarmingTypes';
+import type { ExplorationSaveData } from '../explore/ExplorationManager';
 
 export const SAVE_VERSION = 2;
 const KEY_PREFIX = 'cozyfarm.save.';
@@ -25,6 +26,8 @@ export interface WorldSaveData {
   inventory: { items: Record<string, number>; equipped: string | null };
   player: [number, number, number];
   vehicle: { p: [number, number, number]; yaw: number } | null;
+  moped?: { p: [number, number, number]; yaw: number };
+  exploration?: ExplorationSaveData;
   pets: PetSaveData[];
 }
 
@@ -46,7 +49,14 @@ export class SaveSystem {
     const w = this.world;
     const items: Record<string, number> = {};
     for (const item of w.inventoryManager.getItems()) items[item.id] = item.count;
-    const p = w.character.getPosition();
+    // While riding, the on-foot body is parked under the world: save the player beside the vehicle
+    const ride = w.vehicle.isPlayerInside ? w.vehicle : w.moped.isPlayerInside ? w.moped : null;
+    // Underground pockets are rebuilt on demand, so a save made in a cave resumes at its mouth
+    const p = ride
+      ? ride.getPosition().add(new THREE.Vector3(1.5, 1.2, 0))
+      : w.exploration.inCave
+        ? w.exploration.surfacePosition(w.character.getPosition()).add(new THREE.Vector3(0, 1.2, 0))
+        : w.character.getPosition();
     const vt = w.vehicle.body.translation();
     const vr = w.vehicle.body.rotation();
     const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(new THREE.Quaternion(vr.x, vr.y, vr.z, vr.w));
@@ -63,7 +73,9 @@ export class SaveSystem {
       inventory: { items, equipped: w.inventoryManager.getEquippedItemId() },
       player: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
       vehicle: { p: [vt.x, vt.y + 0.3, vt.z], yaw: Math.atan2(fwd.x, fwd.z) },
+      moped: { p: w.moped.getPosition().add(new THREE.Vector3(0, 0.2, 0)).toArray() as [number, number, number], yaw: w.moped.getYaw() },
       pets: w.gameplay.pets.serialize(),
+      exploration: w.exploration.serialize(),
     };
   }
 
@@ -76,6 +88,8 @@ export class SaveSystem {
     w.props.deserialize(data.props);
     // A save from the old 128 m world now sits in the island's centre: grow nature around it
     if (w.terrain.expandedFromLegacy) w.props.populateWilderness();
+    w.exploration.clearSiteProps();
+    w.exploration.deserialize(data.exploration);
 
     const bm = w.character.buildAbility?.buildingManager;
     if (bm) {
@@ -101,6 +115,7 @@ export class SaveSystem {
       w.vehicle.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
       w.vehicle.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     }
+    if (data.moped) w.moped.place(new THREE.Vector3(...data.moped.p), data.moped.yaw);
     if (data.pets?.length) w.gameplay.pets.deserialize(data.pets);
   }
 

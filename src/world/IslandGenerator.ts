@@ -1,4 +1,5 @@
 import { WORLD_HALF, SEA_FLOOR_Y } from './WorldSettings';
+import { applySitePads } from './IslandSites';
 
 /**
  * Deterministic island terrain: the original 128 m farm valley in the middle (unchanged, so old
@@ -53,7 +54,8 @@ export function coastRadius(x: number, z: number): number {
   return WORLD_HALF * 0.79 + fbm(Math.cos(a) * 1.6 + 3.1, Math.sin(a) * 1.6 - 1.7) * 26;
 }
 
-export function islandHeight(x: number, z: number): number {
+/** Natural terrain before landmarks level their pads. */
+export function baseIslandHeight(x: number, z: number): number {
   const r = Math.sqrt(x * x + z * z);
 
   // Original world: flat farm in the middle, rolling hills toward its old edges, fishing pond
@@ -83,4 +85,9 @@ export function islandHeight(x: number, z: number): number {
   const sea = smoothstep(r, coast - 26, coast + 22);
   y = y * (1 - sea) + SEA_FLOOR_Y * sea;
   return Math.max(-12, Math.min(24, y));
+}
+
+/** Final generated terrain: the natural island with landmark pads levelled in. */
+export function islandHeight(x: number, z: number): number {
+  return Math.max(-12, Math.min(24, applySitePads(x, z, baseIslandHeight(x, z))));
 }

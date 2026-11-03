@@ -106,6 +106,10 @@ export interface ExtraLight {
   halo: number;
   /** Multiplier on the warm lamp colour (street lamps are 1). */
   intensity: number;
+  /** Linear RGB instead of the warm lamp colour (glowing cave crystals). */
+  color?: [number, number, number];
+  /** Torch-like flicker. */
+  flicker?: boolean;
 }
 
 interface LightSource {
@@ -135,6 +139,8 @@ export class NightLighting {
   private readonly glowShades: THREE.MeshLambertMaterial[] = [];
   private selectTimer = 0;
   private selected: LightSource[] = [];
+  /** 0..1 darkness forced regardless of the clock (inside caves): lights and the player lantern come on. */
+  public forcedDark = 0;
   private time = 0;
 
   private readonly halos: THREE.Points;
@@ -208,7 +214,7 @@ export class NightLighting {
 
   public update(dt: number, cameraPos: THREE.Vector3, playerPos: THREE.Vector3 | null): void {
     this.time += dt;
-    const night = this.weather.nightFactor;
+    const night = Math.max(this.weather.nightFactor, this.forcedDark);
 
     // Bulbs: dim warm glass by day, bright at night
     this.bulbMaterials.lamp.color.setRGB(0.78 + 0.22 * night, 0.72 + 0.2 * night, 0.55 + 0.1 * night);
@@ -267,7 +273,7 @@ export class NightLighting {
     if (playerPos && n < MAX_FAKE_LIGHTS) {
       // Soft lantern glow around the player so the night stays playable away from lamps
       this.tmp.copy(playerPos);
-      u.uFakeLightPos.value[n].set(this.tmp.x, this.tmp.y + 1.4, this.tmp.z, 5.5);
+      u.uFakeLightPos.value[n].set(this.tmp.x, this.tmp.y + 1.4, this.tmp.z, 5.5 + this.forcedDark * 3.5);
       u.uFakeLightColor.value[n].copy(PLAYER_COLOR).multiplyScalar(night);
       n++;
     }
@@ -299,11 +305,12 @@ export class NightLighting {
     }
     for (const l of this.extraProvider?.() ?? []) {
       const pos = new THREE.Vector3(l.x, l.y, l.z);
-      this.sources.push({ pos, range: l.range, color: LAMP_COLOR.clone().multiplyScalar(l.intensity), flicker: 0, seed: Math.random() });
+      const color = l.color ? new THREE.Color(...l.color) : LAMP_COLOR.clone();
+      this.sources.push({ pos, range: l.range, color: color.multiplyScalar(l.intensity), flicker: l.flicker ? 1 : 0, seed: Math.random() });
       if (h < MAX_HALOS) {
         this.haloPos.set([pos.x, pos.y, pos.z], h * 3);
         this.haloSize[h] = l.halo;
-        this.haloColor.set([0.55, 0.44, 0.27].map((c) => c * (0.4 + l.intensity)), h * 3);
+        this.haloColor.set((l.color ?? [0.55, 0.44, 0.27]).map((c) => c * (l.color ? 0.45 : 1) * (0.4 + l.intensity)), h * 3);
         h++;
       }
     }

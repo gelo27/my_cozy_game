@@ -1,4 +1,5 @@
 import { worldSettings } from '../../world/WorldSettings';
+import { riverWorld } from '../../world/rivers/RiverWorld';
 import * as THREE from 'three';
 import { IAbility, CharacterContext } from './IAbility';
 import {
@@ -40,12 +41,13 @@ export class SwimAbility implements IAbility {
   public waterEffects: WaterEffects | null = null;
   public waterParticles: WaterParticleSystem | null = null;
 
+  private readonly flow = { x: 0, z: 0 };
+
   // Ledge cache
   private detectedLedgeNormal = new THREE.Vector3();
   private detectedLedgeTopY = 0;
 
   public update(dt: number, context: CharacterContext): void {
-    this.waterMax.y = worldSettings.waterLevel;
     if (this.mantleCooldown > 0) {
       this.mantleCooldown -= dt;
     }
@@ -64,6 +66,12 @@ export class SwimAbility implements IAbility {
     const pos = context.body.translation();
     const vel = context.body.linvel();
 
+    // Local surface: the sea, or a river (only deep enough stretches are swum; shallows are waded)
+    const level = riverWorld.waterLevelAt(pos.x, pos.z);
+    this.waterMax.y = level;
+    const shallowRiver = level > worldSettings.waterLevel + 0.01 && riverWorld.depthAt(pos.x, pos.z) < 0.95;
+    riverWorld.flowAt(pos.x, pos.z, this.flow);
+
     // 1. Water Bounds Check
     // Capsule height is 1.5m (center at pos.y). Enter water when center drops below water level + 0.45m.
     const inWaterVolume =
@@ -72,7 +80,8 @@ export class SwimAbility implements IAbility {
       pos.z >= this.waterMin.z &&
       pos.z <= this.waterMax.z &&
       pos.y >= this.waterMin.y &&
-      pos.y <= this.waterMax.y + 0.45;
+      pos.y <= this.waterMax.y + 0.45 &&
+      !shallowRiver;
 
     this.isSwimming = inWaterVolume && !this.isMantling;
     context.isSwimming = this.isSwimming;
@@ -211,6 +220,9 @@ export class SwimAbility implements IAbility {
       } else {
         currentLat.multiplyScalar(Math.pow(0.1, dt));
       }
+      // River current carries the swimmer downstream
+      currentLat.x += this.flow.x * dt * 2.5;
+      currentLat.z += this.flow.z * dt * 2.5;
 
       context.body.setLinvel({ x: currentLat.x, y: vy, z: currentLat.z }, true);
       context.targetVelocity.set(0, 0, 0);
