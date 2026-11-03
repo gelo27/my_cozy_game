@@ -1,3 +1,4 @@
+import { injectNightLights } from './NightLighting';
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
@@ -393,6 +394,7 @@ export class TerrainSystem {
       tRock: createRockTexture(),
     };
     mat.onBeforeCompile = (shader) => {
+      injectNightLights(shader);
       Object.assign(shader.uniforms, this.uniforms, {
         tSplatA: { value: this.splatA },
         tSplatB: { value: this.splatB },

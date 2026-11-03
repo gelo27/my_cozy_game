@@ -57,6 +57,9 @@ const M = {
   mushroom: new THREE.MeshLambertMaterial({ color: 0xc62828 }),
 };
 
+/** Self-lit materials the night lighting drives (bulbs brighten at dusk, fire flickers). */
+export const PROP_GLOW_MATERIALS = { lamp: M.lamp, fire: M.fire };
+
 /** Collects primitives per material, then merges into one geometry with one group per material. */
 export class PropBuilder {
   private parts = new Map<THREE.Material, THREE.BufferGeometry[]>();

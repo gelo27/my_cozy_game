@@ -1,3 +1,4 @@
+import { injectNightLights } from './NightLighting';
 import * as THREE from 'three';
 import { WORLD_SIZE, worldSettings } from './WorldSettings';
 
@@ -19,6 +20,7 @@ export class WaterSystem {
       depthWrite: false,
     });
     mat.onBeforeCompile = (shader) => {
+      injectNightLights(shader);
       shader.uniforms.uTime = this.uniforms.uTime;
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec2 vWaterXZ;')

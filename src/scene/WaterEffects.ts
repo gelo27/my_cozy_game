@@ -1,3 +1,4 @@
+import { injectNightLights } from '../world/NightLighting';
 import * as THREE from 'three';
 import { WATER_EFFECTS_CONFIG, WATER_PHYSICS_CONFIG, WATER_FOG_CONFIG } from '../config/constants';
 
@@ -170,6 +171,7 @@ export class WaterEffects {
    */
   public applyProjectedCaustics(material: THREE.Material): void {
     material.onBeforeCompile = (shader) => {
+      injectNightLights(shader);
       shader.uniforms.uCausticsTime = this.causticsUniforms.uCausticsTime;
       shader.uniforms.uCausticsMap = this.causticsUniforms.uCausticsMap;
       shader.uniforms.uCausticsIntensity = this.causticsUniforms.uCausticsIntensity;

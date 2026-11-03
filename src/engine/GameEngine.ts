@@ -22,7 +22,8 @@ import { VehicleController } from '../vehicle/VehicleController';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
 import { WeatherSystem } from '../world/WeatherSystem';
-import { PropSystem } from '../world/PropSystem';
+import { PropSystem, PROP_GLOW_MATERIALS } from '../world/PropSystem';
+import { NightLighting, installGlobalNightLights } from '../world/NightLighting';
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
 import { isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState } from '../gameplay/GameplayManager';
@@ -83,6 +84,7 @@ export interface GameWorld {
   water: WaterSystem;
   weather: WeatherSystem;
   props: PropSystem;
+  nightLighting: NightLighting;
   inventoryManager: InventoryManager;
   farmingManager: FarmingManager;
   forest: ForestZone;
@@ -126,6 +128,8 @@ export class GameEngine {
     const height = container.clientHeight || window.innerHeight;
 
     const isMobile = isMobileDevice();
+    // Must run before any material compiles so every lit shader gets the night light loop
+    installGlobalNightLights();
     // MSAA on top of a high-DPI backbuffer is wasted fill-rate; HiDPI screens are sharp enough without it
     this.renderer = new THREE.WebGLRenderer({
       antialias: !isMobile && window.devicePixelRatio < 1.5,
@@ -201,6 +205,7 @@ export class GameEngine {
       const water = new WaterSystem(scene);
       const weather = new WeatherSystem(scene);
       const props = new PropSystem(scene, physics, terrain);
+      const nightLighting = new NightLighting(scene, props, weather, PROP_GLOW_MATERIALS);
 
       const waterEffects = new WaterEffects(scene);
       const waterParticles = new WaterParticleSystem(scene);
@@ -246,6 +251,7 @@ export class GameEngine {
         water,
         weather,
         props,
+        nightLighting,
         inventoryManager,
         farmingManager,
         forest,
@@ -348,6 +354,8 @@ export class GameEngine {
       tpCamera.update(dt, cameraTargetPos, physics, isDriving ? vehicle.collider : character.collider);
     }
     w.weather.update(dt, tpCamera.camera.position);
+    w.nightLighting.setViewportHeight(this.renderer.domElement.height);
+    w.nightLighting.update(dt, tpCamera.camera.position, editing ? null : isDriving ? vehicle.getPosition() : character.getPosition());
     farmingManager.rainIntensity = w.weather.rainIntensity;
 
     farmingManager.update(dt);
