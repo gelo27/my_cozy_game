@@ -3,6 +3,7 @@ import { t, plural, dataName } from '../../i18n/i18n';
 import { IAbility, CharacterContext } from './IAbility';
 import { ForestZone, ForestTarget } from '../../forest/ForestZone';
 import { RockField, RockNode } from '../../gathering/RockField';
+import { PropTreeField, PropTreeNode } from '../../gathering/PropTreeField';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { GATHERING_CONFIG, GatherTool, ROCK_TYPES } from '../../gathering/GatheringConfig';
 import { audioEngine } from '../../audio/AudioEngine';
@@ -17,7 +18,10 @@ export interface GatherPrompt {
   canAct: boolean;
 }
 
-type Target = { type: 'forest'; node: ForestTarget } | { type: 'rock'; node: RockNode };
+type Target =
+  | { type: 'forest'; node: ForestTarget }
+  | { type: 'propTree'; node: PropTreeNode }
+  | { type: 'rock'; node: RockNode };
 
 /**
  * Chopping trees with the axe and mining rocks with the pickaxe (E / LMB).
@@ -31,13 +35,15 @@ export class GatheringAbility implements IAbility {
 
   private forest: ForestZone | null = null;
   private rocks: RockField | null = null;
+  private propTrees: PropTreeField | null = null;
   private inventory: InventoryManager | null = null;
 
   private cooldown = 0;
   private pendingHit: { target: Target; direction: THREE.Vector3; delay: number } | null = null;
 
-  public setSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager): void {
+  public setSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager, propTrees: PropTreeField | null = null): void {
     this.forest = forest;
+    this.propTrees = propTrees;
     this.rocks = rocks;
     this.inventory = inventory;
   }
@@ -92,6 +98,10 @@ export class GatheringAbility implements IAbility {
       this.rocks!.hit(target.node, direction);
       return;
     }
+    if (target.type === 'propTree') {
+      this.propTrees!.hit(target.node, direction);
+      return;
+    }
 
     // Strike the trunk surface facing the player, at chest height
     const node = target.node;
@@ -104,15 +114,24 @@ export class GatheringAbility implements IAbility {
 
   private findTarget(playerPos: THREE.Vector3): Target | null {
     const reach = GATHERING_CONFIG.REACH;
+    const candidates: Target[] = [];
     const forestNode = this.forest!.findTarget(playerPos, reach);
+    if (forestNode) candidates.push({ type: 'forest', node: forestNode });
+    const propTree = this.propTrees?.findNearest(playerPos, reach);
+    if (propTree) candidates.push({ type: 'propTree', node: propTree });
     const rockNode = this.rocks!.findNearest(playerPos, reach);
-    if (!forestNode && !rockNode) return null;
-    if (!rockNode) return { type: 'forest', node: forestNode! };
-    if (!forestNode) return { type: 'rock', node: rockNode };
+    if (rockNode) candidates.push({ type: 'rock', node: rockNode });
 
-    const dForest = playerPos.distanceTo(forestNode.position) - forestNode.radius;
-    const dRock = playerPos.distanceTo(rockNode.position) - rockNode.radius;
-    return dForest <= dRock ? { type: 'forest', node: forestNode } : { type: 'rock', node: rockNode };
+    let best: Target | null = null;
+    let bestDist = Infinity;
+    for (const c of candidates) {
+      const d = Math.hypot(playerPos.x - c.node.position.x, playerPos.z - c.node.position.z) - c.node.radius;
+      if (d < bestDist) {
+        bestDist = d;
+        best = c;
+      }
+    }
+    return best;
   }
 
   private equippedTool(): GatherTool | null {
@@ -121,7 +140,7 @@ export class GatheringAbility implements IAbility {
   }
 
   private requiredTool(target: Target): GatherTool {
-    return target.type === 'forest' ? 'axe' : 'pickaxe';
+    return target.type === 'rock' ? 'pickaxe' : 'axe';
   }
 
   private buildPrompt(target: Target, tool: GatherTool | null): GatherPrompt {
@@ -129,8 +148,8 @@ export class GatheringAbility implements IAbility {
     const { health, maxHealth } = target.node;
     const progress = 1 - health / maxHealth;
 
-    if (target.type === 'forest') {
-      if (target.node.kind === 'fallen') {
+    if (target.type !== 'rock') {
+      if (target.type === 'forest' && target.node.kind === 'fallen') {
         return {
           kind: 'fallen',
           title: t('gather.fallen'),

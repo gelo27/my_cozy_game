@@ -277,6 +277,10 @@ export class PropSystem {
   private readonly batches = new Map<string, PropBatch>();
   private readonly props = new Map<number, PropInstance>();
   private readonly bodies = new Map<number, RAPIER.RigidBody>();
+  /** Temporary visual pose (chop wobble, fall, regrow) per prop; not saved. */
+  /** Props that exist only for this session (stumps of felled trees). */
+  private readonly transient = new Set<number>();
+  private readonly poses = new Map<number, { axis: THREE.Vector3; angle: number; scale: number }>();
   private nextId = 1;
   private terrainRevision = -1;
   /** Bumped on any add/remove/move so UIs can refresh their lists. */
@@ -284,6 +288,7 @@ export class PropSystem {
 
   private static readonly _m = new THREE.Matrix4();
   private static readonly _q = new THREE.Quaternion();
+  private static readonly _tilt = new THREE.Quaternion();
   private static readonly _s = new THREE.Vector3();
   private static readonly _up = new THREE.Vector3(0, 1, 0);
 
@@ -368,8 +373,40 @@ export class PropSystem {
     const body = this.bodies.get(id);
     if (body) this.physics.removeRigidBody(body);
     this.bodies.delete(id);
+    this.poses.delete(id);
+    this.transient.delete(id);
     this.props.delete(id);
     this.revision++;
+  }
+
+  /**
+   * Overrides how a prop is drawn without changing its saved transform: tilt around `axis`
+   * (horizontal, pivot at the base) and a scale multiplier (0 hides it). `null` restores it.
+   */
+  public setPose(id: number, pose: { axis: THREE.Vector3; angle: number; scale: number } | null): void {
+    const prop = this.props.get(id);
+    if (!prop) return;
+    if (pose) this.poses.set(id, pose);
+    else this.poses.delete(id);
+    const batch = this.batches.get(prop.type)!;
+    this.writeMatrix(batch, batch.ids.indexOf(id), prop);
+  }
+
+  public setTransient(id: number): void {
+    this.transient.add(id);
+  }
+
+  /** Removes or restores a prop's collider (e.g. a felled tree). */
+  public setSolid(id: number, solid: boolean): void {
+    const prop = this.props.get(id);
+    if (!prop) return;
+    const body = this.bodies.get(id);
+    if (!solid) {
+      if (body) this.physics.removeRigidBody(body);
+      this.bodies.delete(id);
+    } else if (!body) {
+      this.createBody(prop, this.batches.get(prop.type)!.def);
+    }
   }
 
   public setTransform(id: number, position: THREE.Vector3, rotationY: number, scale: number): void {
@@ -456,7 +493,9 @@ export class PropSystem {
 
   private writeMatrix(batch: PropBatch, slot: number, prop: PropInstance): void {
     PropSystem._q.setFromAxisAngle(PropSystem._up, prop.rotationY);
-    PropSystem._s.setScalar(prop.scale);
+    const pose = this.poses.get(prop.id);
+    if (pose) PropSystem._q.premultiply(PropSystem._tilt.setFromAxisAngle(pose.axis, pose.angle));
+    PropSystem._s.setScalar(prop.scale * (pose ? Math.max(pose.scale, 1e-4) : 1));
     PropSystem._m.compose(prop.position, PropSystem._q, PropSystem._s);
     batch.mesh.setMatrixAt(slot, PropSystem._m);
     batch.mesh.instanceMatrix.needsUpdate = true;
@@ -476,7 +515,7 @@ export class PropSystem {
   }
 
   public serialize(): PropSaveData[] {
-    return this.list().map((p) => ({
+    return this.list().filter((p) => !this.transient.has(p.id)).map((p) => ({
       type: p.type,
       p: [+p.position.x.toFixed(3), +p.position.y.toFixed(3), +p.position.z.toFixed(3)],
       r: +p.rotationY.toFixed(4),

@@ -19,6 +19,7 @@ import { BuildAbility } from './abilities/BuildAbility';
 import { FarmingAbility } from './abilities/FarmingAbility';
 import { GatheringAbility } from './abilities/GatheringAbility';
 import { ForestZone } from '../forest/ForestZone';
+import { PropTreeField } from '../gathering/PropTreeField';
 import { RockField } from '../gathering/RockField';
 import { BuildingManager } from '../building/BuildingManager';
 import { PreviewGhostRenderer } from '../building/PreviewGhostRenderer';
@@ -280,8 +281,8 @@ export class CharacterController {
     });
   }
 
-  public setGatheringSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager): void {
-    this.gatheringAbility.setSystems(forest, rocks, inventory);
+  public setGatheringSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager, propTrees: PropTreeField | null = null): void {
+    this.gatheringAbility.setSystems(forest, rocks, inventory, propTrees);
     // The weapon-slot axe [6] chops the same trees
     this.setForestZone(forest);
   }

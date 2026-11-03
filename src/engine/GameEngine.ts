@@ -14,6 +14,8 @@ import { InventoryManager } from '../inventory/InventoryManager';
 import { FarmingManager } from '../farming/FarmingManager';
 import { FarmInteractionPrompt } from '../farming/types/FarmingTypes';
 import { ForestZone } from '../forest/ForestZone';
+import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
+import { PropTreeField } from '../gathering/PropTreeField';
 import { RockField } from '../gathering/RockField';
 import { GATHERING_CONFIG, ROCK_SPOTS, TREE_SPOTS } from '../gathering/GatheringConfig';
 import { GatherPrompt } from '../character/abilities/GatheringAbility';
@@ -88,6 +90,7 @@ export interface GameWorld {
   inventoryManager: InventoryManager;
   farmingManager: FarmingManager;
   forest: ForestZone;
+  propTrees: PropTreeField;
   rocks: RockField;
   particleManager: ParticleManager;
   vehicle: VehicleController;
@@ -204,6 +207,7 @@ export class GameEngine {
       terrain.commit();
       const water = new WaterSystem(scene);
       const weather = new WeatherSystem(scene);
+      weather.setOcclusion(new PrecipitationOcclusion(physics, WeatherSystem.PRECIP_BOX));
       const props = new PropSystem(scene, physics, terrain);
       const nightLighting = new NightLighting(scene, props, weather, PROP_GLOW_MATERIALS);
 
@@ -235,7 +239,9 @@ export class GameEngine {
       });
       const rocks = new RockField(physics, scene, particleManager, ROCK_SPOTS);
       rocks.onMined = (drops) => giveResources(drops);
-      character.setGatheringSystems(forest, rocks, inventoryManager);
+      const propTrees = new PropTreeField(props, particleManager);
+      propTrees.onWood = (amount) => giveResources([{ itemId: 'wood', amount }]);
+      character.setGatheringSystems(forest, rocks, inventoryManager, propTrees);
 
       const vehicle = new VehicleController(physics, scene, new THREE.Vector3(7, 1.2, 2), -Math.PI / 2);
       const gameplay = new GameplayManager(scene, character, inventoryManager, props, weather, terrain, particleManager);
@@ -255,6 +261,7 @@ export class GameEngine {
         inventoryManager,
         farmingManager,
         forest,
+        propTrees,
         rocks,
         particleManager,
         vehicle,
@@ -360,6 +367,7 @@ export class GameEngine {
 
     farmingManager.update(dt);
     forest.update(dt);
+    w.propTrees.update(dt);
     rocks.update(dt);
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
 

@@ -10,24 +10,27 @@ import { COLLISION_GROUPS } from '../config/constants';
 /** Tuning for a relaxed, forgiving farm-truck feel (not a racing sim). */
 export const VEHICLE_CONFIG = {
   MASS: 900,
-  ENGINE_FORCE: 4200, // N per driven (rear) wheel
-  REVERSE_FORCE: 2400,
+  ENGINE_FORCE: 2600, // N per wheel, all-wheel drive so the truck climbs bumps and slopes
+  REVERSE_FORCE: 1600,
   MAX_SPEED_KMH: 55,
   MAX_REVERSE_KMH: 18,
   BRAKE: 18,
   HANDBRAKE: 30,
-  ROLLING_BRAKE: 0.5, // engine braking when no throttle
-  MAX_STEER: 0.55,
-  MIN_STEER_AT_SPEED: 0.18, // steer limit at top speed, keeps the truck stable
-  STEER_SPEED: 3.0,
+  ROLLING_BRAKE: 8, // engine braking when no throttle
+  COAST_DAMPING: 0.8, // body drag with no throttle: from 50 km/h to a stop in ~3 s
+  MAX_STEER: 0.6,
+  MIN_STEER_AT_SPEED: 0.3, // steer limit at top speed, keeps the truck stable
+  STEER_SPEED: 8.0, // how fast the wheels turn toward the input (1/s)
+  STEER_RETURN_SPEED: 10.0, // how fast they re-centre when the input is released
   WHEEL_RADIUS: 0.38,
   SUSPENSION_REST: 0.32,
   SUSPENSION_TRAVEL: 0.18,
   SUSPENSION_STIFFNESS: 75, // world gravity is -22, so springs are stiffer than a real truck
   SUSPENSION_COMPRESSION: 4.4,
   SUSPENSION_RELAXATION: 5.2,
-  FRICTION_SLIP: 2.2,
-  SIDE_FRICTION: 1.1,
+  FRICTION_SLIP: 4.0,
+  SIDE_FRICTION: 1.4,
+  STUCK_SECONDS: 1.2, // throttle held without moving this long triggers a gentle nudge
   INTERACT_RADIUS: 3.2,
   CAMERA_FOLLOW_DELAY: 1.2, // seconds after the last mouse move before the camera swings behind
 } as const;
@@ -55,6 +58,8 @@ export class VehicleController {
 
   private controller!: RAPIER.DynamicRayCastVehicleController;
   private steer = 0;
+  private stuckTime = 0;
+  private coasting = false;
   private wheelSpin = [0, 0, 0, 0];
   private upsideDownTime = 0;
   private lastMouseTime = -Infinity;
@@ -86,16 +91,24 @@ export class VehicleController {
         .setTranslation(this.spawnPosition.x, this.spawnPosition.y, this.spawnPosition.z)
         .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
         .setLinearDamping(0.1)
-        .setAngularDamping(1.2)
+        .setAngularDamping(0.6)
         .setCcdEnabled(true)
     );
     this.body.userData = { isVehicle: true, type: 'vehicle' };
 
     this.collider = world.createCollider(
-      rapier.ColliderDesc.cuboid(0.9, 0.42, 2.15)
+      // Rounded edges slide over terrain crests instead of catching on them; low friction so a
+      // bottomed-out chassis doesn't glue itself to the ground
+      rapier.ColliderDesc.roundCuboid(0.78, 0.3, 2.0, 0.12)
         .setTranslation(0, 0.85, 0)
-        .setMass(VEHICLE_CONFIG.MASS)
-        .setFriction(0.5)
+        // Low centre of mass keeps it planted in turns; inertia tuned for a light, responsive yaw
+        .setMassProperties(
+          VEHICLE_CONFIG.MASS,
+          { x: 0, y: -0.45, z: 0 },
+          { x: 1400, y: 1150, z: 320 },
+          { x: 0, y: 0, z: 0, w: 1 }
+        )
+        .setFriction(0.15)
         .setCollisionGroups(
           this.physics.packCollisionGroups(
             COLLISION_GROUPS.DYNAMIC_PROPS,
@@ -181,7 +194,8 @@ export class VehicleController {
     const speedT = Math.min(this.speedKmh / VEHICLE_CONFIG.MAX_SPEED_KMH, 1);
     const maxSteer = THREE.MathUtils.lerp(VEHICLE_CONFIG.MAX_STEER, VEHICLE_CONFIG.MIN_STEER_AT_SPEED, speedT);
     const targetSteer = -steerInput * maxSteer;
-    this.steer += (targetSteer - this.steer) * (1 - Math.exp(-VEHICLE_CONFIG.STEER_SPEED * dt));
+    const rate = Math.abs(steerInput) < 0.05 ? VEHICLE_CONFIG.STEER_RETURN_SPEED : VEHICLE_CONFIG.STEER_SPEED;
+    this.steer += (targetSteer - this.steer) * (1 - Math.exp(-rate * dt));
     c.setWheelSteering(0, this.steer);
     c.setWheelSteering(1, this.steer);
 
@@ -194,16 +208,39 @@ export class VehicleController {
       if (speed > 0.5) brake = VEHICLE_CONFIG.BRAKE;
       else if (this.speedKmh < VEHICLE_CONFIG.MAX_REVERSE_KMH) engine = VEHICLE_CONFIG.REVERSE_FORCE * throttle;
     } else {
-      brake = VEHICLE_CONFIG.ROLLING_BRAKE;
+      // Engine braking; at a crawl hold it firmly so the parked truck doesn't creep downhill
+      brake = this.speedKmh < 3 ? VEHICLE_CONFIG.BRAKE : VEHICLE_CONFIG.ROLLING_BRAKE;
+    }
+
+    // Rapier's wheel brake barely slows a rolling truck, so coasting also adds body drag
+    const coasting = Math.abs(throttle) <= 0.05 && !handbrake;
+    if (coasting !== this.coasting) {
+      this.coasting = coasting;
+      this.body.setLinearDamping(coasting ? VEHICLE_CONFIG.COAST_DAMPING : 0.1);
     }
 
     for (let i = 0; i < 4; i++) {
       const rear = i >= 2;
-      c.setWheelEngineForce(i, rear ? engine : 0);
+      c.setWheelEngineForce(i, engine);
       c.setWheelBrake(i, handbrake && rear ? VEHICLE_CONFIG.HANDBRAKE : brake);
     }
     c.updateVehicle(dt);
-    this.model.setBrakeLights(brake > VEHICLE_CONFIG.ROLLING_BRAKE || handbrake);
+
+    // Stuck on a ledge or a prop: throttle held but not moving -> small hop forward
+    const lv = this.body.linvel();
+    if (Math.abs(throttle) > 0.5 && Math.hypot(lv.x, lv.z) < 0.4 && !handbrake) {
+      this.stuckTime += dt;
+      if (this.stuckTime > VEHICLE_CONFIG.STUCK_SECONDS) {
+        this.stuckTime = 0;
+        const r0 = this.body.rotation();
+        const fwd = VehicleController._v.set(0, 0, Math.sign(throttle)).applyQuaternion(VehicleController._q.set(r0.x, r0.y, r0.z, r0.w));
+        const m = VEHICLE_CONFIG.MASS;
+        this.body.applyImpulse({ x: fwd.x * m * 2.2, y: m * 3.2, z: fwd.z * m * 2.2 }, true);
+      }
+    } else {
+      this.stuckTime = 0;
+    }
+    this.model.setBrakeLights((brake > VEHICLE_CONFIG.ROLLING_BRAKE && Math.abs(throttle) > 0.05) || handbrake);
 
     // Auto-right after a rollover instead of leaving the player stuck
     const r = this.body.rotation();
@@ -229,7 +266,12 @@ export class VehicleController {
     this.model.group.position.set(t.x, t.y, t.z);
     this.model.group.quaternion.set(r.x, r.y, r.z, r.w);
     if (!this.controller) return;
-    const speed = this.controller.currentVehicleSpeed();
+    // Wheel spin follows the body's real forward velocity: the controller's own speed goes stale
+    // while the parked truck isn't being simulated, which kept the wheels turning at rest.
+    const fwd = VehicleController._v.set(0, 0, 1).applyQuaternion(VehicleController._q.set(r.x, r.y, r.z, r.w));
+    const lv = this.body.linvel();
+    let speed = this.body.isSleeping() ? 0 : lv.x * fwd.x + lv.y * fwd.y + lv.z * fwd.z;
+    if (Math.abs(speed) < 0.05) speed = 0;
     for (let i = 0; i < 4; i++) {
       const susp = this.controller.wheelSuspensionLength(i) ?? VEHICLE_CONFIG.SUSPENSION_REST;
       this.wheelSpin[i] += (speed / VEHICLE_CONFIG.WHEEL_RADIUS) * dt;

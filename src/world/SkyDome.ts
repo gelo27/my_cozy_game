@@ -100,7 +100,9 @@ export class SkyDome {
             if (hs > 0.975) {
               vec3 c = cell + 0.5 + (vec3(hash13(cell + 1.7), hash13(cell + 3.1), hash13(cell + 5.9)) - 0.5) * 0.5;
               float star = smoothstep(0.42, 0.0, length(sp - c));
-              float tw = 0.55 + 0.45 * sin(uTime * (1.5 + hs * 40.0) + hs * 90.0);
+              // Slow, gentle twinkle: each star gets its own rate of 0.4..1.6 rad/s from a separate hash
+              float rate = 0.4 + hash13(cell + 7.3) * 1.2;
+              float tw = 0.7 + 0.3 * sin(uTime * rate + hs * 90.0);
               vec3 tint = mix(vec3(0.75, 0.85, 1.0), vec3(1.0, 0.9, 0.75), hash13(cell + 9.2));
               col += tint * star * tw * uNight * smoothstep(0.02, 0.3, h) * (0.6 + (hs - 0.975) * 40.0);
             }
