@@ -3,6 +3,27 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { TerrainSystem } from './TerrainSystem';
+import { WORLD_HALF, isMobileDevice, worldSettings } from './WorldSettings';
+import { coastRadius, fbm } from './IslandGenerator';
+
+/**
+ * Props are batched per type AND per square cell, so whole cells get culled. Far-seen types (trees,
+ * boulders) use big cells for fewer draw calls; small things use small cells for tighter culling.
+ */
+const CELL_SMALL = 64;
+const CELL_BIG = 128;
+/** Phones draw props a bit less far (the fog is thick there anyway). */
+const VIEW_SCALE = isMobileDevice() ? 0.75 : 1;
+/** How far each type stays drawn (m); small things vanish first. Default for the rest: 160. */
+const VIEW_DIST: Record<string, number> = {
+  tree_pine: 240,
+  tree_round: 240,
+  rock_big: 200,
+  bush: 130,
+  rock_small: 95,
+  flowers: 75,
+  mushrooms: 60,
+};
 
 export type PropCategory = 'nature' | 'decor' | 'farm' | 'stations';
 
@@ -57,6 +78,9 @@ const M = {
   mushroom: new THREE.MeshLambertMaterial({ color: 0xc62828 }),
 };
 
+const WHITE = new THREE.Color(1, 1, 1);
+const VERTEX_COLOR_MAT = new THREE.MeshLambertMaterial({ vertexColors: true });
+
 /** Self-lit materials the night lighting drives (bulbs brighten at dusk, fire flickers). */
 export const PROP_GLOW_MATERIALS = { lamp: M.lamp, fire: M.fire };
 
@@ -87,16 +111,37 @@ export class PropBuilder {
     g.scale(1, sy, 0.85);
     this.add(mat, g, x, y, z);
   }
+  /**
+   * Plain smooth Lambert parts are baked into vertex colours and share one material, so most props
+   * (trees, bushes) are a single draw call per batch; special materials keep their own group.
+   */
   build(): { geometry: THREE.BufferGeometry; materials: THREE.Material[] } {
     const materials: THREE.Material[] = [];
     const merged: THREE.BufferGeometry[] = [];
+    const baked: THREE.BufferGeometry[] = [];
     for (const [mat, list] of this.parts) {
+      const lambert = mat as THREE.MeshLambertMaterial;
+      const bake = lambert.isMeshLambertMaterial && !lambert.flatShading && !lambert.map && !lambert.transparent;
+      const color = bake ? lambert.color : WHITE;
       for (const g of list) {
         g.deleteAttribute('uv');
+        const n = g.getAttribute('position').count;
+        const c = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) c.set([color.r, color.g, color.b], i * 3);
+        g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+      }
+      if (bake) {
+        baked.push(...list);
+        continue;
       }
       merged.push(mergeGeometries(list)!);
       list.forEach((g) => g.dispose());
       materials.push(mat);
+    }
+    if (baked.length) {
+      merged.push(mergeGeometries(baked)!);
+      baked.forEach((g) => g.dispose());
+      materials.push(VERTEX_COLOR_MAT);
     }
     const geometry = mergeGeometries(merged, true)!;
     merged.forEach((g) => g.dispose());
@@ -266,16 +311,24 @@ interface PropBatch {
   def: PropDef;
   mesh: THREE.InstancedMesh;
   ids: number[]; // instance slot -> prop id
+  cx: number;
+  cz: number;
+  size: number;
+  viewDist: number;
 }
 
 /**
- * Placeable world props. Each prop type is ONE InstancedMesh (with a material per merged group),
- * so a forest of 300 trees costs a handful of draw calls.
+ * Placeable world props. Each prop type is one InstancedMesh (with a material per merged group)
+ * per 64 m cell: a forest of thousands of trees costs a few draw calls, and cells outside the view
+ * frustum or beyond the type's draw distance are skipped entirely. The cells double as a spatial
+ * index for nearest-prop queries.
  */
 export class PropSystem {
   public readonly group = new THREE.Group();
   private readonly batches = new Map<string, PropBatch>();
   private readonly props = new Map<number, PropInstance>();
+  private readonly batchOf = new Map<number, PropBatch>();
+  private readonly slotOf = new Map<number, number>();
   private readonly bodies = new Map<number, RAPIER.RigidBody>();
   /** Temporary visual pose (chop wobble, fall, regrow) per prop; not saved. */
   /** Props that exist only for this session (stumps of felled trees). */
@@ -297,22 +350,41 @@ export class PropSystem {
     scene.add(this.group);
   }
 
-  private getBatch(type: string): PropBatch | null {
-    let batch = this.batches.get(type);
+  private readonly geometries = new Map<string, { geometry: THREE.BufferGeometry; materials: THREE.Material[] }>();
+
+  private static cellSize(type: string): number {
+    return (VIEW_DIST[type] ?? 160) > 160 ? CELL_BIG : CELL_SMALL;
+  }
+
+  private getBatch(type: string, x: number, z: number): PropBatch | null {
+    const size = PropSystem.cellSize(type);
+    const cx = Math.floor(x / size);
+    const cz = Math.floor(z / size);
+    const key = `${type}|${cx}|${cz}`;
+    let batch = this.batches.get(key);
     if (batch) return batch;
     const def = PROP_DEF_MAP.get(type);
     if (!def) return null;
-    const b = new PropBuilder();
-    def.build(b);
-    const { geometry, materials } = b.build();
-    const mesh = new THREE.InstancedMesh(geometry, materials, 16);
+    let shared = this.geometries.get(type);
+    if (!shared) {
+      const b = new PropBuilder();
+      def.build(b);
+      shared = b.build();
+      this.geometries.set(type, shared);
+    }
+    const mesh = new THREE.InstancedMesh(shared.geometry, shared.materials, 16);
     mesh.count = 0;
-    mesh.name = `Props_${type}`;
-    mesh.frustumCulled = false; // instances spread over the map; culled per batch would hide them
+    mesh.name = `Props_${type}_${cx}_${cz}`;
+    this.setCellBounds(mesh, cx, cz, size);
     this.group.add(mesh);
-    batch = { def, mesh, ids: [] };
-    this.batches.set(type, batch);
+    batch = { def, mesh, ids: [], cx, cz, size, viewDist: (VIEW_DIST[type] ?? 160) * VIEW_SCALE };
+    this.batches.set(key, batch);
     return batch;
+  }
+
+  /** Fixed bounding sphere of the cell (also covers props placed on roofs), used for culling and picking. */
+  private setCellBounds(mesh: THREE.InstancedMesh, cx: number, cz: number, size: number): void {
+    mesh.boundingSphere = new THREE.Sphere(new THREE.Vector3((cx + 0.5) * size, 6, (cz + 0.5) * size), size * 0.7072 + 30);
   }
 
   private ensureCapacity(batch: PropBatch): void {
@@ -321,7 +393,8 @@ export class PropSystem {
     const old = batch.mesh;
     const mesh = new THREE.InstancedMesh(old.geometry, old.material, cap * 2);
     mesh.name = old.name;
-    mesh.frustumCulled = false;
+    this.setCellBounds(mesh, batch.cx, batch.cz, batch.size);
+    mesh.visible = old.visible;
     for (let i = 0; i < old.count; i++) {
       old.getMatrixAt(i, PropSystem._m);
       mesh.setMatrixAt(i, PropSystem._m);
@@ -333,10 +406,59 @@ export class PropSystem {
     batch.mesh = mesh;
   }
 
-  public add(type: string, x: number, z: number, rotationY = 0, scale = 1, y?: number, grounded = true): number | null {
-    const batch = this.getBatch(type);
-    if (!batch || !Number.isFinite(x) || !Number.isFinite(z)) return null;
+  private attach(prop: PropInstance, batch: PropBatch): void {
     this.ensureCapacity(batch);
+    batch.ids.push(prop.id);
+    batch.mesh.count = batch.ids.length;
+    this.batchOf.set(prop.id, batch);
+    this.slotOf.set(prop.id, batch.ids.length - 1);
+    this.writeMatrix(batch, batch.ids.length - 1, prop);
+  }
+
+  private detach(id: number): void {
+    const batch = this.batchOf.get(id);
+    if (!batch) return;
+    const slot = this.slotOf.get(id)!;
+    const last = batch.ids.length - 1;
+    if (slot !== last) {
+      // Swap the last instance into the freed slot
+      batch.mesh.getMatrixAt(last, PropSystem._m);
+      batch.mesh.setMatrixAt(slot, PropSystem._m);
+      batch.ids[slot] = batch.ids[last];
+      this.slotOf.set(batch.ids[slot], slot);
+    }
+    batch.ids.pop();
+    batch.mesh.count = batch.ids.length;
+    batch.mesh.instanceMatrix.needsUpdate = true;
+    this.batchOf.delete(id);
+    this.slotOf.delete(id);
+  }
+
+  /** Shows only the cells within each type's draw distance of the camera (call once per frame). */
+  public updateVisibility(camera: THREE.Vector3): void {
+    for (const b of this.batches.values()) {
+      const x0 = b.cx * b.size;
+      const z0 = b.cz * b.size;
+      const dx = Math.max(x0 - camera.x, 0, camera.x - x0 - b.size);
+      const dz = Math.max(z0 - camera.z, 0, camera.z - z0 - b.size);
+      b.mesh.visible = b.ids.length > 0 && dx * dx + dz * dz < b.viewDist * b.viewDist;
+    }
+  }
+
+  /** Calls `fn` for every prop whose cell overlaps the circle (then filter by exact distance). */
+  public forEachNear(x: number, z: number, radius: number, fn: (p: PropInstance) => void, type?: string): void {
+    for (const b of this.batches.values()) {
+      if (type && b.def.id !== type) continue;
+      if (b.cx < Math.floor((x - radius) / b.size) || b.cx > Math.floor((x + radius) / b.size)) continue;
+      if (b.cz < Math.floor((z - radius) / b.size) || b.cz > Math.floor((z + radius) / b.size)) continue;
+      for (const id of b.ids) fn(this.props.get(id)!);
+    }
+  }
+
+  public add(type: string, x: number, z: number, rotationY = 0, scale = 1, y?: number, grounded = true): number | null {
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+    const batch = this.getBatch(type, x, z);
+    if (!batch) return null;
     const id = this.nextId++;
     const prop: PropInstance = {
       id,
@@ -347,9 +469,7 @@ export class PropSystem {
       grounded,
     };
     this.props.set(id, prop);
-    batch.ids.push(id);
-    batch.mesh.count = batch.ids.length;
-    this.writeMatrix(batch, batch.ids.length - 1, prop);
+    this.attach(prop, batch);
     this.createBody(prop, batch.def);
     this.revision++;
     return id;
@@ -358,18 +478,7 @@ export class PropSystem {
   public remove(id: number): void {
     const prop = this.props.get(id);
     if (!prop) return;
-    const batch = this.batches.get(prop.type)!;
-    const slot = batch.ids.indexOf(id);
-    const last = batch.ids.length - 1;
-    if (slot !== last) {
-      // Swap the last instance into the freed slot
-      batch.mesh.getMatrixAt(last, PropSystem._m);
-      batch.mesh.setMatrixAt(slot, PropSystem._m);
-      batch.ids[slot] = batch.ids[last];
-    }
-    batch.ids.pop();
-    batch.mesh.count = batch.ids.length;
-    batch.mesh.instanceMatrix.needsUpdate = true;
+    this.detach(id);
     const body = this.bodies.get(id);
     if (body) this.physics.removeRigidBody(body);
     this.bodies.delete(id);
@@ -388,8 +497,7 @@ export class PropSystem {
     if (!prop) return;
     if (pose) this.poses.set(id, pose);
     else this.poses.delete(id);
-    const batch = this.batches.get(prop.type)!;
-    this.writeMatrix(batch, batch.ids.indexOf(id), prop);
+    this.writeMatrix(this.batchOf.get(id)!, this.slotOf.get(id)!, prop);
   }
 
   public setTransient(id: number): void {
@@ -405,7 +513,7 @@ export class PropSystem {
       if (body) this.physics.removeRigidBody(body);
       this.bodies.delete(id);
     } else if (!body) {
-      this.createBody(prop, this.batches.get(prop.type)!.def);
+      this.createBody(prop, this.batchOf.get(id)!.def);
     }
   }
 
@@ -415,8 +523,15 @@ export class PropSystem {
     prop.position.copy(position);
     prop.rotationY = rotationY;
     prop.scale = scale;
-    const batch = this.batches.get(prop.type)!;
-    this.writeMatrix(batch, batch.ids.indexOf(id), prop);
+    let batch = this.batchOf.get(id)!;
+    if (batch.cx !== Math.floor(position.x / batch.size) || batch.cz !== Math.floor(position.z / batch.size)) {
+      // Moved into another cell
+      this.detach(id);
+      batch = this.getBatch(prop.type, position.x, position.z)!;
+      this.attach(prop, batch);
+    } else {
+      this.writeMatrix(batch, this.slotOf.get(id)!, prop);
+    }
     const body = this.bodies.get(id);
     if (body) this.physics.removeRigidBody(body);
     this.createBody(prop, batch.def);
@@ -443,14 +558,19 @@ export class PropSystem {
   public findNearest(type: string, pos: THREE.Vector3, maxDist: number): PropInstance | null {
     let best: PropInstance | null = null;
     let bestD = maxDist * maxDist;
-    for (const p of this.props.values()) {
-      if (p.type !== type) continue;
-      const d = p.position.distanceToSquared(pos);
-      if (d < bestD) {
-        bestD = d;
-        best = p;
-      }
-    }
+    this.forEachNear(
+      pos.x,
+      pos.z,
+      maxDist,
+      (p) => {
+        const d = p.position.distanceToSquared(pos);
+        if (d < bestD) {
+          bestD = d;
+          best = p;
+        }
+      },
+      type
+    );
     return best;
   }
 
@@ -458,7 +578,6 @@ export class PropSystem {
     let best: { id: number; point: THREE.Vector3; distance: number } | null = null;
     for (const batch of this.batches.values()) {
       if (!batch.mesh.count) continue;
-      batch.mesh.computeBoundingSphere();
       const hits = raycaster.intersectObject(batch.mesh, false);
       const h = hits[0];
       if (h && h.instanceId !== undefined && (!best || h.distance < best.distance)) {
@@ -479,8 +598,8 @@ export class PropSystem {
       const y = this.terrain.getHeight(prop.position.x, prop.position.z);
       if (Math.abs(y - prop.position.y) > 0.01) {
         prop.position.y = y;
-        const batch = this.batches.get(prop.type)!;
-        this.writeMatrix(batch, batch.ids.indexOf(prop.id), prop);
+        const batch = this.batchOf.get(prop.id)!;
+        this.writeMatrix(batch, this.slotOf.get(prop.id)!, prop);
         const body = this.bodies.get(prop.id);
         if (body) body.setTranslation({ x: prop.position.x, y: y + this.colliderOffset(batch.def), z: prop.position.z }, false);
       }
@@ -554,5 +673,49 @@ export class PropSystem {
     this.add('lamp', 9, 12, 0, 1);
     this.add('hay', -3, 20, 0.4, 1);
     for (let i = 0; i < 5; i++) this.add('fence', 18 + i * 2, 24, 0, 1);
+    this.populateWilderness();
+  }
+
+  /**
+   * Forests, meadows and boulders across the island outside the original farm area. Deterministic,
+   * so the same world comes out every time; densities follow noise, avoiding water and steep slopes.
+   */
+  public populateWilderness(): void {
+    let s = 9001;
+    const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+    const STEP = 6.5;
+    const water = worldSettings.waterLevel;
+    for (let gz = -WORLD_HALF; gz < WORLD_HALF; gz += STEP) {
+      for (let gx = -WORLD_HALF; gx < WORLD_HALF; gx += STEP) {
+        const x = gx + rnd() * STEP;
+        const z = gz + rnd() * STEP;
+        const pick = rnd();
+        const r = Math.hypot(x, z);
+        if (r < 66 || r > coastRadius(x, z) - 8) continue;
+        const y = this.terrain.getHeight(x, z);
+        if (y < water + 0.5) continue;
+        const slope = Math.abs(this.terrain.getHeight(x + 1, z) - y) + Math.abs(this.terrain.getHeight(x, z + 1) - y);
+        const forest = fbm(x * 0.012 + 40, z * 0.012 - 13);
+        const rot = rnd() * Math.PI * 2;
+        const scale = 0.8 + rnd() * 0.55;
+        if (slope > 1.1) {
+          if (pick < 0.12) this.add('rock_big', x, z, rot, scale);
+          else if (pick < 0.3) this.add('rock_small', x, z, rot, scale);
+        } else if (forest > -0.02) {
+          // Forest: pines up high, round trees in the lowlands
+          const pine = y > 6 || forest > 0.3 ? 0.75 : 0.35;
+          if (pick < 0.7) this.add(rnd() < pine ? 'tree_pine' : 'tree_round', x, z, rot, scale);
+          else if (pick < 0.78) this.add('bush', x, z, rot, scale);
+          else if (pick < 0.82) this.add('mushrooms', x, z, rot, scale);
+        } else {
+          // Meadows: scattered trees, bushes, flowers and stones
+          if (pick < 0.05) this.add(rnd() < 0.5 ? 'tree_round' : 'tree_pine', x, z, rot, scale);
+          else if (pick < 0.13) this.add('bush', x, z, rot, scale);
+          else if (pick < 0.25) this.add('flowers', x, z, rot, scale);
+          else if (pick < 0.29) this.add('rock_small', x, z, rot, scale);
+          else if (pick < 0.3) this.add('rock_big', x, z, rot, scale);
+        }
+      }
+    }
   }
 }

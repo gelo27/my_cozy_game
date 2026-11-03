@@ -160,7 +160,7 @@ export class GameEngine {
     container.appendChild(this.renderer.domElement);
 
     this.camera = new ThirdPersonCamera(width / height);
-    this.camera.camera.far = 220; // world is 128 m; fog hides the rest
+    this.camera.camera.far = 220; // distance fog hides the rest of the 512 m island and the sea
     this.camera.camera.updateProjectionMatrix();
     this.input = new InputManager(container);
 
@@ -393,7 +393,8 @@ export class GameEngine {
     // World systems
     terrain.update(rawDt);
     w.props.update();
-    w.water.update(dt);
+    w.props.updateVisibility(this.camera.camera.position);
+    w.water.update(dt, this.camera.camera.position);
     if (editing) {
       editor.update(rawDt);
     } else {

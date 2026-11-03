@@ -26,8 +26,8 @@ interface WeatherProfile {
 }
 
 const PROFILES: Record<WeatherType, WeatherProfile> = {
-  clear: { light: 1, fog: 0.006, tint: new THREE.Color(1, 1, 1), precipitation: 'none', amount: 0, cover: 0.36, dark: 0 },
-  cloudy: { light: 0.65, fog: 0.009, tint: new THREE.Color(0.86, 0.88, 0.9), precipitation: 'none', amount: 0, cover: 0.68, dark: 0.25 },
+  clear: { light: 1, fog: 0.0072, tint: new THREE.Color(1, 1, 1), precipitation: 'none', amount: 0, cover: 0.36, dark: 0 },
+  cloudy: { light: 0.65, fog: 0.0098, tint: new THREE.Color(0.86, 0.88, 0.9), precipitation: 'none', amount: 0, cover: 0.68, dark: 0.25 },
   rain: { light: 0.5, fog: 0.014, tint: new THREE.Color(0.7, 0.74, 0.8), precipitation: 'rain', amount: 0.7, cover: 0.88, dark: 0.6 },
   storm: { light: 0.32, fog: 0.02, tint: new THREE.Color(0.5, 0.54, 0.62), precipitation: 'rain', amount: 1, cover: 0.97, dark: 0.85 },
   fog: { light: 0.6, fog: 0.045, tint: new THREE.Color(0.9, 0.9, 0.9), precipitation: 'none', amount: 0, cover: 0.6, dark: 0.3 },

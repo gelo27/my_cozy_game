@@ -46,18 +46,18 @@ export class PropTreeField {
   public findNearest(point: THREE.Vector3, reach: number): PropTreeNode | null {
     let best: PropInstance | null = null;
     let bestDist = Infinity;
-    for (const p of this.props.list()) {
-      if (!CHOPPABLE.has(p.type)) continue;
+    this.props.forEachNear(point.x, point.z, reach + 1, (p) => {
+      if (!CHOPPABLE.has(p.type)) return;
       const st = this.states.get(p.id);
-      if (st && st.fall >= 0) continue;
+      if (st && st.fall >= 0) return;
       const dy = point.y - p.position.y;
-      if (dy < -2 || dy > 4) continue;
+      if (dy < -2 || dy > 4) return;
       const dist = Math.hypot(point.x - p.position.x, point.z - p.position.z) - TRUNK_RADIUS * p.scale;
       if (dist <= reach && dist < bestDist) {
         best = p;
         bestDist = dist;
       }
-    }
+    });
     if (!best) return null;
     const st = this.states.get(best.id);
     return {

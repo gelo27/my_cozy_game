@@ -3,6 +3,8 @@
  * All balance and tuning parameters are strictly defined here without magic numbers.
  */
 
+import { WORLD_LIMIT } from '../world/WorldSettings';
+
 export const COLLISION_GROUPS = {
   // 16-bit bitmasks for Rapier interaction groups
   // [membership] [filter]
@@ -134,11 +136,11 @@ export const WATER_FOG_CONFIG = {
   HEIGHT_MAX_Y: 3.8,
 
   // Horizontal pool boundary coordinates
-  // Water can exist anywhere in the 128 m world (terrain below worldSettings.waterLevel)
-  BOUNDS_MIN_X: -64.0,
-  BOUNDS_MAX_X: 64.0,
-  BOUNDS_MIN_Z: -64.0,
-  BOUNDS_MAX_Z: 64.0,
+  // Water can exist anywhere: lakes on the island and the open sea up to the world limit
+  BOUNDS_MIN_X: -WORLD_LIMIT,
+  BOUNDS_MAX_X: WORLD_LIMIT,
+  BOUNDS_MIN_Z: -WORLD_LIMIT,
+  BOUNDS_MAX_Z: WORLD_LIMIT,
 
   // Soft boundary blend margin in meters
   FADE_MARGIN: 6.0,

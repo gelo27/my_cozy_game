@@ -35,7 +35,8 @@ export interface SaveSlotInfo {
 }
 
 /**
- * Whole-world save/load. Slots live in localStorage (a typical world is ~120 KB);
+ * Whole-world save/load. Slots live in localStorage (terrain is stored as edits over the generated
+ * island, so a typical save is ~200-400 KB, mostly props);
  * files can be exported/imported as JSON for sharing levels between developers.
  */
 export class SaveSystem {
@@ -73,6 +74,8 @@ export class SaveSystem {
     w.weather.setWeather(data.weather);
     w.terrain.deserialize(data.terrain);
     w.props.deserialize(data.props);
+    // A save from the old 128 m world now sits in the island's centre: grow nature around it
+    if (w.terrain.expandedFromLegacy) w.props.populateWilderness();
 
     const bm = w.character.buildAbility?.buildingManager;
     if (bm) {

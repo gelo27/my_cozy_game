@@ -4,29 +4,38 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { TerrainTileType, TILE_DEFINITIONS } from '../terrain/types/TerrainTypes';
-import { WORLD_HALF, WORLD_SIZE, worldSettings } from './WorldSettings';
+import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, worldSettings } from './WorldSettings';
+import { islandHeight } from './IslandGenerator';
 
 const N = WORLD_SIZE; // cells per side (1 m cells)
 const V = N + 1; // vertices per side
-const CHUNK = 32; // metres per render chunk -> 4x4 = 16 draw calls
+const CHUNK = 64; // metres per render + physics chunk -> 8x8; the camera frustum culls most of them
 const CHUNKS = N / CHUNK;
 
 export type TerrainBrushKind = 'raise' | 'lower' | 'smooth' | 'flatten';
 
-/** Serialized terrain: heights in centimetres and one tile id per cell, both base64. */
+/**
+ * Serialized terrain, base64. Format 'd1': run-length encoded Int16 pairs (count, value) of the
+ * height difference from the generated island in centimetres, and of the tile ids, so an untouched
+ * world is a few bytes and edits cost only where they are. Without `enc`: raw Int16 cm heights and
+ * raw tile bytes (old saves, possibly a smaller world that gets placed in the island's centre).
+ */
 export interface TerrainSaveData {
   size: number;
   heights: string;
   tiles: string;
+  enc?: 'd1';
 }
 
 /**
  * Heightmap terrain with GPU texture splatting.
  *
- * - Heights: (N+1)^2 grid, 1 m spacing, rendered as 16 chunk meshes sharing one index buffer.
- * - Surface types: one byte per cell, uploaded to two tiny RGBA weight textures (128x128) that the
- *   shader samples bilinearly, so tile borders blend softly with zero canvas redraws.
- * - Physics: a single Rapier heightfield, rebuilt (throttled) only after height edits.
+ * - Heights: (N+1)^2 grid, 1 m spacing, rendered as 64 m chunk meshes sharing one index buffer;
+ *   chunks outside the camera frustum (and beyond the far plane) are skipped by three.js.
+ * - Surface types: one byte per cell, uploaded to two RGBA weight textures (N x N) that the shader
+ *   samples bilinearly, so tile borders blend softly; only the painted rectangle is rewritten.
+ * - Physics: one Rapier heightfield per chunk, so a brush stroke rebuilds only the chunks it touched.
+ * - Beyond the island: a sea-bed collider, and invisible walls far out in the open sea.
  */
 export class TerrainSystem {
   public readonly group = new THREE.Group();
@@ -39,9 +48,11 @@ export class TerrainSystem {
   private readonly splatA: THREE.DataTexture;
   private readonly splatB: THREE.DataTexture;
   private splatDirty = true;
-  private physicsDirty = true;
+  /** Cell rectangle of tiles changed since the last splat upload. */
+  private splatRect = { x0: 0, z0: 0, x1: N - 1, z1: N - 1 };
+  private readonly physicsDirtyChunks = new Set<number>();
   private physicsTimer = 0;
-  private collider: RAPIER.Collider | null = null;
+  private readonly chunkColliders: (RAPIER.Collider | null)[] = new Array(CHUNKS * CHUNKS).fill(null);
   private body: RAPIER.RigidBody | null = null;
   private readonly uniforms = { uWaterLevel: { value: worldSettings.waterLevel } };
   /** Bumped on every height edit so dependants (props, water) can re-snap lazily. */
@@ -130,7 +141,7 @@ export class TerrainSystem {
     if (ix < 0 || iz < 0 || ix >= N || iz >= N) return false;
     if (this.tiles[iz * N + ix] === type) return false;
     this.tiles[iz * N + ix] = type;
-    this.splatDirty = true;
+    this.markSplatDirty(ix, iz, ix, iz);
     return true;
   }
 
@@ -165,6 +176,22 @@ export class TerrainSystem {
       if (cx < N - 1) stack.push(i + 1);
       if (cz > 0) stack.push(i - N);
       if (cz < N - 1) stack.push(i + N);
+    }
+    this.markSplatDirty(0, 0, N - 1, N - 1);
+  }
+
+  private markSplatDirty(x0: number, z0: number, x1: number, z1: number): void {
+    const r = this.splatRect;
+    if (!this.splatDirty) {
+      r.x0 = x0;
+      r.z0 = z0;
+      r.x1 = x1;
+      r.z1 = z1;
+    } else {
+      r.x0 = Math.min(r.x0, x0);
+      r.z0 = Math.min(r.z0, z0);
+      r.x1 = Math.max(r.x1, x1);
+      r.z1 = Math.max(r.z1, z1);
     }
     this.splatDirty = true;
   }
@@ -208,7 +235,7 @@ export class TerrainSystem {
           }
           h[i] += (sum / n - h[i]) * Math.min(1, k * 2);
         }
-        h[i] = THREE.MathUtils.clamp(h[i], -12, 24);
+        h[i] = THREE.MathUtils.clamp(h[i], SEA_FLOOR_Y, 24);
       }
     }
     this.markHeightsDirty(minX, minZ, maxX, maxZ);
@@ -220,8 +247,12 @@ export class TerrainSystem {
     const c1x = Math.min(CHUNKS - 1, Math.floor((maxX + 1) / CHUNK));
     const c0z = Math.max(0, Math.floor((minZ - 1) / CHUNK));
     const c1z = Math.min(CHUNKS - 1, Math.floor((maxZ + 1) / CHUNK));
-    for (let cz = c0z; cz <= c1z; cz++) for (let cx = c0x; cx <= c1x; cx++) this.dirtyChunks.add(cz * CHUNKS + cx);
-    this.physicsDirty = true;
+    for (let cz = c0z; cz <= c1z; cz++) {
+      for (let cx = c0x; cx <= c1x; cx++) {
+        this.dirtyChunks.add(cz * CHUNKS + cx);
+        this.physicsDirtyChunks.add(cz * CHUNKS + cx);
+      }
+    }
     this.revision++;
   }
 
@@ -237,56 +268,58 @@ export class TerrainSystem {
       this.splatDirty = false;
     }
     this.physicsTimer -= dt;
-    if (this.physicsDirty && this.physicsTimer <= 0) {
-      this.rebuildCollider();
-      this.physicsDirty = false;
+    if (this.physicsDirtyChunks.size && this.physicsTimer <= 0) {
+      this.rebuildDirtyColliders();
       this.physicsTimer = 0.25;
     }
   }
 
   /** Forces the physics heightfield to match immediately (e.g. on brush release). */
   public commit(): void {
-    if (this.physicsDirty) {
-      this.rebuildCollider();
-      this.physicsDirty = false;
-    }
+    if (this.physicsDirtyChunks.size) this.rebuildDirtyColliders();
   }
 
   // ---------------------------------------------------------------- generation
 
-  private generateDefaultWorld(): void {
-    const h = this.heights;
+  /** Generated island heights (rounded to cm, as saved) and default tiles. */
+  private static baseCache: { heights: Int16Array; tiles: Uint8Array } | null = null;
+
+  private static base(): { heights: Int16Array; tiles: Uint8Array } {
+    if (TerrainSystem.baseCache) return TerrainSystem.baseCache;
+    const heights = new Int16Array(V * V);
     for (let iz = 0; iz <= N; iz++) {
-      for (let ix = 0; ix <= N; ix++) {
-        const x = ix - WORLD_HALF;
-        const z = iz - WORLD_HALF;
-        // Flat farm in the middle, rolling hills toward the edges
-        const r = Math.sqrt(x * x + z * z);
-        const edge = THREE.MathUtils.smoothstep(r, 42, 62);
-        const hills = (Math.sin(x * 0.11) * Math.cos(z * 0.09) * 0.5 + 0.5) * 5 + Math.sin(x * 0.27 + z * 0.19) * 0.6;
-        let y = edge * hills;
-        // Fishing pond north-east of the farm
-        const px = x - 30;
-        const pz = z - 28;
-        const pd = Math.sqrt(px * px * 0.8 + pz * pz) / 10;
-        if (pd < 1.4) y = Math.min(y, -2.6 * (1 - THREE.MathUtils.smoothstep(pd, 0.55, 1.4)));
-        h[iz * V + ix] = y;
-      }
+      for (let ix = 0; ix <= N; ix++) heights[iz * V + ix] = Math.round(islandHeight(ix - WORLD_HALF, iz - WORLD_HALF) * 100);
     }
-    this.tiles.fill(TerrainTileType.GRASS);
+    const tiles = new Uint8Array(N * N).fill(TerrainTileType.GRASS);
     // Dirt path from spawn towards the pond
     for (let t = 0; t <= 1; t += 0.01) {
-      this.paintCircle(THREE.MathUtils.lerp(2, 22, t), THREE.MathUtils.lerp(6, 21, t) + Math.sin(t * 6) * 1.5, 1.1, TerrainTileType.DIRT_ROAD);
+      const x = THREE.MathUtils.lerp(2, 22, t);
+      const z = THREE.MathUtils.lerp(6, 21, t) + Math.sin(t * 6) * 1.5;
+      for (let gz = Math.floor(z - 1.1); gz <= Math.ceil(z + 1.1); gz++) {
+        for (let gx = Math.floor(x - 1.1); gx <= Math.ceil(x + 1.1); gx++) {
+          const dx = gx + 0.5 - x;
+          const dz = gz + 0.5 - z;
+          if (dx * dx + dz * dz <= 1.21) tiles[(gz + WORLD_HALF) * N + gx + WORLD_HALF] = TerrainTileType.DIRT_ROAD;
+        }
+      }
     }
-    this.splatDirty = true;
-    this.physicsDirty = true;
+    TerrainSystem.baseCache = { heights, tiles };
+    return TerrainSystem.baseCache;
+  }
+
+  private generateDefaultWorld(): void {
+    const base = TerrainSystem.base();
+    for (let i = 0; i < this.heights.length; i++) this.heights[i] = base.heights[i] / 100;
+    this.tiles.set(base.tiles);
+    this.markSplatDirty(0, 0, N - 1, N - 1);
+    for (let i = 0; i < CHUNKS * CHUNKS; i++) this.physicsDirtyChunks.add(i);
   }
 
   public resetFlat(): void {
     this.heights.fill(0);
     this.tiles.fill(TerrainTileType.GRASS);
     this.markHeightsDirty(0, 0, N, N);
-    this.splatDirty = true;
+    this.markSplatDirty(0, 0, N - 1, N - 1);
   }
 
   // ---------------------------------------------------------------- rendering
@@ -361,8 +394,6 @@ export class TerrainSystem {
   private uploadSplat(): void {
     const a = this.splatA.image.data as Uint8Array;
     const b = this.splatB.image.data as Uint8Array;
-    a.fill(0);
-    b.fill(0);
     // Layer order: A = dirt, asphalt, cobble, sand | B = water, wood
     const slot: Record<number, [Uint8Array, number] | null> = {
       [TerrainTileType.GRASS]: null,
@@ -373,9 +404,15 @@ export class TerrainSystem {
       [TerrainTileType.WATER_CHANNEL]: [b, 0],
       [TerrainTileType.WOOD_DECK]: [b, 1],
     };
-    for (let i = 0; i < N * N; i++) {
-      const s = slot[this.tiles[i]];
-      if (s) s[0][i * 4 + s[1]] = 255;
+    const r = this.splatRect;
+    for (let z = r.z0; z <= r.z1; z++) {
+      for (let x = r.x0; x <= r.x1; x++) {
+        const i = z * N + x;
+        a.fill(0, i * 4, i * 4 + 4);
+        b.fill(0, i * 4, i * 4 + 4);
+        const s = slot[this.tiles[i]];
+        if (s) s[0][i * 4 + s[1]] = 255;
+      }
     }
     this.splatA.needsUpdate = true;
     this.splatB.needsUpdate = true;
@@ -447,57 +484,106 @@ vec3 terrainColor() {
 
   // ---------------------------------------------------------------- physics
 
-  private rebuildCollider(): void {
+  private rebuildDirtyColliders(): void {
     const { rapier, world } = this.physics;
-    if (!this.body) {
-      this.body = world.createRigidBody(rapier.RigidBodyDesc.fixed());
+    if (!this.body) this.body = world.createRigidBody(rapier.RigidBodyDesc.fixed());
+    const S = CHUNK + 1;
+    const data = new Float32Array(S * S);
+    const groups = this.physics.packCollisionGroups(COLLISION_GROUPS.ENVIRONMENT, 0xffff);
+    for (const c of this.physicsDirtyChunks) {
+      const cx = c % CHUNKS;
+      const cz = (c - cx) / CHUNKS;
+      const old = this.chunkColliders[c];
+      if (old) world.removeCollider(old, false);
+      // Rapier heightfields are column-major with columns along X, centred on the collider
+      for (let x = 0; x < S; x++) {
+        for (let z = 0; z < S; z++) data[x * S + z] = this.heights[(cz * CHUNK + z) * V + cx * CHUNK + x];
+      }
+      this.chunkColliders[c] = world.createCollider(
+        rapier.ColliderDesc.heightfield(CHUNK, CHUNK, data, { x: CHUNK, y: 1, z: CHUNK })
+          .setTranslation(cx * CHUNK + CHUNK / 2 - WORLD_HALF, 0, cz * CHUNK + CHUNK / 2 - WORLD_HALF)
+          .setFriction(0.9)
+          .setCollisionGroups(groups),
+        this.body
+      );
     }
-    if (this.collider) world.removeCollider(this.collider, false);
-    // Rapier heightfields are column-major with columns along X
-    const data = new Float32Array(V * V);
-    for (let ix = 0; ix <= N; ix++) {
-      for (let iz = 0; iz <= N; iz++) data[ix * V + iz] = this.heights[iz * V + ix];
-    }
-    this.collider = world.createCollider(
-      rapier.ColliderDesc.heightfield(N, N, data, { x: WORLD_SIZE, y: 1, z: WORLD_SIZE })
-        .setFriction(0.9)
-        .setCollisionGroups(this.physics.packCollisionGroups(COLLISION_GROUPS.ENVIRONMENT, 0xffff)),
-      this.body
-    );
+    this.physicsDirtyChunks.clear();
   }
 
-  /** Invisible walls at the world edge so nothing falls off the map. */
+  /** Sea bed under the open sea, and invisible walls far out in it so nothing leaves the world. */
   private createWorldBounds(): void {
-    const h = 30;
+    const s = WORLD_LIMIT * 2;
+    this.physics.createStaticBox(new THREE.Vector3(0, SEA_BED_TOP - 0.5, 0), new THREE.Vector3(s, 1, s));
+    const h = 60;
     const t = 1;
-    const s = WORLD_SIZE + 2 * t;
     const walls: [number, number, number, number][] = [
-      [0, -WORLD_HALF - t / 2, s, t],
-      [0, WORLD_HALF + t / 2, s, t],
-      [-WORLD_HALF - t / 2, 0, t, s],
-      [WORLD_HALF + t / 2, 0, t, s],
+      [0, -WORLD_LIMIT - t / 2, s + 2 * t, t],
+      [0, WORLD_LIMIT + t / 2, s + 2 * t, t],
+      [-WORLD_LIMIT - t / 2, 0, t, s + 2 * t],
+      [WORLD_LIMIT + t / 2, 0, t, s + 2 * t],
     ];
     for (const [x, z, sx, sz] of walls) {
-      this.physics.createStaticBox(new THREE.Vector3(x, h / 2 - 12, z), new THREE.Vector3(sx, h, sz));
+      this.physics.createStaticBox(new THREE.Vector3(x, h / 2 - 13, z), new THREE.Vector3(sx, h, sz));
     }
   }
 
   // ---------------------------------------------------------------- save / load
 
   public serialize(): TerrainSaveData {
-    const cm = new Int16Array(V * V);
-    for (let i = 0; i < cm.length; i++) cm[i] = Math.round(this.heights[i] * 100);
-    return { size: N, heights: toBase64(new Uint8Array(cm.buffer)), tiles: toBase64(this.tiles) };
+    const base = TerrainSystem.base();
+    const dh = new Int16Array(V * V);
+    for (let i = 0; i < dh.length; i++) dh[i] = Math.round(this.heights[i] * 100) - base.heights[i];
+    const dt = new Int16Array(N * N);
+    for (let i = 0; i < dt.length; i++) dt[i] = this.tiles[i];
+    return { size: N, enc: 'd1', heights: rleEncode(dh), tiles: rleEncode(dt) };
   }
 
+  /** True when the last load placed an older, smaller world in the island's centre. */
+  public expandedFromLegacy = false;
+
   public deserialize(data: TerrainSaveData): void {
-    if (data.size !== N) return;
-    const cm = new Int16Array(fromBase64(data.heights).buffer);
-    for (let i = 0; i < Math.min(cm.length, this.heights.length); i++) this.heights[i] = cm[i] / 100;
-    this.tiles.set(fromBase64(data.tiles).subarray(0, this.tiles.length));
+    this.expandedFromLegacy = false;
+    const base = TerrainSystem.base();
+    if (data.enc === 'd1' && data.size === N) {
+      const dh = rleDecode(data.heights, V * V);
+      for (let i = 0; i < dh.length; i++) this.heights[i] = (base.heights[i] + dh[i]) / 100;
+      const dt = rleDecode(data.tiles, N * N);
+      for (let i = 0; i < dt.length; i++) this.tiles[i] = dt[i];
+    } else if (!data.enc && data.size <= N) {
+      this.loadLegacy(data, base);
+    } else {
+      return;
+    }
     this.markHeightsDirty(0, 0, N, N);
-    this.splatDirty = true;
+    this.markSplatDirty(0, 0, N - 1, N - 1);
     this.commit();
+  }
+
+  /** Old raw saves: their (smaller) world goes in the middle, blended into the island around it. */
+  private loadLegacy(data: TerrainSaveData, base: { heights: Int16Array; tiles: Uint8Array }): void {
+    const s = data.size;
+    const sv = s + 1;
+    const o = (N - s) / 2;
+    const cm = new Int16Array(fromBase64(data.heights).buffer);
+    const oldTiles = fromBase64(data.tiles);
+    const BLEND = 24;
+    for (let iz = 0; iz <= N; iz++) {
+      for (let ix = 0; ix <= N; ix++) {
+        const lx = ix - o;
+        const lz = iz - o;
+        const cx = Math.min(s, Math.max(0, lx));
+        const cz = Math.min(s, Math.max(0, lz));
+        const old = (cm[cz * sv + cx] ?? 0) / 100;
+        const d = Math.hypot(lx - cx, lz - cz);
+        const t = THREE.MathUtils.smoothstep(d, 0, BLEND);
+        this.heights[iz * V + ix] = old * (1 - t) + (base.heights[iz * V + ix] / 100) * t;
+      }
+    }
+    this.tiles.set(base.tiles);
+    for (let z = 0; z < s; z++) {
+      for (let x = 0; x < s; x++) this.tiles[(z + o) * N + x + o] = oldTiles[z * s + x] ?? TerrainTileType.GRASS;
+    }
+    this.expandedFromLegacy = s < N;
   }
 }
 
@@ -507,6 +593,32 @@ function toBase64(bytes: Uint8Array): string {
   let s = '';
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
+}
+
+/** Run-length encoding as Int16 (count, value) pairs, base64. */
+function rleEncode(values: Int16Array): string {
+  const out: number[] = [];
+  let i = 0;
+  while (i < values.length) {
+    const v = values[i];
+    let n = 1;
+    while (i + n < values.length && values[i + n] === v && n < 32767) n++;
+    out.push(n, v);
+    i += n;
+  }
+  return toBase64(new Uint8Array(new Int16Array(out).buffer));
+}
+
+function rleDecode(b64: string, length: number): Int16Array {
+  const bytes = fromBase64(b64);
+  const pairs = new Int16Array(bytes.buffer, 0, bytes.length >> 1);
+  const out = new Int16Array(length);
+  let k = 0;
+  for (let i = 0; i + 1 < pairs.length && k < length; i += 2) {
+    out.fill(pairs[i + 1], k, Math.min(length, k + pairs[i]));
+    k += pairs[i];
+  }
+  return out;
 }
 
 function fromBase64(b64: string): Uint8Array {
