@@ -29,6 +29,11 @@ export const uk: Record<TKey, string> = {
   'play.noCoins': 'Не вистачає монет',
   'pet.catName': 'Мурчик',
   'pet.dogName': 'Бублик',
+  'npc.name': 'Міра',
+  'npc.follow': 'Покликати {name} з собою',
+  'npc.stay': 'Попросити {name} зачекати',
+  'npc.following': '{name} йде за тобою',
+  'npc.waiting': '{name} чекатиме тут',
 
   'fishing.cast': 'Закидання…',
   'fishing.wait': 'Чекаємо на клювання…',

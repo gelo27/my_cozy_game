@@ -19,6 +19,9 @@ import type { ExtraLight } from '../world/NightLighting';
 import { AmbientAudio } from '../audio/AmbientAudio';
 import { audioEngine } from '../audio/AudioEngine';
 import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
+import { GridNavigator } from '../navigation/GridNavigator';
+import { CompanionNPC } from '../npc/CompanionNPC';
+import { t } from '../i18n/i18n';
 import { PropTreeField } from '../gathering/PropTreeField';
 import { RockField } from '../gathering/RockField';
 import { GATHERING_CONFIG, ROCK_SPOTS, TREE_SPOTS } from '../gathering/GatheringConfig';
@@ -267,6 +270,19 @@ export class GameEngine {
       const vehicle = new VehicleController(physics, scene, new THREE.Vector3(7, 1.2, 2), -Math.PI / 2);
       const gameplay = new GameplayManager(scene, character, inventoryManager, props, weather, terrain, particleManager);
       gameplay.onNotify = (text, type) => callbacks.onNotify(text, type);
+
+      // Villager companion: paths come from a physics-sampled grid that resets when anything is built
+      const nav = new GridNavigator(physics, () => buildingManager.revision * 100003 + props.revision, {
+        cell: 0.5,
+        radius: 0.28,
+        height: 1.6,
+        maxStepUp: 0.45,
+        maxDrop: 1.2,
+        minFloorY: () => worldSettings.waterLevel - 0.25,
+      });
+      const npcSpawn = new THREE.Vector3(-4, 0, 7);
+      npcSpawn.y = terrain.getHeight(npcSpawn.x, npcSpawn.z);
+      gameplay.companion = new CompanionNPC(physics, scene, nav, npcSpawn, t('npc.name'));
       const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props);
       const debugRenderer = new DebugRenderer(physics, scene);
 
@@ -589,6 +605,7 @@ export class GameEngine {
       load: (slot = 'dev') => w.saves.load(slot),
       editor: (on = true) => this.setMode(on ? 'editor' : 'play'),
       stats: () => ({ ...this.renderer.info.render, ...this.renderer.info.memory }),
+      npcPath: (on = true) => w.gameplay.companion?.setDebug(on),
     };
   }
 }

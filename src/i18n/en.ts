@@ -34,6 +34,11 @@ export const en = {
   'play.noCoins': 'Not enough coins',
   'pet.catName': 'Whiskers',
   'pet.dogName': 'Biscuit',
+  'npc.name': 'Mira',
+  'npc.follow': 'Ask {name} to follow you',
+  'npc.stay': 'Ask {name} to wait here',
+  'npc.following': '{name} is following you',
+  'npc.waiting': '{name} will wait here',
 
   // Fishing
   'fishing.cast': 'Casting…',

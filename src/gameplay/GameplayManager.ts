@@ -8,6 +8,7 @@ import { FishingSystem, FishingState } from './FishingSystem';
 import { PetSystem, Pet } from './PetSystem';
 import { RECIPES, FISH_IDS, DISH_BUFF, Recipe } from './Recipes';
 import { audioEngine } from '../audio/AudioEngine';
+import { CompanionNPC } from '../npc/CompanionNPC';
 import { t, dataName, getLang } from '../i18n/i18n';
 
 export type GameplayPanel = 'cook' | 'shop' | null;
@@ -15,7 +16,7 @@ export type GameplayPanel = 'cook' | 'shop' | null;
 export interface GameplayPrompt {
   text: string;
   key: string;
-  action: 'fish' | 'pet' | 'cook' | 'shop';
+  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc';
   secondary?: { text: string; key: string; action: 'treat' };
 }
 
@@ -41,6 +42,7 @@ export class GameplayManager {
   public prompt: GameplayPrompt | null = null;
   public readonly fishing: FishingSystem;
   public readonly pets: PetSystem;
+  public companion: CompanionNPC | null = null;
   /** Bumped on any change the HUD should show immediately. */
   public revision = 0;
 
@@ -75,6 +77,7 @@ export class GameplayManager {
     const moving = pos.distanceToSquared(this.lastPlayerPos) > 0.0004;
     this.lastPlayerPos.copy(pos);
     this.pets.update(dt, pos, moving);
+    this.companion?.update(dt, pos);
     this.updateBuff(dt);
     this.updateCooking(dt);
 
@@ -125,6 +128,11 @@ export class GameplayManager {
     if (this.props.findNearest('campfire', pos, 2.6)) return { text: t('play.cook'), key: 'E', action: 'cook' };
     if (this.props.findNearest('mailbox', pos, 2.4)) return { text: t('play.shop'), key: 'E', action: 'shop' };
 
+    const npc = this.companion;
+    if (npc && npc.getPosition(this.tmp).distanceTo(pos) < 2.6) {
+      return { text: t(npc.following ? 'npc.stay' : 'npc.follow', { name: npc.name }), key: 'E', action: 'npc' };
+    }
+
     const pet = this.pets.nearest(pos, 2.2);
     if (pet) {
       const hasTreat = this.inventory.hasItem('pet_treat');
@@ -156,6 +164,11 @@ export class GameplayManager {
         this.fishing.cast(this.rodTip, this.castTarget);
         audioEngine.playBuildSelect();
       }
+    } else if (action === 'npc' && this.companion) {
+      const following = this.companion.toggleFollow();
+      audioEngine.at(this.companion.getPosition()).playBuildSelect();
+      this.onNotify(t(following ? 'npc.following' : 'npc.waiting', { name: this.companion.name }), 'info');
+      this.promptTimer = 0;
     } else if (action === 'pet') {
       this.pets.petNearest(pos);
     } else if (action === 'treat') {

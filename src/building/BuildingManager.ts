@@ -98,6 +98,8 @@ class SpatialPieceGrid {
 
 export class BuildingManager {
   public pieces: Map<string, BuiltPiece> = new Map();
+  /** Bumped whenever colliders change (place, remove, move, door toggle): navigation re-samples. */
+  public revision = 0;
   public group: THREE.Group;
   public continuousWallSystem: ContinuousWallSystem;
   public wallPaintingSystem: WallPaintingSystem;
@@ -330,6 +332,7 @@ export class BuildingManager {
     this.pieces.set(id, builtPiece);
     this.spatialGrid.insert(builtPiece);
     this.cachedPiecesArray = null; // Invalidate cached pieces array
+    this.revision++;
 
     if (isProceduralRoofPiece(type)) {
       this.rebuildRoofPhysicsCollider(builtPiece);
@@ -512,6 +515,7 @@ export class BuildingManager {
     this.spatialGrid.remove(piece);
     this.spatialGrid.insert(piece);
     this.cachedPiecesArray = null;
+    this.revision++;
 
     // 7. Update continuous walls if opening piece changed orientation
     if (this.continuousWallSystem && this.continuousWallSystem.isOpeningPiece(piece.type)) {
@@ -588,6 +592,7 @@ export class BuildingManager {
 
     // Rebuild physics collider for open/closed state
     this.rebuildDoorPhysicsCollider(piece);
+    this.revision++;
 
     // Audio feedback
     audioEngine.at(piece.position).playDoorToggle(isOpen);
@@ -1071,6 +1076,7 @@ export class BuildingManager {
     // 3. Update spatial index & cache
     this.spatialGrid.remove(piece);
     this.cachedPiecesArray = null;
+    this.revision++;
 
     // Unregister from FarmingManager if demolished
     if (isFarmPlotPiece(piece.type) && this.farmingManager) {

@@ -27,7 +27,7 @@ interface GameHUDProps {
   onOpenBackpack(): void;
   onToggleBuild(): void;
   onOpenEditor(): void;
-  onAction(action: 'fish' | 'pet' | 'cook' | 'shop' | 'treat'): void;
+  onAction(action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'treat'): void;
 }
 
 /** Hotbar shows what the player can hold; 1-8 keys or a tap equips. */
