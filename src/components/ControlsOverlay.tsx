@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { ArrowUp, Move, Hand, Footprints, Sparkles } from 'lucide-react';
 import { InputManager } from '../input/InputManager';
+import { t } from '../i18n/i18n';
 
 interface ControlsOverlayProps {
   inputManager: InputManager | null;
@@ -133,7 +134,7 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
 
           {/* Action cluster, kept above the hotbar */}
           <div className="pointer-events-auto absolute bottom-24 right-3 grid grid-cols-2 gap-2.5 items-end select-none">
-            <button onTouchStart={tap('interactJustPressed')} className={`${roundBtn} w-14 h-14`} title="Взаємодія (E)">
+            <button onTouchStart={tap('interactJustPressed')} className={`${roundBtn} w-14 h-14`} title={t('touch.interact')}>
               <Hand className="w-6 h-6" />
             </button>
             <button
@@ -143,11 +144,11 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
                 if (inputManager) inputManager.touchState.sprint = !inputManager.touchState.sprint;
               }}
               className={`${roundBtn} w-12 h-12 justify-self-end ${inputManager?.touchState.sprint ? '!bg-amber-400 !text-white !border-amber-300' : ''}`}
-              title="Біг"
+              title={t('touch.sprint')}
             >
               <Footprints className="w-5 h-5" />
             </button>
-            <button onTouchStart={tap('chopJustPressed')} className={`${roundBtn} w-14 h-14`} title="Використати інструмент">
+            <button onTouchStart={tap('chopJustPressed')} className={`${roundBtn} w-14 h-14`} title={t('touch.use')}>
               <Sparkles className="w-6 h-6" />
             </button>
             <button
@@ -155,7 +156,7 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
               onTouchEnd={releaseJump}
               onTouchCancel={releaseJump}
               className={`${roundBtn} w-16 h-16 !bg-emerald-500 !text-white !border-emerald-300`}
-              title="Стрибок"
+              title={t('touch.jump')}
             >
               <ArrowUp className="w-8 h-8" />
             </button>

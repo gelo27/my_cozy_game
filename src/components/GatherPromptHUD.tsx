@@ -1,6 +1,7 @@
 import React from 'react';
 import { Axe, Pickaxe, TreePine, Gem } from 'lucide-react';
 import { GatherPrompt } from '../character/abilities/GatheringAbility';
+import { t } from '../i18n/i18n';
 
 interface GatherPromptHUDProps {
   prompt: GatherPrompt;
@@ -36,7 +37,7 @@ export const GatherPromptHUD: React.FC<GatherPromptHUDProps> = ({ prompt }) => {
 
         {prompt.canAct && (
           <div className="ml-2 px-2.5 py-1 bg-amber-500 text-amber-950 font-black text-xs rounded-lg shadow-sm">
-            [E / ЛКМ]
+            {t('common.actKeys')}
           </div>
         )}
       </div>

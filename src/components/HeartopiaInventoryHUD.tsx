@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { InventoryManager } from '../inventory/InventoryManager';
 import { InventoryItem, InventoryCategory, getItemEmoji } from '../inventory/types/InventoryTypes';
-import { X, Sparkles, Check, Droplets, Sprout, Package, Trees, Info } from 'lucide-react';
+import { X, Sparkles, Check, Droplets, Sprout, Package, Trees, Info, Fish } from 'lucide-react';
+import { t, useLang, dataName, itemDesc } from '../i18n/i18n';
 
 interface HeartopiaInventoryHUDProps {
   inventoryManager: InventoryManager;
@@ -18,15 +19,16 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
 }) => {
   const [activeCategory, setActiveCategory] = useState<InventoryCategory>('all');
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+  useLang();
 
   if (!isOpen) return null;
 
   const state = inventoryManager.getState();
   const equippedId = state.equippedItemId;
 
-  const filteredItems = activeCategory === 'all'
-    ? state.items
-    : state.items.filter((it) => it.category === activeCategory);
+  const owned = state.items.filter((it) => it.count > 0 && it.id !== 'coins');
+  const filteredItems = activeCategory === 'all' ? owned : owned.filter((it) => it.category === activeCategory);
+  const slotCount = Math.max(16, Math.ceil(filteredItems.length / 4) * 4);
 
   const handleSelectSlot = (item: InventoryItem) => {
     setSelectedItem(item);
@@ -70,14 +72,14 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-xl font-bold tracking-wide text-amber-950">
-                  Рюкзак Heartopia
+                  {t('inv.title')}
                 </h2>
                 <span className="px-2 py-0.5 text-xs font-semibold bg-amber-200/70 text-amber-800 rounded-full border border-amber-300">
-                  Клавіша [Q]
+                  {t('inv.key')}
                 </span>
               </div>
               <p className="text-xs text-amber-800/80">
-                Вибирайте лійку, насіння пшениці, моркви, помідорів та оглядайте зібрані ящики
+                {t('inv.subtitle')}
               </p>
             </div>
           </div>
@@ -85,7 +87,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
           <button
             onClick={onClose}
             className="w-9 h-9 rounded-full bg-amber-200/60 hover:bg-amber-300 border border-amber-300/80 flex items-center justify-center transition-all duration-150 active:scale-95 cursor-pointer"
-            title="Закрити (Q або Esc)"
+            title={t('inv.closeTitle')}
           >
             <X className="w-5 h-5 text-amber-900" />
           </button>
@@ -101,7 +103,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
                 : 'bg-amber-200/50 hover:bg-amber-200/80 text-amber-900'
             }`}
           >
-            Усі предмети
+            {t('inv.all')}
           </button>
           <button
             onClick={() => setActiveCategory('tools')}
@@ -112,7 +114,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
             }`}
           >
             <Droplets className="w-3.5 h-3.5" />
-            Інструменти
+            {t('inv.tools')}
           </button>
           <button
             onClick={() => setActiveCategory('seeds')}
@@ -123,7 +125,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
             }`}
           >
             <Sprout className="w-3.5 h-3.5" />
-            Насіння
+            {t('inv.seeds')}
           </button>
           <button
             onClick={() => setActiveCategory('crops')}
@@ -134,7 +136,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
             }`}
           >
             <Package className="w-3.5 h-3.5" />
-            Ящики врожаю
+            {t('inv.crops')}
           </button>
           <button
             onClick={() => setActiveCategory('materials')}
@@ -145,7 +147,18 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
             }`}
           >
             <Trees className="w-3.5 h-3.5" />
-            Матеріали
+            {t('inv.materials')}
+          </button>
+          <button
+            onClick={() => setActiveCategory('food')}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
+              activeCategory === 'food'
+                ? 'bg-orange-600 text-white shadow-md'
+                : 'bg-amber-200/50 hover:bg-amber-200/80 text-amber-900'
+            }`}
+          >
+            <Fish className="w-3.5 h-3.5" />
+            {t('inv.food')}
           </button>
         </div>
 
@@ -154,7 +167,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
           {/* Item Grid */}
           <div className="col-span-7 bg-[#f2e7da] rounded-2xl p-3 border border-[#ded0c0] shadow-inner overflow-y-auto max-h-[360px]">
             <div className="grid grid-cols-4 gap-2.5">
-              {Array.from({ length: 16 }).map((_, idx) => {
+              {Array.from({ length: slotCount }).map((_, idx) => {
                 const item = filteredItems[idx];
                 const isEquipped = item && equippedId === item.id;
                 const isSelected = item && selectedItem?.id === item.id;
@@ -180,7 +193,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
                           {getItemEmoji(item)}
                         </div>
                         <span className="text-[10px] font-bold text-center line-clamp-1 mt-1 text-amber-900">
-                          {item.name}
+                          {dataName('item', item.id, item.name)}
                         </span>
 
                         {/* Quantity Badge */}
@@ -193,7 +206,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
                         {/* Equipped Tag */}
                         {isEquipped && (
                           <div className="absolute -bottom-1 bg-amber-600 text-white text-[9px] font-extrabold px-1.5 py-0.2 rounded-md shadow flex items-center gap-0.5">
-                            <Check className="w-2.5 h-2.5 stroke-[3]" /> В руці
+                            <Check className="w-2.5 h-2.5 stroke-[3]" /> {t('inv.equipped')}
                           </div>
                         )}
                       </>
@@ -216,31 +229,32 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
                   </div>
                   <div>
                     <h3 className="font-extrabold text-base text-amber-950">
-                      {selectedItem.name}
+                      {dataName('item', selectedItem.id, selectedItem.name)}
                     </h3>
                     <div className="flex items-center gap-1 mt-0.5">
                       {getItemCategoryIcon(selectedItem.category)}
                       <span className="text-xs font-semibold text-amber-800">
-                        {selectedItem.category === 'tools' && (selectedItem.id === 'watering_can' ? 'Інструмент для поливу' : 'Інструмент для збору ресурсів')}
-                        {selectedItem.category === 'seeds' && 'Насіння для посадки'}
-                        {selectedItem.category === 'crops' && 'Ящик зібраного врожаю'}
-                        {selectedItem.category === 'materials' && 'Ресурс для будівництва'}
+                        {selectedItem.category === 'tools' && (selectedItem.id === 'watering_can' ? t('inv.catWatering') : t('inv.catTool'))}
+                        {selectedItem.category === 'seeds' && t('inv.catSeeds')}
+                        {selectedItem.category === 'crops' && t('inv.catCrops')}
+                        {selectedItem.category === 'materials' && t('inv.catMaterials')}
+                        {selectedItem.category === 'food' && t('inv.catFood')}
                       </span>
                     </div>
                   </div>
                 </div>
 
                 <div className="p-3 bg-white/70 rounded-xl border border-amber-200/80 text-xs text-amber-900 leading-relaxed">
-                  {selectedItem.description}
+                  {itemDesc(selectedItem.id, selectedItem.description)}
                 </div>
 
                 <div className="bg-[#ede1d3] p-2.5 rounded-xl border border-[#d8c7b4] text-[11px] space-y-1">
                   <div className="flex justify-between text-amber-800 font-semibold">
-                    <span>Кількість у рюкзаку:</span>
-                    <span className="font-bold text-amber-950">{selectedItem.count} шт.</span>
+                    <span>{t('inv.count')}</span>
+                    <span className="font-bold text-amber-950">{t('inv.pcs', { n: selectedItem.count })}</span>
                   </div>
                   <div className="flex justify-between text-amber-800 font-semibold">
-                    <span>Максимум у стаку:</span>
+                    <span>{t('inv.maxStack')}</span>
                     <span className="font-bold text-amber-950">{selectedItem.maxStack}</span>
                   </div>
                 </div>
@@ -248,7 +262,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
                 {selectedItem.cropType && (
                   <div className="p-2 bg-emerald-50 rounded-xl border border-emerald-200 text-[11px] text-emerald-900 flex items-center gap-2">
                     <Sprout className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>Саджається на підготовлені грядки 1х1м або 2х2м [ЛКМ / E]</span>
+                    <span>{t('inv.seedHint')}</span>
                   </div>
                 )}
               </div>
@@ -256,7 +270,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
               <div className="h-full flex flex-col items-center justify-center text-center p-4 text-amber-800/60">
                 <Info className="w-8 h-8 mb-2 opacity-50 text-amber-700" />
                 <p className="text-xs font-semibold">
-                  Оберіть предмет у рюкзаку для огляду або візьміть у руку (Лійка або Насіння)
+                  {t('inv.selectHint')}
                 </p>
               </div>
             )}
@@ -274,17 +288,17 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
                 >
                   {equippedId === selectedItem.id ? (
                     <>
-                      <X className="w-4 h-4" /> Сховати з рук
+                      <X className="w-4 h-4" /> {t('inv.unequip')}
                     </>
                   ) : (
                     <>
-                      <Check className="w-4 h-4" /> Взяти в руку
+                      <Check className="w-4 h-4" /> {t('inv.equip')}
                     </>
                   )}
                 </button>
               ) : selectedItem && selectedItem.category === 'crops' ? (
                 <div className="flex-1 py-2 px-3 bg-amber-200/50 rounded-xl border border-amber-300/70 text-center text-xs font-bold text-amber-900">
-                  📦 1 ящик з однієї грядки зібрано!
+                  {t('inv.crateNote')}
                 </div>
               ) : null}
 
@@ -292,7 +306,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
                 onClick={onClose}
                 className="py-2.5 px-4 bg-[#e5d6c5] hover:bg-[#dccbbb] text-amber-950 text-xs font-bold rounded-xl border border-[#cebcab] transition-all active:scale-95 cursor-pointer"
               >
-                Закрити
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -301,11 +315,9 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
         {/* Footer info bar */}
         <div className="px-6 py-2.5 bg-[#ebdccf] border-t border-[#dbcbb8] flex items-center justify-between text-[11px] text-amber-800">
           <div className="flex items-center gap-4">
-            <span>💡 <b>Q</b> — відкрити/закрити інвентар</span>
-            <span>💧 <b>Лійка</b> — поливає суху грядку (потрібно 2 поливи)</span>
-            <span>🌾 <b>Ящик</b> — збирається 1 ящик з готової грядки</span>
+            <span>💡 {t('inv.tipQ')}</span>
+            <span className="hidden sm:inline">💧 {t('inv.tipWater')}</span>
           </div>
-          <span className="font-semibold text-amber-900">Heartopia Farming Engine v1.0</span>
         </div>
       </div>
     </div>

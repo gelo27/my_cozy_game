@@ -1,3 +1,4 @@
+import { t, localName } from '../../i18n/i18n';
 import * as THREE from 'three';
 import { IAbility, CharacterContext } from './IAbility';
 import { BuildingPieceType, BuildingTelemetry, SnapResult, isDoorPiece } from '../../building/types/BuildingTypes';
@@ -674,7 +675,7 @@ export class BuildAbility implements IAbility {
     return {
       isBuildModeActive: this.isBuildModeActive,
       selectedPieceType: currentPieceType,
-      selectedPieceName: pieceDef ? pieceDef.ukrainianName : 'Не обрано (оберіть елемент знизу)',
+      selectedPieceName: pieceDef ? localName(pieceDef) : t('build.noneSelected'),
       isSnapped: this.currentSnapResult?.isSnapped ?? false,
       snappingEnabled: this.snappingEnabled,
       isValidPlacement: this.currentSnapResult?.isValidPlacement ?? false,
@@ -689,9 +690,10 @@ export class BuildAbility implements IAbility {
       activePaintingTool: this.activePaintingTool,
       hoveredCellFace: this.currentHoverCellInfo?.faceLabel ?? null,
       hoveredCellCoords: this.currentHoverCellInfo
-        ? `Стіна ${this.currentHoverCellInfo.width.toFixed(1)}×${this.currentHoverCellInfo.height.toFixed(1)}м`
+        ? t('paint.wallSize', { w: this.currentHoverCellInfo.width.toFixed(1), h: this.currentHoverCellInfo.height.toFixed(1) })
         : null,
-      hoveredCellWallpaperName: hoveredDef ? hoveredDef.ukrainianName : (this.currentHoverCellInfo ? 'Стандартна стіна' : null),
+      hoveredCellWallpaperName: hoveredDef ? localName(hoveredDef) : (this.currentHoverCellInfo ? t('paint.defaultWall') : null),
+      hoveredCellFaceKind: this.currentHoverCellInfo?.faceKind ?? null,
       customizedCellsCount: this.buildingManager?.wallPaintingSystem.getCustomizationCount() ?? 0,
       canUndoPaint: this.buildingManager?.wallPaintingSystem.canUndo() ?? false,
       canRedoPaint: this.buildingManager?.wallPaintingSystem.canRedo() ?? false,

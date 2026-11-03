@@ -2,6 +2,7 @@ import React from 'react';
 import { FarmInteractionPrompt } from '../farming/types/FarmingTypes';
 import { InventoryManager } from '../inventory/InventoryManager';
 import { getItemEmoji } from '../inventory/types/InventoryTypes';
+import { t, useLang, dataName } from '../i18n/i18n';
 import { Droplets, Sprout, Package, Sparkles, Clock, AlertCircle } from 'lucide-react';
 
 interface FarmingInteractionHUDProps {
@@ -26,6 +27,7 @@ export const FarmingInteractionHUD: React.FC<FarmingInteractionHUDProps> = ({
   inventoryManager,
   onOpenInventory,
 }) => {
+  useLang();
   const state = inventoryManager.getState();
   const equippedItem = inventoryManager.getEquippedItem();
   const action = prompt ? getPromptAction(prompt) : 'none';
@@ -48,10 +50,10 @@ export const FarmingInteractionHUD: React.FC<FarmingInteractionHUDProps> = ({
 
           <div className="text-left">
             <div className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700">
-              В руках [Q - Рюкзак]
+              {t('farm.inHands')}
             </div>
             <div className="text-sm font-black text-amber-950 flex items-center gap-1.5">
-              {equippedItem ? equippedItem.name : 'Порожні руки'}
+              {equippedItem ? dataName('item', equippedItem.id, equippedItem.name) : t('farm.emptyHands')}
               {equippedItem && equippedItem.count > 1 && (
                 <span className="text-xs font-bold text-amber-600">x{equippedItem.count}</span>
               )}
@@ -74,7 +76,7 @@ export const FarmingInteractionHUD: React.FC<FarmingInteractionHUDProps> = ({
             </div>
 
             <div className="flex flex-col">
-              <span className="text-xs font-semibold text-amber-200">Грядка Heartopia</span>
+              <span className="text-xs font-semibold text-amber-200">{t('farm.plot')}</span>
               <span className="text-sm font-extrabold text-amber-50 tracking-wide">
                 {prompt.actionText}
               </span>
@@ -84,7 +86,7 @@ export const FarmingInteractionHUD: React.FC<FarmingInteractionHUDProps> = ({
             {/* Quick action button hint */}
             {canAct && (
               <div className="ml-2 px-2.5 py-1 bg-amber-500 text-amber-950 font-black text-xs rounded-lg shadow-sm">
-                [E / ЛКМ]
+                {t('common.actKeys')}
               </div>
             )}
           </div>

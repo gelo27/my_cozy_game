@@ -1,3 +1,5 @@
+import { t, useLang, localName, localizeBadge } from '../i18n/i18n';
+import type { TKey } from '../i18n/en';
 import React, { useState, useMemo, useRef } from 'react';
 import {
   LayoutGrid,
@@ -327,16 +329,16 @@ const PIECE_ITEMS: PieceItemConfig[] = [
 ];
 
 const CATEGORY_TABS: { id: PieceCategory | 'ALL'; name: string; icon: React.ReactNode }[] = [
-  { id: 'ALL', name: 'Всі', icon: <LayoutGrid className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.FLOORS, name: 'Підлога', icon: <Square className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.WALLS, name: 'Стіни', icon: <Columns className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.WINDOWS, name: 'Вікна', icon: <AppWindow className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.DOORS, name: 'Двері', icon: <DoorOpen className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.STAIRS, name: 'Сходи', icon: <TrendingUp className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.RAILINGS, name: 'Перила та Паркани', icon: <Fence className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.ROOFS, name: 'Дах', icon: <Home className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.PILLARS, name: 'Опори', icon: <MoveVertical className="w-3.5 h-3.5" /> },
-  { id: PieceCategory.FURNITURE, name: 'Меблі', icon: <Sofa className="w-3.5 h-3.5" /> },
+  { id: 'ALL', name: 'build.cat.all', icon: <LayoutGrid className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.FLOORS, name: 'build.cat.floors', icon: <Square className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.WALLS, name: 'build.cat.walls', icon: <Columns className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.WINDOWS, name: 'build.cat.windows', icon: <AppWindow className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.DOORS, name: 'build.cat.doors', icon: <DoorOpen className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.STAIRS, name: 'build.cat.stairs', icon: <TrendingUp className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.RAILINGS, name: 'build.cat.railings', icon: <Fence className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.ROOFS, name: 'build.cat.roofs', icon: <Home className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.PILLARS, name: 'build.cat.pillars', icon: <MoveVertical className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.FURNITURE, name: 'build.cat.furniture', icon: <Sofa className="w-3.5 h-3.5" /> },
 ];
 
 export const BuildingHUD: React.FC<BuildingHUDProps> = ({
@@ -353,6 +355,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
   onConfirmFoundations,
   onConfirmAll,
 }) => {
+  useLang();
   const {
     isBuildModeActive,
     selectedPieceType,
@@ -399,10 +402,10 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
               ? 'bg-amber-600/90 hover:bg-amber-500 text-white border-amber-300/60 ring-2 ring-amber-400/40'
               : 'bg-stone-900/80 hover:bg-stone-800 text-stone-200 border-stone-700/60'
           }`}
-          title="Режим будівництва Valheim (Клавіша B)"
+          title={t('build.modeTitle')}
         >
           <Hammer className={`w-4 h-4 ${isBuildModeActive ? 'animate-bounce' : 'text-amber-400'}`} />
-          <span>{isBuildModeActive ? 'Будівництво' : 'Будівництво [B]'}</span>
+          <span>{isBuildModeActive ? t('build.mode') : t('build.modeKey')}</span>
           <span className="text-xs px-1.5 py-0.5 rounded bg-black/40 border border-white/10 text-amber-200 hidden md:inline">
             [B]
           </span>
@@ -423,10 +426,10 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                   ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-300 ring-2 ring-emerald-400/50 shadow-emerald-950/60 animate-pulse'
                   : 'bg-emerald-700/90 hover:bg-emerald-600 text-emerald-100 border-emerald-500/60 shadow-emerald-950/40'
               }`}
-              title="Підтвердити: окрема регенерація мешів для стін, підлоги та фундаменту"
+              title={t('build.confirmTitle')}
             >
               <Check className="w-4 h-4 text-emerald-100" />
-              <span>Підтвердити</span>
+              <span>{t('build.confirm')}</span>
               {totalUnconfirmed > 0 && (
                 <span className="text-xs px-1.5 py-0.5 rounded-full bg-emerald-950 border border-emerald-400/60 text-emerald-200 font-mono font-bold">
                   {totalUnconfirmed}
@@ -446,10 +449,10 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                 ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white border-pink-300 ring-2 ring-pink-400/50 shadow-pink-950/60'
                 : 'bg-stone-900/80 hover:bg-stone-800 text-stone-200 border-stone-700/60 hover:text-pink-300'
             }`}
-            title="Режим розфарбовування стін Heartopia: незалежні шпалери/фасад по клітинках (P)"
+            title={t('build.paintTitle')}
           >
             <Paintbrush className={`w-4 h-4 ${telemetry.isPaintingModeActive ? 'animate-pulse text-white' : 'text-pink-400'}`} />
-            <span>Шпалери</span>
+            <span>{t('build.paint')}</span>
             <span className="text-xs px-1.5 py-0.5 rounded bg-black/40 border border-white/10 text-pink-200 font-mono hidden md:inline">
               [P]
             </span>
@@ -460,7 +463,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
           <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-stone-900/85 border border-stone-700 text-xs text-stone-300 shadow whitespace-nowrap">
             <Wrench className="w-3.5 h-3.5 text-stone-400" />
             <span>
-              Об’єктів: <strong className="text-amber-400">{totalPiecesBuilt}</strong>
+              {t('build.objects')} <strong className="text-amber-400">{totalPiecesBuilt}</strong>
             </span>
           </div>
         )}
@@ -490,20 +493,20 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                     ? 'bg-emerald-950/85 border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/80'
                     : 'bg-stone-850/85 border-stone-600/50 text-stone-300 hover:bg-stone-700'
                 }`}
-                title="Перемкнути автоматичний магніт сокетів (V)"
+                title={t('build.snapTitle')}
               >
                 <Magnet className="w-3.5 h-3.5 text-current" />
-                <span>МАГНІТ: {snappingEnabled ? 'УВІМКНЕНО [V]' : 'ВІЛЬНО [V]'}</span>
+                <span>{snappingEnabled ? t('build.snapOn') : t('build.snapOff')}</span>
               </button>
 
               {/* Grid 0.5m badge */}
               <div
                 id="badge-grid-step"
                 className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-mono font-medium bg-sky-950/80 border border-sky-500/40 text-sky-300 shadow"
-                title="Розміщення предметів по сітці 1x1/2 = 0.5м"
+                title={t('build.gridTitle')}
               >
                 <LayoutGrid className="w-3.5 h-3.5 text-sky-400" />
-                <span>Сітка: 0.5м</span>
+                <span>{t('build.grid')}</span>
               </div>
 
               {/* Rotate piece button */}
@@ -511,10 +514,10 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                 id="btn-rotate-piece"
                 onClick={onRotatePiece}
                 className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium bg-stone-850/85 hover:bg-stone-750 border border-stone-600/50 text-stone-200 transition shadow"
-                title="Повернути деталь на 90 градусів (R)"
+                title={t('build.rotateTitle')}
               >
                 <RotateCw className="w-3.5 h-3.5 text-amber-400" />
-                <span>Поворот 90° [R]</span>
+                <span>{t('build.rotate')}</span>
               </button>
 
               {/* Placement status pill */}
@@ -529,19 +532,19 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                   {isValidPlacement ? (
                     <>
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Готово до встановлення [ЛКМ]</span>
+                      <span>{t('build.ready')}</span>
                     </>
                   ) : (
                     <>
                       <AlertCircle className="w-3.5 h-3.5" />
-                      <span>Неможливо встановити тут</span>
+                      <span>{t('build.blocked')}</span>
                     </>
                   )}
                 </div>
               ) : telemetry.selectedWallId ? (
                 <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium bg-sky-950/85 border border-sky-400/60 text-sky-200 shadow-md">
                   <span className="inline-block w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
-                  <span>Елемент активний: тисніть білі стрілки по краях</span>
+                  <span>{t('build.active')}</span>
                 </div>
               ) : null}
 
@@ -549,7 +552,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
               {aimingAtPieceId && (
                 <div className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium bg-rose-950/85 border border-rose-400/60 text-rose-200 shadow-md animate-pulse">
                   <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-                  <span>Ціль: [X] або ПКМ розібрати</span>
+                  <span>{t('build.demolishHint')}</span>
                 </div>
               )}
             </div>
@@ -563,7 +566,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                   type="button"
                   onClick={() => scrollCategories('left')}
                   className="absolute left-0 z-10 p-1 bg-stone-900/95 hover:bg-stone-800 border border-stone-700/80 rounded-lg text-stone-300 shadow-md transition-all flex items-center justify-center -ml-1 sm:-ml-2"
-                  title="Прокрутити ліворуч"
+                  title={t('build.scrollLeft')}
                 >
                   <ChevronLeft className="w-4 h-4" />
                 </button>
@@ -600,7 +603,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                         <span className={isActive ? 'text-amber-400' : 'text-stone-400'}>
                           {tab.icon}
                         </span>
-                        <span>{tab.name}</span>
+                        <span>{t(tab.name as TKey)}</span>
                         <span
                           className={`text-[10px] px-1.5 py-0.2 rounded-full ${
                             isActive
@@ -620,7 +623,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                   type="button"
                   onClick={() => scrollCategories('right')}
                   className="absolute right-0 z-10 p-1 bg-stone-900/95 hover:bg-stone-800 border border-stone-700/80 rounded-lg text-stone-300 shadow-md transition-all flex items-center justify-center -mr-1 sm:-mr-2"
-                  title="Прокрутити праворуч"
+                  title={t('build.scrollRight')}
                 >
                   <ChevronRight className="w-4 h-4" />
                 </button>
@@ -631,7 +634,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                 <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-stone-900/90 rounded-xl border border-amber-500/30 text-xs">
                   <span className="text-amber-300 font-semibold flex items-center gap-1.5">
                     <Home className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Текстура покрівлі (Sims 4):</span>
+                    <span>{t('build.roofTexture')}</span>
                   </span>
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <button
@@ -698,7 +701,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                           ? 'bg-amber-500/25 border-amber-400 ring-2 ring-amber-500/40 shadow-lg scale-102'
                           : 'bg-stone-900/70 border-stone-800 text-stone-400 hover:bg-stone-800 hover:border-stone-700 hover:text-stone-200'
                       }`}
-                      title={def?.ukrainianName}
+                      title={localName(def)}
                     >
                       {/* Slot Shortcut Badge */}
                       {item.slot !== undefined && (
@@ -709,7 +712,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
 
                       {/* Dimension tag */}
                       <span className="absolute top-1 right-1 text-[9px] font-mono text-stone-400 bg-black/40 px-1 rounded">
-                        {item.dimBadge}
+                        {localizeBadge(item.dimBadge)}
                       </span>
 
                       {/* Icon */}
@@ -724,7 +727,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                       {/* Name & Cost footer */}
                       <div className="w-full flex items-center justify-between gap-1 text-[9px] font-medium leading-none">
                         <span className="truncate max-w-[50px] text-stone-200">
-                          {def?.ukrainianName.split(' ')[0]}
+                          {localName(def).split(' ')[0]}
                         </span>
                         <span className="text-amber-400/90 font-mono text-[9px] flex items-center gap-0.5">
                           🌲{def?.woodCost}
@@ -744,7 +747,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
             <button
               onClick={onConfirmWalls}
               className="w-13 h-13 rounded-full bg-emerald-600 border border-emerald-300 text-white flex items-center justify-center shadow-xl active:scale-90"
-              title="Підтвердити стіни"
+              title={t('build.confirmWalls')}
             >
               <Check className="w-6 h-6" />
             </button>
@@ -757,7 +760,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                   ? 'bg-emerald-600 border-emerald-300'
                   : 'bg-stone-700/60 border-stone-600 text-stone-500 cursor-not-allowed'
               }`}
-              title="Встановити деталь"
+              title={t('build.place')}
             >
               <Hammer className="w-6 h-6" />
             </button>
@@ -765,7 +768,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
             <button
               onClick={onRotatePiece}
               className="w-11 h-11 rounded-full bg-stone-800/90 border border-stone-600 text-amber-300 flex items-center justify-center shadow-lg active:scale-90"
-              title="Повернути"
+              title={t('build.rotateShort')}
             >
               <RotateCw className="w-5 h-5" />
             </button>
@@ -777,7 +780,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                   ? 'bg-emerald-900/90 border-emerald-400 text-emerald-300'
                   : 'bg-stone-800/90 border-stone-600 text-stone-400'
               }`}
-              title="Магніт"
+              title={t('build.snap')}
             >
               <Magnet className="w-5 h-5" />
             </button>
@@ -786,7 +789,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
               <button
                 onClick={onDemolish}
                 className="w-11 h-11 rounded-full bg-rose-900/90 border border-rose-400 text-rose-300 flex items-center justify-center shadow-lg active:scale-90 animate-pulse"
-                title="Розібрати деталь"
+                title={t('build.demolish')}
               >
                 <Trash2 className="w-5 h-5" />
               </button>

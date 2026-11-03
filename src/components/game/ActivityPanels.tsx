@@ -4,10 +4,14 @@ import { GameplayManager, GameplayHudState } from '../../gameplay/GameplayManage
 import { RECIPES, DISH_BUFF } from '../../gameplay/Recipes';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji } from '../../inventory/types/InventoryTypes';
+import { t, useLang, dataName } from '../../i18n/i18n';
+
+const recipeName = (id: string) => dataName('recipe', id, RECIPES.find((r) => r.id === id)?.name ?? id);
 
 const sheet = 'bg-[#fffaf0] text-[#4a3b2a] border border-[#e9dcc3] shadow-[0_12px_40px_rgba(60,40,10,0.3)]';
 
 function useInventoryTick(inventory: InventoryManager): number {
+  useLang();
   const [tick, setTick] = useState(0);
   useEffect(() => inventory.subscribe(() => setTick((t) => t + 1)), [inventory]);
   return tick;
@@ -31,7 +35,7 @@ const Shell: React.FC<{ title: string; icon: React.ReactNode; onClose(): void; c
       <div className="flex items-center gap-2 px-5 py-3 border-b border-[#e9dcc3]">
         {icon}
         <h2 className="text-base font-extrabold flex-1">{title}</h2>
-        <button onClick={onClose} className="w-9 h-9 rounded-xl hover:bg-[#f3e8d2] flex items-center justify-center" title="Закрити (Esc)">
+        <button onClick={onClose} className="w-9 h-9 rounded-xl hover:bg-[#f3e8d2] flex items-center justify-center" title={t('common.closeEsc')}>
           <X className="w-5 h-5" />
         </button>
       </div>
@@ -44,11 +48,11 @@ export const CookingPanel: React.FC<PanelProps> = ({ hud, gameplay, inventory, o
   useInventoryTick(inventory);
   const dishes = inventory.getItems().filter((i) => i.id.startsWith('dish_') && i.count > 0);
   return (
-    <Shell title="Багаття — готування" icon={<ChefHat className="w-5 h-5 text-orange-600" />} onClose={onClose}>
+    <Shell title={t('cook.title')} icon={<ChefHat className="w-5 h-5 text-orange-600" />} onClose={onClose}>
       {hud.cooking && (
         <div className="rounded-2xl bg-orange-50 border border-orange-200 p-3">
           <div className="text-sm font-semibold mb-1.5">
-            Готується: {RECIPES.find((r) => r.id === hud.cooking!.recipeId)?.name}
+            {t('cook.cooking', { name: recipeName(hud.cooking.recipeId) })}
           </div>
           <div className="h-2.5 rounded-full bg-orange-100 overflow-hidden">
             <div className="h-full bg-orange-400 transition-[width] duration-300" style={{ width: `${hud.cooking.progress * 100}%` }} />
@@ -62,11 +66,11 @@ export const CookingPanel: React.FC<PanelProps> = ({ hud, gameplay, inventory, o
           <div key={r.id} className="rounded-2xl bg-white/80 border border-[#efe4cf] p-3 flex items-center gap-3">
             <span className="text-2xl">{getItemEmoji(dish)}</span>
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-bold">{r.name}</div>
+              <div className="text-sm font-bold">{recipeName(r.id)}</div>
               <div className="flex flex-wrap gap-1.5 mt-1">
                 {r.ingredients.map((ing) => {
                   const have = gameplay.countIngredient(ing.itemId);
-                  const name = ing.itemId === 'fish_any' ? 'Риба' : inventory.getItem(ing.itemId)?.name ?? ing.itemId;
+                  const name = ing.itemId === 'fish_any' ? t('cook.anyFish') : dataName('item', ing.itemId, inventory.getItem(ing.itemId)?.name ?? ing.itemId);
                   return (
                     <span
                       key={ing.itemId}
@@ -85,25 +89,25 @@ export const CookingPanel: React.FC<PanelProps> = ({ hud, gameplay, inventory, o
               onClick={() => gameplay.cook(r.id)}
               className="px-4 py-2 rounded-xl text-sm font-bold bg-orange-500 text-white disabled:bg-[#e9dcc3] disabled:text-[#a08a68] active:scale-95 transition"
             >
-              Готувати
+              {t('cook.cook')}
             </button>
           </div>
         );
       })}
       {dishes.length > 0 && (
         <>
-          <div className="text-xs font-bold text-[#8a7556] mt-2">Ваші страви — з'їжте для прискорення</div>
+          <div className="text-xs font-bold text-[#8a7556] mt-2">{t('cook.yourDishes')}</div>
           {dishes.map((d) => (
             <div key={d.id} className="rounded-2xl bg-white/80 border border-[#efe4cf] p-2.5 flex items-center gap-3">
               <span className="text-xl">{getItemEmoji(d)}</span>
               <span className="flex-1 text-sm font-semibold">
-                {d.name} ×{d.count}
+                {dataName('item', d.id, d.name)} ×{d.count}
                 <span className="text-[11px] text-[#8a7556] ml-2">
-                  +{Math.round((DISH_BUFF[d.id].speed - 1) * 100)}% швидкості, {DISH_BUFF[d.id].seconds}с
+                  {t('cook.buff', { pct: Math.round((DISH_BUFF[d.id].speed - 1) * 100), s: DISH_BUFF[d.id].seconds })}
                 </span>
               </span>
               <button onClick={() => gameplay.eat(d.id)} className="px-3 py-1.5 rounded-xl text-sm font-bold bg-emerald-500 text-white active:scale-95">
-                З'їсти
+                {t('cook.eat')}
               </button>
             </div>
           ))}
@@ -121,15 +125,15 @@ export const ShopPanel: React.FC<PanelProps> = ({ gameplay, inventory, onClose }
   const buyable = items.filter((i) => i.buyPrice);
   const coins = inventory.getItemCount('coins');
   return (
-    <Shell title="Поштова скринька — магазин" icon={<Store className="w-5 h-5 text-sky-600" />} onClose={onClose}>
+    <Shell title={t('shop.title')} icon={<Store className="w-5 h-5 text-sky-600" />} onClose={onClose}>
       <div className="flex items-center gap-2 mb-1">
-        {(['sell', 'buy'] as const).map((t) => (
+        {(['sell', 'buy'] as const).map((id) => (
           <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-1.5 rounded-xl text-sm font-bold ${tab === t ? 'bg-[#4a3b2a] text-white' : 'bg-[#f3e8d2]'}`}
+            key={id}
+            onClick={() => setTab(id)}
+            className={`px-4 py-1.5 rounded-xl text-sm font-bold ${tab === id ? 'bg-[#4a3b2a] text-white' : 'bg-[#f3e8d2]'}`}
           >
-            {t === 'sell' ? 'Продати' : 'Купити'}
+            {id === 'sell' ? t('shop.sell') : t('shop.buy')}
           </button>
         ))}
         <span className="ml-auto flex items-center gap-1 text-sm font-bold">
@@ -137,15 +141,15 @@ export const ShopPanel: React.FC<PanelProps> = ({ gameplay, inventory, onClose }
         </span>
       </div>
       {tab === 'sell' && sellable.length === 0 && (
-        <div className="text-sm text-[#8a7556] text-center py-6">Немає що продати. Зберіть урожай, наловіть риби або приготуйте страву!</div>
+        <div className="text-sm text-[#8a7556] text-center py-6">{t('shop.empty')}</div>
       )}
       {(tab === 'sell' ? sellable : buyable).map((item) => (
         <div key={item.id} className="rounded-2xl bg-white/80 border border-[#efe4cf] p-2.5 flex items-center gap-3">
           <span className="text-xl">{getItemEmoji(item)}</span>
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-bold truncate">{item.name}</div>
+            <div className="text-sm font-bold truncate">{dataName('item', item.id, item.name)}</div>
             <div className="text-[11px] text-[#8a7556]">
-              {tab === 'sell' ? `${item.sellPrice} 💰 · є ${item.count}` : `${item.buyPrice} 💰 · є ${item.count}`}
+              {t('shop.priceLine', { price: (tab === 'sell' ? item.sellPrice : item.buyPrice) ?? 0, n: item.count })}
             </div>
           </div>
           {tab === 'sell' ? (
@@ -154,7 +158,7 @@ export const ShopPanel: React.FC<PanelProps> = ({ gameplay, inventory, onClose }
                 1
               </button>
               <button onClick={() => gameplay.sell(item.id, item.count)} className="px-3 py-1.5 rounded-xl text-sm font-bold bg-amber-500 text-white active:scale-95">
-                Усе
+                {t('shop.all')}
               </button>
             </>
           ) : (

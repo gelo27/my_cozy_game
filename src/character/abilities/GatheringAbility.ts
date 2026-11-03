@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { t, plural, dataName } from '../../i18n/i18n';
 import { IAbility, CharacterContext } from './IAbility';
 import { ForestZone, ForestTarget } from '../../forest/ForestZone';
 import { RockField, RockNode } from '../../gathering/RockField';
@@ -132,33 +133,36 @@ export class GatheringAbility implements IAbility {
       if (target.node.kind === 'fallen') {
         return {
           kind: 'fallen',
-          title: 'Повалене дерево',
-          actionText: hasTool ? 'Розколоти на дрова' : 'Потрібна сокира [Q]',
-          hintText: `Один удар сокирою — і ${GATHERING_CONFIG.TREE_WOOD_YIELD} деревини у рюкзаку.`,
+          title: t('gather.fallen'),
+          actionText: hasTool ? t('gather.split') : t('gather.needAxe'),
+          hintText: t('gather.splitHint', { n: GATHERING_CONFIG.TREE_WOOD_YIELD }),
           progress: 0,
           canAct: hasTool,
         };
       }
       return {
         kind: 'tree',
-        title: 'Дерево',
-        actionText: hasTool ? `Рубати дерево (${maxHealth - health}/${maxHealth})` : 'Потрібна сокира [Q]',
+        title: t('gather.tree'),
+        actionText: hasTool ? t('gather.chop', { done: maxHealth - health, max: maxHealth }) : t('gather.needAxe'),
         hintText: hasTool
-          ? `Ще ${health} ${health === 1 ? 'удар' : health < 5 ? 'удари' : 'ударів'} до падіння. Не стійте з того боку, куди воно впаде!`
-          : 'Відкрийте рюкзак [Q] і візьміть сокиру в руки.',
+          ? t('gather.chopHint', { n: health, hits: plural(health, t('gather.hit1'), t('gather.hit2'), t('gather.hit5')) })
+          : t('gather.takeAxe'),
         progress,
         canAct: hasTool,
       };
     }
 
     const rockType = ROCK_TYPES[target.node.kind];
+    const rockName = dataName('rock', target.node.kind, rockType.name);
     return {
       kind: target.node.kind,
-      title: rockType.name,
-      actionText: hasTool ? `Добувати: ${rockType.name.toLowerCase()} (${maxHealth - health}/${maxHealth})` : 'Потрібне кайло [Q]',
+      title: rockName,
+      actionText: hasTool
+        ? t('gather.mine', { name: rockName.toLowerCase(), done: maxHealth - health, max: maxHealth })
+        : t('gather.needPickaxe'),
       hintText: hasTool
-        ? `Ще ${health} ${health === 1 ? 'удар' : health < 5 ? 'удари' : 'ударів'} кайлом. Брила відновиться згодом.`
-        : 'Відкрийте рюкзак [Q] і візьміть кайло в руки.',
+        ? t('gather.mineHint', { n: health, hits: plural(health, t('gather.hit1'), t('gather.hit2'), t('gather.hit5')) })
+        : t('gather.takePickaxe'),
       progress,
       canAct: hasTool,
     };

@@ -273,6 +273,7 @@ export interface BuildingTelemetry {
   activeWallpaperId?: string;
   activePaintingTool?: string;
   hoveredCellFace?: string | null;
+  hoveredCellFaceKind?: 'outer' | 'inner' | 'floor' | 'ceiling' | null;
   hoveredCellCoords?: string | null;
   hoveredCellWallpaperName?: string | null;
   customizedCellsCount?: number;

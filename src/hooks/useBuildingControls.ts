@@ -1,3 +1,4 @@
+import { t } from '../i18n/i18n';
 import { BuildingPieceType, BuildingTelemetry } from '../building/types/BuildingTypes';
 import { PaintingToolMode } from '../building/WallPaintingSystem';
 import { GameEngine } from '../engine/GameEngine';
@@ -51,7 +52,7 @@ export function useBuildingControls(
     setGridCellSize: (size: number) => {
       withBuild(build => build.setGridCellSize(size));
       if (buildAbility) {
-        showToast({ text: `Розмір сітки фарбування: ${size === 1.0 ? '1×1м' : '0.5×0.5м'}`, type: 'info' });
+        showToast({ text: t('paint.gridSize', { size: size === 1.0 ? '1×1' : '0.5×0.5' }), type: 'info' });
       }
     },
 
@@ -70,15 +71,15 @@ export function useBuildingControls(
     },
 
     confirmWalls: () =>
-      confirmWith(() => buildAbility!.confirmWalls(), 'Стіни підтверджено: згенеровано суцільний меш стін без швів'),
+      confirmWith(() => buildAbility!.confirmWalls(), t('build.confirmedWalls')),
 
     confirmFloors: () =>
-      confirmWith(() => buildAbility!.confirmFloors(), 'Підлогу підтверджено: згенеровано суцільний меш підлоги'),
+      confirmWith(() => buildAbility!.confirmFloors(), t('build.confirmedFloors')),
 
     confirmFoundations: () =>
-      confirmWith(() => buildAbility!.confirmFoundations(), 'Фундамент підтверджено: згенеровано суцільний камʼяний меш'),
+      confirmWith(() => buildAbility!.confirmFoundations(), t('build.confirmedFoundations')),
 
     confirmAll: () =>
-      confirmWith(() => buildAbility!.confirmAll(), 'Усі елементи підтверджено: згенеровано окремі суцільні меші'),
+      confirmWith(() => buildAbility!.confirmAll(), t('build.confirmedAll')),
   };
 }

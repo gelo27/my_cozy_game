@@ -6,6 +6,7 @@ import { GameplayHudState } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji, InventoryItem } from '../../inventory/types/InventoryTypes';
 import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
+import { t, useLang, setLang, dataName, Lang } from '../../i18n/i18n';
 
 const WEATHER_ICON: Record<WeatherType, React.ElementType> = {
   clear: Sun,
@@ -41,6 +42,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   hud, inventory, hidden, devToolsEnabled, onOpenBackpack, onToggleBuild, onOpenEditor, onAction,
 }) => {
   const { items, equipped } = useHotbar(inventory);
+  const lang = useLang();
 
   useEffect(() => {
     if (hidden) return;
@@ -64,7 +66,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         <div className={`${panel} rounded-2xl px-3 py-1.5 flex items-center gap-2`}>
           <WeatherIcon className="w-4 h-4 text-amber-600" />
           <span className="text-sm font-bold tabular-nums">{hud.clock}</span>
-          <span className="text-xs text-[#8a7556] hidden sm:inline">{WEATHER_LABELS[hud.weather]}</span>
+          <span className="text-xs text-[#8a7556] hidden sm:inline">{dataName('weather', hud.weather, WEATHER_LABELS[hud.weather])}</span>
         </div>
         <div className={`${panel} rounded-2xl px-3 py-1.5 flex items-center gap-1.5`}>
           <Coins className="w-4 h-4 text-yellow-500" />
@@ -73,7 +75,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         {hud.buff && (
           <div className={`${panel} rounded-2xl px-3 py-1.5 flex items-center gap-1.5`}>
             <Zap className="w-4 h-4 text-emerald-600" />
-            <span className="text-xs font-semibold">{hud.buff.secondsLeft}с</span>
+            <span className="text-xs font-semibold">{t('hud.seconds', { n: hud.buff.secondsLeft })}</span>
           </div>
         )}
       </div>
@@ -90,14 +92,21 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             ))}
           </div>
         )}
-        <HudButton label="Рюкзак" hotkey="Q" onClick={onOpenBackpack}>
+        <button
+          onClick={() => setLang(lang === 'en' ? 'uk' : ('en' as Lang))}
+          title={t('hud.language')}
+          className={`${panel} rounded-2xl h-11 px-3 text-xs font-extrabold hover:bg-amber-50 active:scale-95 transition`}
+        >
+          {lang === 'en' ? 'EN' : 'UA'}
+        </button>
+        <HudButton label={t('hud.backpack')} hotkey="Q" onClick={onOpenBackpack}>
           <Backpack className="w-5 h-5" />
         </HudButton>
-        <HudButton label="Будувати" hotkey="B" onClick={onToggleBuild}>
+        <HudButton label={t('hud.build')} hotkey="B" onClick={onToggleBuild}>
           <Hammer className="w-5 h-5" />
         </HudButton>
         {devToolsEnabled && (
-          <HudButton label="Редактор" hotkey="F1" onClick={onOpenEditor}>
+          <HudButton label={t('hud.editor')} hotkey="F1" onClick={onOpenEditor}>
             <Settings2 className="w-5 h-5" />
           </HudButton>
         )}
@@ -126,7 +135,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <button
               key={item.id}
               onClick={() => inventory.equipItem(item.id)}
-              title={item.name}
+              title={dataName('item', item.id, item.name)}
               className={`relative w-11 h-11 sm:w-12 sm:h-12 rounded-xl flex items-center justify-center text-xl transition-all ${
                 equipped === item.id
                   ? 'bg-amber-200 ring-2 ring-amber-500 scale-105'
@@ -173,12 +182,12 @@ const PromptButton: React.FC<{ keyLabel: string; text: string; onClick(): void }
 const FishingWidget: React.FC<{ hud: GameplayHudState; onPress(): void }> = ({ hud, onPress }) => {
   const f = hud.fishing!;
   const text: Record<string, string> = {
-    cast: 'Закидання…',
-    wait: 'Чекаємо на клювання…',
-    bite: 'Клює! Тисніть!',
-    reel: `Тисніть у зеленій зоні (${f.hits}/${f.hitsNeeded})`,
-    caught: 'Є улов!',
-    escaped: 'Риба зірвалась…',
+    cast: t('fishing.cast'),
+    wait: t('fishing.wait'),
+    bite: t('fishing.bite'),
+    reel: t('fishing.reel', { hits: f.hits, need: f.hitsNeeded }),
+    caught: t('fishing.caught'),
+    escaped: t('fishing.escaped'),
   };
   const urgent = f.phase === 'bite' || f.phase === 'reel';
   return (
@@ -191,7 +200,7 @@ const FishingWidget: React.FC<{ hud: GameplayHudState; onPress(): void }> = ({ h
       >
         <span className={`text-sm font-bold ${f.phase === 'bite' ? 'text-rose-600 animate-pulse' : ''}`}>{text[f.phase]}</span>
         {f.phase === 'reel' && <ReelBar marker={f.marker} zoneStart={f.zoneStart} zoneWidth={f.zoneWidth} />}
-        <span className="text-[11px] text-[#8a7556]">E / ЛКМ / дотик</span>
+        <span className="text-[11px] text-[#8a7556]">{t('fishing.hint')}</span>
       </button>
     </div>
   );

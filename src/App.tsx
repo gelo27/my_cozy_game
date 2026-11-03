@@ -20,6 +20,7 @@ import { GatherPrompt } from './character/abilities/GatheringAbility';
 import { GameHUD } from './components/game/GameHUD';
 import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
 import { EditorUI } from './components/editor/EditorUI';
+import { useLang, dataName } from './i18n/i18n';
 import { ErrorOverlay, JsonDropOverlay, LoadingOverlay, ToastPill } from './components/ViewportOverlays';
 
 export default function App() {
@@ -43,6 +44,7 @@ export default function App() {
   const [showConsole, setShowConsole] = useState(false);
   const [showCharacterInspector, setShowCharacterInspector] = useState(false);
 
+  useLang();
   const { logs, addLog, clearLogs } = useConsoleLog();
   const { toast, showToast } = useToast();
   const building = useBuildingControls(engine, setBuildingTelemetry, addLog, showToast);
@@ -83,7 +85,7 @@ export default function App() {
       onGatherPrompt: setGatherPrompt,
       onResourcesGathered: (items) => {
         const inventory = engineRef.current?.world?.inventoryManager;
-        const text = items.map(({ itemId, amount }) => `+${amount} ${inventory?.getItem(itemId)?.name ?? itemId}`).join(', ');
+        const text = items.map(({ itemId, amount }) => `+${amount} ${dataName('item', itemId, inventory?.getItem(itemId)?.name ?? itemId)}`).join(', ');
         showToast({ text, type: 'success' });
       },
       onWireframeToggled: setIsWireframe,

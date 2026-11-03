@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { t, dataName } from '../i18n/i18n';
 import { CropType, CropStage, FarmPlot, CROP_DEFINITIONS, FarmInteractionPrompt } from './types/FarmingTypes';
 import { FarmingMeshGenerator, FARMING_MATERIALS } from './FarmingMeshGenerator';
 import { ParticleManager } from '../particles/ParticleManager';
@@ -329,8 +330,10 @@ export class FarmingManager {
         canWater: false,
         canHarvest: false,
         growthProgress: 0,
-        actionText: seedCropType ? `Посадити: ${CROP_DEFINITIONS[seedCropType].seedNameUk}` : 'Потрібне насіння з інвентаря [Q]',
-        hintText: 'Грядка готова до посадки. Відкрийте інвентар [Q] та виберіть насіння.',
+        actionText: seedCropType
+          ? t('farm.plant', { name: dataName('item', CROP_DEFINITIONS[seedCropType].seedItemId, CROP_DEFINITIONS[seedCropType].seedNameUk) })
+          : t('farm.needSeeds'),
+        hintText: t('farm.plantHint'),
       };
     }
 
@@ -347,8 +350,8 @@ export class FarmingManager {
         canWater: false,
         canHarvest: true,
         growthProgress: 1.0,
-        actionText: `Зібрати врожай: ${def.nameUk}`,
-        hintText: `Врожай дозрів! Отримайте 1 ${def.crateNameUk} в інвентар.`,
+        actionText: t('farm.harvest', { name: dataName('crop', def.type, def.nameUk) }),
+        hintText: t('farm.harvestHint', { name: dataName('item', def.crateItemId, def.crateNameUk) }),
       };
     }
 
@@ -357,7 +360,7 @@ export class FarmingManager {
     const progress = Math.min(1.0, closestPlot.crop.growthTimer / closestPlot.crop.stageDuration);
 
     if (!isWatered) {
-      const waterStepText = stage === 1 ? '1-й полив' : '2-й полив';
+      const waterStepText = stage === 1 ? t('farm.water1') : t('farm.water2');
       return {
         plotId: closestPlot.pieceId,
         cropType,
@@ -368,8 +371,8 @@ export class FarmingManager {
         canWater: isWateringCan,
         canHarvest: false,
         growthProgress: progress,
-        actionText: isWateringCan ? `Полити грядку (${waterStepText})` : `Потрібна лійка (${waterStepText}) [Q]`,
-        hintText: `Земля суха! Рослина не росте без води. Виберіть лійку в інвентарі [Q].`,
+        actionText: isWateringCan ? t('farm.water', { step: waterStepText }) : t('farm.needCan', { step: waterStepText }),
+        hintText: t('farm.dryHint'),
       };
     }
 
@@ -384,8 +387,8 @@ export class FarmingManager {
       canWater: false,
       canHarvest: false,
       growthProgress: progress,
-      actionText: `Росте (${stage}/3): ${def.nameUk} (${Math.round(progress * 100)}%)`,
-      hintText: stage === 1 ? 'Після 1-ї стадії грядка висохне для 2-го поливу.' : 'Після дозрівання можна буде зібрати ящик врожаю!',
+      actionText: t('farm.growing', { stage, name: dataName('crop', def.type, def.nameUk), pct: Math.round(progress * 100) }),
+      hintText: stage === 1 ? t('farm.growHint1') : t('farm.growHint2'),
     };
   }
 

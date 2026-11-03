@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { t } from '../i18n/i18n';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { worldSettings } from '../world/WorldSettings';
@@ -233,8 +234,8 @@ export class PetSystem {
   constructor(private readonly scene: THREE.Scene, private readonly terrain: TerrainSystem, private readonly particles?: ParticleManager) {}
 
   public spawnDefaults(near: THREE.Vector3): void {
-    this.add('cat', 'Мурчик', new THREE.Vector3(near.x + 2, 0, near.z + 1));
-    this.add('dog', 'Бублик', new THREE.Vector3(near.x - 2, 0, near.z + 1.5));
+    this.add('cat', t('pet.catName'), new THREE.Vector3(near.x + 2, 0, near.z + 1));
+    this.add('dog', t('pet.dogName'), new THREE.Vector3(near.x - 2, 0, near.z + 1.5));
   }
 
   public add(kind: PetKind, name: string, pos: THREE.Vector3): Pet {

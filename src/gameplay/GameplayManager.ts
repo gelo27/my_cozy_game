@@ -8,6 +8,7 @@ import { FishingSystem, FishingState } from './FishingSystem';
 import { PetSystem, Pet } from './PetSystem';
 import { RECIPES, FISH_IDS, DISH_BUFF, Recipe } from './Recipes';
 import { audioEngine } from '../audio/AudioEngine';
+import { t, dataName, getLang } from '../i18n/i18n';
 
 export type GameplayPanel = 'cook' | 'shop' | null;
 
@@ -119,19 +120,19 @@ export class GameplayManager {
 
     // Fixed stations win over pets: pets follow the player and would otherwise hijack every prompt
     if (this.inventory.getEquippedItemId() === 'fishing_rod' && this.fishing.findCastTarget(pos, facing, this.castTarget)) {
-      return { text: 'Закинути вудку', key: 'E', action: 'fish' };
+      return { text: t('play.cast'), key: 'E', action: 'fish' };
     }
-    if (this.props.findNearest('campfire', pos, 2.6)) return { text: 'Готувати їжу', key: 'E', action: 'cook' };
-    if (this.props.findNearest('mailbox', pos, 2.4)) return { text: 'Магазин', key: 'E', action: 'shop' };
+    if (this.props.findNearest('campfire', pos, 2.6)) return { text: t('play.cook'), key: 'E', action: 'cook' };
+    if (this.props.findNearest('mailbox', pos, 2.4)) return { text: t('play.shop'), key: 'E', action: 'shop' };
 
     const pet = this.pets.nearest(pos, 2.2);
     if (pet) {
       const hasTreat = this.inventory.hasItem('pet_treat');
       return {
-        text: `Погладити ${pet.name}`,
+        text: t('play.pet', { name: pet.name }),
         key: 'E',
         action: 'pet',
-        secondary: hasTreat ? { text: 'Пригостити', key: 'G', action: 'treat' } : undefined,
+        secondary: hasTreat ? { text: t('play.treat'), key: 'G', action: 'treat' } : undefined,
       };
     }
     return null;
@@ -161,7 +162,7 @@ export class GameplayManager {
       const pet: Pet | null = this.pets.nearest(pos, 2.2);
       if (pet && this.inventory.removeItem('pet_treat', 1)) {
         this.pets.feed(pet);
-        this.onNotify(`${pet.name} у захваті! ❤ ${Math.round(pet.affection)}`, 'success');
+        this.onNotify(t('play.petHappy', { name: pet.name, n: Math.round(pet.affection) }), 'success');
       }
     } else if (action === 'cook' || action === 'shop') {
       this.openPanel(action);
@@ -175,7 +176,7 @@ export class GameplayManager {
       this.inventory.addItem(fishId, 1);
       const item = this.inventory.getItem(fishId);
       audioEngine.playHarvest();
-      this.onNotify(`Спіймано: ${item?.name ?? fishId}!`, 'success');
+      this.onNotify(t('play.caught', { name: dataName('item', fishId, item?.name ?? fishId) }), 'success');
     }
     this.revision++;
   }
@@ -223,7 +224,7 @@ export class GameplayManager {
       this.cookingJob = null;
       this.inventory.addItem(recipe.dishId, 1);
       audioEngine.playHarvest();
-      this.onNotify(`Готово: ${recipe.name}!`, 'success');
+      this.onNotify(t('play.cooked', { name: dataName('recipe', recipe.id, recipe.name) }), 'success');
     }
     this.revision++;
   }
@@ -237,7 +238,7 @@ export class GameplayManager {
     this.buff = { dishId, remaining: buff.seconds, speed: buff.speed };
     this.character.walkSpeed = this.baseSpeeds.walk * buff.speed;
     this.character.sprintSpeed = this.baseSpeeds.sprint * buff.speed;
-    this.onNotify(`Смачно! Швидкість +${Math.round((buff.speed - 1) * 100)}% на ${buff.seconds} с`, 'success');
+    this.onNotify(t('play.ate', { pct: Math.round((buff.speed - 1) * 100), s: buff.seconds }), 'success');
     this.revision++;
   }
 
@@ -269,7 +270,7 @@ export class GameplayManager {
     if (!item?.buyPrice) return;
     const cost = item.buyPrice * amount;
     if (!this.inventory.removeItem('coins', cost)) {
-      this.onNotify('Не вистачає монет', 'warning');
+      this.onNotify(t('play.noCoins'), 'warning');
       return;
     }
     this.inventory.addItem(itemId, amount);
@@ -289,7 +290,7 @@ export class GameplayManager {
         ? { recipeId: this.cookingJob.recipe.id, progress: 1 - this.cookingJob.remaining / this.cookingJob.recipe.seconds }
         : null,
       buff: this.buff
-        ? { label: this.inventory.getItem(this.buff.dishId)?.name ?? '', secondsLeft: Math.ceil(this.buff.remaining) }
+        ? { label: dataName('item', this.buff.dishId, this.inventory.getItem(this.buff.dishId)?.name ?? ''), secondsLeft: Math.ceil(this.buff.remaining) }
         : null,
       clock: this.weather.getClockLabel(),
       weather: this.weather.weather,
@@ -301,7 +302,7 @@ export class GameplayManager {
 
   public get hudKey(): string {
     // Cheap change detector for throttled HUD pushes
-    return `${this.revision}|${this.fishing.revision}|${this.weather.getClockLabel()}|${this.weather.weather}`;
+    return `${this.revision}|${this.fishing.revision}|${this.weather.getClockLabel()}|${this.weather.weather}|${getLang()}`;
   }
 
   public dispose(): void {

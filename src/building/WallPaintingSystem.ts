@@ -1,3 +1,4 @@
+import { t } from '../i18n/i18n';
 import * as THREE from 'three';
 import { BuiltPiece, BuildingPieceType } from './types/BuildingTypes';
 import { SolvedSegmentCorners } from './ContinuousWallSystem';
@@ -76,6 +77,7 @@ export interface WallCellHitInfo extends WallCellCoord {
   numRows: number;
   currentWallpaperId: string;
   faceLabel: string;
+  faceKind: 'outer' | 'inner' | 'floor' | 'ceiling';
 }
 
 /**
@@ -1974,7 +1976,8 @@ export class WallPaintingSystem {
       numCols: 1,
       numRows: 1,
       currentWallpaperId: this.getCellWallpaper(pieceId, faceSide),
-      faceLabel: isLeft ? 'Зовнішня (Фасад)' : 'Внутрішня (Шпалери)',
+      faceLabel: isLeft ? t('paint.faceOuter') : t('paint.faceInner'),
+      faceKind: isLeft ? 'outer' : 'inner',
     };
   }
 
@@ -2010,7 +2013,8 @@ export class WallPaintingSystem {
       numCols: 1,
       numRows: 1,
       currentWallpaperId: this.getCellWallpaper(piece.id, faceSide),
-      faceLabel: isTop ? 'Підлога (Верхній настил)' : 'Стеля (Нижня поверхня)',
+      faceLabel: isTop ? t('paint.faceFloor') : t('paint.faceCeiling'),
+      faceKind: isTop ? 'floor' : 'ceiling',
     };
   }
 
