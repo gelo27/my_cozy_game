@@ -3,7 +3,13 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { CharacterModel } from '../character/CharacterModel';
 import { CHARACTER_CONFIG, COLLISION_GROUPS } from '../config/constants';
-import { GridNavigator } from '../navigation/GridNavigator';
+import { GridNavigator, NavDoor, PathPoint } from '../navigation/GridNavigator';
+
+/** How the companion uses doors (BuildingManager behind it). */
+export interface DoorControl {
+  isOpen(id: string): boolean;
+  toggle(id: string, from: THREE.Vector3): void;
+}
 
 const FEET = CHARACTER_CONFIG.CAPSULE_HALF_HEIGHT + CHARACTER_CONFIG.CAPSULE_RADIUS;
 const WALK = 4.2;
@@ -34,7 +40,9 @@ export class CompanionNPC {
   private readonly body: RAPIER.RigidBody;
   private readonly collider: RAPIER.Collider;
   private readonly kcc: RAPIER.KinematicCharacterController;
-  private path: THREE.Vector3[] = [];
+  private path: PathPoint[] = [];
+  /** Doors it opened itself, closed again once everyone has walked away. */
+  private openedDoors = new Map<string, NavDoor>();
   private pathIndex = 0;
   private lastGoal = new THREE.Vector3(Infinity, 0, Infinity);
   private replanTimer = 0;
@@ -54,7 +62,8 @@ export class CompanionNPC {
     private readonly scene: THREE.Scene,
     private readonly nav: GridNavigator,
     spawn: THREE.Vector3,
-    name: string
+    name: string,
+    private readonly doors: DoorControl | null = null
   ) {
     this.name = name;
     this.model = new CharacterModel(0xd8e8ff);
@@ -116,6 +125,8 @@ export class CompanionNPC {
       }
     }
 
+    this.updateDoors(pos, player);
+
     // Accelerate / brake smoothly
     this.speed += (targetSpeed - this.speed) * Math.min(1, dt * (targetSpeed > this.speed ? 6 : 10));
     if (targetSpeed === 0 && this.speed < 0.05) this.speed = 0;
@@ -124,8 +135,15 @@ export class CompanionNPC {
     this.vy = this.grounded ? -1 : Math.max(this.vy - 25 * dt, -30);
     const desired = { x: moveX * this.speed * dt, y: this.vy * dt, z: moveZ * this.speed * dt };
     this.kcc.computeColliderMovement(this.collider, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
-    const m = this.kcc.computedMovement();
+    let m = this.kcc.computedMovement();
     this.grounded = this.kcc.computedGrounded();
+    // Autostep misses low edges like a floor slab's lip; when blocked, retry the move lifted by a step
+    const wantXZ = Math.hypot(desired.x, desired.z);
+    if (wantXZ > 0.02 && Math.hypot(m.x, m.z) < wantXZ * 0.25) {
+      this.kcc.computeColliderMovement(this.collider, { x: desired.x, y: 0.2, z: desired.z }, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
+      const lifted = this.kcc.computedMovement();
+      if (Math.hypot(lifted.x, lifted.z) > wantXZ * 0.5) m = lifted;
+    }
     this.body.setNextKinematicTranslation({ x: pos.x + m.x, y: pos.y + m.y, z: pos.z + m.z });
 
     // Stuck: wanted to walk, barely moved
@@ -192,6 +210,23 @@ export class CompanionNPC {
     }
     const d = new THREE.Vector3(wp.x - pos.x, 0, wp.z - pos.z);
     return d.normalize();
+  }
+
+  /** Opens a closed door just ahead on the path; closes the ones it opened once left behind. */
+  private updateDoors(pos: THREE.Vector3, player: THREE.Vector3): void {
+    if (!this.doors) return;
+    for (let i = this.pathIndex; i < Math.min(this.path.length, this.pathIndex + 2); i++) {
+      const d = this.path[i].door;
+      if (!d || Math.hypot(d.x - pos.x, d.z - pos.z) > 1.6 || this.doors.isOpen(d.id)) continue;
+      this.doors.toggle(d.id, pos);
+      this.openedDoors.set(d.id, d);
+    }
+    for (const [id, d] of this.openedDoors) {
+      if (Math.hypot(d.x - pos.x, d.z - pos.z) < 2.5 || Math.hypot(d.x - player.x, d.z - player.z) < 2.5) continue;
+      if (this.path.some((p, i) => i >= this.pathIndex && p.door === d)) continue;
+      if (this.doors.isOpen(id)) this.doors.toggle(id, pos);
+      this.openedDoors.delete(id);
+    }
   }
 
   private teleportNear(player: THREE.Vector3): void {

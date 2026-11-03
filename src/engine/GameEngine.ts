@@ -272,17 +272,22 @@ export class GameEngine {
       gameplay.onNotify = (text, type) => callbacks.onNotify(text, type);
 
       // Villager companion: paths come from a physics-sampled grid that resets when anything is built
-      const nav = new GridNavigator(physics, () => buildingManager.revision * 100003 + props.revision, {
+      const nav = new GridNavigator(physics, () => (buildingManager.revision * 100003 + props.revision) * 7919 + terrain.revision, {
         cell: 0.5,
         radius: 0.28,
-        height: 1.6,
+        height: 1.5, // the character capsule is 1.5 m tall
         maxStepUp: 0.45,
         maxDrop: 1.2,
         minFloorY: () => worldSettings.waterLevel - 0.25,
+        doors: () => buildingManager.getDoorOpenings(),
       });
+      buildingManager.onDoorToggled = (piece) => nav.invalidateAround(piece.position, 2.5);
       const npcSpawn = new THREE.Vector3(-4, 0, 7);
       npcSpawn.y = terrain.getHeight(npcSpawn.x, npcSpawn.z);
-      gameplay.companion = new CompanionNPC(physics, scene, nav, npcSpawn, t('npc.name'));
+      gameplay.companion = new CompanionNPC(physics, scene, nav, npcSpawn, t('npc.name'), {
+        isOpen: (id) => !!buildingManager.getPiece(id)?.isOpen,
+        toggle: (id, from) => buildingManager.toggleDoor(id, from),
+      });
       const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props);
       const debugRenderer = new DebugRenderer(physics, scene);
 

@@ -23,6 +23,12 @@ import { PhysicsWorld } from '../physics/PhysicsWorld';
  * 3. string pulling: waypoints are dropped while the line of sight between neighbours is clear, so
  *    agents walk straight lines instead of grid zigzags.
  *
+ * Doors: a 0.84 m doorway is narrower than two grid cells, so cell centres rarely fit through it. Cells
+ * inside a door opening are tested on the doorway's centre line with the door's own colliders
+ * ignored, which makes doorways walkable whether the door is open or closed. After smoothing, every
+ * crossing gets a waypoint in front of and behind the door (tagged with the door) so agents walk
+ * straight through the middle and know which door to open.
+ *
  * Cost control: cached cells are free, only new physics samples cost (~30 us each). Each findPath
  * call may take at most `sampleBudget` new samples; when it runs out the search returns the best
  * partial path and flags `lastPartial`, the agent starts walking and re-plans a moment later with
@@ -38,7 +44,27 @@ export interface NavConfig {
   maxDrop: number;
   /** Lowest walkable floor (e.g. the water surface for agents that don't swim). */
   minFloorY: () => number;
+  /** Door openings, re-read when the revision changes. */
+  doors?: () => NavDoor[];
 }
+
+export interface NavDoor {
+  id: string;
+  /** Floor centre of the opening. */
+  x: number;
+  y: number;
+  z: number;
+  /** Horizontal normal of the door plane. */
+  nx: number;
+  nz: number;
+  /** Clear half-width between the jambs. */
+  half: number;
+  /** Body holding the frame and leaf colliders (ignored when testing doorway cells). */
+  body: RAPIER.RigidBody | null;
+}
+
+/** A path waypoint; `door` is set on the points just before and after a doorway. */
+export type PathPoint = THREE.Vector3 & { door?: NavDoor };
 
 interface Cell {
   walkable: boolean;
@@ -76,6 +102,7 @@ export class GridNavigator {
   /** True when the last findPath stopped early (budget) and returned a partial path. */
   public lastPartial = false;
   private sampleLimit = Infinity;
+  private doors: NavDoor[] = [];
 
   constructor(
     private readonly physics: PhysicsWorld,
@@ -102,7 +129,7 @@ export class GridNavigator {
    * Path from `start` to `goal` as world points (the first point is the next waypoint, the last is
    * the goal or the closest reachable point). Empty when no progress is possible.
    */
-  public findPath(start: THREE.Vector3, goal: THREE.Vector3, maxNodes = 2500, sampleBudget = 160): THREE.Vector3[] {
+  public findPath(start: THREE.Vector3, goal: THREE.Vector3, maxNodes = 2500, sampleBudget = 160): PathPoint[] {
     this.checkRevision();
     this.lastPartial = false;
     this.sampleLimit = this.samples + sampleBudget;
@@ -113,15 +140,54 @@ export class GridNavigator {
     }
   }
 
-  private plan(start: THREE.Vector3, goal: THREE.Vector3, maxNodes: number): THREE.Vector3[] {
+  private plan(start: THREE.Vector3, goal: THREE.Vector3, maxNodes: number): PathPoint[] {
+    const path = this.planRaw(start, goal, maxNodes);
+    return this.doors.length ? this.throughDoors(start, path) : path;
+  }
+
+  /** Inserts centred waypoints at every doorway the path crosses. */
+  private throughDoors(start: THREE.Vector3, path: PathPoint[]): PathPoint[] {
+    const out: PathPoint[] = [];
+    let ax = start.x, az = start.z, ay = start.y;
+    for (const p of path) {
+      for (const d of this.doors) {
+        if (Math.abs(d.y - ay) > 1.5 && Math.abs(d.y - p.y) > 1.5) continue;
+        const sa = (ax - d.x) * d.nx + (az - d.z) * d.nz;
+        const sb = (p.x - d.x) * d.nx + (p.z - d.z) * d.nz;
+        if (sa * sb >= 0) continue;
+        // Where the segment crosses the door plane, measured along the door
+        const t = sa / (sa - sb);
+        const lx = ax + (p.x - ax) * t - d.x, lz = az + (p.z - az) * t - d.z;
+        if (Math.abs(lx * d.nz - lz * d.nx) > d.half + 0.6) continue;
+        const side = Math.sign(sa);
+        const before: PathPoint = new THREE.Vector3(d.x + d.nx * 0.7 * side, d.y, d.z + d.nz * 0.7 * side);
+        const after: PathPoint = new THREE.Vector3(d.x - d.nx * 0.7 * side, d.y, d.z - d.nz * 0.7 * side);
+        before.door = after.door = d;
+        out.push(before, after);
+      }
+      out.push(p);
+      ax = p.x;
+      az = p.z;
+      ay = p.y;
+    }
+    return out;
+  }
+
+  private planRaw(start: THREE.Vector3, goal: THREE.Vector3, maxNodes: number): PathPoint[] {
     const s = this.snap(start.x, start.z, start.y);
-    if (!s) return [];
+    if (!s) {
+      // Pressed against a wall: the agent's own cell fails the clearance test, step off it first
+      const free = this.nearestWalkable(start, 2);
+      if (!free) return [];
+      const off = new THREE.Vector3(free.x, free.y, free.z) as PathPoint;
+      return [off, ...this.planRaw(off, goal, maxNodes)];
+    }
     let g = this.snap(goal.x, goal.z, goal.y);
     if (!g) g = this.nearestWalkable(goal);
     if (!g) return [];
 
     // 1. Straight line (the common case in open terrain)
-    if (this.lineWalkable(start.x, start.z, s.y, g.x, g.z)) return [new THREE.Vector3(g.x, g.y, g.z)];
+    if (this.lineWalkable(start.x, start.z, s.y, g.x, g.z)) return [new THREE.Vector3(g.x, g.y, g.z) as PathPoint];
 
     // 2. A*
     const nodes = this.astar(s, g, maxNodes);
@@ -341,11 +407,26 @@ export class GridNavigator {
     const world = this.physics.world;
     if (!world) return { walkable: false, y: refY };
     this.samples++;
+    // Inside a doorway: test on its centre line, ignoring the door's own frame and leaf
+    let exclude: RAPIER.RigidBody | undefined;
+    for (const d of this.doors) {
+      if (Math.abs(refY - d.y) > 1.5) continue;
+      const rx = x - d.x, rz = z - d.z;
+      const across = rx * d.nx + rz * d.nz;
+      const along = rx * d.nz - rz * d.nx;
+      if (Math.abs(across) > 0.6 || Math.abs(along) > d.half) continue;
+      const lim = Math.max(0, d.half - this.cfg.radius - 0.02);
+      const a = Math.max(-lim, Math.min(lim, along));
+      x = d.x + d.nz * a + d.nx * across;
+      z = d.z - d.nx * a + d.nz * across;
+      exclude = d.body ?? undefined;
+      break;
+    }
     const top = refY + this.cfg.maxStepUp + 0.6;
     this.ray.origin.x = x;
     this.ray.origin.y = top;
     this.ray.origin.z = z;
-    const hit = world.castRay(this.ray, this.cfg.maxStepUp + 0.6 + this.cfg.maxDrop + 3, true, this.flags);
+    const hit = world.castRay(this.ray, this.cfg.maxStepUp + 0.6 + this.cfg.maxDrop + 3, true, this.flags, undefined, undefined, exclude);
     if (!hit) return { walkable: false, y: refY };
     const y = top - hit.timeOfImpact;
     // Started inside something (wall, trunk): not a floor
@@ -355,7 +436,10 @@ export class GridNavigator {
       { x, y: y + this.cfg.maxStepUp + half, z },
       this.identity,
       this.box,
-      this.flags
+      this.flags,
+      undefined,
+      undefined,
+      exclude
     );
     return { walkable: !blocker, y };
   }
@@ -365,6 +449,7 @@ export class GridNavigator {
     if (r !== this.revision || this.cells.size > 60000) {
       this.revision = r;
       this.cells.clear();
+      this.doors = this.cfg.doors?.() ?? [];
     }
   }
 

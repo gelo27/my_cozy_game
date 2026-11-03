@@ -98,8 +98,10 @@ class SpatialPieceGrid {
 
 export class BuildingManager {
   public pieces: Map<string, BuiltPiece> = new Map();
-  /** Bumped whenever colliders change (place, remove, move, door toggle): navigation re-samples. */
+  /** Bumped whenever colliders change (place, remove, move): navigation re-samples. */
   public revision = 0;
+  /** Door open/close only changes colliders around that door, so navigation forgets just those cells. */
+  public onDoorToggled: ((piece: BuiltPiece) => void) | null = null;
   public group: THREE.Group;
   public continuousWallSystem: ContinuousWallSystem;
   public wallPaintingSystem: WallPaintingSystem;
@@ -592,12 +594,37 @@ export class BuildingManager {
 
     // Rebuild physics collider for open/closed state
     this.rebuildDoorPhysicsCollider(piece);
-    this.revision++;
+    this.onDoorToggled?.(piece);
 
     // Audio feedback
     audioEngine.at(piece.position).playDoorToggle(isOpen);
 
     return true;
+  }
+
+  /**
+   * Door openings for navigation: floor centre, facing normal and clear half-width between the jambs
+   * (matches the frame colliders in rebuildDoorPhysicsCollider).
+   */
+  public getDoorOpenings(): { id: string; x: number; y: number; z: number; nx: number; nz: number; half: number; body: RAPIER.RigidBody | null }[] {
+    const out = [];
+    for (const piece of this.pieces.values()) {
+      if (!isDoorPiece(piece.type)) continue;
+      const n = new THREE.Vector3(0, 0, 1).applyQuaternion(piece.quaternion);
+      const half =
+        piece.type === BuildingPieceType.WOOD_DOOR_DOUBLE ? 0.9 : piece.type === BuildingPieceType.DOOR_GRAND_SIDELITES_2X2 ? 0.46 : 0.42;
+      out.push({
+        id: piece.id,
+        x: piece.position.x,
+        y: piece.position.y - 1.0,
+        z: piece.position.z,
+        nx: n.x,
+        nz: n.z,
+        half,
+        body: piece.staticBody ?? null,
+      });
+    }
+    return out;
   }
 
   /**
