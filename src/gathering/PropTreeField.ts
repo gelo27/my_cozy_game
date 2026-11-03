@@ -90,14 +90,14 @@ export class PropTreeField {
     this.particles?.emitTreeFoliageLeaves(prop.position.clone().setY(prop.position.y + 2.6 * prop.scale), 5);
 
     if (st.health > 0) {
-      audioEngine.playWoodChopHit(false);
+      audioEngine.at(surface).playWoodChopHit(false);
       return false;
     }
 
     st.fall = 0;
     this.props.setSolid(node.propId, false);
-    audioEngine.playWoodChopHit(true);
-    audioEngine.playTreeFallCreak();
+    audioEngine.at(surface).playWoodChopHit(true);
+    audioEngine.at(prop.position, 5).playTreeFallCreak();
     return true;
   }
 

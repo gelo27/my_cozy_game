@@ -360,7 +360,7 @@ export class BuildingManager {
     // Audio and particles
     if (!skipAudioParticles) {
       const isWood = type !== BuildingPieceType.STONE_FOUNDATION_2X2;
-      audioEngine.playBuildPlace(isWood);
+      audioEngine.at(builtPiece.position).playBuildPlace(isWood);
       if (this.particleManager) {
         this.particleManager.emitBuildPuff(position, isWood);
       }
@@ -590,7 +590,7 @@ export class BuildingManager {
     this.rebuildDoorPhysicsCollider(piece);
 
     // Audio feedback
-    audioEngine.playDoorToggle(isOpen);
+    audioEngine.at(piece.position).playDoorToggle(isOpen);
 
     return true;
   }
@@ -1079,7 +1079,7 @@ export class BuildingManager {
 
     // 4. Sound & Particles
     const isWood = piece.type !== BuildingPieceType.STONE_FOUNDATION_2X2;
-    audioEngine.playBuildDemolish();
+    audioEngine.at(piece.position, 4).playBuildDemolish();
     if (this.particleManager) {
       this.particleManager.emitBuildPuff(piece.position, isWood);
     }

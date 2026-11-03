@@ -143,7 +143,7 @@ export class FarmingManager {
               this.setSoilVisual(plot, false);
 
               // Audio & particles
-              audioEngine.playHitSound();
+              audioEngine.at(plot.position).playHitSound();
               if (this.particleManager) {
                 this.particleManager.emitBuildPuff(plot.position, true);
               }
@@ -158,7 +158,7 @@ export class FarmingManager {
               this.setSoilVisual(plot, false);
 
               // Celebration sound & particles
-              audioEngine.playHarvest();
+              audioEngine.at(plot.position).playHarvest();
               if (this.particleManager) {
                 this.particleManager.emitBuildPuff(plot.position, false);
               }
@@ -206,7 +206,7 @@ export class FarmingManager {
     this.updateCropVisual(plot);
     this.setSoilVisual(plot, false);
 
-    audioEngine.playPlantSeed();
+    audioEngine.at(plot.position).playPlantSeed();
     if (this.particleManager) {
       this.particleManager.emitBuildPuff(plot.position, true);
     }
@@ -227,7 +227,7 @@ export class FarmingManager {
     plot.crop.waterCount += 1;
 
     this.setSoilVisual(plot, true);
-    audioEngine.playWatering();
+    audioEngine.at(plot.position).playWatering();
 
     // Emit gentle water droplet splash
     if (this.particleManager) {
@@ -256,7 +256,7 @@ export class FarmingManager {
     this.setSoilVisual(plot, false);
 
     // Audio & celebratory particles
-    audioEngine.playHarvest();
+    audioEngine.at(plot.position).playHarvest();
     if (this.particleManager) {
       this.particleManager.emitSplash(plot.position, 1.8);
       this.particleManager.emitBuildPuff(plot.position, true);

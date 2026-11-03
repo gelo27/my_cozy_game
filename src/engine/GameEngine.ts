@@ -14,6 +14,10 @@ import { InventoryManager } from '../inventory/InventoryManager';
 import { FarmingManager } from '../farming/FarmingManager';
 import { FarmInteractionPrompt } from '../farming/types/FarmingTypes';
 import { ForestZone } from '../forest/ForestZone';
+import { FURNITURE_LIGHTS, FURNITURE_MATERIALS } from '../building/furniture/FurnitureCatalog';
+import type { ExtraLight } from '../world/NightLighting';
+import { AmbientAudio } from '../audio/AmbientAudio';
+import { audioEngine } from '../audio/AudioEngine';
 import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
 import { PropTreeField } from '../gathering/PropTreeField';
 import { RockField } from '../gathering/RockField';
@@ -116,6 +120,10 @@ export class GameEngine {
   private animationFrameId = 0;
   private isDisposed = false;
   private keyG = false;
+  private readonly ambient = new AmbientAudio();
+  private campfireTimer = 0;
+  private nearestCampfire: THREE.Vector3 | null = null;
+  private readonly listenerPos = new THREE.Vector3();
 
   // Adaptive resolution: drops the pixel ratio when frames run long, restores it when there is headroom
   private lastFarmPromptKey = '';
@@ -207,6 +215,7 @@ export class GameEngine {
       terrain.commit();
       const water = new WaterSystem(scene);
       const weather = new WeatherSystem(scene);
+      weather.onLightning = () => this.ambient.thunder(this.listenerPos);
       weather.setOcclusion(new PrecipitationOcclusion(physics, WeatherSystem.PRECIP_BOX));
       const props = new PropSystem(scene, physics, terrain);
       const nightLighting = new NightLighting(scene, props, weather, PROP_GLOW_MATERIALS);
@@ -221,6 +230,18 @@ export class GameEngine {
       const inventoryManager = new InventoryManager();
       const farmingManager = new FarmingManager(scene, particleManager);
       buildingManager.setFarmingManager(farmingManager);
+      // Lamp furniture inside buildings feeds the night lighting
+      nightLighting.setExtraLights(
+        () => {
+          const out: ExtraLight[] = [];
+          for (const piece of buildingManager.getAllPieces()) {
+            const light = FURNITURE_LIGHTS[piece.type];
+            if (light) out.push({ x: piece.position.x, y: piece.position.y + light.yOffset, z: piece.position.z, range: light.range, halo: light.halo });
+          }
+          return out;
+        },
+        { bulbs: [FURNITURE_MATERIALS.bulb], shades: [FURNITURE_MATERIALS.shade] }
+      );
 
       const character = new CharacterController(physics, scene, SPAWN_POSITION.clone(), particleManager);
       character.setWaterSystems(waterEffects, waterParticles);
@@ -364,6 +385,7 @@ export class GameEngine {
     w.nightLighting.setViewportHeight(this.renderer.domElement.height);
     w.nightLighting.update(dt, tpCamera.camera.position, editing ? null : isDriving ? vehicle.getPosition() : character.getPosition());
     farmingManager.rainIntensity = w.weather.rainIntensity;
+    this.updateAudio(dt, editing ? tpCamera.camera.position : isDriving ? vehicle.getPosition() : character.getPosition(), isDriving);
 
     farmingManager.update(dt);
     forest.update(dt);
@@ -475,6 +497,33 @@ export class GameEngine {
       this.renderer.setPixelRatio(next);
       this.callbacks.onLog('info', `Роздільна здатність рендера: ${Math.round(next * 100)}% (FPS ${Math.round(avgFps)})`);
     }
+  }
+
+  /** Listener at the camera; ambience (rain, wind, campfire, engine) around the player. */
+  private updateAudio(dt: number, playerPos: THREE.Vector3, isDriving: boolean): void {
+    const w = this.world;
+    if (!w) return;
+    const camera = this.camera.camera;
+    audioEngine.updateListener(camera);
+    this.listenerPos.copy(camera.position);
+    if (!audioEngine.context) return;
+
+    this.campfireTimer -= dt;
+    if (this.campfireTimer <= 0) {
+      this.campfireTimer = 0.5;
+      const fire = w.props.findNearest('campfire', playerPos, 30);
+      this.nearestCampfire = fire ? fire.position.clone().setY(fire.position.y + 0.4) : null;
+    }
+    const weather = w.weather;
+    const storm = weather.weather === 'storm' ? 1 : 0;
+    this.ambient.update({
+      listener: this.listenerPos,
+      rain: weather.rainIntensity * (1 - weather.snowAmount),
+      wind: Math.max(storm * 0.9, weather.snowAmount * 0.7, weather.weather === 'rain' ? 0.25 : 0),
+      underRoof: weather.isSheltered(playerPos),
+      campfire: this.nearestCampfire,
+      engine: isDriving ? { position: w.vehicle.getPosition(), speedKmh: w.vehicle.speedKmh } : null,
+    });
   }
 
   private consumeKeyG(): boolean {

@@ -79,7 +79,7 @@ export class RockField {
     if (rock.kind === 'iron') this.particleManager?.emitBuildPuff(surface, true, 6);
 
     if (rock.health > 0) {
-      audioEngine.playBuildPlace(false);
+      audioEngine.at(surface).playBuildPlace(false);
       // Chip the rock smaller with every hit
       const remaining = rock.health / rock.maxHealth;
       rock.group.scale.setScalar(rock.baseScale * (0.7 + 0.3 * remaining));
@@ -194,7 +194,7 @@ export class RockField {
       rock.body = null;
     }
 
-    audioEngine.playBuildDemolish();
+    audioEngine.at(rock.position, 4).playBuildDemolish();
     const center = rock.position.clone().setY(0.4);
     this.particleManager?.emitBuildPuff(center, false, 36);
     this.particleManager?.emitLandDust(center, 6);

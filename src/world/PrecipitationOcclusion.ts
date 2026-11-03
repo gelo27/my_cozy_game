@@ -103,6 +103,14 @@ export class PrecipitationOcclusion {
     if (dirty) this.texture.needsUpdate = true;
   }
 
+  /** Height of the shelter above (x, z), or null when that cell isn't mapped yet. */
+  public heightAt(x: number, z: number): number | null {
+    const cx = Math.floor(x / this.cellSize);
+    const cz = Math.floor(z / this.cellSize);
+    const i = this.texel(cx, cz);
+    return this.keysX[i] === cx && this.keysZ[i] === cz ? this.heights[i] : null;
+  }
+
   private texel(cx: number, cz: number): number {
     const N = this.size;
     return (((cz % N) + N) % N) * N + (((cx % N) + N) % N);

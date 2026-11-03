@@ -1,18 +1,142 @@
 import * as THREE from 'three';
+import { isMobileDevice } from '../world/WorldSettings';
 
+export interface SoundPos {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * Procedural sound effects (Web Audio, no files).
+ *
+ * Spatial: `audioEngine.at(position).playX()` routes that one sound through a PannerNode placed in
+ * the world, and the listener follows the camera (updateListener), so chops, building, splashes of
+ * the watering can etc. come from where they happen and fade with distance. Calls without `at()`
+ * stay flat (UI clicks, inventory). HRTF on desktop, cheaper equal-power panning on phones.
+ */
 class AudioEngine {
   private ctx: AudioContext | null = null;
+  private master: GainNode | null = null;
+  private pendingPos: SoundPos | null = null;
+  private pendingRef = 0;
+  private readonly hrtf = !isMobileDevice();
+  private static readonly _fwd = new THREE.Vector3();
+  private static readonly _up = new THREE.Vector3();
+
+  constructor() {
+    // Browsers only allow audio after a gesture: create/resume the context on the first one
+    if (typeof window !== 'undefined') {
+      const unlock = () => {
+        this.init();
+        if (this.ctx?.state === 'suspended') this.ctx.resume();
+        if (this.ctx?.state === 'running') {
+          window.removeEventListener('pointerdown', unlock);
+          window.removeEventListener('keydown', unlock);
+        }
+      };
+      window.addEventListener('pointerdown', unlock);
+      window.addEventListener('keydown', unlock);
+    }
+  }
 
   public init() {
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.9;
+      this.master.connect(this.ctx.destination);
     }
+  }
+
+  /** The running audio context, or null before the first user gesture. */
+  public get context(): AudioContext | null {
+    return this.ctx && this.ctx.state === 'running' ? this.ctx : null;
+  }
+
+  /**
+   * Places the NEXT play call in the world. `refDistance` is how far (m) the sound keeps its full
+   * volume; it halves at roughly twice that.
+   */
+  public at(pos: SoundPos, refDistance = 3): this {
+    this.pendingPos = { x: pos.x, y: pos.y, z: pos.z };
+    this.pendingRef = refDistance;
+    return this;
+  }
+
+  /** A panner at `pos` feeding the master bus (also used by ambient loops). */
+  public createPanner(pos: SoundPos, refDistance = 3): PannerNode | null {
+    if (!this.ctx || !this.master) return null;
+    const p = this.ctx.createPanner();
+    p.panningModel = this.hrtf ? 'HRTF' : 'equalpower';
+    p.distanceModel = 'inverse';
+    p.refDistance = refDistance;
+    p.maxDistance = 200;
+    p.rolloffFactor = 1.2;
+    this.setPannerPos(p, pos);
+    p.connect(this.master);
+    return p;
+  }
+
+  public setPannerPos(p: PannerNode, pos: SoundPos): void {
+    if (p.positionX) {
+      p.positionX.value = pos.x;
+      p.positionY.value = pos.y;
+      p.positionZ.value = pos.z;
+    } else {
+      p.setPosition(pos.x, pos.y, pos.z);
+    }
+  }
+
+  /** Flat (non-positional) input of the master bus. */
+  public get bus(): AudioNode | null {
+    return this.master;
+  }
+
+  /** Moves the listener to the camera. Call once per frame. */
+  public updateListener(camera: THREE.Camera): void {
+    const ctx = this.context;
+    if (!ctx) return;
+    const l = ctx.listener;
+    const pos = camera.position;
+    const fwd = camera.getWorldDirection(AudioEngine._fwd);
+    const up = AudioEngine._up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+    if (l.positionX) {
+      l.positionX.value = pos.x;
+      l.positionY.value = pos.y;
+      l.positionZ.value = pos.z;
+      l.forwardX.value = fwd.x;
+      l.forwardY.value = fwd.y;
+      l.forwardZ.value = fwd.z;
+      l.upX.value = up.x;
+      l.upY.value = up.y;
+      l.upZ.value = up.z;
+    } else {
+      l.setPosition(pos.x, pos.y, pos.z);
+      l.setOrientation(fwd.x, fwd.y, fwd.z, up.x, up.y, up.z);
+    }
+  }
+
+  /** Destination for the sound being built: a world panner after at(), else the flat bus. */
+  private output(): AudioNode {
+    const pos = this.pendingPos;
+    this.pendingPos = null;
+    if (pos) {
+      const p = this.createPanner(pos, this.pendingRef);
+      if (p) {
+        // Let the panner be collected once the sound has finished
+        setTimeout(() => p.disconnect(), 4000);
+        return p;
+      }
+    }
+    return this.master ?? this.ctx!.destination;
   }
 
   public playHitSound() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -27,7 +151,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
 
     osc.start(t);
     osc.stop(t + 0.1);
@@ -40,6 +164,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -58,7 +183,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + (critical ? 0.22 : 0.16));
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
 
     osc.start(t);
     osc.stop(t + 0.25);
@@ -71,6 +196,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     
@@ -89,7 +215,7 @@ class AudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, noteTime + 0.28);
 
       osc.connect(gain);
-      gain.connect(this.ctx.destination);
+      gain.connect(out);
 
       osc.start(noteTime);
       osc.stop(noteTime + 0.3);
@@ -103,6 +229,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -117,7 +244,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
 
     osc.start(t);
     osc.stop(t + 0.28);
@@ -130,6 +257,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     
@@ -152,7 +280,7 @@ class AudioEngine {
 
     osc.connect(filter);
     filter.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
 
     osc.start(t);
     osc.stop(t + 0.2);
@@ -165,6 +293,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
 
@@ -179,7 +308,7 @@ class AudioEngine {
     gainBite.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
 
     oscBite.connect(gainBite);
-    gainBite.connect(this.ctx.destination);
+    gainBite.connect(out);
     oscBite.start(t);
     oscBite.stop(t + 0.13);
 
@@ -194,7 +323,7 @@ class AudioEngine {
     gainWood.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
 
     oscWood.connect(gainWood);
-    gainWood.connect(this.ctx.destination);
+    gainWood.connect(out);
     oscWood.start(t);
     oscWood.stop(t + 0.23);
 
@@ -219,7 +348,7 @@ class AudioEngine {
 
     whiteNoise.connect(noiseFilter);
     noiseFilter.connect(noiseGain);
-    noiseGain.connect(this.ctx.destination);
+    noiseGain.connect(out);
     whiteNoise.start(t);
   }
 
@@ -230,6 +359,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
 
@@ -255,7 +385,7 @@ class AudioEngine {
     outGain.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
 
     carrier.connect(outGain);
-    outGain.connect(this.ctx.destination);
+    outGain.connect(out);
 
     modulator.start(t);
     carrier.start(t);
@@ -270,6 +400,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
 
@@ -284,7 +415,7 @@ class AudioEngine {
     subGain.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
 
     subOsc.connect(subGain);
-    subGain.connect(this.ctx.destination);
+    subGain.connect(out);
     subOsc.start(t);
     subOsc.stop(t + 0.5);
 
@@ -309,7 +440,7 @@ class AudioEngine {
 
     noise.connect(filter);
     filter.connect(noiseGain);
-    noiseGain.connect(this.ctx.destination);
+    noiseGain.connect(out);
     noise.start(t);
   }
 
@@ -320,6 +451,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
 
@@ -333,7 +465,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.16);
   }
@@ -345,6 +477,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
 
@@ -359,7 +492,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.2);
 
@@ -384,7 +517,7 @@ class AudioEngine {
 
     noise.connect(filter);
     filter.connect(noiseGain);
-    noiseGain.connect(this.ctx.destination);
+    noiseGain.connect(out);
     noise.start(t);
   }
 
@@ -395,6 +528,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
 
@@ -409,7 +543,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.24);
 
@@ -424,7 +558,7 @@ class AudioEngine {
     subGain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
 
     subOsc.connect(subGain);
-    subGain.connect(this.ctx.destination);
+    subGain.connect(out);
     subOsc.start(t + 0.05);
     subOsc.stop(t + 0.25);
   }
@@ -436,6 +570,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -448,7 +583,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.06);
   }
@@ -460,6 +595,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -472,7 +608,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.24);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.25);
   }
@@ -484,6 +620,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -496,7 +633,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.05);
   }
@@ -508,6 +645,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
 
@@ -522,7 +660,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.15);
 
@@ -547,7 +685,7 @@ class AudioEngine {
 
     noise.connect(filter);
     filter.connect(noiseGain);
-    noiseGain.connect(this.ctx.destination);
+    noiseGain.connect(out);
     noise.start(t);
     noise.stop(t + 0.13);
   }
@@ -559,6 +697,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -571,7 +710,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.09);
   }
@@ -583,6 +722,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const duration = 0.45;
@@ -610,7 +750,7 @@ class AudioEngine {
 
     noise.connect(bandpass);
     bandpass.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     noise.start(t);
     noise.stop(t + duration);
 
@@ -623,7 +763,7 @@ class AudioEngine {
     oscGain.gain.setValueAtTime(0.12, t);
     oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
     osc.connect(oscGain);
-    oscGain.connect(this.ctx.destination);
+    oscGain.connect(out);
     osc.start(t);
     osc.stop(t + 0.26);
   }
@@ -635,6 +775,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -647,7 +788,7 @@ class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
 
     osc.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.15);
   }
@@ -659,6 +800,7 @@ class AudioEngine {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
+    const out = this.output();
 
     const t = this.ctx.currentTime;
     const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6 major chord
@@ -675,7 +817,7 @@ class AudioEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, noteTime + 0.35);
 
       osc.connect(gain);
-      gain.connect(this.ctx!.destination);
+      gain.connect(out);
       osc.start(noteTime);
       osc.stop(noteTime + 0.36);
     });

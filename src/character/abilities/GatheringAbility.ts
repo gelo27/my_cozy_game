@@ -77,7 +77,7 @@ export class GatheringAbility implements IAbility {
 
     if (tool === 'axe') {
       context.model?.triggerAxeSwing();
-      audioEngine.playAxeSwing();
+      audioEngine.at(playerPos).playAxeSwing();
     } else {
       context.model?.triggerMineSwing();
     }

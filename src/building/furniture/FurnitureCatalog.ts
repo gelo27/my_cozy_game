@@ -21,7 +21,23 @@ export const FURNITURE_TYPES: BuildingPieceType[] = [
   BuildingPieceType.FURN_DRESSER,
   BuildingPieceType.FURN_NIGHTSTAND,
   BuildingPieceType.FURN_BOOKSHELF,
+  BuildingPieceType.FURN_CHANDELIER,
+  BuildingPieceType.FURN_TABLE_LAMP,
 ];
+
+/** Furniture that hangs from a ceiling instead of standing on a surface. */
+export function isCeilingFurniture(type: BuildingPieceType): boolean {
+  return type === BuildingPieceType.FURN_CHANDELIER;
+}
+
+/**
+ * Light emitted by lamp furniture, relative to the piece pivot (bounding-box centre).
+ * Read by the night lighting.
+ */
+export const FURNITURE_LIGHTS: Partial<Record<BuildingPieceType, { yOffset: number; range: number; halo: number }>> = {
+  [BuildingPieceType.FURN_CHANDELIER]: { yOffset: 0.02, range: 9.5, halo: 2.2 },
+  [BuildingPieceType.FURN_TABLE_LAMP]: { yOffset: 0.08, range: 5.5, halo: 1.3 },
+};
 
 const FURNITURE_SET = new Set(FURNITURE_TYPES);
 
@@ -99,6 +115,11 @@ export const FURNITURE_MATERIALS = {
   bookBlue: plain('#5878a8'),
   bookGreen: plain('#6f9a62'),
   bookYellow: plain('#e0b85a'),
+  candle: plain('#f6efdc'),
+  /** Lamp shade fabric; the night lighting raises its emissive after dusk. */
+  shade: new THREE.MeshLambertMaterial({ color: '#f3e3c4', map: fabricTexture, side: THREE.DoubleSide, emissive: '#000000' }),
+  /** Bulbs and candle flames; the night lighting brightens them after dusk. */
+  bulb: new THREE.MeshBasicMaterial({ color: '#f5e2b8' }),
 };
 
 // ---------------------------------------------------------------------------
@@ -148,6 +169,20 @@ class FurnitureBuilder {
   cyl(mat: THREE.Material, radius: number, h: number, x: number, y: number, z: number, radiusTop = radius): this {
     const geo = new THREE.CylinderGeometry(radiusTop, radius, h, 10);
     geo.translate(x, y + h / 2, z);
+    this.add(mat, geo);
+    return this;
+  }
+
+  /** Any prepared geometry (already positioned in piece space). */
+  part(mat: THREE.Material, geo: THREE.BufferGeometry): this {
+    this.add(mat, geo);
+    return this;
+  }
+
+  /** Sphere centred at (x, y, z). */
+  ball(mat: THREE.Material, radius: number, x: number, y: number, z: number): this {
+    const geo = new THREE.SphereGeometry(radius, 10, 8);
+    geo.translate(x, y, z);
     this.add(mat, geo);
     return this;
   }
@@ -350,6 +385,47 @@ function buildBookshelf(): FurnitureBuilder {
   return b;
 }
 
+function buildChandelier(): FurnitureBuilder {
+  const b = new FurnitureBuilder();
+  const top = 0.5;
+  b.cyl(M.brass, 0.09, 0.04, 0, top - 0.04, 0, 0.07); // ceiling canopy
+  b.cyl(M.brass, 0.012, 0.3, 0, top - 0.34, 0); // chain rod
+  b.cyl(M.brass, 0.05, 0.16, 0, 0.0, 0, 0.065); // hub
+  b.ball(M.brass, 0.035, 0, 0.0, 0); // finial
+  const arms = 6;
+  const reach = 0.3;
+  for (let i = 0; i < arms; i++) {
+    const a = (i / arms) * Math.PI * 2;
+    const cx = Math.cos(a) * reach;
+    const cz = Math.sin(a) * reach;
+    // Gently curved arm: a thin box from the hub to the cup, tilted up
+    const arm = new THREE.BoxGeometry(reach, 0.02, 0.02);
+    arm.translate(reach / 2, 0, 0);
+    arm.rotateZ(0.18);
+    arm.rotateY(-a);
+    arm.translate(0, 0.06, 0);
+    b.part(M.brass, arm);
+    const cupY = 0.06 + Math.sin(0.18) * reach;
+    b.cyl(M.brass, 0.03, 0.03, cx, cupY, cz, 0.04);
+    b.cyl(M.candle, 0.016, 0.09, cx, cupY + 0.03, cz);
+    b.ball(M.bulb, 0.022, cx, cupY + 0.14, cz);
+  }
+  return b;
+}
+
+function buildTableLamp(): FurnitureBuilder {
+  const b = new FurnitureBuilder();
+  b.cyl(M.walnut, 0.09, 0.03, 0, 0, 0, 0.08); // base
+  b.cyl(M.brass, 0.014, 0.27, 0, 0.03, 0); // stem
+  b.ball(M.bulb, 0.04, 0, 0.31, 0);
+  // Open drum shade
+  const shade = new THREE.CylinderGeometry(0.1, 0.16, 0.2, 18, 1, true);
+  shade.translate(0, 0.36, 0);
+  b.part(M.shade, shade);
+  b.cyl(M.brass, 0.1, 0.006, 0, 0.455, 0); // top rim
+  return b;
+}
+
 // ---------------------------------------------------------------------------
 // Catalog
 // ---------------------------------------------------------------------------
@@ -375,6 +451,8 @@ const SPECS: FurnitureSpec[] = [
   { type: BuildingPieceType.FURN_WARDROBE, name: 'Wardrobe', ukrainianName: 'Шафа', size: [1.26, 2.0, 0.66], iconName: 'Archive', description: 'Висока двостулкова шафа для одягу.', build: buildWardrobe },
   { type: BuildingPieceType.FURN_DRESSER, name: 'Dresser', ukrainianName: 'Комод', size: [1.24, 0.85, 0.55], iconName: 'Archive', description: 'Горіховий комод з трьома шухлядами.', build: buildDresser },
   { type: BuildingPieceType.FURN_NIGHTSTAND, name: 'Nightstand', ukrainianName: 'Приліжкова тумба', size: [0.53, 0.55, 0.47], iconName: 'LampDesk', description: 'Маленька тумба з шухлядою біля ліжка.', build: buildNightstand },
+  { type: BuildingPieceType.FURN_CHANDELIER, name: 'Chandelier', ukrainianName: 'Люстра', size: [0.68, 0.5, 0.68], iconName: 'LampCeiling', description: 'Латунна люстра на шість свічок. Вішається на стелю й світить уночі.', build: buildChandelier },
+  { type: BuildingPieceType.FURN_TABLE_LAMP, name: 'Table Lamp', ukrainianName: 'Настільна лампа', size: [0.32, 0.46, 0.32], iconName: 'Lamp', description: 'Лампа з тканинним абажуром. Ставиться на стіл, тумбу чи підлогу й світить уночі.', build: buildTableLamp },
   { type: BuildingPieceType.FURN_BOOKSHELF, name: 'Bookshelf', ukrainianName: 'Книжкова шафа', size: [1.0, 1.8, 0.35], iconName: 'Library', description: 'Відкрита полиця з кольоровими книжками.', build: buildBookshelf },
 ];
 

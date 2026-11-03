@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { BuildingPieceType, BuiltPiece, SnapResult, SnapSocket, SocketType, WallGridInfo, isWindowPiece, isDoorPiece, isDoorwayPiece, isWindowOrDoorPiece, isSolidWallPiece } from './types/BuildingTypes';
 import { BUILDING_PIECES, FLOOR_THICKNESS, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isPieceBelowSurface, getPieceMeshTemplate } from './config/BuildingPiecesConfig';
-import { FURNITURE_GRID_STEP, isFurniturePiece } from './furniture/FurnitureCatalog';
+import { FURNITURE_GRID_STEP, isCeilingFurniture, isFurniturePiece } from './furniture/FurnitureCatalog';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS, BUILDING_CONFIG } from '../config/constants';
 
@@ -2198,7 +2198,8 @@ export class SnapSystem {
       position.x = Math.round(position.x / FURNITURE_GRID_STEP) * FURNITURE_GRID_STEP;
       position.z = Math.round(position.z / FURNITURE_GRID_STEP) * FURNITURE_GRID_STEP;
     }
-    position.y = hitPoint.y + size.y / 2;
+    const hanging = isCeilingFurniture(pieceType);
+    position.y = hanging ? hitPoint.y - size.y / 2 : hitPoint.y + size.y / 2;
 
     // World footprint of the rotated piece
     const c = Math.abs(Math.cos(yaw));
@@ -2250,12 +2251,12 @@ export class SnapSystem {
     const dxPlayer = Math.max(Math.abs(playerPos.x - position.x) - halfX, 0);
     const dzPlayer = Math.max(Math.abs(playerPos.z - position.z) - halfZ, 0);
     const playerInside = Math.hypot(dxPlayer, dzPlayer) < 0.3 && Math.abs(playerPos.y - position.y) < size.y / 2 + 0.9;
-    const isFlatSurface = hitNormal.y > 0.7;
+    const isFlatSurface = hanging ? hitNormal.y < -0.7 : hitNormal.y > 0.7;
     const isWithinRange = position.distanceTo(playerPos) <= SnapSystem.MAX_PLACEMENT_DISTANCE;
     const isBelowSurface = position.y - size.y / 2 < BUILDING_CONFIG.GROUND_SURFACE_Y + BUILDING_CONFIG.MIN_SURFACE_TOLERANCE;
 
     let reason: string | undefined;
-    if (!isFlatSurface) reason = 'Furniture must stand on a flat surface';
+    if (!isFlatSurface) reason = hanging ? 'Hang it from a ceiling' : 'Furniture must stand on a flat surface';
     else if (overlapping) reason = 'Overlaps a wall or other furniture';
     else if (playerInside) reason = 'Too close to player character';
     else if (!isWithinRange) reason = 'Too far away (max 15m)';

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { isMobileDevice, worldSettings } from './WorldSettings';
+import { worldSettings } from './WorldSettings';
 import { PrecipitationOcclusion } from './PrecipitationOcclusion';
+import { Precipitation, PRECIP_BOX } from './Precipitation';
 import { SkyDome, SkyParams } from './SkyDome';
 
 export type WeatherType = 'clear' | 'cloudy' | 'rain' | 'storm' | 'fog' | 'snow';
@@ -65,12 +66,11 @@ const SKY_KEYS: [number, number][] = [
 /**
  * Day/night cycle, sky, fog and weather.
  *
- * Precipitation is a single THREE.Points cloud around the camera whose motion is computed in the
- * vertex shader from time, so the CPU only updates two uniforms per frame regardless of drop count.
+ * Rain and snow live in Precipitation (GPU-animated, roof-aware through PrecipitationOcclusion).
  */
 export class WeatherSystem {
   /** Side of the precipitation box that follows the camera (m). */
-  public static readonly PRECIP_BOX = 40;
+  public static readonly PRECIP_BOX = PRECIP_BOX;
   public weather: WeatherType = 'clear';
   /** Smoothed 0..1, readable by gameplay (e.g. rain waters crops). */
   public rainIntensity = 0;
@@ -78,9 +78,11 @@ export class WeatherSystem {
   public readonly sun: THREE.DirectionalLight;
   private readonly hemi: THREE.HemisphereLight;
   private readonly ambient: THREE.AmbientLight;
-  private readonly precip: THREE.Points;
-  private readonly precipMat: THREE.ShaderMaterial;
+  private readonly precipitation: Precipitation;
   private occlusion: PrecipitationOcclusion | null = null;
+  private snowMix = 0;
+  /** Called when a storm lightning flash starts (thunder sound). */
+  public onLightning: (() => void) | null = null;
   private readonly fog: THREE.FogExp2;
   private readonly sky = new THREE.Color();
   private current = { light: 1, fog: 0.006, amount: 0, cover: 0.28, dark: 0, tint: new THREE.Color(1, 1, 1) };
@@ -119,84 +121,24 @@ export class WeatherSystem {
     scene.background = this.sky;
     this.skyDome = new SkyDome(scene);
 
-    const count = isMobileDevice() ? 900 : 2600;
-    const pos = new Float32Array(count * 3);
-    const seed = new Float32Array(count);
-    for (let i = 0; i < count; i++) {
-      pos[i * 3] = Math.random() * 40 - 20;
-      pos[i * 3 + 1] = Math.random() * 24;
-      pos[i * 3 + 2] = Math.random() * 40 - 20;
-      seed[i] = Math.random();
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('seed', new THREE.BufferAttribute(seed, 1));
-    this.precipMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      uniforms: {
-        uTime: { value: 0 },
-        uCenter: { value: new THREE.Vector3() },
-        uAmount: { value: 0 },
-        uSnow: { value: 0 },
-        uSize: { value: isMobileDevice() ? 2.0 : 2.6 },
-        uOcc: { value: null as THREE.Texture | null },
-        uOccCell: { value: 1 },
-        uOccN: { value: 1 },
-        uOccOn: { value: 0 },
-      },
-      vertexShader: `
-        attribute float seed;
-        uniform float uTime, uAmount, uSnow, uSize, uOccCell, uOccN, uOccOn;
-        uniform vec3 uCenter;
-        uniform sampler2D uOcc;
-        varying float vAlpha;
-        void main() {
-          float speed = mix(16.0, 1.6, uSnow);
-          vec3 p = position;
-          p.y = mod(p.y - uTime * speed * (0.8 + seed * 0.4), 24.0);
-          p.x += uSnow * sin(uTime * 0.9 + seed * 20.0) * 0.6;
-          // Wrap the 40 m box around the camera so drops never run out
-          p.xz = mod(p.xz - uCenter.xz + 20.0, 40.0) - 20.0 + uCenter.xz;
-          p.y += uCenter.y - 8.0;
-          vAlpha = step(seed, uAmount);
-          // Roof map: hide drops below the highest static surface of their column
-          if (uOccOn > 0.5) {
-            vec2 cell = floor(p.xz / uOccCell);
-            float roof = texture2D(uOcc, (mod(cell, uOccN) + 0.5) / uOccN).r;
-            vAlpha *= step(roof, p.y);
-          }
-          vec4 mv = modelViewMatrix * vec4(p, 1.0);
-          gl_PointSize = uSize * mix(1.0, 1.8, uSnow) * (30.0 / -mv.z);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      fragmentShader: `
-        uniform float uSnow;
-        varying float vAlpha;
-        void main() {
-          if (vAlpha < 0.5) discard;
-          vec2 d = gl_PointCoord - 0.5;
-          float a = uSnow > 0.5
-            ? smoothstep(0.5, 0.2, length(d))
-            : smoothstep(0.12, 0.0, abs(d.x)) * smoothstep(0.5, 0.1, abs(d.y));
-          if (a < 0.05) discard;
-          gl_FragColor = vec4(uSnow > 0.5 ? vec3(1.0) : vec3(0.75, 0.85, 0.95), a * (uSnow > 0.5 ? 0.9 : 0.55));
-        }`,
-    });
-    this.precip = new THREE.Points(geo, this.precipMat);
-    this.precip.frustumCulled = false;
-    this.precip.visible = false;
-    scene.add(this.precip);
+    this.precipitation = new Precipitation(scene);
   }
 
   /** Enables the raycast roof map so rain and snow stop at roofs and big static colliders. */
   public setOcclusion(occ: PrecipitationOcclusion): void {
     this.occlusion = occ;
-    const u = this.precipMat.uniforms;
-    u.uOcc.value = occ.texture;
-    u.uOccCell.value = occ.cellSize;
-    u.uOccN.value = occ.size;
-    u.uOccOn.value = 1;
+    this.precipitation.setOcclusion(occ);
+  }
+
+  /** True when a roof or another large static collider covers `pos` (only tracked while it rains). */
+  public isSheltered(pos: THREE.Vector3): boolean {
+    const h = this.occlusion?.heightAt(pos.x, pos.z);
+    return h !== null && h !== undefined && h > pos.y + 1.2;
+  }
+
+  /** 0..1 how much snow (vs rain) is falling. */
+  public get snowAmount(): number {
+    return this.snowMix * this.current.amount;
   }
 
   public setWeather(type: WeatherType): void {
@@ -250,6 +192,7 @@ export class WeatherSystem {
       if (this.lightningTimer <= 0) {
         this.flash = 1;
         this.lightningTimer = 5 + Math.random() * 9;
+        this.onLightning?.();
       }
     }
     this.flash = Math.max(0, this.flash - dt * 3);
@@ -297,13 +240,11 @@ export class WeatherSystem {
     this.skyDome.update(dt, cameraPos, sp);
 
     // Precipitation
-    const u = this.precipMat.uniforms;
-    u.uTime.value += dt;
-    u.uCenter.value.copy(cameraPos);
-    u.uAmount.value = cur.amount;
-    u.uSnow.value = p.precipitation === 'snow' ? 1 : p.precipitation === 'rain' ? 0 : u.uSnow.value;
-    this.precip.visible = cur.amount > 0.02;
-    if (this.precip.visible) this.occlusion?.update(cameraPos);
+    if (p.precipitation !== 'none') this.snowMix = p.precipitation === 'snow' ? 1 : 0;
+    const bright = (0.3 + daylight * 0.7) * (0.55 + cur.light * 0.45) + this.flash;
+    const storm = this.weather === 'storm' ? 1 : 0;
+    this.precipitation.update(dt, cameraPos, cur.amount, this.snowMix, bright, storm, Math.min(window.devicePixelRatio || 1, 1.5));
+    if (this.precipitation.active) this.occlusion?.update(cameraPos);
   }
 
   private sampleKeys(keys: [number, number][], hour: number, out: THREE.Color): THREE.Color {

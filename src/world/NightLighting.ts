@@ -97,6 +97,15 @@ export function installGlobalNightLights(): void {
 
 // ------------------------------------------------------------------ light sources
 
+/** A light provided by something other than props (e.g. lamp furniture in buildings). */
+export interface ExtraLight {
+  x: number;
+  y: number;
+  z: number;
+  range: number;
+  halo: number;
+}
+
 interface LightSource {
   pos: THREE.Vector3;
   range: number;
@@ -117,6 +126,11 @@ const MAX_HALOS = 96;
 export class NightLighting {
   private sources: LightSource[] = [];
   private lastPropsRevision = -1;
+  private extraProvider: (() => ExtraLight[]) | null = null;
+  private extraKey = '';
+  private extraTimer = 0;
+  private readonly glowBulbs: THREE.MeshBasicMaterial[] = [];
+  private readonly glowShades: THREE.MeshLambertMaterial[] = [];
   private selectTimer = 0;
   private selected: LightSource[] = [];
   private time = 0;
@@ -171,6 +185,20 @@ export class NightLighting {
     scene.add(this.halos);
   }
 
+  /**
+   * Extra light sources polled twice a second (cheap: a key string detects changes), plus the
+   * materials that should glow with them: bulbs follow the prop lamp bulbs, shades get emissive.
+   */
+  public setExtraLights(
+    provider: () => ExtraLight[],
+    glow: { bulbs?: THREE.MeshBasicMaterial[]; shades?: THREE.MeshLambertMaterial[] } = {}
+  ): void {
+    this.extraProvider = provider;
+    this.glowBulbs.push(...(glow.bulbs ?? []));
+    this.glowShades.push(...(glow.shades ?? []));
+    this.extraTimer = 0;
+  }
+
   /** Viewport height drives point sizes so halos keep their world size at any resolution. */
   public setViewportHeight(px: number): void {
     this.haloMat.uniforms.uScale.value = px * 0.9;
@@ -184,11 +212,26 @@ export class NightLighting {
     this.bulbMaterials.lamp.color.setRGB(0.78 + 0.22 * night, 0.72 + 0.2 * night, 0.55 + 0.1 * night);
     const fireFlicker = 0.85 + 0.15 * Math.sin(this.time * 17) * Math.sin(this.time * 7.3);
     this.bulbMaterials.fire.color.setRGB(1, 0.5 + 0.12 * fireFlicker, 0.16);
+    for (const m of this.glowBulbs) m.color.copy(this.bulbMaterials.lamp.color);
+    for (const m of this.glowShades) m.emissive.setRGB(0.55 * night, 0.4 * night, 0.2 * night);
 
+    let rebuild = false;
     if (this.props.revision !== this.lastPropsRevision) {
       this.lastPropsRevision = this.props.revision;
-      this.rebuildSources();
+      rebuild = true;
     }
+    this.extraTimer -= dt;
+    if (this.extraProvider && this.extraTimer <= 0) {
+      this.extraTimer = 0.5;
+      const key = this.extraProvider()
+        .map((l) => `${l.x.toFixed(2)},${l.y.toFixed(2)},${l.z.toFixed(2)}`)
+        .join(';');
+      if (key !== this.extraKey) {
+        this.extraKey = key;
+        rebuild = true;
+      }
+    }
+    if (rebuild) this.rebuildSources();
 
     this.haloMat.uniforms.uNight.value = night;
     this.haloMat.uniforms.uTime.value = this.time;
@@ -249,6 +292,16 @@ export class NightLighting {
         this.haloSize[h] = (isLamp ? 2.6 : 3.4) * p.scale;
         const c = isLamp ? [1.0, 0.8, 0.5] : [1.0, 0.55, 0.22];
         this.haloColor.set(c.map((v) => v * 0.55), h * 3);
+        h++;
+      }
+    }
+    for (const l of this.extraProvider?.() ?? []) {
+      const pos = new THREE.Vector3(l.x, l.y, l.z);
+      this.sources.push({ pos, range: l.range, color: LAMP_COLOR, flicker: 0, seed: Math.random() });
+      if (h < MAX_HALOS) {
+        this.haloPos.set([pos.x, pos.y, pos.z], h * 3);
+        this.haloSize[h] = l.halo;
+        this.haloColor.set([0.55, 0.44, 0.27], h * 3);
         h++;
       }
     }

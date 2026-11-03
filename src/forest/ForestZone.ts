@@ -915,7 +915,7 @@ export class ForestZone {
             tree.trunkMesh.rotation.y = tree.notchAngle;
           }
 
-          audioEngine.playWoodChopHit(false);
+          audioEngine.at(hitPoint).playWoodChopHit(false);
           this.particleManager?.emitWoodSplinters(hitPoint, normal, isAxe ? (15 + hitsDone * 6) : 12);
           this.particleManager?.emitTreeFoliageLeaves(
             new THREE.Vector3(tree.position.x, tree.trunkHeight * 0.7, tree.position.z),
@@ -942,7 +942,7 @@ export class ForestZone {
           this.splitFallenTreeIntoLogs(fallen, hitPoint);
           return { hit: true, isFatal: true, hitPoint, normal, isLogSplit: true };
         } else {
-          audioEngine.playWoodChopHit(false);
+          audioEngine.at(hitPoint).playWoodChopHit(false);
           this.particleManager?.emitWoodSplinters(hitPoint, normal, 18);
           return { hit: true, isFatal: false, hitPoint, normal };
         }
@@ -993,8 +993,8 @@ export class ForestZone {
     ).body;
 
     // 4. Audio: wood crack + creak
-    audioEngine.playWoodChopHit(true);
-    audioEngine.playTreeFallCreak();
+    audioEngine.at(tree.position).playWoodChopHit(true);
+    audioEngine.at(tree.position, 5).playTreeFallCreak();
 
     // 5. Particles: massive wood splinter burst + fluttering foliage
     const chopPoint = new THREE.Vector3(tree.position.x, 0.8, tree.position.z);
@@ -1099,7 +1099,7 @@ export class ForestZone {
     }
 
     // 3. Audio & particle feedback
-    audioEngine.playLogSplit();
+    audioEngine.at(splitPoint).playLogSplit();
     this.particleManager?.emitWoodSplinters(splitPoint, new THREE.Vector3(0, 1, 0), 28);
     this.particleManager?.emitTreeFoliageLeaves(splitPoint, 20);
 
@@ -1226,7 +1226,7 @@ export class ForestZone {
         // When fallen tree strikes ground (y low and vertical speed stopped, or after 1s fall)
         if ((t.y <= 1.2 && Math.abs(vel.y) < 1.5 && age > 450) || age > 2000) {
           fallen.hasHitGround = true;
-          audioEngine.playTreeImpact();
+          audioEngine.at(t, 8).playTreeImpact();
 
           // Ground dust burst and leaf flutter
           this.particleManager?.emitLandDust(new THREE.Vector3(t.x, 0.1, t.z), 6.5);

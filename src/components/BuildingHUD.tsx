@@ -39,6 +39,8 @@ import {
   Archive,
   LampDesk,
   Library,
+  Lamp,
+  LampCeiling,
 } from 'lucide-react';
 import { BuildingPieceType, BuildingTelemetry, PieceCategory } from '../building/types/BuildingTypes';
 import { BUILDING_PIECES } from '../building/config/BuildingPiecesConfig';
@@ -326,6 +328,8 @@ const PIECE_ITEMS: PieceItemConfig[] = [
   { type: BuildingPieceType.FURN_DRESSER, category: PieceCategory.FURNITURE, icon: <Archive className="w-4 h-4" />, dimBadge: '3 шухляди' },
   { type: BuildingPieceType.FURN_NIGHTSTAND, category: PieceCategory.FURNITURE, icon: <LampDesk className="w-5 h-5" />, dimBadge: '0.5м' },
   { type: BuildingPieceType.FURN_BOOKSHELF, category: PieceCategory.FURNITURE, icon: <Library className="w-5 h-5" />, dimBadge: '1×1.8м' },
+  { type: BuildingPieceType.FURN_CHANDELIER, category: PieceCategory.FURNITURE, icon: <LampCeiling className="w-5 h-5" />, dimBadge: '0.7м' },
+  { type: BuildingPieceType.FURN_TABLE_LAMP, category: PieceCategory.FURNITURE, icon: <Lamp className="w-5 h-5" />, dimBadge: '0.3м' },
 ];
 
 const CATEGORY_TABS: { id: PieceCategory | 'ALL'; name: string; icon: React.ReactNode }[] = [
