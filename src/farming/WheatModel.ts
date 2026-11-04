@@ -10,7 +10,8 @@ export const fieldCropTime = { value: 0 };
 
 /**
  * One vertex-coloured material for every field plant. Stalks sway with the square of their height,
- * phase-shifted by the instance position, so the whole field ripples without any per-frame CPU work.
+ * phase-shifted by the instance position, so the whole field ripples without any per-frame CPU work;
+ * the per-instance `aBend` adds the proximity push (players, pets, moped) on top.
  */
 export const FIELD_CROP_MATERIAL = (() => {
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
@@ -18,7 +19,7 @@ export const FIELD_CROP_MATERIAL = (() => {
     injectNightLights(shader);
     shader.uniforms.uTime = fieldCropTime;
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uTime;')
+      .replace('#include <common>', '#include <common>\nuniform float uTime;\nattribute vec2 aBend;')
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
@@ -30,6 +31,15 @@ export const FIELD_CROP_MATERIAL = (() => {
   float gust = sin(uTime * 0.6 + ip.x * 0.11 + ip.z * 0.07) * 0.5 + 0.5;
   transformed.x += sin(uTime * 1.9 + ip.x * 0.8 + ip.z * 0.5) * (0.05 + gust * 0.07) * bend;
   transformed.z += cos(uTime * 1.5 + ip.z * 0.9 - ip.x * 0.3) * 0.04 * bend;
+
+  // Proximity push: aBend is the tip's world XZ offset from the CPU springs. The instance matrix is
+  // yaw * uniform scale, so its inverse is transpose / scale^2 (no inverse() needed).
+  mat3 im = mat3(instanceMatrix);
+  vec3 localBend = (transpose(im) * vec3(aBend.x, 0.0, aBend.y)) / dot(im[0], im[0]);
+  float hn = h / 0.8;
+  float k = hn * hn;
+  transformed.xz += localBend.xz * k;
+  transformed.y -= dot(localBend.xz, localBend.xz) * 0.6 * k; // keep stalk length as it leans
 }
 #endif`
       );

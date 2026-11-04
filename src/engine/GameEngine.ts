@@ -153,6 +153,8 @@ export class GameEngine {
 
   // Adaptive resolution: drops the pixel ratio when frames run long, restores it when there is headroom
   private lastFarmPromptKey = '';
+  /** Reused for the field-wheat pushers so the frame loop doesn't allocate. */
+  private readonly pushTmp = new THREE.Vector3();
   private lastGatherPromptKey = '';
 
   private maxPixelRatio = 1;
@@ -520,6 +522,22 @@ export class GameEngine {
     farmingManager.rainIntensity = w.weather.rainIntensity;
     this.updateAudio(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), ride);
 
+    // Bodies that part the field wheat (springs run only for stalks they touch)
+    const fields = farmingManager.fields;
+    fields.clearPushers();
+    if (!editing) {
+      if (character.body) {
+        const cp = character.body.translation();
+        fields.addPusher(cp.x, cp.y - 0.9, cp.z, 0.8);
+      }
+      moped.getPosition(this.pushTmp);
+      fields.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 1.0);
+      const pets = w.gameplay.pets.pets;
+      for (let i = 0; i < pets.length; i++) {
+        const pp = pets[i].group.position;
+        fields.addPusher(pp.x, pp.y, pp.z, 0.55);
+      }
+    }
     farmingManager.update(dt);
     forest.update(dt);
     w.propTrees.update(dt);

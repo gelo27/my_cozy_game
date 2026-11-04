@@ -62,7 +62,31 @@ interface CropVisual {
 interface Batch {
   mesh: THREE.InstancedMesh;
   capacity: number;
+  /** Per-plant springs (single-plant wheat batches only). */
+  springs: SpringSet | null;
 }
+
+/**
+ * Bend springs for one wheat batch. `bend` is uploaded as the per-instance `aBend` attribute: the
+ * world-space XZ offset of a stalk's tip. Only plants a pusher touched are simulated, and only the
+ * changed index range is re-uploaded; once everything settles nothing runs at all.
+ */
+interface SpringSet {
+  attr: THREE.InstancedBufferAttribute;
+  bend: Float32Array;
+  vel: Float32Array;
+  target: Float32Array;
+  /** Plant base XZ in world space. */
+  base: Float32Array;
+  isActive: Uint8Array;
+  active: number[];
+}
+
+/** Tip offset (m) at full push, spring stiffness and damping (underdamped: a couple of wobbles). */
+const MAX_BEND = 0.42;
+const SPRING_K = 70;
+const SPRING_DAMP = 5.5;
+const MAX_PUSHERS = 16;
 
 /** Deterministic per-field random so plants keep their layout across reloads. */
 function rng(seed: number): () => number {
@@ -99,6 +123,14 @@ export class FieldManager {
   private readonly ghostMaterial: THREE.MeshBasicMaterial;
   private ghostKey = '';
   private ghostTime = 0;
+
+  /** Wheat instances of each field inside its batch, for the proximity push. */
+  // Plain arrays (not Map/Set iteration) so the per-frame spring pass allocates nothing
+  private wheatSlots: { field: FarmField; springs: SpringSet; start: number; count: number }[] = [];
+  private springSets: SpringSet[] = [];
+  /** x, y, z, radius per pusher, refilled every frame. */
+  private readonly pushers = new Float32Array(MAX_PUSHERS * 4);
+  private pusherCount = 0;
 
   private readonly tmpMatrix = new THREE.Matrix4();
   private readonly tmpQuat = new THREE.Quaternion();
@@ -152,6 +184,7 @@ export class FieldManager {
     wheatProbe.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
     wheatProbe.setAttribute('normal', new THREE.BufferAttribute(new Float32Array([0, 1, 0, 0, 1, 0, 0, 1, 0]), 3));
     wheatProbe.setAttribute('color', new THREE.BufferAttribute(new Float32Array(9), 3));
+    wheatProbe.setAttribute('aBend', new THREE.InstancedBufferAttribute(new Float32Array(2), 2));
     const warm = (geometry: THREE.BufferGeometry, material: THREE.Material) => {
       const mesh = new THREE.InstancedMesh(geometry, material, 1);
       mesh.name = 'FieldShaderWarmer';
@@ -434,6 +467,7 @@ export class FieldManager {
       this.dirty = false;
       this.rebuildInstances();
     }
+    this.updateSprings(dt);
     if (this.ghost.visible) {
       this.ghostTime += dt;
       this.ghostMaterial.opacity = 0.75 + Math.sin(this.ghostTime * 5) * 0.2;
@@ -449,6 +483,144 @@ export class FieldManager {
         f.indicator.scale.set(s, s, 1);
       }
     }
+  }
+
+  // ---------------------------------------------------------------- proximity push
+
+  /** Call once per frame before update(), then addPusher() for each body that parts the wheat. */
+  public clearPushers(): void {
+    this.pusherCount = 0;
+  }
+
+  /** A body at (x, y, z) pushing stalks within `radius` metres (y is its feet or centre). */
+  public addPusher(x: number, y: number, z: number, radius: number): void {
+    if (this.pusherCount >= MAX_PUSHERS) return;
+    const o = this.pusherCount++ * 4;
+    this.pushers[o] = x;
+    this.pushers[o + 1] = y;
+    this.pushers[o + 2] = z;
+    this.pushers[o + 3] = radius;
+  }
+
+  private updateSprings(dt: number): void {
+    if (this.wheatSlots.length === 0) return;
+
+    // Targets of the moving plants relax to upright unless a pusher holds them this frame
+    for (let k = 0; k < this.springSets.length; k++) {
+      const s = this.springSets[k];
+      for (let a = 0; a < s.active.length; a++) s.target[s.active[a] * 2] = s.target[s.active[a] * 2 + 1] = 0;
+    }
+
+    for (let p = 0; p < this.pusherCount; p++) {
+      const px = this.pushers[p * 4];
+      const py = this.pushers[p * 4 + 1];
+      const pz = this.pushers[p * 4 + 2];
+      const r = this.pushers[p * 4 + 3];
+      for (let w = 0; w < this.wheatSlots.length; w++) {
+        const slot = this.wheatSlots[w];
+        const field = slot.field;
+        const dy = py - field.center.y;
+        if (dy < -1.5 || dy > 2.5) continue; // jumping high over it, or on a bridge below
+        if (this.distanceTo(field, px, pz) > r) continue;
+        const s = slot.springs;
+        for (let i = slot.start; i < slot.start + slot.count; i++) {
+          const dx = s.base[i * 2] - px;
+          const dz = s.base[i * 2 + 1] - pz;
+          const d2 = dx * dx + dz * dz;
+          if (d2 >= r * r) continue;
+          const d = Math.sqrt(d2);
+          const f = 1 - d / r;
+          const push = MAX_BEND * f * (2 - f); // eased: firm near the body, soft at the edge
+          if (d > 1e-3) {
+            s.target[i * 2] += (dx / d) * push;
+            s.target[i * 2 + 1] += (dz / d) * push;
+          } else {
+            s.target[i * 2] += push;
+          }
+          if (!s.isActive[i]) {
+            s.isActive[i] = 1;
+            s.active.push(i);
+          }
+        }
+      }
+    }
+
+    const h = Math.min(dt, 1 / 30);
+    for (let k = 0; k < this.springSets.length; k++) {
+      const s = this.springSets[k];
+      if (s.active.length === 0) continue;
+      let lo = Infinity;
+      let hi = -1;
+      for (let a = s.active.length - 1; a >= 0; a--) {
+        const i = s.active[a];
+        const ix = i * 2;
+        let tx = s.target[ix];
+        let tz = s.target[ix + 1];
+        const tl = Math.hypot(tx, tz);
+        if (tl > MAX_BEND) {
+          tx *= MAX_BEND / tl;
+          tz *= MAX_BEND / tl;
+        }
+        // Semi-implicit Euler: stable at these stiffnesses with the 1/30 s step cap
+        s.vel[ix] += (SPRING_K * (tx - s.bend[ix]) - SPRING_DAMP * s.vel[ix]) * h;
+        s.vel[ix + 1] += (SPRING_K * (tz - s.bend[ix + 1]) - SPRING_DAMP * s.vel[ix + 1]) * h;
+        s.bend[ix] += s.vel[ix] * h;
+        s.bend[ix + 1] += s.vel[ix + 1] * h;
+        lo = Math.min(lo, i);
+        hi = Math.max(hi, i);
+        const settled =
+          tl === 0 &&
+          Math.abs(s.bend[ix]) + Math.abs(s.bend[ix + 1]) < 0.002 &&
+          Math.abs(s.vel[ix]) + Math.abs(s.vel[ix + 1]) < 0.01;
+        if (settled) {
+          s.bend[ix] = s.bend[ix + 1] = s.vel[ix] = s.vel[ix + 1] = 0;
+          s.isActive[i] = 0;
+          s.active[a] = s.active[s.active.length - 1];
+          s.active.pop();
+        }
+      }
+      if (hi >= 0) {
+        s.attr.clearUpdateRanges();
+        s.attr.addUpdateRange(lo * 2, (hi - lo + 1) * 2);
+        s.attr.needsUpdate = true;
+      }
+    }
+  }
+
+  /**
+   * Springs for a (new or regrown) wheat batch. The stage geometry is shared only by this batch, so
+   * disposing it frees its GPU buffers, including the previous smaller aBend: no orphaned buffers.
+   * The old set is dropped from the list, leaving its typed arrays to the GC.
+   */
+  private createSprings(geometry: THREE.BufferGeometry, capacity: number, previous: SpringSet | null): SpringSet {
+    if (previous) this.springSets = this.springSets.filter((s) => s !== previous);
+    const bend = new Float32Array(capacity * 2);
+    const attr = new THREE.InstancedBufferAttribute(bend, 2);
+    attr.setUsage(THREE.DynamicDrawUsage);
+    geometry.dispose();
+    geometry.setAttribute('aBend', attr);
+    const s: SpringSet = {
+      attr,
+      bend,
+      vel: new Float32Array(capacity * 2),
+      target: new Float32Array(capacity * 2),
+      base: new Float32Array(capacity * 2),
+      isActive: new Uint8Array(capacity),
+      active: [],
+    };
+    this.springSets.push(s);
+    return s;
+  }
+
+  /** Plants moved (planted / harvested / re-laid out): everything stands upright again. */
+  private resetSprings(s: SpringSet): void {
+    s.bend.fill(0);
+    s.vel.fill(0);
+    s.target.fill(0);
+    s.isActive.fill(0);
+    s.active.length = 0;
+    s.attr.clearUpdateRanges();
+    s.attr.needsUpdate = true;
   }
 
   // ---------------------------------------------------------------- instancing
@@ -484,7 +656,8 @@ export class FieldManager {
 
   private rebuildInstances(): void {
     const terrain = this.terrain;
-    const lists = new Map<string, { part: CropPart; matrices: THREE.Matrix4[] }>();
+    type Entry = { part: CropPart; matrices: THREE.Matrix4[]; owners: { field: FarmField; start: number; count: number }[] };
+    const lists = new Map<string, Entry>();
 
     for (const field of this.fields.values()) {
       if (!field.crop || !terrain) continue;
@@ -494,10 +667,13 @@ export class FieldManager {
       visual.parts.forEach((part, pi) => {
         const key = `${cropType}:${stage}:${visual.single ? 's' : 't'}:${pi}`;
         let entry = lists.get(key);
-        if (!entry) lists.set(key, (entry = { part, matrices: [] }));
+        if (!entry) lists.set(key, (entry = { part, matrices: [], owners: [] }));
+        entry.owners.push({ field, start: entry.matrices.length, count: placements.length });
         for (const m of placements) entry.matrices.push(m.clone().multiply(part.matrix));
       });
     }
+
+    this.wheatSlots = [];
 
     for (const [key, batch] of this.batches) {
       if (!lists.has(key)) {
@@ -506,9 +682,11 @@ export class FieldManager {
       }
     }
 
-    for (const [key, { part, matrices }] of lists) {
+    for (const [key, { part, matrices, owners }] of lists) {
+      const springy = part.material === FIELD_CROP_MATERIAL;
       let batch = this.batches.get(key);
       if (!batch || batch.capacity < matrices.length) {
+        const previousSprings = batch?.springs ?? null;
         if (batch) {
           this.group.remove(batch.mesh);
           batch.mesh.dispose(); // instance buffers only; geometry and material are shared
@@ -518,11 +696,21 @@ export class FieldManager {
         mesh.name = `FieldCrops_${key}`;
         mesh.matrixAutoUpdate = false;
         this.group.add(mesh);
-        batch = { mesh, capacity };
+        const springs = springy ? this.createSprings(part.geometry, capacity, previousSprings) : null;
+        batch = { mesh, capacity, springs };
         this.batches.set(key, batch);
       }
       const mesh = batch.mesh;
       for (let i = 0; i < matrices.length; i++) mesh.setMatrixAt(i, matrices[i]);
+      const springs = batch.springs;
+      if (springs) {
+        this.resetSprings(springs);
+        for (let i = 0; i < matrices.length; i++) {
+          springs.base[i * 2] = matrices[i].elements[12];
+          springs.base[i * 2 + 1] = matrices[i].elements[14];
+        }
+        for (const o of owners) this.wheatSlots.push({ field: o.field, springs, start: o.start, count: o.count });
+      }
       mesh.count = matrices.length;
       mesh.visible = matrices.length > 0;
       mesh.instanceMatrix.needsUpdate = true;
