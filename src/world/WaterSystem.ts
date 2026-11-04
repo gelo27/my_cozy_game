@@ -25,6 +25,10 @@ export class WaterSystem {
       depthWrite: false,
       // Seen from below when diving: the underside of the surface must show too
       side: THREE.DoubleSide,
+      // A flat plane can't overlap itself: draw both faces in one pass. Otherwise three.js renders a
+      // transparent double-sided material twice, flipping material.side, which rebuilds its program
+      // parameters (a big object and a long cache-key string) twice every frame.
+      forceSinglePass: true,
     });
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader);

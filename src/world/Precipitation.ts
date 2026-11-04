@@ -68,6 +68,7 @@ export class Precipitation {
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide, // streak orientation flips with the view, so its winding does too
+      forceSinglePass: true, // single quads: no back/front ordering to preserve
       uniforms: {
         uTime: { value: 0 },
         uCenter: { value: new THREE.Vector3() },

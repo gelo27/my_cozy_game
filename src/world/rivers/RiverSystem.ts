@@ -274,6 +274,7 @@ export class RiverSystem {
       opacity: 0.8,
       depthWrite: false,
       side: THREE.DoubleSide,
+      forceSinglePass: true, // see WaterSystem: avoids two program lookups per frame
     });
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader);

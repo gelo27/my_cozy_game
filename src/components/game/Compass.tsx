@@ -60,37 +60,65 @@ export const Compass: React.FC<{ world: GameWorld; heading(): number }> = ({ wor
   }, [world, ex]);
 
   useEffect(() => {
-    let raf = 0;
-    const place = (el: HTMLElement, bearingDeg: number, h: number) => {
+    const strip = stripRef.current;
+    if (!strip) return;
+    // Elements and their numbers are read once per target list, not queried every frame
+    interface Slot { el: HTMLElement; bearing: number; tx: number; tz: number; dist: HTMLElement | null; left: string; shown: boolean; label: string }
+    const slot = (el: HTMLElement): Slot => ({
+      el,
+      bearing: Number(el.dataset.bearing ?? 0),
+      tx: Number(el.dataset.tx ?? 0),
+      tz: Number(el.dataset.tz ?? 0),
+      dist: el.querySelector('span'),
+      left: el.style.left,
+      shown: el.style.opacity !== '0',
+      label: '',
+    });
+    const ticks = Array.from(strip.querySelectorAll<HTMLElement>('[data-bearing]'), slot);
+    const marks = Array.from(strip.querySelectorAll<HTMLElement>('[data-tx]'), slot);
+    // Style writes only when a value changes: an idle camera costs no style recalculation
+    const place = (s: Slot, bearingDeg: number, h: number) => {
       let d = bearingDeg - h;
       d = ((d + 540) % 360) - 180;
       const visible = Math.abs(d) <= HALF_FOV;
-      el.style.opacity = visible ? '' : '0';
-      if (visible) el.style.left = `${50 + (d / HALF_FOV) * 50}%`;
+      if (visible !== s.shown) {
+        s.shown = visible;
+        s.el.style.opacity = visible ? '' : '0';
+      }
+      if (!visible) return;
+      const left = `${(50 + (d / HALF_FOV) * 50).toFixed(1)}%`;
+      if (left !== s.left) {
+        s.left = left;
+        s.el.style.left = left;
+      }
     };
+    let raf = 0;
+    let lastH = NaN, lastX = NaN, lastZ = NaN;
     const tick = () => {
       raf = requestAnimationFrame(tick);
-      const strip = stripRef.current;
-      if (!strip) return;
       const h = (heading() * 180) / Math.PI;
-      const player = ex.surfacePosition(world.character.getPosition());
       const ride = world.vehicle.isPlayerInside ? world.vehicle : world.moped.isPlayerInside ? world.moped : world.boat.isPlayerInside ? world.boat : null;
-      if (ride) player.copy(ride.getPosition());
-      for (const el of strip.querySelectorAll<HTMLElement>('[data-bearing]')) place(el, Number(el.dataset.bearing), h);
-      for (const el of strip.querySelectorAll<HTMLElement>('[data-tx]')) {
-        const dx = Number(el.dataset.tx) - player.x;
-        const dz = Number(el.dataset.tz) - player.z;
-        place(el, (Math.atan2(dx, -dz) * 180) / Math.PI, h);
-        const dist = el.querySelector('span');
-        if (dist) {
+      // surfacePosition allocates a clone, so it's used only in a cave (where it returns the entrance)
+      const p = ride ? ride.getPosition() : ex.inCave ? ex.surfacePosition(world.character.getPosition()) : world.character.getPosition();
+      if (Math.abs(h - lastH) < 0.05 && Math.abs(p.x - lastX) < 0.05 && Math.abs(p.z - lastZ) < 0.05) return;
+      lastH = h; lastX = p.x; lastZ = p.z;
+      for (const s of ticks) place(s, s.bearing, h);
+      for (const s of marks) {
+        const dx = s.tx - p.x;
+        const dz = s.tz - p.z;
+        place(s, (Math.atan2(dx, -dz) * 180) / Math.PI, h);
+        if (s.dist) {
           const label = `${Math.round(Math.hypot(dx, dz) / 5) * 5} m`;
-          if (dist.textContent !== label) dist.textContent = label;
+          if (label !== s.label) {
+            s.label = label;
+            s.dist.textContent = label;
+          }
         }
       }
     };
     tick();
     return () => cancelAnimationFrame(raf);
-  }, [world, ex, heading]);
+  }, [world, ex, heading, targets]);
 
   return (
     <div className={`absolute top-16 left-1/2 -translate-x-1/2 w-[min(440px,70vw)] h-10 rounded-2xl ${panel} overflow-hidden pointer-events-none`}>

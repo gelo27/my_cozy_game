@@ -159,6 +159,12 @@ export class GameEngine {
   private minPixelRatio = 0.75;
   private perfWindowMs = 0;
   private perfWindowFrames = 0;
+  private perfSlowWindows = 0;
+  private perfFastWindows = 0;
+  private lastPixelRatioRaise = -Infinity;
+  /** A pixel ratio that just proved too slow can't be returned to until this time. */
+  private pixelRatioCeiling = Infinity;
+  private pixelRatioCeilingUntil = 0;
 
   constructor(private readonly container: HTMLElement, private readonly callbacks: GameEngineCallbacks) {
     const width = container.clientWidth || window.innerWidth;
@@ -562,12 +568,29 @@ export class GameEngine {
     this.autosaveTimer -= rawDt;
     if (this.autosaveTimer <= 0 && !editing) {
       this.autosaveTimer = 60;
-      w.saves.save(AUTOSAVE_SLOT);
+      this.scheduleAutosave();
     }
 
     this.frameMsAccum += performance.now() - frameStart;
     this.updateDiagnostics(stepTime);
   };
+
+  /**
+   * The periodic autosave (capture + JSON + localStorage, several ms) runs in the browser's idle time
+   * after a frame instead of inside one, so it doesn't add a hitch on top of the frame's own work.
+   * Leaving the page still saves synchronously (pagehide).
+   */
+  private autosavePending = false;
+  private scheduleAutosave(): void {
+    if (this.autosavePending) return;
+    this.autosavePending = true;
+    const run = () => {
+      this.autosavePending = false;
+      if (!this.isDisposed && this.world && this.mode === 'play') this.world.saves.save(AUTOSAVE_SLOT);
+    };
+    if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(run, { timeout: 5000 });
+    else window.setTimeout(run, 0);
+  }
 
   /** Diagnostics & Telemetry updates (~3 times per second). */
   private updateDiagnostics(stepTime: number): void {
@@ -619,10 +642,27 @@ export class GameEngine {
     const avgFps = (this.perfWindowFrames * 1000) / this.perfWindowMs;
     this.perfWindowMs = this.perfWindowFrames = 0;
 
+    // Every change reallocates the canvas (a visible hitch), so it needs a sustained reason:
+    // two slow windows in a row to drop, five fast ones to rise, and after a rise that had to be
+    // undone the higher level stays blocked for a minute instead of flip-flopping.
+    const now = performance.now();
     const pr = this.renderer.getPixelRatio();
     let next = pr;
-    if (avgFps < 45) next = Math.max(this.minPixelRatio, pr - 0.15);
-    else if (avgFps > 58) next = Math.min(this.maxPixelRatio, pr + 0.1);
+    this.perfSlowWindows = avgFps < 45 ? this.perfSlowWindows + 1 : 0;
+    this.perfFastWindows = avgFps > 58 ? this.perfFastWindows + 1 : 0;
+    if (this.perfSlowWindows >= 2) {
+      next = Math.max(this.minPixelRatio, pr - 0.15);
+      if (now - this.lastPixelRatioRaise < 15000) this.pixelRatioCeilingUntil = now + 60000;
+      this.pixelRatioCeiling = Math.min(this.pixelRatioCeiling, pr);
+      this.perfSlowWindows = this.perfFastWindows = 0;
+    } else if (this.perfFastWindows >= 5) {
+      if (now > this.pixelRatioCeilingUntil) this.pixelRatioCeiling = this.maxPixelRatio;
+      const ceiling = now > this.pixelRatioCeilingUntil ? this.maxPixelRatio : this.pixelRatioCeiling - 0.01;
+      next = Math.min(ceiling, pr + 0.1);
+      if (next < pr) next = pr;
+      this.perfFastWindows = 0;
+      if (next > pr + 0.01) this.lastPixelRatioRaise = now;
+    }
     if (Math.abs(next - pr) > 0.01) {
       this.renderer.setPixelRatio(next);
       this.callbacks.onLog('info', `Роздільна здатність рендера: ${Math.round(next * 100)}% (FPS ${Math.round(avgFps)})`);

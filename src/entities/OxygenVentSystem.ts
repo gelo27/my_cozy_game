@@ -83,6 +83,7 @@ export class OxygenVentSystem {
       transparent: true,
       opacity: 0,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
       depthWrite: false,
     });
     this.auraRing = new THREE.Mesh(ringGeo, ringMat);

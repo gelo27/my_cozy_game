@@ -960,6 +960,7 @@ export class WallPaintingSystem {
       opacity: 0.35,
       depthWrite: false,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
     });
     this.hoverFillMesh = new THREE.Mesh(fillGeo, this.hoverFillMaterial);
     this.hoverGroup.add(this.hoverFillMesh);
@@ -972,6 +973,7 @@ export class WallPaintingSystem {
       opacity: 0.28,
       depthWrite: false,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
       polygonOffset: true,
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -2,
