@@ -4,7 +4,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/types/TerrainTypes';
-import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, worldSettings } from './WorldSettings';
+import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
 import { islandHeight } from './IslandGenerator';
 import { riverWorld, GridRect } from './rivers/RiverWorld';
 
@@ -12,6 +12,68 @@ const N = WORLD_SIZE; // cells per side (1 m cells)
 const V = N + 1; // vertices per side
 const CHUNK = 64; // metres per render + physics chunk -> 8x8; the camera frustum culls most of them
 const CHUNKS = N / CHUNK;
+/** Vertex step per LOD level (1 m, 2 m, 4 m, 8 m). */
+const LOD_STEPS = [1, 2, 4, 8];
+/**
+ * Distance (camera to the chunk's footprint, metres) up to which each LOD level is used; past the
+ * last one the coarsest. Phones switch earlier: their GPUs pay the most per vertex.
+ */
+const LOD_DIST_PC = [100, 190, 300];
+const LOD_DIST_MOBILE = [60, 120, 190];
+
+/**
+ * Index buffer for one chunk at vertex step `s`: an s-spaced grid inside, and a border ring whose
+ * outer edge keeps every 1 m vertex (fans), so neighbours at any LOD meet without cracks.
+ */
+function buildLodIndex(s: number): number[] {
+  const S = CHUNK + 1;
+  const out: number[] = [];
+  const id = (x: number, z: number) => z * S + x;
+  // Front face = clockwise in (x, z), as the full-res grid (a, a+S, a+1)
+  const tri = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number) => {
+    const cross = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+    if (cross === 0) return;
+    if (cross < 0) out.push(id(ax, az), id(bx, bz), id(cx, cz));
+    else out.push(id(ax, az), id(cx, cz), id(bx, bz));
+  };
+  if (s === 1) {
+    for (let z = 0; z < CHUNK; z++) for (let x = 0; x < CHUNK; x++) tri(x, z, x, z + 1, x + 1, z), tri(x + 1, z, x, z + 1, x + 1, z + 1);
+    return out;
+  }
+  const E = CHUNK - s; // inner grid spans s..E
+  for (let z = s; z < E; z += s) {
+    for (let x = s; x < E; x += s) tri(x, z, x, z + s, x + s, z), tri(x + s, z, x, z + s, x + s, z + s);
+  }
+  // Border strips: inner segment A-B at distance s from the edge, 1 m steps along the edge
+  type P = [number, number];
+  const strip = (A: P, B: P, edge: (t: number) => P) => {
+    const h = s / 2;
+    for (let i = 0; i < s; i++) {
+      const p = edge(i), q = edge(i + 1), apex = i < h ? A : B;
+      tri(p[0], p[1], q[0], q[1], apex[0], apex[1]);
+    }
+    const m = edge(h);
+    tri(m[0], m[1], A[0], A[1], B[0], B[1]);
+  };
+  for (let a = s; a < E; a += s) {
+    strip([a, s], [a + s, s], (t) => [a + t, 0]); // z = 0 side
+    strip([a, E], [a + s, E], (t) => [a + t, CHUNK]); // z = max side
+    strip([s, a], [s, a + s], (t) => [0, a + t]); // x = 0 side
+    strip([E, a], [E, a + s], (t) => [CHUNK, a + t]); // x = max side
+  }
+  // Corners: fan from the inner corner vertex over both 1 m edges
+  const corner = (ix: number, iz: number, ox: number, oz: number) => {
+    const path: P[] = [];
+    for (let t = 0; t <= s; t++) path.push([ix + (ox - ix) * (t / s), oz]); // along the z edge
+    for (let t = 1; t <= s; t++) path.push([ox, oz + (iz - oz) * (t / s)]); // along the x edge
+    for (let i = 0; i + 1 < path.length; i++) tri(path[i][0], path[i][1], path[i + 1][0], path[i + 1][1], ix, iz);
+  };
+  corner(s, s, 0, 0);
+  corner(E, s, CHUNK, 0);
+  corner(s, E, 0, CHUNK);
+  corner(E, E, CHUNK, CHUNK);
+  return out;
+}
 
 export type TerrainBrushKind = 'raise' | 'lower' | 'smooth' | 'flatten';
 
@@ -45,6 +107,11 @@ export class TerrainSystem {
 
   private readonly material: THREE.MeshLambertMaterial;
   private readonly chunkMeshes: THREE.Mesh[] = [];
+  /** Per chunk, one geometry per LOD level sharing the position / normal buffers. */
+  private readonly chunkLods: THREE.BufferGeometry[][] = [];
+  private readonly lodDist = isMobileDevice() ? LOD_DIST_MOBILE : LOD_DIST_PC;
+  /** Triangles in the chunk meshes' current LODs (all chunks, before frustum culling). */
+  public lodTriangles = 0;
   private readonly dirtyChunks = new Set<number>();
   private readonly splatA: THREE.DataTexture;
   private readonly splatB: THREE.DataTexture;
@@ -353,21 +420,22 @@ export class TerrainSystem {
 
   private buildChunks(): void {
     const S = CHUNK + 1;
-    const index: number[] = [];
-    for (let z = 0; z < CHUNK; z++) {
-      for (let x = 0; x < CHUNK; x++) {
-        const a = z * S + x;
-        index.push(a, a + S, a + 1, a + 1, a + S, a + S + 1);
-      }
-    }
-    const sharedIndex = new THREE.Uint16BufferAttribute(index, 1);
+    // One index buffer per LOD level, shared by all chunks; vertices stay full resolution
+    const indices = LOD_STEPS.map((s) => new THREE.Uint16BufferAttribute(buildLodIndex(s), 1));
 
     for (let cz = 0; cz < CHUNKS; cz++) {
       for (let cx = 0; cx < CHUNKS; cx++) {
-        const geo = new THREE.BufferGeometry();
-        geo.setIndex(sharedIndex);
-        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(S * S * 3), 3));
-        geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(S * S * 3), 3));
+        const position = new THREE.BufferAttribute(new Float32Array(S * S * 3), 3);
+        const normal = new THREE.BufferAttribute(new Float32Array(S * S * 3), 3);
+        const lods = indices.map((index) => {
+          const g = new THREE.BufferGeometry();
+          g.setIndex(index);
+          g.setAttribute('position', position);
+          g.setAttribute('normal', normal);
+          return g;
+        });
+        this.chunkLods.push(lods);
+        const geo = lods[0];
         const mesh = new THREE.Mesh(geo, this.material);
         mesh.name = `TerrainChunk_${cx}_${cz}`;
         mesh.matrixAutoUpdate = false;
@@ -414,8 +482,36 @@ export class TerrainSystem {
     }
     pos.needsUpdate = true;
     nor.needsUpdate = true;
-    mesh.geometry.computeBoundingSphere();
-    mesh.geometry.computeBoundingBox();
+    const lods = this.chunkLods[chunkIndex];
+    lods[0].computeBoundingSphere();
+    lods[0].computeBoundingBox();
+    for (let i = 1; i < lods.length; i++) {
+      lods[i].boundingSphere = lods[0].boundingSphere;
+      lods[i].boundingBox = lods[0].boundingBox;
+    }
+  }
+
+  /**
+   * Picks each chunk's LOD from the camera's horizontal distance to its footprint. Every LOD keeps
+   * full-resolution chunk borders, so neighbours never crack; normals are per 1 m vertex, so the
+   * lighting stays the same and only the silhouette of far hills simplifies.
+   */
+  public updateLod(camera: THREE.Vector3): void {
+    let tris = 0;
+    for (let c = 0; c < this.chunkMeshes.length; c++) {
+      const cx = c % CHUNKS, cz = (c - cx) / CHUNKS;
+      const x0 = cx * CHUNK - WORLD_HALF, z0 = cz * CHUNK - WORLD_HALF;
+      const dx = Math.max(x0 - camera.x, 0, camera.x - (x0 + CHUNK));
+      const dz = Math.max(z0 - camera.z, 0, camera.z - (z0 + CHUNK));
+      const d = Math.sqrt(dx * dx + dz * dz);
+      let level = 0;
+      while (level < this.lodDist.length && d > this.lodDist[level]) level++;
+      const geo = this.chunkLods[c][level];
+      const mesh = this.chunkMeshes[c];
+      if (mesh.geometry !== geo) mesh.geometry = geo;
+      tris += geo.index!.count / 3;
+    }
+    this.lodTriangles = tris;
   }
 
   private uploadSplat(): void {
@@ -446,6 +542,10 @@ export class TerrainSystem {
 
   private createMaterial(): THREE.MeshLambertMaterial {
     const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    // Phones get a lighter fragment path: 2-3 fewer texture fetches and no snow glints
+    const lite = isMobileDevice();
+    if (lite) mat.defines = { TERRAIN_LITE: '' };
+    mat.customProgramCacheKey = () => (lite ? 'terrain-lite' : 'terrain');
     const layers = {
       tGrass: createLayerTexture(TerrainTileType.GRASS),
       tDirt: createLayerTexture(TerrainTileType.DIRT_ROAD),
@@ -487,7 +587,12 @@ vec3 terrainColor() {
   vec2 river = texture2D(tRiver, (vTerrWorld.xz + uWorldSize * 0.5 + 0.5) / (uWorldSize + 1.0)).rg;
   float waterY = river.g > 0.5 ? max(uWaterLevel, river.r) : uWaterLevel;
   vec4 g = texture2D(tGrass, uv);
+#ifdef TERRAIN_LITE
+  // Phones: analytic border noise instead of a second grass fetch
+  float n = (sin(vTerrWorld.x * 0.37 + sin(vTerrWorld.z * 0.23) * 2.0) * sin(vTerrWorld.z * 0.41 + vTerrWorld.x * 0.11)) * 0.3;
+#else
   float n = texture2D(tGrass, vTerrWorld.xz * 0.061).a - 0.5;
+#endif
   vec4 wa = smoothstep(0.32, 0.68, texture2D(tSplatA, suv) + n * 0.45);
   vec2 wb = smoothstep(0.32, 0.68, texture2D(tSplatB, suv).rg + n * 0.45);
   vec3 c = g.rgb;
@@ -510,8 +615,12 @@ vec3 terrainColor() {
   // and sparse view-dependent glints twinkle as the camera moves.
   if (wb.r > 0.001) {
     float sw = wb.r * (1.0 - smoothstep(0.55, 0.35, vTerrUpY) * 0.7) * smoothstep(waterY + 0.05, waterY + 0.35, vTerrWorld.y);
-    vec3 sTex = texture2D(tSnow, uv * 0.5).rgb;
     float drift = clamp(n * 2.2 + 0.5, 0.0, 1.0);
+#ifdef TERRAIN_LITE
+    vec3 snow = mix(vec3(0.76, 0.84, 0.94), vec3(1.0, 1.0, 1.02), drift);
+    snow = mix(snow, vec3(0.70, 0.78, 0.90), smoothstep(0.97, 0.75, vTerrUpY) * 0.5);
+#else
+    vec3 sTex = texture2D(tSnow, uv * 0.5).rgb;
     vec3 snow = mix(vec3(0.74, 0.82, 0.93), vec3(1.0, 1.0, 1.02), drift) * mix(0.93, 1.04, sTex.g);
     snow = mix(snow, vec3(0.70, 0.78, 0.90), smoothstep(0.97, 0.75, vTerrUpY) * 0.5);
     vec2 cell = floor(vTerrWorld.xz * 9.0);
@@ -520,11 +629,16 @@ vec3 terrainColor() {
     float tw = fract(sin(dot(cell + floor(toCam.xz * 2.5 + toCam.y), vec2(269.5, 183.3))) * 17853.13);
     float glint = step(0.93, h) * step(0.6, tw) * smoothstep(40.0, 8.0, length(toCam));
     snow += glint * 0.9;
+#endif
     c = mix(c, snow, sw);
   }
   // River beds are gravel; everything below the waterline is wet and darker
   float underRiver = smoothstep(waterY - 0.05, waterY - 0.4, vTerrWorld.y) * step(0.5, river.g);
+#ifdef TERRAIN_LITE
+  c = mix(c, vec3(0.42, 0.38, 0.32), underRiver * 0.6);
+#else
   if (underRiver > 0.001) c = mix(c, texture2D(tRock, uv * 1.7).rgb * vec3(0.95, 0.9, 0.8), underRiver * 0.75);
+#endif
   c *= mix(1.0, 0.62, smoothstep(waterY, waterY - 1.5, vTerrWorld.y));
   return c;
 }`

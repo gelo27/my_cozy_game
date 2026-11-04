@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { worldSettings } from './WorldSettings';
+import { FOG_SCALE, worldSettings } from './WorldSettings';
 import { PrecipitationOcclusion } from './PrecipitationOcclusion';
 import { Precipitation, PRECIP_BOX } from './Precipitation';
 import { SkyDome, SkyParams } from './SkyDome';
@@ -225,7 +225,7 @@ export class WeatherSystem {
     this.sampleKeys(SKY_KEYS, t, this.sky).multiply(cur.tint);
     if (this.flash > 0) this.sky.lerp(WeatherSystem._c.setRGB(1, 1, 1), this.flash * 0.5);
     this.fog.color.copy(this.sky);
-    this.fog.density = cur.fog;
+    this.fog.density = cur.fog * FOG_SCALE;
 
     // Sky dome
     cur.cover += (p.cover - cur.cover) * k;

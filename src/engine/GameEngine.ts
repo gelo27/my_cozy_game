@@ -40,7 +40,7 @@ import { WeatherSystem } from '../world/WeatherSystem';
 import { PropSystem, PROP_GLOW_MATERIALS } from '../world/PropSystem';
 import { NightLighting, installGlobalNightLights } from '../world/NightLighting';
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
-import { isMobileDevice, worldSettings } from '../world/WorldSettings';
+import { VIEW_DISTANCE, isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState } from '../gameplay/GameplayManager';
 import { EditorController } from '../editor/EditorController';
 import { ExplorationManager } from '../explore/ExplorationManager';
@@ -181,7 +181,7 @@ export class GameEngine {
     container.appendChild(this.renderer.domElement);
 
     this.camera = new ThirdPersonCamera(width / height);
-    this.camera.camera.far = 220; // distance fog hides the rest of the 512 m island and the sea
+    this.camera.camera.far = VIEW_DISTANCE; // distance fog hides the rest of the island and the sea
     this.camera.camera.updateProjectionMatrix();
     this.input = new InputManager(container);
 
@@ -389,6 +389,10 @@ export class GameEngine {
       window.addEventListener('pagehide', this.handlePageHide);
       if (DEV_TOOLS_ENABLED) (window as unknown as { dev: unknown }).dev = this.createDevApi();
 
+      // Compile every shader now, behind the loading screen, instead of on first sight in play
+      await this.prewarmShaders();
+      if (this.isDisposed) return;
+
       this.clock.start();
       this.lastFpsUpdate = performance.now();
       this.animate();
@@ -397,6 +401,28 @@ export class GameEngine {
       console.error('Failed to initialize 3D scene / Rapier physics:', err);
       this.callbacks.onError(err?.message || 'Error loading physics engine');
     }
+  }
+
+  /**
+   * Compiles the shader programs of everything in the scene, hidden objects included (boat prompt,
+   * wildlife pools, night-only lights' materials), through KHR_parallel_shader_compile where the
+   * browser has it, so the driver builds them in parallel without blocking the page. Without the
+   * extension it still moves the cost to load time. Capped at a few seconds so a slow driver can't
+   * hold the loading screen forever; anything left simply compiles on first use as before.
+   */
+  public shaderPrewarmMs = 0;
+  public shaderPrewarmPrograms = 0;
+  private async prewarmShaders(): Promise<void> {
+    const t0 = performance.now();
+    try {
+      this.world?.terrain.updateLod(this.camera.camera.position);
+      const timeout = new Promise<void>((r) => setTimeout(r, 4000));
+      await Promise.race([this.renderer.compileAsync(this.scene, this.camera.camera).then(() => undefined), timeout]);
+    } catch (err) {
+      console.warn('Shader prewarm failed', err);
+    }
+    this.shaderPrewarmMs = performance.now() - t0;
+    this.shaderPrewarmPrograms = this.renderer.info.programs?.length ?? 0;
   }
 
   // Loop state
@@ -509,6 +535,7 @@ export class GameEngine {
     particleManager.update(dt);
     debugRenderer.update(character);
 
+    w.terrain.updateLod(tpCamera.camera.position);
     this.renderer.render(this.scene, tpCamera.camera);
 
     // Throttled UI pushes

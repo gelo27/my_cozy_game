@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Agent, Species, SpeciesTuning, WildContext, angleTo, turnToward } from './Species';
 import { createAnimalMaterial } from './AnimalMaterial';
-import { butterflyGeometry, fishGeometry, gullGeometry, hareGeometry, sparrowGeometry, turtleGeometry } from './AnimalGeometry';
+import { butterflyGeometry, fishGeometry, gullGeometry, hareGeometry, turtleGeometry } from './AnimalGeometry';
 
 const TAU = Math.PI * 2;
 const dist2 = (ax: number, az: number, bx: number, bz: number) => (ax - bx) ** 2 + (az - bz) ** 2;
@@ -491,110 +491,5 @@ export class Turtles extends Species {
     a.gait = swim ? 1 : 0; // paddle both fronts together underwater
     a.pitch = swim ? Math.sin(ctx.time * 0.4 + a.phase) * 0.08 : 0;
     void near;
-  }
-}
-
-// ======================================================================== sparrows
-
-const SPARROWS_PER_FLOCK = 7;
-
-/**
- * Sparrow flocks in forests: the flock pecks about on the ground (each bird hopping on its own
- * rhythm, wings folded), then the whole flock takes off together and flits to another spot among
- * the trees; walking close scatters it. One agent per flock, birds placed on fixed offsets.
- */
-export class Sparrows extends Species {
-  public clock = 0;
-
-  constructor(parent: THREE.Object3D, tune: SpeciesTuning) {
-    super('sparrows', { ...tune, perAgent: SPARROWS_PER_FLOCK }, sparrowGeometry(), createAnimalMaterial('flap', 0.15, { doubleSide: true }), parent);
-  }
-
-  protected target(ctx: WildContext): number {
-    return Math.round(this.tune.capacity * Math.max(0, 1 - ctx.night * 1.6) * (1 - ctx.rain * 0.7));
-  }
-
-  private landing(ctx: WildContext, x: number, z: number): number | null {
-    if (ctx.trees(x, z) < 3) return null;
-    return dryGround(ctx, x, z, 0.4);
-  }
-
-  protected spawn(a: Agent, x: number, z: number, ctx: WildContext): boolean {
-    const y = this.landing(ctx, x, z);
-    if (y === null) return false;
-    a.x = a.tx = x;
-    a.z = a.tz = z;
-    a.y = a.ty = a.hy = y;
-    a.state = 0; // 0 feeding, 1 flying
-    a.timer = 4 + this.rnd() * 8;
-    a.yaw = this.rnd() * TAU;
-    this.setColor(a, 0xffffff, 0.05);
-    return true;
-  }
-
-  protected think(a: Agent, dt: number, ctx: WildContext, near: boolean): void {
-    a.timer -= dt;
-    const p = ctx.player;
-    const startled = a.state === 0 && a.dist2 < 6 * 6;
-    if (a.state === 0 && (a.timer <= 0 || startled)) {
-      // Take off toward a new spot among the trees (away from the player when startled)
-      for (let t = 0; t < 5; t++) {
-        const ang = startled ? Math.atan2(a.x - p.x, a.z - p.z) + (this.rnd() - 0.5) * 1.4 : this.rnd() * TAU;
-        const r = 10 + this.rnd() * 16;
-        const tx = a.x + Math.sin(ang) * r, tz = a.z + Math.cos(ang) * r;
-        const gy = near ? this.landing(ctx, tx, tz) : ctx.terrain.getHeight(tx, tz);
-        if (gy === null) continue;
-        a.state = 1;
-        a.hx = a.x;
-        a.hz = a.z;
-        a.hy = a.y;
-        a.tx = tx;
-        a.tz = tz;
-        a.ty = gy;
-        a.a0 = 0; // flight progress 0..1
-        a.a1 = r;
-        a.yaw = Math.atan2(tx - a.x, tz - a.z);
-        return;
-      }
-      a.timer = 3;
-      return;
-    }
-    if (a.state === 1) {
-      // Arc over the ground: progress along the chord, a bump of height in the middle
-      a.a0 = Math.min(1, a.a0 + (dt * 7) / a.a1);
-      const f = a.a0;
-      a.x = a.hx + (a.tx - a.hx) * f;
-      a.z = a.hz + (a.tz - a.hz) * f;
-      a.y = a.hy + (a.ty - a.hy) * f + Math.sin(f * Math.PI) * (2.5 + a.a1 * 0.12);
-      if (f >= 1) {
-        a.state = 0;
-        a.timer = 5 + this.rnd() * 10;
-        a.y = a.ty;
-      }
-    }
-  }
-
-  protected draw(a: Agent): void {
-    const t = this.clock;
-    const flying = a.state === 1;
-    const c = Math.cos(a.yaw), s = Math.sin(a.yaw);
-    for (let i = 0; i < SPARROWS_PER_FLOCK; i++) {
-      const ph = a.phase + i * 1.93;
-      // Spread a bit wider on the ground, bunch up in the air
-      const spread = flying ? 0.9 : 1.4;
-      const lx = Math.sin(ph * 3.1) * spread;
-      const lz = Math.cos(ph * 2.3) * spread + (flying ? Math.sin(t * 2 + ph) * 0.3 : 0);
-      let y = a.y;
-      let yaw = a.yaw;
-      if (flying) {
-        y += Math.sin(t * 3 + ph) * 0.25 + (i % 3) * 0.2;
-      } else {
-        // Hop in short bursts, turning to peck around
-        const burst = Math.sin(t * 0.9 + ph) > 0.3 ? 1 : 0;
-        y += Math.abs(Math.sin(t * 11 + ph)) * 0.05 * burst + 0.04;
-        yaw = a.yaw + Math.sin(t * 0.5 + ph * 4) * 2.5;
-      }
-      this.emit(a.x + lx * c + lz * s, y, a.z - lx * s + lz * c, yaw, flying ? 0.1 : 0, 0, 1, ph, flying ? 32 : 0, flying ? 1.0 : 0, flying ? 0 : 1, a.r, a.g, a.b);
-    }
   }
 }

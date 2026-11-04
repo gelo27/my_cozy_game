@@ -138,21 +138,3 @@ export function turtleGeometry(): THREE.BufferGeometry {
   b.box(skin, 0.14, 0.05, 0.09, 0.26, 0.07, -0.3, PART.LEG_BR, 0.16, 0, -0.5);
   return b.build();
 }
-
-/** House sparrow, ~0.15 m: brown back, grey-buff belly, dark cap and bib, short tail. */
-export function sparrowGeometry(): THREE.BufferGeometry {
-  const brown = 0x8a5a36, buff = 0xcdbb9c, cap = 0x6b6f72, dark = 0x2b2420, beak = 0x3a3330;
-  const b = new Builder()
-    .blob(buff, 0.04, 0.038, 0.06, 0, 0, 0)
-    .blob(brown, 0.038, 0.03, 0.058, 0, 0.012, -0.004)
-    .blob(cap, 0.03, 0.03, 0.03, 0, 0.03, 0.05)
-    .box(dark, 0.03, 0.02, 0.012, 0, 0.012, 0.074)
-    .box(beak, 0.01, 0.01, 0.018, 0, 0.026, 0.084)
-    .box(brown, 0.03, 0.008, 0.06, 0, 0.012, -0.08, 0, 0, 0.25);
-  for (const side of [-1, 1]) {
-    const part = side < 0 ? PART.WING_L : PART.WING_R;
-    b.box(brown, 0.1, 0.008, 0.055, side * 0.07, 0.018, -0.005, part);
-    b.box(dark, 0.05, 0.009, 0.04, side * 0.13, 0.018, -0.012, part);
-  }
-  return b.build();
-}

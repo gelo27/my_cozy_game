@@ -24,3 +24,8 @@ export const worldSettings = {
 
 export const isMobileDevice = (): boolean =>
   typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+
+/** Camera far plane: phones keep 220 m, PCs see almost the whole island. */
+export const VIEW_DISTANCE = isMobileDevice() ? 220 : 420;
+/** Fog density multiplier so the haze reaches the same thickness at the far plane on every device. */
+export const FOG_SCALE = 220 / VIEW_DISTANCE;
