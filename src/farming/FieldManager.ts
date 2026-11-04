@@ -16,7 +16,8 @@ export const FIELD_CRATE_YIELD = 6;
 /** Wheat clumps per side (5 x 5 = 25 per field) and their spacing in metres. */
 const WHEAT_ROWS = 5;
 const WHEAT_SPACING = 0.68;
-const MAX_SLOPE = 0.9;
+/** Max height difference (m) across the field's 5 x 5 corner grid: 2 m over 4 m is ~27°. */
+const MAX_SLOPE = 2.0;
 const HALF = FIELD_CELLS / 2;
 
 export interface FarmField {
@@ -130,11 +131,46 @@ export class FieldManager {
     this.ghost.frustumCulled = false;
     scene.add(this.ghost);
 
+    this.addShaderWarmers();
+
     void loadWheatModel().then(() => {
       // Fields planted before the model arrived switch from the procedural fallback
       this.visuals.clear();
       this.dirty = true;
     });
+  }
+
+  /**
+   * Hidden one-instance meshes carrying every material the fields draw with instancing (the swaying
+   * wheat, and the instanced variants of the bed crops' materials, which differ from the plain
+   * ones the garden beds use). The engine's load-time shader prewarm compiles hidden objects too,
+   * so the first field on screen doesn't stall on a shader compile. They never render.
+   */
+  private addShaderWarmers(): void {
+    // Same attribute layout as the wheat stage geometries (position, normal, RGB colour)
+    const wheatProbe = new THREE.BufferGeometry();
+    wheatProbe.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9), 3));
+    wheatProbe.setAttribute('normal', new THREE.BufferAttribute(new Float32Array([0, 1, 0, 0, 1, 0, 0, 1, 0]), 3));
+    wheatProbe.setAttribute('color', new THREE.BufferAttribute(new Float32Array(9), 3));
+    const warm = (geometry: THREE.BufferGeometry, material: THREE.Material) => {
+      const mesh = new THREE.InstancedMesh(geometry, material, 1);
+      mesh.name = 'FieldShaderWarmer';
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      this.group.add(mesh);
+    };
+    warm(wheatProbe, FIELD_CROP_MATERIAL);
+
+    const seen = new Set<THREE.Material>();
+    for (const type of ['carrot', 'tomato'] as CropType[]) {
+      for (const stage of [1, 2, 3] as CropStage[]) {
+        for (const part of this.getVisual(type, stage).parts) {
+          if (seen.has(part.material)) continue;
+          seen.add(part.material);
+          warm(part.geometry, part.material);
+        }
+      }
+    }
   }
 
   public setWorld(terrain: TerrainSystem, physics: PhysicsWorld): void {
@@ -233,16 +269,22 @@ export class FieldManager {
     if (maxH - minH > MAX_SLOPE) return 'slope';
 
     if (this.isAreaReserved?.(gx - 0.3, gz - 0.3, gx + FIELD_CELLS + 0.3, gz + FIELD_CELLS + 0.3)) return 'blocked';
-    if (this.hasStaticObstacle(gx, gz, maxH)) return 'blocked';
+    if (this.hasStaticObstacle(gx, gz, minH, maxH)) return 'blocked';
     return null;
   }
 
-  /** Trees, rocks, buildings, fences: any fixed collider (except the terrain) over the footprint. */
-  private hasStaticObstacle(gx: number, gz: number, groundTop: number): boolean {
+  /**
+   * Trees, rocks, buildings, fences: any fixed collider (except the terrain) over the footprint.
+   * The box spans from just above the lowest ground to 2 m over the highest, so a rock on the low
+   * side of a slope still counts.
+   */
+  private hasStaticObstacle(gx: number, gz: number, groundLow: number, groundTop: number): boolean {
     const physics = this.physics;
     if (!physics?.world) return false;
-    const shape = new RAPIER.Cuboid(HALF - 0.1, 1.0, HALF - 0.1);
-    const pos = { x: gx + HALF, y: groundTop + 1.3, z: gz + HALF };
+    const y0 = groundLow + 0.3;
+    const y1 = groundTop + 2.3;
+    const shape = new RAPIER.Cuboid(HALF - 0.1, (y1 - y0) / 2, HALF - 0.1);
+    const pos = { x: gx + HALF, y: (y0 + y1) / 2, z: gz + HALF };
     const rot = { x: 0, y: 0, z: 0, w: 1 };
     const hit = physics.world.intersectionWithShape(
       pos,

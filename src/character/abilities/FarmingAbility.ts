@@ -8,8 +8,6 @@ import { InventoryManager } from '../../inventory/InventoryManager';
 import { FarmInteractionPrompt } from '../../farming/types/FarmingTypes';
 import { audioEngine } from '../../audio/AudioEngine';
 
-/** How far ahead of the player the field preview is centred (metres). */
-const SHOVEL_REACH = FIELD_CELLS / 2 + 1.0;
 const SWING_TIME = 0.7;
 const SWING_IMPACT = 0.38;
 
@@ -143,11 +141,8 @@ export class FarmingAbility implements IAbility {
       return;
     }
 
-    // Preview the field in front of the character
-    const facing = context.model?.group.rotation.y ?? 0;
-    const cx = playerPos.x + Math.sin(facing) * SHOVEL_REACH;
-    const cz = playerPos.z + Math.cos(facing) * SHOVEL_REACH;
-    const target = fields.resolveShovelTarget(cx, cz);
+    // Preview the field centred under the character: walk to move it
+    const target = fields.resolveShovelTarget(playerPos.x, playerPos.z);
     this.currentPrompt = this.buildShovelPrompt(target);
 
     if (target.kind === 'dig') fields.showGhost(target.gx, target.gz, target.reason ? 'bad' : 'ok');
@@ -168,14 +163,12 @@ export class FarmingAbility implements IAbility {
       timer: 0,
       impactDone: false,
     };
-    this.startSwing(context, playerPos);
+    this.startSwing(context);
   }
 
-  private startSwing(context: CharacterContext, playerPos: THREE.Vector3): void {
+  /** The player stands on the field, so they dig the way they already face. */
+  private startSwing(context: CharacterContext): void {
     const job = this.shovelJob!;
-    const dx = job.gx + FIELD_CELLS / 2 - playerPos.x;
-    const dz = job.gz + FIELD_CELLS / 2 - playerPos.z;
-    if (dx * dx + dz * dz > 0.01) context.model?.setFacingAngleInstant(Math.atan2(dx, dz));
     context.model?.triggerMineSwing();
     job.timer = 0;
     job.impactDone = false;
@@ -201,8 +194,7 @@ export class FarmingAbility implements IAbility {
 
     if (job.timer >= SWING_TIME) {
       if (job.swingsLeft > 0) {
-        const t = context.body.translation();
-        this.startSwing(context, this.tmpVec.set(t.x, t.y, t.z));
+        this.startSwing(context);
       } else {
         this.shovelJob = null;
       }

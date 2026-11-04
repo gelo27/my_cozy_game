@@ -86,7 +86,7 @@ export const en = {
 
   'field.title': 'Field',
   'field.dig': 'Dig a field here',
-  'field.digHint': 'A 4×4 m patch of soil for 25 plants. Turn to aim the frame; it snaps next to other fields.',
+  'field.digHint': 'A 4×4 m patch of soil for 25 plants. The frame is under you: walk to move it; it snaps next to other fields.',
   'field.cantDig': "Can't dig here",
   'field.reason.tile': 'Only grass can be dug up (not roads, sand or snow).',
   'field.reason.water': 'Too close to water.',
