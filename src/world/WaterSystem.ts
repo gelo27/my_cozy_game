@@ -23,6 +23,8 @@ export class WaterSystem {
       transparent: true,
       opacity: 0.78,
       depthWrite: false,
+      // Seen from below when diving: the underside of the surface must show too
+      side: THREE.DoubleSide,
     });
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader);

@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import * as THREE from 'three';
-import { Plus, Trash2, Crosshair, Save, ClipboardCopy, Spline, Droplet } from 'lucide-react';
+import { Plus, Trash2, Crosshair, Save, ClipboardCopy, Spline, Droplet, GitBranch, Waves } from 'lucide-react';
 import type { GameEngine } from '../../engine/GameEngine';
 import { riverWorld } from '../../world/rivers/RiverWorld';
+import { DEFAULT_BULGE } from '../../world/rivers/RiverSpline';
 import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 
 const danger = `${btn} gap-1.5 py-1.5 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25`;
@@ -34,7 +35,7 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
             return (
               <div key={d.id} className={`flex items-center rounded-lg ${d.id === tool.selectedRiver ? 'bg-sky-500/30' : 'hover:bg-white/10'}`}>
                 <button className={`${btn} flex-1 justify-start gap-2 px-2 py-1 min-w-0`} onClick={() => tool.select(d.id)}>
-                  <Spline className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                  {d.kind === 'lake' ? <Waves className="w-3.5 h-3.5 text-cyan-300 shrink-0" /> : <Spline className="w-3.5 h-3.5 text-sky-400 shrink-0" />}
                   <span className="truncate">{d.name}</span>
                   <span className="ml-auto text-[10px] text-zinc-500 tabular-nums shrink-0">
                     {d.points.length} т.{s?.falls.length ? ` · ${s.falls.length} вод.` : ''}
@@ -55,11 +56,14 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           <button className={`${chip(false)} flex-1`} onClick={() => tool.newRiver('stream')}>
             <Plus className="w-3.5 h-3.5" /> Струмок
           </button>
+          <button className={`${chip(false)} flex-1`} onClick={() => tool.newRiver('lake')} title="Замкнений контур з рівною водою; клікніть по землі, щоб поставити">
+            <Plus className="w-3.5 h-3.5" /> Озеро
+          </button>
         </div>
       </Section>
 
       {river && (
-        <Section title="Параметри річки">
+        <Section title={tool.isLake ? 'Параметри озера' : 'Параметри річки'}>
           <input
             key={river.id}
             defaultValue={river.name}
@@ -67,9 +71,47 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
             onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
             className="bg-black/30 border border-white/10 rounded px-2 py-1 outline-none focus:border-sky-500"
           />
-          <Slider label="Ширина" value={river.width} min={0.8} max={20} step={0.1} onStart={() => tool.beginEdit()} onChange={(v) => tool.setRiver({ width: v }, false)} fmt={(v) => `${v.toFixed(1)} м`} />
-          <Slider label="Глибина" value={river.depth} min={0.2} max={4} step={0.05} onStart={() => tool.beginEdit()} onChange={(v) => tool.setRiver({ depth: v }, false)} fmt={(v) => `${v.toFixed(2)} м`} />
-          {sampled && sampled.samples.length > 1 && (
+          {!tool.isLake && (
+            <Slider label="Ширина" value={river.width} min={0.8} max={20} step={0.1} onStart={() => tool.beginEdit()} onChange={(v) => tool.setRiver({ width: v }, false)} fmt={(v) => `${v.toFixed(1)} м`} />
+          )}
+          {tool.isLake && (
+            <>
+              <label className="flex items-center gap-2 text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={river.level === undefined}
+                  onChange={(e) => tool.setRiver({ level: e.target.checked ? undefined : Math.round((sampled?.lake?.level ?? 0) * 100) / 100 })}
+                  className="accent-sky-500"
+                />
+                Рівень води — авто (нижче найнижчого берега)
+              </label>
+              {river.level !== undefined ? (
+                <Slider label="Рівень води" value={river.level} min={0} max={60} step={0.05} onStart={() => tool.beginEdit()} onChange={(v) => tool.setRiver({ level: v }, false)} fmt={(v) => `${v.toFixed(2)} м`} />
+              ) : (
+                <p className="text-zinc-500 tabular-nums">Рівень: {(sampled?.lake?.level ?? 0).toFixed(2)} м</p>
+              )}
+            </>
+          )}
+          <Slider label="Глибина" value={river.depth} min={0.2} max={tool.isLake ? 8 : 4} step={0.05} onStart={() => tool.beginEdit()} onChange={(v) => tool.setRiver({ depth: v }, false)} fmt={(v) => `${v.toFixed(2)} м`} />
+          <label className="flex items-start gap-2 text-zinc-300" title="Невисокі вали там, де вода тече вище навколишньої землі">
+            <input
+              type="checkbox"
+              checked={river.levees !== false}
+              onChange={(e) => tool.setRiver({ levees: e.target.checked })}
+              className="accent-sky-500 mt-0.5"
+            />
+            <span>
+              Насипи вздовж берегів
+              <span className="block text-[10px] text-zinc-500">Вимкнено: береги лише врізаються в рельєф, нічого не насипається.</span>
+            </span>
+          </label>
+          {(sampled?.branchOf || sampled?.flowsInto) && (
+            <p className="text-sky-300">
+              {sampled.branchOf && <>Гілка від: {riverWorld.defs.find((d) => d.id === sampled.branchOf)?.name}. </>}
+              {sampled.flowsInto && <>Впадає в: {riverWorld.defs.find((d) => d.id === sampled.flowsInto)?.name}.</>}
+            </p>
+          )}
+          {sampled && sampled.samples.length > 1 && !tool.isLake && (
             <p className="text-zinc-500 tabular-nums">
               Довжина {sampled.samples[sampled.samples.length - 1].dist.toFixed(0)} м · перепад{' '}
               {(sampled.samples[0].s - sampled.samples[sampled.samples.length - 1].s).toFixed(1)} м
@@ -77,7 +119,7 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
             </p>
           )}
           <button className={danger} onClick={() => tool.deleteRiver(river.id)}>
-            <Trash2 className="w-3.5 h-3.5" /> Видалити річку
+            <Trash2 className="w-3.5 h-3.5" /> {tool.isLake ? 'Видалити озеро' : 'Видалити річку'}
           </button>
         </Section>
       )}
@@ -88,6 +130,7 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
             <NumberField label="X" value={point.x} onCommit={(v) => tool.setPoint({ x: v })} />
             <NumberField label="Z" value={point.z} onCommit={(v) => tool.setPoint({ z: v })} />
           </div>
+          {!tool.isLake && (<>
           <label className="flex items-center gap-2 text-zinc-300">
             <input
               type="checkbox"
@@ -114,6 +157,18 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           {point.w !== undefined && (
             <Slider label="Ширина" value={point.w} min={0.6} max={30} step={0.1} onStart={() => tool.beginEdit()} onChange={(v) => tool.setPoint({ w: v }, false)} fmt={(v) => `${v.toFixed(1)} м`} />
           )}
+          <label className="flex items-center gap-2 text-zinc-300">
+            <input
+              type="checkbox"
+              checked={point.d !== undefined}
+              onChange={(e) => tool.setPoint({ d: e.target.checked ? river.depth : undefined })}
+              className="accent-sky-500"
+            />
+            Своя глибина в цій точці
+          </label>
+          {point.d !== undefined && (
+            <Slider label="Глибина" value={point.d} min={0.1} max={6} step={0.05} onStart={() => tool.beginEdit()} onChange={(v) => tool.setPoint({ d: v }, false)} fmt={(v) => `${v.toFixed(2)} м`} />
+          )}
           <Slider
             label="Водоспад: перепад"
             value={point.fall ?? 0}
@@ -124,7 +179,23 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
             onChange={(v) => tool.setPoint({ fall: v || undefined }, false)}
             fmt={(v) => (v ? `${v.toFixed(1)} м` : 'немає')}
           />
+          {!!point.fall && (
+            <Slider
+              label="Опуклість водоспаду"
+              value={point.bulge ?? DEFAULT_BULGE}
+              min={0}
+              max={2.5}
+              step={0.05}
+              onStart={() => tool.beginEdit()}
+              onChange={(v) => tool.setPoint({ bulge: v }, false)}
+              fmt={(v) => (v < 0.05 ? 'пласка стіна' : `${v.toFixed(2)}`)}
+            />
+          )}
           {tool.selectedPoint === 0 && <p className="text-zinc-500">Перша точка — витік; водоспад тут не діє.</p>}
+          <button className={`${chip(false)} justify-center`} onClick={() => tool.newBranch()} title="Нова річка, що відходить від цієї точки">
+            <GitBranch className="w-3.5 h-3.5" /> Гілка від цієї точки
+          </button>
+          </>)}
           <button className={danger} onClick={() => tool.deletePoint()}>
             <Trash2 className="w-3.5 h-3.5" /> Видалити точку (Del)
           </button>
@@ -159,6 +230,8 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         <span>Клік по землі — нова точка в кінці (або перед першою, якщо вона вибрана).</span>
         <span>Shift+клік — вставити точку в найближчий відрізок.</span>
         <span>Клік по маркеру — вибрати; гізмо XZ — рух, стрілка Y — закріпити рівень води.</span>
+        <span>Гілки: «Гілка від цієї точки», далі кліками. Закінчіть річку в руслі іншої — вона в неї впаде.</span>
+        <span>Озеро: «+ Озеро», клік по землі ставить контур; клік біля краю додає точку. Річка, що входить в озеро чи проходить крізь нього, бере його рівень.</span>
         <span>Вода ніколи не тече вгору: на підйомі русло врізається в рельєф. «Водоспад» опускає воду на перепад і прорізає ущелину нижче.</span>
         <span>Esc — зняти вибір точки · Del — видалити точку · Ctrl+Z — скасувати.</span>
       </div>

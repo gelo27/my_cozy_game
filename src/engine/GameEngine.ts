@@ -136,8 +136,12 @@ export class GameEngine {
   private campfireTimer = 0;
   private nearestCampfire: THREE.Vector3 | null = null;
   private waterTimer = 0;
-  private readonly waterSoundPos = new THREE.Vector3();
-  private waterSound: { position: THREE.Vector3; loud: number; fall: boolean } | null = null;
+  /** Where the river sound is aimed: glides after the nearest point on the river. */
+  private readonly riverTarget = new THREE.Vector3();
+  private readonly riverSoundPos = new THREE.Vector3();
+  private riverLoud = 0;
+  private riverSound: { position: THREE.Vector3; loud: number } | null = null;
+  private readonly fallSounds: import('../world/rivers/RiverSystem').FallSound[] = [];
   private readonly listenerPos = new THREE.Vector3();
 
   // Adaptive resolution: drops the pixel ratio when frames run long, restores it when there is headroom
@@ -445,7 +449,7 @@ export class GameEngine {
     w.props.update();
     w.props.updateVisibility(this.camera.camera.position);
     w.water.update(dt, this.camera.camera.position);
-    w.rivers.update(dt, w.weather.nightFactor);
+    w.rivers.update(dt, w.weather.nightFactor, w.exploration.inCave ? 0 : w.weather.rainIntensity * (1 - w.weather.snowAmount));
     if (editing) {
       editor.update(rawDt);
     } else {
@@ -592,15 +596,32 @@ export class GameEngine {
     const weather = w.weather;
     const storm = weather.weather === 'storm' ? 1 : 0;
     const outdoors = w.exploration.inCave ? 0 : 1;
+    // Rivers: the nearest point on a centre line, looked up 10x a second through a spatial hash,
+    // and the panner glides after it every frame (no hops between sample points). Waterfalls are
+    // fixed sources, only the two loudest within earshot play.
     this.waterTimer -= dt;
     if (this.waterTimer <= 0) {
-      this.waterTimer = 0.4;
-      const src = w.rivers.soundSource(playerPos, this.waterSoundPos);
-      this.waterSound = src && !w.exploration.inCave ? { position: this.waterSoundPos, loud: src.loud, fall: src.fall } : null;
+      this.waterTimer = 0.1;
+      const inCave = w.exploration.inCave;
+      const prev = this.riverLoud;
+      this.riverLoud = inCave ? 0 : w.rivers.riverSound(playerPos, this.riverTarget);
+      // A different river far from the last point: jump there instead of sweeping across land
+      if (this.riverLoud > 0 && (prev === 0 || this.riverTarget.distanceToSquared(this.riverSoundPos) > 30 * 30)) {
+        this.riverSoundPos.copy(this.riverTarget);
+      }
+      if (inCave) this.fallSounds.length = 0;
+      else w.rivers.fallsNear(playerPos, 2, this.fallSounds);
+    }
+    if (this.riverLoud > 0) {
+      this.riverSoundPos.lerp(this.riverTarget, 1 - Math.exp(-dt * 6));
+      this.riverSound = { position: this.riverSoundPos, loud: this.riverLoud };
+    } else {
+      this.riverSound = null;
     }
     this.ambient.update({
       listener: this.listenerPos,
-      water: this.waterSound,
+      river: this.riverSound,
+      falls: this.fallSounds,
       rain: weather.rainIntensity * (1 - weather.snowAmount) * outdoors,
       wind: Math.max(storm * 0.9, weather.snowAmount * 0.7, weather.weather === 'rain' ? 0.25 : 0) * outdoors,
       underRoof: !outdoors || weather.isSheltered(playerPos),

@@ -5,7 +5,7 @@ import type { RiverSystem } from '../world/rivers/RiverSystem';
 import { riverWorld, stringifyRivers } from '../world/rivers/RiverWorld';
 import type { RiverDef, RiverPoint } from '../world/rivers/RiverTypes';
 
-export type RiverKind = 'river' | 'stream';
+export type RiverKind = 'river' | 'stream' | 'lake';
 
 /** Live edits re-carve the terrain at most this often while dragging (s). */
 const DRAG_REBUILD_INTERVAL = 0.12;
@@ -13,7 +13,11 @@ const DRAG_REBUILD_INTERVAL = 0.12;
 const PRESETS: Record<RiverKind, { width: number; depth: number; name: string }> = {
   river: { width: 7, depth: 1.6, name: 'Річка' },
   stream: { width: 2.6, depth: 0.6, name: 'Струмок' },
+  lake: { width: 0, depth: 2.2, name: 'Озеро' },
 };
+
+/** A new lake starts as a hexagon this wide around the click (m). */
+const LAKE_START_RADIUS = 10;
 
 const COLORS = { line: 0x38bdf8, foam: 0xf97316, point: 0x38bdf8, selected: 0xfacc15, fall: 0xf97316, pinned: 0xa855f7, dim: 0x64748b };
 
@@ -126,12 +130,45 @@ export class RiverEditTool {
       name: `${p.name} ${n}`,
       width: p.width,
       depth: p.depth,
-      points: first ? [{ x: first.x, z: first.z }] : [],
+      points: first ? [{ x: round(first.x), z: round(first.z) }] : [],
     };
+    if (kind === 'lake') {
+      def.kind = 'lake';
+      def.points = first ? lakeOutline(first.x, first.z) : [];
+    }
     this.hooks.pushUndo();
     this.rivers.addRiver(def);
     this.unsaved = true;
     this.select(def.id, first ? 0 : -1);
+    return def;
+  }
+
+  /** The selected def is a lake (closed outline, flat water). */
+  public get isLake(): boolean {
+    return this.river?.kind === 'lake';
+  }
+
+  /**
+   * Starts a branch at the selected point: a new, narrower river whose source sits in this one's
+   * channel (so it leaves at this river's level). Click on to draw it; end a river inside another
+   * one's channel and it flows into it.
+   */
+  public newBranch(): RiverDef | null {
+    const parent = this.river;
+    const p = this.point;
+    if (!parent || !p) return null;
+    const n = riverWorld.defs.filter((d) => d.name.startsWith('Гілка')).length + 1;
+    const def: RiverDef = {
+      id: `branch_${Date.now().toString(36)}`,
+      name: `Гілка ${n} (${parent.name})`,
+      width: round(Math.max(1.2, (p.w ?? parent.width) * 0.6)),
+      depth: round(Math.max(0.3, (p.d ?? parent.depth) * 0.7)),
+      points: [{ x: p.x, z: p.z }],
+    };
+    this.hooks.pushUndo();
+    this.rivers.addRiver(def);
+    this.unsaved = true;
+    this.select(def.id, 0);
     return def;
   }
 
@@ -144,12 +181,14 @@ export class RiverEditTool {
     else this.hooks.touch();
   }
 
-  /** Changes river-wide settings (width, depth, name). */
-  public setRiver(patch: Partial<Pick<RiverDef, 'name' | 'width' | 'depth'>>, undo = true): void {
+  /** Changes river-wide settings (width, depth, levees, name). */
+  public setRiver(patch: Partial<Pick<RiverDef, 'name' | 'width' | 'depth' | 'levees' | 'level'>>, undo = true): void {
     const r = this.river;
     if (!r) return;
     if (undo) this.hooks.pushUndo();
     Object.assign(r, patch);
+    if (r.levees !== false) delete r.levees; // default on: keep rivers.json minimal
+    if (r.level === undefined) delete r.level;
     if (patch.name === undefined || Object.keys(patch).length > 1) this.changed(r.id, !undo);
     this.unsaved = true;
     this.hooks.touch();
@@ -237,10 +276,22 @@ export class RiverEditTool {
       this.newRiver('river', hit);
       return;
     }
+    if (r.kind === 'lake' && r.points.length === 0) {
+      this.hooks.pushUndo();
+      r.points = lakeOutline(hit.x, hit.z);
+      this.changed(r.id);
+      this.terrain.commit();
+      this.unsaved = true;
+      this.select(r.id, 0);
+      return;
+    }
     this.hooks.pushUndo();
     const p: RiverPoint = { x: round(hit.x), z: round(hit.z) };
     let index: number;
-    if (shift && r.points.length >= 2) {
+    if (r.kind === 'lake' && r.points.length >= 3) {
+      // A closed outline: the new point goes into the nearest side (the wrap-around one too)
+      index = nearestSegment([...r.points, r.points[0]], hit.x, hit.z) + 1;
+    } else if (shift && r.points.length >= 2) {
       index = nearestSegment(r.points, hit.x, hit.z) + 1;
     } else if (this.selectedPoint === 0 && r.points.length > 1) {
       index = 0;
@@ -305,7 +356,9 @@ export class RiverEditTool {
     if (!p || !r) return;
     const t = this.target.position;
     if (this.gizmo.axis === 'Y') {
-      p.y = round(t.y);
+      // A lake has one level for all of it
+      if (r.kind === 'lake') r.level = round(t.y);
+      else p.y = round(t.y);
     } else {
       p.x = round(t.x);
       p.z = round(t.z);
@@ -368,11 +421,12 @@ export class RiverEditTool {
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
         geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-        const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false, transparent: true }));
+        const lineMat = new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false, transparent: true });
+        const line = river.def.kind === 'lake' ? new THREE.LineLoop(geo, lineMat) : new THREE.Line(geo, lineMat);
         line.renderOrder = 30;
         this.helpers.add(line);
 
-        if (selected) {
+        if (selected && river.def.kind !== 'lake') {
           // Channel edges
           const edge: number[] = [];
           for (let k = 0; k < S.length - 1; k++) {
@@ -408,6 +462,17 @@ export class RiverEditTool {
 
 function round(v: number): number {
   return Math.round(v * 100) / 100;
+}
+
+/** Six points in a slightly irregular ring: a starting shape for a new lake. */
+function lakeOutline(x: number, z: number): RiverPoint[] {
+  const pts: RiverPoint[] = [];
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const r = LAKE_START_RADIUS * (i % 2 ? 0.85 : 1.1);
+    pts.push({ x: round(x + Math.cos(a) * r), z: round(z + Math.sin(a) * r) });
+  }
+  return pts;
 }
 
 /** Index of the control-point segment closest to (x, z). */

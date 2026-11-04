@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { isMobileDevice } from './WorldSettings';
+import { riverWorld } from './rivers/RiverWorld';
 
 /** Height reported for columns with nothing above the drops. */
 const OPEN_SKY = -1e4;
@@ -15,7 +16,8 @@ const MIN_SHELTER_HALF_SIZE = 0.6;
  *
  * The grid is a ring buffer (texel = world cell mod N), so walking only re-casts the cells that
  * enter the window. A small round-robin refresh picks up newly built or demolished pieces.
- * Only fixed colliders count (character, vehicle and loose props never block the sky).
+ * Only fixed colliders count (character, vehicle and loose props never block the sky); river and
+ * lake surfaces count as well.
  */
 export class PrecipitationOcclusion {
   public readonly texture: THREE.DataTexture;
@@ -130,6 +132,9 @@ export class PrecipitationOcclusion {
     } catch {
       // world mid-rebuild: leave the column open
     }
+    // Rivers and lakes are not colliders: drops and flakes stop on their surface too
+    const water = riverWorld.riverSurfaceAt(this.ray.origin.x, this.ray.origin.z);
+    if (water > h) h = water;
     this.heights[i] = h;
     this.keysX[i] = cx;
     this.keysZ[i] = cz;

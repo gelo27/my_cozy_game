@@ -12,14 +12,27 @@ export interface AmbientState {
   underRoof: boolean;
   /** Nearest burning campfire within earshot, or null. */
   campfire: THREE.Vector3 | null;
-  /** Loudest nearby river or waterfall (0..1 before distance falloff), or null. */
-  water: { position: THREE.Vector3; loud: number; fall: boolean } | null;
+  /** Nearest river (a point gliding along its centre line, loudness 0..1 before falloff), or null. */
+  river: { position: THREE.Vector3; loud: number } | null;
+  /** Waterfalls within earshot, each at a fixed spot. */
+  falls: { id: string; position: THREE.Vector3; loud: number }[];
   /** Vehicle engine while the player drives it, or null. */
   engine: { position: THREE.Vector3; speedKmh: number; kind: 'truck' | 'scooter' } | null;
 }
 
 /** Seconds of looping noise; long enough that the loop point is not audible. */
 const NOISE_SECONDS = 2.5;
+/** River and waterfall loops fall silent at these distances (m). */
+const RIVER_RANGE = 34;
+const FALL_RANGE = 64;
+
+interface WaterLoop {
+  src: AudioBufferSourceNode;
+  filter: BiquadFilterNode;
+  gain: GainNode;
+  panner: PannerNode;
+}
+
 /** The campfire falls silent at this distance (m). */
 const FIRE_EARSHOT = 14;
 
@@ -40,7 +53,8 @@ export class AmbientAudio {
   private wind: { src: AudioBufferSourceNode; filter: BiquadFilterNode; gain: GainNode; lfo: OscillatorNode } | null = null;
   private fire: { src: AudioBufferSourceNode; gain: GainNode; panner: PannerNode } | null = null;
   private engine: { osc: OscillatorNode; sub: OscillatorNode; filter: BiquadFilterNode; gain: GainNode; panner: PannerNode } | null = null;
-  private water: { src: AudioBufferSourceNode; filter: BiquadFilterNode; gain: GainNode; panner: PannerNode } | null = null;
+  private water: WaterLoop | null = null;
+  private readonly fallLoops = new Map<string, WaterLoop>();
   private roofMix = 0;
 
   public update(s: AmbientState): void {
@@ -71,19 +85,32 @@ export class AmbientAudio {
       this.fire = null;
     }
 
-    // Rivers babble, waterfalls roar: one panned noise loop at the loudest water within earshot
-    if (s.water) {
-      if (!this.water) this.water = this.startWater(ctx, s.water.position);
+    // Rivers babble: one panned loop that glides along the nearest river
+    if (s.river) {
+      if (!this.water) this.water = this.startWater(ctx, s.river.position, 1900, 0.9, 1.15, RIVER_RANGE);
       if (this.water) {
-        audioEngine.setPannerPos(this.water.panner, s.water.position);
-        this.water.filter.frequency.setTargetAtTime(s.water.fall ? 900 : 1900, t, 0.4);
-        this.water.filter.Q.value = s.water.fall ? 0.5 : 0.9;
-        this.water.src.playbackRate.setTargetAtTime(s.water.fall ? 0.7 : 1.15, t, 0.4);
-        this.water.gain.gain.setTargetAtTime(s.water.loud * (s.water.fall ? 0.55 : 0.28), t, 0.4);
+        audioEngine.setPannerPos(this.water.panner, s.river.position);
+        this.water.gain.gain.setTargetAtTime(s.river.loud * 0.28, t, 0.4);
       }
     } else if (this.water) {
       this.stop(this.water.gain, [this.water.src], [this.water.panner]);
       this.water = null;
+    }
+
+    // Waterfalls roar from where they land: a loop per fall within earshot, placed once
+    for (const f of s.falls) {
+      let loop = this.fallLoops.get(f.id);
+      if (!loop) {
+        const started = this.startWater(ctx, f.position, 900, 0.5, 0.7, FALL_RANGE);
+        if (!started) continue;
+        this.fallLoops.set(f.id, (loop = started));
+      }
+      loop.gain.gain.setTargetAtTime(f.loud * 0.55, t, 0.4);
+    }
+    for (const [id, loop] of this.fallLoops) {
+      if (s.falls.some((f) => f.id === id)) continue;
+      this.stop(loop.gain, [loop.src], [loop.panner]);
+      this.fallLoops.delete(id);
     }
 
     // Engine
@@ -186,17 +213,21 @@ export class AmbientAudio {
     return { src, gain, panner };
   }
 
-  private startWater(ctx: AudioContext, pos: THREE.Vector3) {
-    const panner = audioEngine.createPanner(pos, 4, 60);
+  /** A band-passed noise loop at a point: higher and brighter for rivers, deep for waterfalls. */
+  private startWater(ctx: AudioContext, pos: THREE.Vector3, freq: number, q: number, rate: number, range: number): WaterLoop | null {
+    const panner = audioEngine.createPanner(pos, 4, range);
     if (!panner) return null;
     const src = this.loop(ctx, this.getNoise(ctx));
+    src.playbackRate.value = rate;
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.value = 1500;
+    filter.frequency.value = freq;
+    filter.Q.value = q;
     const gain = ctx.createGain();
     gain.gain.value = 0;
     src.connect(filter).connect(gain).connect(panner);
-    src.start();
+    // Each loop starts at its own spot in the shared buffer, so two falls never sound identical
+    src.start(0, Math.random() * NOISE_SECONDS);
     return { src, filter, gain, panner };
   }
 

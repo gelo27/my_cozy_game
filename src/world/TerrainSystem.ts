@@ -496,8 +496,13 @@ vec3 terrainColor() {
   if (wa.r > 0.001) c = mix(c, texture2D(tDirt, uv).rgb, wa.r);
   if (wa.g > 0.001) c = mix(c, texture2D(tAsphalt, uv).rgb, wa.g);
   if (wa.b > 0.001) c = mix(c, texture2D(tCobble, uv).rgb, wa.b);
-  // Sandy shore by the sea, a narrow gravel strip along rivers
-  float beach = river.g > 0.5 ? smoothstep(waterY + 0.32, waterY + 0.08, vTerrWorld.y) : smoothstep(waterY + 0.55, waterY + 0.15, vTerrWorld.y);
+  // Sandy shore by the sea and in estuaries, a narrow gravel strip along rivers upstream
+  bool riverBank = river.g > 0.5 && waterY > uWaterLevel + 0.3;
+  // River gravel only hugs the water (the weight is 1 within ~2.5 m of the channel): flat
+  // floodplains that happen to sit just above the water stay grass
+  float beach = riverBank
+    ? smoothstep(waterY + 0.32, waterY + 0.08, vTerrWorld.y) * smoothstep(0.8, 0.97, river.g)
+    : smoothstep(waterY + 0.55, waterY + 0.15, vTerrWorld.y);
   float sandW = max(wa.a, beach);
   if (sandW > 0.001) c = mix(c, texture2D(tSand, uv).rgb, sandW);
   if (wb.r > 0.001) c = mix(c, texture2D(tWater, uv).rgb, wb.r);

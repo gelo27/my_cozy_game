@@ -3,6 +3,7 @@ import { worldSettings } from './WorldSettings';
 import { PrecipitationOcclusion } from './PrecipitationOcclusion';
 import { Precipitation, PRECIP_BOX } from './Precipitation';
 import { SkyDome, SkyParams } from './SkyDome';
+import { riverWorld } from './rivers/RiverWorld';
 
 export type WeatherType = 'clear' | 'cloudy' | 'rain' | 'storm' | 'fog' | 'snow';
 
@@ -91,6 +92,10 @@ export class WeatherSystem {
   /** Target 0..1 for being underground: sunlight, sky light and precipitation fade out, fog turns black. */
   public caveFactor = 0;
   private caveMix = 0;
+  /** 0..1, how far the camera is under the sea, a river or a lake (fog and sky turn to water). */
+  public underwater = 0;
+  /** Depth of the water above the camera (m), 0 above water. */
+  private underDepth = 0;
   public readonly sunDir = new THREE.Vector3(0, 1, 0);
   public readonly moonDir = new THREE.Vector3(0, -1, 0);
   private readonly skyDome: SkyDome;
@@ -248,8 +253,25 @@ export class WeatherSystem {
     const storm = this.weather === 'storm' ? 1 : 0;
     this.caveMix += (this.caveFactor - this.caveMix) * (1 - Math.exp(-dt * 4));
     if (this.caveMix > 0.001) this.applyCave(this.caveMix);
+    // Under water: a dense blue-green fog (darker deeper down and at night), and the sky behind
+    // it turns the same colour, so nothing above the surface shows through the water
+    const surface = riverWorld.waterLevelAt(cameraPos.x, cameraPos.z);
+    const below = surface - cameraPos.y;
+    this.underDepth = Math.max(0, below);
+    this.underwater += ((below > 0.02 ? 1 : 0) - this.underwater) * (1 - Math.exp(-dt * 25));
+    if (this.underwater > 0.001) this.applyUnderwater(this.underwater, daylight);
+    this.skyDome.mesh.visible = this.underwater < 0.5;
     this.precipitation.update(dt, cameraPos, cur.amount * (1 - this.caveMix), this.snowMix, bright, storm, Math.min(window.devicePixelRatio || 1, 1.5), worldSettings.waterLevel);
     if (this.precipitation.active) this.occlusion?.update(cameraPos);
+  }
+
+  private applyUnderwater(k: number, daylight: number): void {
+    const deep = Math.min(1, this.underDepth / 12);
+    const light = (0.25 + daylight * 0.75) * (1 - deep * 0.55) * (1 - this.caveMix);
+    const c = WeatherSystem._c.setRGB(0.06, 0.32, 0.38).multiplyScalar(light);
+    this.fog.color.lerp(c, k);
+    this.fog.density += (0.075 + deep * 0.03 - this.fog.density) * k;
+    this.sky.lerp(c, k);
   }
 
   /** Underground: no sun or sky, a faint cold ambient, and a black fog that swallows far tunnels. */
