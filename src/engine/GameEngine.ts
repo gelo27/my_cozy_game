@@ -32,6 +32,7 @@ import { MopedController } from '../vehicle/MopedController';
 import { BoatController } from '../vehicle/BoatController';
 import { buildLighthousePier } from '../world/Pier';
 import { WildlifeSystem } from '../wildlife/WildlifeSystem';
+import { StaticShadows } from '../world/StaticShadows';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
 import { RiverSystem } from '../world/rivers/RiverSystem';
@@ -114,6 +115,7 @@ export interface GameWorld {
   moped: MopedController;
   boat: BoatController;
   wildlife: WildlifeSystem;
+  shadows: StaticShadows;
   exploration: ExplorationManager;
   gameplay: GameplayManager;
   editor: EditorController;
@@ -274,7 +276,8 @@ export class GameEngine {
           }
           return out;
         },
-        { bulbs: [FURNITURE_MATERIALS.bulb], shades: [FURNITURE_MATERIALS.shade] }
+        { bulbs: [FURNITURE_MATERIALS.bulb], shades: [FURNITURE_MATERIALS.shade] },
+        () => buildingManager.revision * 4096 + (exploration?.lightRevision ?? 0)
       );
 
       const character = new CharacterController(physics, scene, SPAWN_POSITION.clone(), particleManager);
@@ -344,6 +347,7 @@ export class GameEngine {
       const boat = new BoatController(physics, scene, terrain, pier.boatSpawn, pier.boatYaw);
       boat.dock.copy(pier.end).lerp(pier.start, 0.25);
       const wildlife = new WildlifeSystem(scene, terrain, props, weather);
+      const shadows = new StaticShadows(terrain, props, weather, forest, rocks, propTrees, buildingManager);
       const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers);
       const debugRenderer = new DebugRenderer(physics, scene);
 
@@ -367,6 +371,7 @@ export class GameEngine {
         moped,
         boat,
         wildlife,
+        shadows,
         exploration,
         gameplay,
         editor,
@@ -504,7 +509,7 @@ export class GameEngine {
     }
     w.weather.update(dt, tpCamera.camera.position);
     w.nightLighting.setViewportHeight(this.renderer.domElement.height);
-    w.nightLighting.update(dt, tpCamera.camera.position, editing ? null : ride ? ride.getPosition() : character.getPosition());
+    w.nightLighting.update(dt, tpCamera.camera, editing ? null : ride ? ride.getPosition() : character.getPosition());
     farmingManager.rainIntensity = w.weather.rainIntensity;
     this.updateAudio(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), ride);
 
@@ -514,6 +519,7 @@ export class GameEngine {
     rocks.update(dt);
     w.exploration.update(dt, ride ? ride.getPosition() : character.getPosition(), !editing && !isDriving);
     w.wildlife.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), tpCamera.camera, !!w.exploration.inCave);
+    w.shadows.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
 
     // Push prompts to React only when they actually change (each push re-renders the HUD tree)
@@ -758,6 +764,7 @@ export class GameEngine {
       rivers: riverWorld,
       /** Wildlife: `dev.wild.stats`, `dev.wild.enabled = false` to measure its cost. */
       wild: w.wildlife,
+      shadows: w.shadows,
     };
   }
 }

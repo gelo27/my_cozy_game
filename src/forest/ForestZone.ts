@@ -220,6 +220,11 @@ export class ForestZone {
     return best;
   }
 
+  /** Standing trees (for baked ground shadows): base position and trunk height. */
+  public forEachStandingTree(fn: (pos: THREE.Vector3, trunkHeight: number) => void): void {
+    for (const t of this.trees) if (!t.isFelled) fn(t.position, t.trunkHeight);
+  }
+
   public setParticleManager(pm: ParticleManager): void {
     this.particleManager = pm;
   }

@@ -55,6 +55,11 @@ export class RockField {
     spots.forEach((spot, i) => this.createRock(i, spot.position, spot.kind, spot.scale));
   }
 
+  /** Intact rocks (for baked ground shadows). */
+  public forEachIntact(fn: (pos: THREE.Vector3, radius: number) => void): void {
+    for (const r of this.rocks) if (!r.isDepleted) fn(r.position, r.radius);
+  }
+
   /** Nearest intact rock whose surface is within `reach` of `point` (horizontal distance). */
   public findNearest(point: THREE.Vector3, reach: number): RockNode | null {
     let best: RockNode | null = null;

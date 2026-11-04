@@ -96,6 +96,8 @@ export class ExplorationManager {
   public markers: MapMarker[] = [];
   /** Id of the cave the player is in, or null outdoors. */
   public inCave: string | null = null;
+  /** Bumped whenever getLights() may return something different. */
+  public lightRevision = 0;
   /** Full-screen fade for doorways (the HUD animates it). */
   public fading = false;
   /** Bumped when anything the HUD / map shows changes. */
@@ -136,6 +138,7 @@ export class ExplorationManager {
     for (const site of this.sites) {
       const anchors = buildLandmark(site, scene, physics);
       this.landmarks.set(site.id, anchors);
+      this.lightRevision++;
       if (anchors.chest && LOOT[site.id]) this.addChest(site.id, anchors.chest.pos, anchors.chest.yaw);
       if (site.kind === 'cave') {
         const index = this.caves.length;
@@ -298,6 +301,7 @@ export class ExplorationManager {
       character.model.setFacingAngleInstant(L.spawnYaw);
       camera.targetYaw = L.spawnYaw + Math.PI;
       this.inCave = cave.site.id;
+      this.lightRevision++;
       this.gameplay.anchorOverride = this.landmarks.get(cave.site.id)?.action?.clone() ?? null;
       this.discover(cave.site);
       this.revision++;
@@ -311,6 +315,7 @@ export class ExplorationManager {
       character.model.setFacingAngleInstant(cave.site.yaw);
       camera.targetYaw = cave.site.yaw + Math.PI;
       this.inCave = null;
+      this.lightRevision++;
       this.gameplay.anchorOverride = null;
       this.revision++;
     });
@@ -581,6 +586,7 @@ export class ExplorationManager {
     data?.recipes?.forEach((id) => this.gameplay.knownRecipes.add(id));
     this.markers = data?.markers ?? [];
     this.inCave = null;
+    this.lightRevision++;
     this.gameplay.anchorOverride = null;
     this.markerSeq = this.markers.reduce((m, k) => Math.max(m, k.id), 0) + 1;
     this.revision++;

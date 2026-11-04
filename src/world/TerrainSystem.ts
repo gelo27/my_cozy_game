@@ -12,6 +12,8 @@ const N = WORLD_SIZE; // cells per side (1 m cells)
 const V = N + 1; // vertices per side
 const CHUNK = 64; // metres per render + physics chunk -> 8x8; the camera frustum culls most of them
 const CHUNKS = N / CHUNK;
+export const TERRAIN_CHUNK = CHUNK;
+export const TERRAIN_CHUNKS = CHUNKS;
 /** Vertex step per LOD level (1 m, 2 m, 4 m, 8 m). */
 const LOD_STEPS = [1, 2, 4, 8];
 /**
@@ -427,11 +429,14 @@ export class TerrainSystem {
       for (let cx = 0; cx < CHUNKS; cx++) {
         const position = new THREE.BufferAttribute(new Float32Array(S * S * 3), 3);
         const normal = new THREE.BufferAttribute(new Float32Array(S * S * 3), 3);
+        // Baked shadow of static objects per vertex (0 = lit, 1 = full shade), see StaticShadows
+        const shade = new THREE.BufferAttribute(new Uint8Array(S * S), 1, true);
         const lods = indices.map((index) => {
           const g = new THREE.BufferGeometry();
           g.setIndex(index);
           g.setAttribute('position', position);
           g.setAttribute('normal', normal);
+          g.setAttribute('aShade', shade);
           return g;
         });
         this.chunkLods.push(lods);
@@ -496,6 +501,13 @@ export class TerrainSystem {
    * full-resolution chunk borders, so neighbours never crack; normals are per 1 m vertex, so the
    * lighting stays the same and only the silhouette of far hills simplifies.
    */
+  /** Replaces a chunk's baked shadow ((CHUNK+1)^2 bytes, row-major from the chunk's -X/-Z corner). */
+  public setChunkShade(chunkIndex: number, data: Uint8Array): void {
+    const attr = this.chunkLods[chunkIndex][0].getAttribute('aShade') as THREE.BufferAttribute;
+    (attr.array as Uint8Array).set(data);
+    attr.needsUpdate = true;
+  }
+
   public updateLod(camera: THREE.Vector3): void {
     let tris = 0;
     for (let c = 0; c < this.chunkMeshes.length; c++) {
@@ -556,7 +568,7 @@ export class TerrainSystem {
       tRock: createRockTexture(),
     };
     mat.onBeforeCompile = (shader) => {
-      injectNightLights(shader);
+      injectNightLights(shader, { perVertex: lite });
       Object.assign(shader.uniforms, this.uniforms, {
         tRiver: { value: riverWorld.texture },
         tSplatA: { value: this.splatA },
@@ -566,10 +578,10 @@ export class TerrainSystem {
       for (const [k, v] of Object.entries(layers)) shader.uniforms[k] = { value: v };
 
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;\nvarying float vTerrUpY;')
+        .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;\nvarying float vTerrUpY;\nattribute float aShade;\nvarying float vShade;')
         .replace(
           '#include <begin_vertex>',
-          '#include <begin_vertex>\nvTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvTerrUpY = normalize(mat3(modelMatrix) * objectNormal).y;'
+          '#include <begin_vertex>\nvTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvTerrUpY = normalize(mat3(modelMatrix) * objectNormal).y;\nvShade = aShade;'
         );
       shader.fragmentShader = shader.fragmentShader
         .replace(
@@ -577,6 +589,7 @@ export class TerrainSystem {
           `#include <common>
 varying vec3 vTerrWorld;
 varying float vTerrUpY;
+varying float vShade;
 uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tSnow, tRock, tSplatA, tSplatB, tRiver;
 uniform float uWorldSize;
 uniform float uWaterLevel;
@@ -643,7 +656,12 @@ vec3 terrainColor() {
   return c;
 }`
         )
-        .replace('#include <map_fragment>', 'diffuseColor.rgb *= terrainColor();');
+        .replace('#include <map_fragment>', 'diffuseColor.rgb *= terrainColor();')
+        // Baked static shadows dim the sun / moon; a little contact darkening of the sky light too
+        .replace(
+          '#include <lights_fragment_end>',
+          '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= 1.0 - vShade;\nreflectedLight.indirectDiffuse *= 1.0 - vShade * 0.3;'
+        );
     };
     return mat;
   }

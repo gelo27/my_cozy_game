@@ -101,6 +101,12 @@ export class PropTreeField {
     return true;
   }
 
+  /** True while a prop tree is falling, felled (stump) or not yet regrown. */
+  public isDown(propId: number): boolean {
+    const st = this.states.get(propId);
+    return !!st && (st.fall >= 0 || st.stumpId !== null || (st.regrow > 0 && st.regrow < 1));
+  }
+
   public update(dt: number): void {
     if (this.states.size === 0) return;
     const now = performance.now();

@@ -9,11 +9,16 @@ import type { WeatherSystem } from './WeatherSystem';
  * Real THREE.PointLights cost a lighting pass in every lit shader and force a recompile whenever their
  * number changes. Instead every lit built-in material gets a small loop over a fixed-size uniform
  * array of "fake" point lights (position + range, colour). The CPU picks the lights nearest to the
- * camera a few times per second; `uFakeLightCount` is 0 during the day so the loop is skipped.
+ * camera that can touch the view a few times per second and fades them in and out of the slots;
+ * `uFakeLightCount` is 0 during the day so the loop is skipped.
+ *
+ * Positions are sent in VIEW space (transformed once per frame on the CPU), so the shader needs no
+ * extra varying or per-light matrix multiply, and pixels outside a light's range skip it early.
  */
 export const MAX_FAKE_LIGHTS = isMobileDevice() ? 6 : 12;
 
 export const nightLightUniforms = {
+  /** xyz = view-space position, w = range. */
   uFakeLightPos: { value: Array.from({ length: MAX_FAKE_LIGHTS }, () => new THREE.Vector4()) },
   uFakeLightColor: { value: Array.from({ length: MAX_FAKE_LIGHTS }, () => new THREE.Color(0, 0, 0)) },
   uFakeLightCount: { value: 0 },
@@ -25,51 +30,60 @@ interface PatchableShader {
   fragmentShader: string;
 }
 
-/** Adds the fake light loop to a lit built-in shader. Safe to call more than once. */
-export function injectNightLights(shader: PatchableShader): void {
-  if (shader.fragmentShader.includes('uFakeLightPos')) return;
+const LIGHT_DECL = `
+      #define MAX_FAKE_LIGHTS ${MAX_FAKE_LIGHTS}
+      uniform vec4 uFakeLightPos[MAX_FAKE_LIGHTS];
+      uniform vec3 uFakeLightColor[MAX_FAKE_LIGHTS];
+      uniform int uFakeLightCount;
+      // p = view-space position, n = view-space unit normal
+      vec3 fakeNightLight(vec3 p, vec3 n) {
+        vec3 sum = vec3(0.0);
+        for (int i = 0; i < MAX_FAKE_LIGHTS; i++) {
+          if (i >= uFakeLightCount) break;
+          vec3 toLight = uFakeLightPos[i].xyz - p;
+          float r = uFakeLightPos[i].w;
+          float d2 = dot(toLight, toLight);
+          if (d2 >= r * r) continue; // out of range: skip the rest
+          float att = 1.0 - d2 / (r * r);
+          att *= att;
+          // Wrapped Lambert keeps the pools soft and readable on the back side of objects
+          float ndl = max(dot(n, toLight * inversesqrt(max(d2, 1e-4))), 0.0) * 0.7 + 0.3;
+          sum += uFakeLightColor[i] * (att * ndl);
+        }
+        return sum;
+      }`;
+
+/**
+ * Adds the fake light loop to a lit built-in shader. Safe to call more than once.
+ * `perVertex` evaluates the lights per vertex instead of per pixel: only for dense meshes
+ * (the 1 m terrain), where it looks the same and costs a fraction on phones.
+ */
+export function injectNightLights(shader: PatchableShader, opts: { perVertex?: boolean } = {}): void {
+  if (shader.fragmentShader.includes('uFakeLightCount') || shader.vertexShader.includes('uFakeLightCount')) return;
   if (!shader.fragmentShader.includes('#include <opaque_fragment>') || !shader.vertexShader.includes('#include <project_vertex>')) return;
 
   Object.assign(shader.uniforms, nightLightUniforms);
 
-  shader.vertexShader = shader.vertexShader
-    .replace('#include <common>', '#include <common>\nvarying vec3 vNightWorldPos;')
-    .replace(
-      '#include <project_vertex>',
-      `#include <project_vertex>
-      vec4 nightWp = vec4(transformed, 1.0);
-      #ifdef USE_INSTANCING
-        nightWp = instanceMatrix * nightWp;
-      #endif
-      vNightWorldPos = (modelMatrix * nightWp).xyz;`
-    );
+  if (opts.perVertex) {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+varying vec3 vNightLight;${LIGHT_DECL}`)
+      .replace(
+        '#include <project_vertex>',
+        `#include <project_vertex>
+      vNightLight = uFakeLightCount > 0 ? fakeNightLight(mvPosition.xyz, normalize(transformedNormal)) : vec3(0.0);`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vNightLight;')
+      .replace('#include <opaque_fragment>', 'outgoingLight += diffuseColor.rgb * vNightLight;\n#include <opaque_fragment>');
+    return;
+  }
 
   shader.fragmentShader = shader.fragmentShader
-    .replace(
-      '#include <common>',
-      `#include <common>
-      #define MAX_FAKE_LIGHTS ${MAX_FAKE_LIGHTS}
-      varying vec3 vNightWorldPos;
-      uniform vec4 uFakeLightPos[MAX_FAKE_LIGHTS];
-      uniform vec3 uFakeLightColor[MAX_FAKE_LIGHTS];
-      uniform int uFakeLightCount;`
-    )
+    .replace('#include <common>', `#include <common>${LIGHT_DECL}`)
     .replace(
       '#include <opaque_fragment>',
-      `
-      vec3 nightLight = vec3(0.0);
-      for (int i = 0; i < MAX_FAKE_LIGHTS; i++) {
-        if (i >= uFakeLightCount) break;
-        vec3 toLight = uFakeLightPos[i].xyz - vNightWorldPos;
-        float d = length(toLight) / uFakeLightPos[i].w;
-        float att = clamp(1.0 - d * d, 0.0, 1.0);
-        att *= att;
-        // Wrapped Lambert keeps the pools soft and readable on the back side of objects
-        vec3 lv = normalize((viewMatrix * vec4(toLight, 0.0)).xyz);
-        float ndl = max(dot(normal, lv), 0.0) * 0.7 + 0.3;
-        nightLight += uFakeLightColor[i] * att * ndl;
-      }
-      outgoingLight += diffuseColor.rgb * nightLight;
+      `if (uFakeLightCount > 0) outgoingLight += diffuseColor.rgb * fakeNightLight(-vViewPosition, normal);
       #include <opaque_fragment>`
     );
 }
@@ -133,12 +147,19 @@ export class NightLighting {
   private sources: LightSource[] = [];
   private lastPropsRevision = -1;
   private extraProvider: (() => ExtraLight[]) | null = null;
-  private extraKey = '';
+  private extraRevision: (() => number) | null = null;
+  private extraKey = NaN;
   private extraTimer = 0;
   private readonly glowBulbs: THREE.MeshBasicMaterial[] = [];
   private readonly glowShades: THREE.MeshLambertMaterial[] = [];
   private selectTimer = 0;
-  private selected: LightSource[] = [];
+  /** Wanted sources (nearest that can reach the view), refreshed a few times per second. */
+  private wanted: LightSource[] = [];
+  /** Sources holding a uniform slot, with their fade weight (0..1). */
+  private readonly slots: { s: LightSource; w: number }[] = [];
+  private readonly frustum = new THREE.Frustum();
+  private readonly projScreen = new THREE.Matrix4();
+  private readonly sphere = new THREE.Sphere();
   /** 0..1 darkness forced regardless of the clock (inside caves): lights and the player lantern come on. */
   public forcedDark = 0;
   private time = 0;
@@ -149,6 +170,7 @@ export class NightLighting {
   private readonly haloSize = new Float32Array(MAX_HALOS);
   private readonly haloColor = new Float32Array(MAX_HALOS * 3);
   private readonly tmp = new THREE.Vector3();
+  private readonly viewPos = new THREE.Vector3();
 
   constructor(
     scene: THREE.Scene,
@@ -194,14 +216,17 @@ export class NightLighting {
   }
 
   /**
-   * Extra light sources polled twice a second (cheap: a key string detects changes), plus the
+   * Extra light sources, plus a revision counter that changes whenever they may have (checked twice
+   * a second; without one the provider's positions are hashed), plus the
    * materials that should glow with them: bulbs follow the prop lamp bulbs, shades get emissive.
    */
   public setExtraLights(
     provider: () => ExtraLight[],
-    glow: { bulbs?: THREE.MeshBasicMaterial[]; shades?: THREE.MeshLambertMaterial[] } = {}
+    glow: { bulbs?: THREE.MeshBasicMaterial[]; shades?: THREE.MeshLambertMaterial[] } = {},
+    revision?: () => number
   ): void {
     this.extraProvider = provider;
+    this.extraRevision = revision ?? null;
     this.glowBulbs.push(...(glow.bulbs ?? []));
     this.glowShades.push(...(glow.shades ?? []));
     this.extraTimer = 0;
@@ -212,7 +237,10 @@ export class NightLighting {
     this.haloMat.uniforms.uScale.value = px * 0.9;
   }
 
-  public update(dt: number, cameraPos: THREE.Vector3, playerPos: THREE.Vector3 | null): void {
+  /**
+   * Call after the camera has moved for this frame (light positions are sent in its view space).
+   */
+  public update(dt: number, camera: THREE.Camera, playerPos: THREE.Vector3 | null): void {
     this.time += dt;
     const night = Math.max(this.weather.nightFactor, this.forcedDark);
 
@@ -231,9 +259,12 @@ export class NightLighting {
     this.extraTimer -= dt;
     if (this.extraProvider && this.extraTimer <= 0) {
       this.extraTimer = 0.5;
-      const key = this.extraProvider()
-        .map((l) => `${l.x.toFixed(2)},${l.y.toFixed(2)},${l.z.toFixed(2)}`)
-        .join(';');
+      let key: number;
+      if (this.extraRevision) key = this.extraRevision();
+      else {
+        key = 0;
+        for (const l of this.extraProvider()) key = (key * 31 + l.x * 7.13 + l.y * 3.7 + l.z * 1.31) % 1e9;
+      }
       if (key !== this.extraKey) {
         this.extraKey = key;
         rebuild = true;
@@ -248,32 +279,59 @@ export class NightLighting {
     const u = nightLightUniforms;
     if (night < 0.02) {
       u.uFakeLightCount.value = 0;
+      this.slots.length = 0;
+      this.selectTimer = 0;
       return;
     }
 
-    // Choose the nearest sources a few times per second; colours update every frame for flicker
+    camera.updateMatrixWorld();
+    const view = camera.matrixWorldInverse;
+    const cameraPos = this.tmp.setFromMatrixPosition(camera.matrixWorld);
+    const maxFromProps = playerPos ? MAX_FAKE_LIGHTS - 1 : MAX_FAKE_LIGHTS;
+
+    // Wanted: the nearest sources whose light sphere touches the view frustum (lights behind the
+    // camera would waste a slot), a few times per second
     this.selectTimer -= dt;
     if (this.selectTimer <= 0) {
       this.selectTimer = 0.25;
-      const maxFromProps = playerPos ? MAX_FAKE_LIGHTS - 1 : MAX_FAKE_LIGHTS;
-      this.selected = this.sources
-        .map((s) => ({ s, d: s.pos.distanceToSquared(cameraPos) }))
-        .sort((a, b) => a.d - b.d)
-        .slice(0, maxFromProps)
-        .map((e) => e.s);
+      this.projScreen.multiplyMatrices(camera.projectionMatrix, view);
+      this.frustum.setFromProjectionMatrix(this.projScreen);
+      const cand: { s: LightSource; d: number }[] = [];
+      for (const src of this.sources) {
+        this.sphere.center.copy(src.pos);
+        this.sphere.radius = src.range;
+        if (this.frustum.intersectsSphere(this.sphere)) cand.push({ s: src, d: src.pos.distanceToSquared(cameraPos) });
+      }
+      cand.sort((a, b) => a.d - b.d);
+      this.wanted = cand.slice(0, maxFromProps).map((c) => c.s);
+    }
+
+    // Slots fade in / out instead of popping: a source that is no longer wanted fades out, and a
+    // newly wanted one takes a slot as soon as one is free
+    const fade = dt * 4;
+    for (let i = this.slots.length - 1; i >= 0; i--) {
+      const slot = this.slots[i];
+      slot.w = this.wanted.includes(slot.s) ? Math.min(1, slot.w + fade) : slot.w - fade;
+      if (slot.w <= 0) this.slots.splice(i, 1);
+    }
+    for (const src of this.wanted) {
+      if (this.slots.length >= maxFromProps) break;
+      if (!this.slots.some((sl) => sl.s === src)) this.slots.push({ s: src, w: 0 });
     }
 
     let n = 0;
-    for (const s of this.selected) {
+    const v = this.viewPos;
+    for (const { s, w } of this.slots) {
       const flicker = s.flicker ? 0.82 + 0.18 * Math.sin(this.time * (11 + s.seed * 5) + s.seed * 20) * Math.sin(this.time * 4.7) : 1;
-      u.uFakeLightPos.value[n].set(s.pos.x, s.pos.y, s.pos.z, s.range);
-      u.uFakeLightColor.value[n].copy(s.color).multiplyScalar(night * flicker);
+      v.copy(s.pos).applyMatrix4(view);
+      u.uFakeLightPos.value[n].set(v.x, v.y, v.z, s.range);
+      u.uFakeLightColor.value[n].copy(s.color).multiplyScalar(night * flicker * w * w * (3 - 2 * w));
       n++;
     }
     if (playerPos && n < MAX_FAKE_LIGHTS) {
       // Soft lantern glow around the player so the night stays playable away from lamps
-      this.tmp.copy(playerPos);
-      u.uFakeLightPos.value[n].set(this.tmp.x, this.tmp.y + 1.4, this.tmp.z, 5.5 + this.forcedDark * 3.5);
+      v.set(playerPos.x, playerPos.y + 1.4, playerPos.z).applyMatrix4(view);
+      u.uFakeLightPos.value[n].set(v.x, v.y, v.z, 5.5 + this.forcedDark * 3.5);
       u.uFakeLightColor.value[n].copy(PLAYER_COLOR).multiplyScalar(night);
       n++;
     }
@@ -320,5 +378,10 @@ export class NightLighting {
     (geo.attributes.haloColor as THREE.BufferAttribute).needsUpdate = true;
     geo.setDrawRange(0, h);
     this.selectTimer = 0;
+    // Sources were recreated: keep the fade of lights that are still there (same position)
+    for (const slot of this.slots) {
+      const same = this.sources.find((src) => src.pos.equals(slot.s.pos));
+      if (same) slot.s = same;
+    }
   }
 }
