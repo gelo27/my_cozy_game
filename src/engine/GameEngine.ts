@@ -347,7 +347,7 @@ export class GameEngine {
       const boat = new BoatController(physics, scene, terrain, pier.boatSpawn, pier.boatYaw);
       boat.dock.copy(pier.end).lerp(pier.start, 0.25);
       const wildlife = new WildlifeSystem(scene, terrain, props, weather);
-      const shadows = new StaticShadows(terrain, props, weather, forest, rocks, propTrees, buildingManager);
+      const shadows = new StaticShadows(terrain, props, forest, rocks, propTrees, buildingManager);
       const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers);
       const debugRenderer = new DebugRenderer(physics, scene);
 
