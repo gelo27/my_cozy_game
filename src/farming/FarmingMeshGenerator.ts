@@ -73,12 +73,34 @@ export class FarmingMeshGenerator {
    * Generates the 3D farm bed planter structure with wooden timber perimeter,
    * 4-section cross divider grid, and 4 tilled soil quadrant mounds.
    */
+  /** Bed geometry per size: every plot of a size shares the same GPU buffers (never disposed). */
+  private static readonly bedGeometryCache = new Map<number, { wood: THREE.BufferGeometry; soil: THREE.BufferGeometry }>();
+
+  /**
+   * A plot bed (wooden border + soil) as two meshes in a group. Geometry is shared per size and the
+   * soil starts on the shared dry material (FarmingManager swaps it to wet/dry), so placing and
+   * demolishing plots allocates nothing that would need disposing.
+   */
   public static createFarmPlotBed(size: number = 2.0): {
     group: THREE.Group;
     soilMesh: THREE.Mesh;
   } {
+    let geos = FarmingMeshGenerator.bedGeometryCache.get(size);
+    if (!geos) {
+      const built = FarmingMeshGenerator.buildFarmPlotBedGeometry(size);
+      geos = built;
+      FarmingMeshGenerator.bedGeometryCache.set(size, built);
+    }
     const group = new THREE.Group();
     group.name = `FarmPlotBed_${size}m`;
+    group.add(new THREE.Mesh(geos.wood, FARMING_MATERIALS.woodBorder));
+    const soilMesh = new THREE.Mesh(geos.soil, FARMING_MATERIALS.drySoil);
+    soilMesh.name = 'SoilBedMesh';
+    group.add(soilMesh);
+    return { group, soilMesh };
+  }
+
+  private static buildFarmPlotBedGeometry(size: number): { wood: THREE.BufferGeometry; soil: THREE.BufferGeometry } {
 
     const half = size / 2.0;
     const borderHeight = 0.22;
@@ -136,9 +158,6 @@ export class FarmingMeshGenerator {
 
     const mergedWood = mergeGeometries(woodGeos, true)!;
     woodGeos.forEach((g) => g.dispose());
-    const borderMesh = new THREE.Mesh(mergedWood, FARMING_MATERIALS.woodBorder);
-
-    group.add(borderMesh);
 
     // 3. Tilled Soil Surface with Furrow Ridges in each 4 Quadrants
     const soilHeight = 0.16;
@@ -189,12 +208,7 @@ export class FarmingMeshGenerator {
     const mergedSoil = mergeGeometries(soilGeos, true)!;
     soilGeos.forEach((g) => g.dispose());
 
-    const soilMesh = new THREE.Mesh(mergedSoil, FARMING_MATERIALS.drySoil.clone());
-    soilMesh.name = 'SoilBedMesh';
-
-    group.add(soilMesh);
-
-    return { group, soilMesh };
+    return { wood: mergedWood, soil: mergedSoil };
   }
 
   /**

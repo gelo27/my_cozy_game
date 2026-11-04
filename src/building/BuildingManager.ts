@@ -1097,8 +1097,15 @@ export class BuildingManager {
       console.warn('[BuildingManager] Physics collider removal error:', err);
     }
 
-    // 2. Remove from 3D Scene (note: template geometry is shared and remains cached)
+    // 2. Remove from 3D Scene. Template geometry is shared and stays cached; only procedural roofs
+    // own a per-piece geometry, which must be freed here or it stays on the GPU forever.
     this.group.remove(piece.meshGroup);
+    if (isProceduralRoofPiece(piece.type)) {
+      piece.meshGroup.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) mesh.geometry.dispose();
+      });
+    }
 
     // 3. Update spatial index & cache
     this.spatialGrid.remove(piece);

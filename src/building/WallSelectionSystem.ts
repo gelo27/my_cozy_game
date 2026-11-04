@@ -623,9 +623,14 @@ export class WallSelectionSystem {
     while (this.containerGroup.children.length > 0) {
       const child = this.containerGroup.children[0];
       this.containerGroup.remove(child);
-      if ((child as any).geometry) {
-        (child as any).geometry.dispose();
-      }
+      // Outline and arrows are built fresh per selection (arrows are nested groups with their own
+      // geometries and materials), so free the whole subtree, not only direct children's geometry
+      child.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.geometry) return;
+        m.geometry.dispose();
+        for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mat?.dispose();
+      });
     }
     this.selectionOutline = null;
     this.arrows = [];

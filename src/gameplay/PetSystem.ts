@@ -103,6 +103,21 @@ export class Pet {
     this.wanderTarget.copy(spawn);
   }
 
+  /** Frees this pet's GPU geometry and materials (each pet owns its own). */
+  public dispose(): void {
+    this.group.removeFromParent();
+    const geos = new Set<THREE.BufferGeometry>();
+    const mats = new Set<THREE.Material>();
+    this.group.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      geos.add(m.geometry);
+      for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mats.add(mat);
+    });
+    geos.forEach((g) => g.dispose());
+    mats.forEach((mat) => mat.dispose());
+  }
+
   public canPet(now: number): boolean {
     return now - this.lastPetAt > 1.2;
   }
@@ -246,7 +261,7 @@ export class PetSystem {
   }
 
   public clear(): void {
-    for (const p of this.pets) p.group.removeFromParent();
+    for (const p of this.pets) p.dispose();
     this.pets.length = 0;
   }
 

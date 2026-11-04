@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BuildingPieceType, SnapResult, WallGridInfo, isWindowOrDoorPiece } from './types/BuildingTypes';
-import { BUILDING_MATERIALS, BUILDING_PIECES, WALL_THICKNESS, createPieceMeshGroup } from './config/BuildingPiecesConfig';
+import { BUILDING_MATERIALS, BUILDING_PIECES, WALL_THICKNESS, createPieceMeshGroup, isProceduralRoofPiece } from './config/BuildingPiecesConfig';
 
 export class PreviewGhostRenderer {
   public group: THREE.Group;
@@ -71,7 +71,9 @@ export class PreviewGhostRenderer {
     if (this.currentPieceType !== pieceType || !this.currentGhostMesh) {
       if (this.currentGhostMesh) {
         this.group.remove(this.currentGhostMesh);
-        this.disposeHierarchy(this.currentGhostMesh);
+        // Ghosts reuse the cached piece templates (shared with every placed piece): disposing those
+        // would force a GPU re-upload. Only a procedural roof ghost owns its geometry.
+        if (this.currentPieceType && isProceduralRoofPiece(this.currentPieceType)) this.disposeHierarchy(this.currentGhostMesh);
       }
       this.currentPieceType = pieceType;
       this.currentGhostMesh = createPieceMeshGroup(pieceType, true, BUILDING_MATERIALS.ghostValid);
@@ -222,7 +224,7 @@ export class PreviewGhostRenderer {
   public dispose(): void {
     if (this.currentGhostMesh) {
       this.group.remove(this.currentGhostMesh);
-      this.disposeHierarchy(this.currentGhostMesh);
+      if (this.currentPieceType && isProceduralRoofPiece(this.currentPieceType)) this.disposeHierarchy(this.currentGhostMesh);
     }
     if (this.floorGridHelper) {
       this.floorGridHelper.geometry.dispose();
