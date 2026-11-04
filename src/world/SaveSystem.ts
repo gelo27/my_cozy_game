@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { BuildingSceneExportData } from '../building/types/BuildingTypes';
 import { TerrainSaveData } from './TerrainSystem';
-import { PropSaveData, MILLSTONE_SPOT } from './PropSystem';
+import { PropSaveData, MILLSTONE_SPOT, FOREST_VERSION } from './PropSystem';
 import { PetSaveData } from '../gameplay/PetSystem';
 import { WeatherType } from './WeatherSystem';
 import { worldSettings } from './WorldSettings';
@@ -22,6 +22,8 @@ export interface WorldSaveData {
   timeOfDay: number;
   weather: WeatherType;
   props: PropSaveData[];
+  /** Forest generation the props came from (missing = before the denser forests). */
+  forest?: number;
   buildings: BuildingSceneExportData | null;
   crops: { x: number; z: number; crop: CropState }[];
   /** Shovel-dug fields (their soil tiles are part of the terrain save). */
@@ -75,6 +77,7 @@ export class SaveSystem {
       timeOfDay: worldSettings.timeOfDay,
       weather: w.weather.weather,
       props: w.props.serialize(),
+      forest: w.props.forestVersion,
       buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
       crops: w.farmingManager.serializeCrops(),
       fields: w.farmingManager.serializeFields(),
@@ -98,7 +101,13 @@ export class SaveSystem {
     // Saves from before the millstone existed get one at its usual spot
     w.props.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);
     // A save from the old 128 m world now sits in the island's centre: grow nature around it
-    if (w.terrain.expandedFromLegacy) w.props.populateWilderness();
+    w.props.forestVersion = data.forest ?? 0;
+    if (w.terrain.expandedFromLegacy) {
+      w.props.populateWilderness();
+      w.props.forestVersion = 0;
+    }
+    // Worlds from before the denser forests get the extra trees once (after buildings load)
+    if (w.props.forestVersion < FOREST_VERSION) w.props.queueForestUpgrade();
     w.exploration.clearSiteProps();
     w.exploration.deserialize(data.exploration);
 

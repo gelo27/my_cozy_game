@@ -6,6 +6,7 @@ import { TerrainSystem } from './TerrainSystem';
 import { WORLD_HALF, isMobileDevice, worldSettings } from './WorldSettings';
 import { riverWorld } from './rivers/RiverWorld';
 import { coastRadius, fbm } from './IslandGenerator';
+import { TerrainTileType } from '../terrain/types/TerrainTypes';
 
 /**
  * Props are batched per type AND per square cell, so whole cells get culled. Far-seen types (trees,
@@ -25,6 +26,15 @@ const VIEW_DIST: Record<string, number> = {
   flowers: 75,
   mushrooms: 60,
 };
+/**
+ * Beyond this distance (from the cell's nearest edge) a tree cell swaps to a low-poly version.
+ * LOD types use small cells so the swap follows the camera closely; a few metres of hysteresis
+ * keep a cell from flickering between the two at the boundary.
+ */
+const LOD_DIST = (isMobileDevice() ? 50 : 70);
+const LOD_HYSTERESIS = 8;
+/** Bump when the generated forests change, so older saves get the new trees once. */
+export const FOREST_VERSION = 1;
 
 export type PropCategory = 'nature' | 'decor' | 'farm' | 'stations';
 
@@ -319,6 +329,23 @@ export const PROP_DEFS: PropDef[] = [
 
 export const PROP_DEF_MAP = new Map(PROP_DEFS.map((d) => [d.id, d]));
 
+/** Far versions of the trees (same baked material, ~1/3 of the triangles for the round tree). */
+const LOD_BUILDS: Record<string, (b: PropBuilder) => void> = {
+  tree_pine: (b) => {
+    b.cyl(M.bark, 0.18, 0.28, 1.6, 0, 0.8, 0, 4);
+    b.cone(M.pine, 1.6, 2.2, 0, 2.2, 0, 6);
+    b.cone(M.pine, 1.25, 1.9, 0, 3.2, 0, 6);
+    b.cone(M.pine, 0.85, 1.5, 0, 4.1, 0, 6);
+  },
+  tree_round: (b) => {
+    // Detail-0 icosahedra sit inside their radius: grow them a little to keep the silhouette
+    b.cyl(M.bark, 0.22, 0.32, 2.2, 0, 1.1, 0, 4);
+    b.ball(M.leaf, 1.62, 0, 3.1, 0, 0);
+    b.ball(M.leaf, 1.08, 0.9, 2.7, 0.4, 0);
+    b.ball(M.leaf, 1.08, -0.8, 2.8, -0.5, 0);
+  },
+};
+
 /** Where the farm's millstone stands (between the well and the campfire). */
 export const MILLSTONE_SPOT = { x: -1.5, z: 13 };
 
@@ -332,6 +359,9 @@ interface PropBatch {
   cz: number;
   size: number;
   viewDist: number;
+  /** Shared high/low geometries for LOD types; `far` says which one the mesh draws now. */
+  lod: { near: THREE.BufferGeometry; far: THREE.BufferGeometry } | null;
+  far: boolean;
 }
 
 /**
@@ -368,9 +398,29 @@ export class PropSystem {
   }
 
   private readonly geometries = new Map<string, { geometry: THREE.BufferGeometry; materials: THREE.Material[] }>();
+  private readonly lodGeometries = new Map<string, THREE.BufferGeometry>();
+  /** Frames left before an old save's forests get densified (waits for buildings' colliders). */
+  private densifyIn = -1;
+  /** Forest generation the current world has (saved with the world). */
+  public forestVersion = FOREST_VERSION;
 
   private static cellSize(type: string): number {
+    if (LOD_BUILDS[type]) return CELL_SMALL;
     return (VIEW_DIST[type] ?? 160) > 160 ? CELL_BIG : CELL_SMALL;
+  }
+
+  private getLod(type: string, near: THREE.BufferGeometry): PropBatch['lod'] {
+    const build = LOD_BUILDS[type];
+    if (!build) return null;
+    let far = this.lodGeometries.get(type);
+    if (!far) {
+      const b = new PropBuilder();
+      build(b);
+      const built = b.build();
+      far = built.geometry;
+      this.lodGeometries.set(type, far);
+    }
+    return { near, far };
   }
 
   private getBatch(type: string, x: number, z: number): PropBatch | null {
@@ -394,7 +444,12 @@ export class PropSystem {
     mesh.name = `Props_${type}_${cx}_${cz}`;
     this.setCellBounds(mesh, cx, cz, size);
     this.group.add(mesh);
-    batch = { def, mesh, ids: [], cx, cz, size, viewDist: (VIEW_DIST[type] ?? 160) * VIEW_SCALE };
+    batch = {
+      def, mesh, ids: [], cx, cz, size,
+      viewDist: (VIEW_DIST[type] ?? 160) * VIEW_SCALE,
+      lod: this.getLod(type, shared.geometry),
+      far: false,
+    };
     this.batches.set(key, batch);
     return batch;
   }
@@ -458,7 +513,16 @@ export class PropSystem {
       const z0 = b.cz * b.size;
       const dx = Math.max(x0 - camera.x, 0, camera.x - x0 - b.size);
       const dz = Math.max(z0 - camera.z, 0, camera.z - z0 - b.size);
-      b.mesh.visible = b.ids.length > 0 && dx * dx + dz * dz < b.viewDist * b.viewDist;
+      const d2 = dx * dx + dz * dz;
+      b.mesh.visible = b.ids.length > 0 && d2 < b.viewDist * b.viewDist;
+      if (b.lod && b.mesh.visible) {
+        const edge = b.far ? LOD_DIST - LOD_HYSTERESIS : LOD_DIST;
+        const far = d2 > edge * edge;
+        if (far !== b.far) {
+          b.far = far;
+          b.mesh.geometry = far ? b.lod.far : b.lod.near;
+        }
+      }
     }
   }
 
@@ -606,6 +670,7 @@ export class PropSystem {
 
   /** Re-snap grounded props after terrain sculpting (cheap, only when the terrain changed). */
   public update(): void {
+    if (this.densifyIn >= 0 && this.densifyIn-- === 0) this.densifyForests(true);
     if (this.terrainRevision === this.terrain.revision) return;
     const first = this.terrainRevision === -1;
     this.terrainRevision = this.terrain.revision;
@@ -701,6 +766,71 @@ export class PropSystem {
     this.add('hay', -3, 20, 0.4, 1);
     for (let i = 0; i < 5; i++) this.add('fence', 18 + i * 2, 24, 0, 1);
     this.populateWilderness();
+    this.densifyForests(false);
+  }
+
+  /**
+   * Older saves were generated with sparser forests: densify them a couple of frames from now, once
+   * the physics broadphase knows the loaded buildings (so no tree grows through a house).
+   */
+  public queueForestUpgrade(): void {
+    this.densifyIn = 2;
+  }
+
+  /**
+   * Second pass of forest trees between the first pass ones (roughly doubles forests; meadows,
+   * bushes and rocks stay as they were). Keeps clear of other props, player-painted ground and,
+   * when asked, of any collider (buildings, fences).
+   */
+  public densifyForests(checkColliders: boolean): void {
+    this.densifyIn = -1;
+    this.forestVersion = FOREST_VERSION;
+    let s = 4242;
+    const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+    const STEP = 6.5;
+    const water = worldSettings.waterLevel;
+    const MIN_GAP = 2.6;
+    const rot0 = new RAPIER.Quaternion(0, 0, 0, 1);
+    const probe = checkColliders ? new RAPIER.Cylinder(1.5, 0.7) : null;
+    let tooClose = false;
+    const near = (p: PropInstance, x: number, z: number) => {
+      const dx = p.position.x - x;
+      const dz = p.position.z - z;
+      if (dx * dx + dz * dz < MIN_GAP * MIN_GAP) tooClose = true;
+    };
+    for (let gz = -WORLD_HALF + STEP / 2; gz < WORLD_HALF; gz += STEP) {
+      for (let gx = -WORLD_HALF + STEP / 2; gx < WORLD_HALF; gx += STEP) {
+        const x = gx + rnd() * STEP;
+        const z = gz + rnd() * STEP;
+        const pick = rnd();
+        const rot = rnd() * Math.PI * 2;
+        const scale = 0.8 + rnd() * 0.55;
+        const pineRoll = rnd();
+        if (pick >= 0.7) continue;
+        if (Math.hypot(x, z) < 66 || Math.hypot(x, z) > coastRadius(x, z) - 8) continue;
+        const forest = fbm(x * 0.012 + 40, z * 0.012 - 13);
+        if (forest <= -0.02) continue;
+        const y = this.terrain.getHeight(x, z);
+        if (y < water + 0.5 || y < riverWorld.waterLevelAt(x, z) + 0.5 || riverWorld.depthAt(x, z) > 0) continue;
+        const slope = Math.abs(this.terrain.getHeight(x + 1, z) - y) + Math.abs(this.terrain.getHeight(x, z + 1) - y);
+        if (slope > 1.1) continue;
+        if (this.terrain.getTile(Math.floor(x), Math.floor(z)) !== TerrainTileType.GRASS) continue;
+        tooClose = false;
+        this.forEachNear(x, z, MIN_GAP, (p) => near(p, x, z));
+        if (tooClose) continue;
+        if (probe) {
+          const hit = this.physics.world.intersectionWithShape(
+            { x, y: y + 1.7, z }, rot0, probe,
+            RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC | RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+            undefined, undefined, undefined,
+            (c) => c.shape.type !== RAPIER.ShapeType.HeightField
+          );
+          if (hit) continue;
+        }
+        const pine = y > 6 || forest > 0.3 ? 0.75 : 0.35;
+        this.add(pineRoll < pine ? 'tree_pine' : 'tree_round', x, z, rot, scale);
+      }
+    }
   }
 
   /**
