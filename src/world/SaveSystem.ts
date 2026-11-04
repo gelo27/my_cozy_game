@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { BuildingSceneExportData } from '../building/types/BuildingTypes';
 import { TerrainSaveData } from './TerrainSystem';
-import { PropSaveData } from './PropSystem';
+import { PropSaveData, MILLSTONE_SPOT } from './PropSystem';
 import { PetSaveData } from '../gameplay/PetSystem';
 import { WeatherType } from './WeatherSystem';
 import { worldSettings } from './WorldSettings';
@@ -95,6 +95,8 @@ export class SaveSystem {
     w.weather.setWeather(data.weather);
     w.terrain.deserialize(data.terrain);
     w.props.deserialize(data.props);
+    // Saves from before the millstone existed get one at its usual spot
+    w.props.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);
     // A save from the old 128 m world now sits in the island's centre: grow nature around it
     if (w.terrain.expandedFromLegacy) w.props.populateWilderness();
     w.exploration.clearSiteProps();

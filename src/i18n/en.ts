@@ -25,6 +25,9 @@ export const en = {
   'play.cast': 'Cast the line',
   'play.cook': 'Cook food',
   'play.shop': 'Shop',
+  'play.mill': 'Grind a crate of wheat → {n} flour (have {have})',
+  'play.millNeed': 'Millstone: needs a crate of wheat',
+  'play.milled': 'Ground: +{n} {name}',
   'play.pet': 'Pet {name}',
   'play.treat': 'Give a treat',
   'play.petHappy': '{name} is delighted! ❤ {n}',
@@ -85,6 +88,7 @@ export const en = {
   'farm.growHint2': "Once it's ripe you can harvest a crate!",
 
   'field.title': 'Field',
+  'field.holdKeys': 'Hold E / LMB',
   'field.dig': 'Dig a field here',
   'field.digHint': 'A 4×4 m patch of soil for 25 plants. The frame is under you: walk to move it; it snaps next to other fields.',
   'field.cantDig': "Can't dig here",

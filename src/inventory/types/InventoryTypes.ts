@@ -225,6 +225,18 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
   ...fish('fish_seabass', 'Морський окунь', '#7d8fa3', 'Сріблястий морський окунь.', 45),
   ...fish('fish_tuna', 'Тунець', '#2f4f7a', 'Рідкісний! Великий морський тунець.', 140),
   ...fish('fish_moonfish', 'Риба-місяць', '#c9d6e8', 'Легендарна риба, що підіймається до берега лише вночі.', 300),
+  {
+    id: 'flour',
+    name: 'Борошно',
+    category: 'crops',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Wheat',
+    color: '#f5ead0',
+    description: 'Біле пшеничне борошно, змелене на жорнах. З нього печуть хліб на багатті.',
+    isEquippable: false,
+    sellPrice: 7,
+  },
   ...food('dish_bread', 'Хліб', '#d9a35b', 'Пухкий домашній хліб.', 30),
   ...food('dish_salad', 'Овочевий салат', '#4caf50', 'Свіжий салат з моркви та томатів.', 45),
   ...food('dish_soup', 'Овочевий суп', '#ff9800', 'Гарячий суп, що зігріває в дощ.', 60),
@@ -298,6 +310,7 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'fish_golden') return '🐠';
   if (item.id.startsWith('fish_')) return '🐟';
   if (item.id === 'dish_bread') return '🍞';
+  if (item.id === 'flour') return '🥣';
   if (item.id === 'dish_salad') return '🥗';
   if (item.id === 'dish_soup') return '🍲';
   if (item.id === 'dish_grilled_fish') return '🍢';

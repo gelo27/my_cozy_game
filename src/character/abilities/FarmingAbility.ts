@@ -10,6 +10,8 @@ import { audioEngine } from '../../audio/AudioEngine';
 
 const SWING_TIME = 0.7;
 const SWING_IMPACT = 0.38;
+/** Seconds E / LMB must be held to dig or fill a field (guards against accidental presses). */
+const HOLD_TIME = 0.6;
 
 interface ShovelJob {
   kind: 'dig' | 'fill';
@@ -29,7 +31,19 @@ export class FarmingAbility implements IAbility {
   public inventoryManager: InventoryManager | null = null;
   public currentPrompt: FarmInteractionPrompt | null = null;
 
+  /**
+   * Set by the engine: true when a station, the NPC, a find or a pet the player faces should get E
+   * instead of the shovel.
+   */
+  public activityProbe: ((pos: THREE.Vector3) => boolean) | null = null;
+  private activityTimer = 0;
+  private activityNear = false;
+
   private shovelJob: ShovelJob | null = null;
+  /** Hold-to-act: armed by a fresh press on an actionable target, cancelled on release or retarget. */
+  private holdArmed = false;
+  private holdKey = '';
+  private holdTime = 0;
   private readonly playerPos = new THREE.Vector3();
   private readonly tmpVec = new THREE.Vector3();
 
@@ -42,6 +56,7 @@ export class FarmingAbility implements IAbility {
     if (!this.enabled || !this.farmingManager || !this.inventoryManager) {
       this.farmingManager?.fields.showGhost(0, 0, null);
       this.shovelJob = null;
+      this.resetHold();
       this.currentPrompt = null;
       return;
     }
@@ -61,6 +76,7 @@ export class FarmingAbility implements IAbility {
       return;
     }
     this.farmingManager.fields.showGhost(0, 0, null);
+    this.resetHold();
 
     // 1. Evaluate nearby farm plot / field interaction
     const seedCount = equippedId ? this.inventoryManager.getItemCount(equippedId) : 0;
@@ -141,16 +157,43 @@ export class FarmingAbility implements IAbility {
       return;
     }
 
+    // A nearby station, the NPC, a find or a faced pet takes E: the shovel steps aside
+    this.activityTimer -= dt;
+    if (this.activityTimer <= 0) {
+      this.activityTimer = 0.1;
+      this.activityNear = !!this.activityProbe?.(playerPos);
+    }
+    if (this.activityNear) {
+      this.currentPrompt = null;
+      fields.showGhost(0, 0, null);
+      this.resetHold();
+      return;
+    }
+
     // Preview the field centred under the character: walk to move it
     const target = fields.resolveShovelTarget(playerPos.x, playerPos.z);
-    this.currentPrompt = this.buildShovelPrompt(target);
+    const prompt = (this.currentPrompt = this.buildShovelPrompt(target));
 
     if (target.kind === 'dig') fields.showGhost(target.gx, target.gz, target.reason ? 'bad' : 'ok');
     else fields.showGhost(target.field.gx, target.field.gz, target.kind === 'fill' ? 'fill' : 'bad');
 
-    if (!canAct || !this.currentPrompt.canDig) return;
+    // Hold E / LMB: a fresh press arms it, releasing or the frame moving to another spot cancels
     const input = context.input as any;
-    if (!input.interactJustPressed && !input.shootJustPressed) return;
+    const actionable = canAct && !!prompt.canDig;
+    const key = target.kind === 'dig' ? `d${target.gx},${target.gz}` : `f${target.field.id}`;
+    if (actionable && (input.interactJustPressed || input.shootJustPressed)) {
+      this.holdArmed = true;
+      this.holdKey = key;
+      this.holdTime = 0;
+    }
+    if (!actionable || !this.holdArmed || key !== this.holdKey || !(input.interact || input.shoot)) {
+      this.resetHold();
+      return;
+    }
+    this.holdTime += dt;
+    prompt.holdProgress = Math.min(1, this.holdTime / HOLD_TIME);
+    if (this.holdTime < HOLD_TIME) return;
+    this.resetHold();
 
     const gx = target.kind === 'dig' ? target.gx : target.field.gx;
     const gz = target.kind === 'dig' ? target.gz : target.field.gz;
@@ -164,6 +207,11 @@ export class FarmingAbility implements IAbility {
       impactDone: false,
     };
     this.startSwing(context);
+  }
+
+  private resetHold(): void {
+    this.holdArmed = false;
+    this.holdTime = 0;
   }
 
   /** The player stands on the field, so they dig the way they already face. */

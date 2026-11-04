@@ -20,6 +20,9 @@ export const uk: Record<TKey, string> = {
   'play.cast': 'Закинути вудку',
   'play.cook': 'Готувати їжу',
   'play.shop': 'Магазин',
+  'play.mill': 'Змолоти ящик пшениці → {n} борошна (є {have})',
+  'play.millNeed': 'Жорна: потрібен ящик пшениці',
+  'play.milled': 'Змолото: +{n} {name}',
   'play.pet': 'Погладити {name}',
   'play.treat': 'Пригостити',
   'play.petHappy': '{name} у захваті! ❤ {n}',
@@ -76,6 +79,7 @@ export const uk: Record<TKey, string> = {
   'farm.growHint2': 'Після дозрівання можна буде зібрати ящик врожаю!',
 
   'field.title': 'Поле',
+  'field.holdKeys': 'Утримуйте E / ЛКМ',
   'field.dig': 'Викопати поле тут',
   'field.digHint': 'Ділянка 4×4 м на 25 рослин. Рамка під вами: ходіть, щоб її пересунути; вона прилипає до сусідніх полів.',
   'field.cantDig': 'Тут копати не можна',

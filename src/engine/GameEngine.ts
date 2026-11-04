@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { CharacterController } from '../character/CharacterController';
+import { CharacterModel } from '../character/CharacterModel';
+import { loadWheatModel } from '../farming/WheatModel';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { DebugRenderer } from '../physics/DebugRenderer';
 import { InputManager } from '../input/InputManager';
@@ -316,6 +318,8 @@ export class GameEngine {
       const moped = new MopedController(physics, scene, terrain, mopedSpawn, -Math.PI / 2);
       const gameplay = new GameplayManager(scene, character, inventoryManager, props, weather, terrain, particleManager);
       gameplay.onNotify = (text, type) => callbacks.onNotify(text, type);
+      // Stations, the NPC, finds and a faced pet take E from the shovel
+      character.farmingAbility.activityProbe = (pos) => gameplay.hasActivityForShovel(pos);
 
       // Villager companion: paths come from a physics-sampled grid that resets when anything is built
       const nav = new GridNavigator(physics, () => (buildingManager.revision * 100003 + props.revision) * 7919 + terrain.revision, {
@@ -429,6 +433,12 @@ export class GameEngine {
   private async prewarmShaders(): Promise<void> {
     const t0 = performance.now();
     try {
+      // The player / NPC model and the wheat load asynchronously: wait for them (capped) so their
+      // shaders are compiled here too instead of hitching the first frames of play
+      const assets = Promise.allSettled([CharacterModel.preload(), loadWheatModel()]);
+      await Promise.race([assets, new Promise((r) => setTimeout(r, 6000))]);
+      // Let the models' own load callbacks attach their meshes to the scene first
+      await new Promise((r) => setTimeout(r, 0));
       this.world?.terrain.updateLod(this.camera.camera.position);
       const timeout = new Promise<void>((r) => setTimeout(r, 4000));
       await Promise.race([this.renderer.compileAsync(this.scene, this.camera.camera).then(() => undefined), timeout]);

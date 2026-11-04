@@ -28,6 +28,7 @@ export const EN_NAMES = {
     dish_grilled_fish: 'Grilled Fish',
     dish_fish_stew: 'Fish Stew',
     pet_treat: 'Pet Treat',
+    flour: 'Flour',
     coins: 'Coins',
     copper_ore: 'Copper Ore',
     gold_ore: 'Gold Ore',
@@ -72,6 +73,7 @@ export const EN_NAMES = {
     dish_grilled_fish: 'Fragrant fish cooked over the campfire.',
     dish_fish_stew: 'A hearty stew of fish and vegetables.',
     pet_treat: 'Treat your cat or dog to raise their affection.',
+    flour: 'Fine wheat flour, ground at the millstone. Bake bread from it at the campfire.',
     coins: 'Earn them by selling crops, fish and dishes at the mailbox.',
     copper_ore: 'Greenish copper ore from the mountain slopes.',
     gold_ore: 'Rare ore with golden veins. Found high in the mountains and deep in caves.',
@@ -129,6 +131,7 @@ export const EN_NAMES = {
     well: 'Well',
     campfire: 'Campfire',
     mailbox: 'Mailbox',
+    millstone: 'Millstone',
   },
   /** Wallpaper tags are keyed by their Ukrainian source text. */
   tag: {

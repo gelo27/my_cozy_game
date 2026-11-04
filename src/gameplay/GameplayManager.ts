@@ -11,12 +11,15 @@ import { audioEngine } from '../audio/AudioEngine';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { t, dataName, getLang } from '../i18n/i18n';
 
+/** Flour from one crate of wheat at the millstone (3 flour bake one loaf). */
+const FLOUR_PER_CRATE = 3;
+
 export type GameplayPanel = 'cook' | 'shop' | null;
 
 export interface GameplayPrompt {
   text: string;
   key: string;
-  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'explore';
+  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'explore' | 'mill';
   secondary?: { text: string; key: string; action: 'treat' };
 }
 
@@ -78,7 +81,7 @@ export class GameplayManager {
     private readonly props: PropSystem,
     private readonly weather: WeatherSystem,
     terrain: ConstructorParameters<typeof FishingSystem>[1],
-    particles?: ConstructorParameters<typeof PetSystem>[2]
+    private readonly particles?: ConstructorParameters<typeof PetSystem>[2]
   ) {
     this.fishing = new FishingSystem(scene, terrain);
     this.pets = new PetSystem(scene, terrain, particles);
@@ -132,9 +135,28 @@ export class GameplayManager {
     if (pressed && this.prompt && !ownedByOthers) this.runAction(this.prompt.action);
   }
 
-  private computePrompt(pos: THREE.Vector3, facing: THREE.Vector3): GameplayPrompt | null {
+  /**
+   * Whether something here should take E from the shovel: stations, the NPC, finds, or a pet the
+   * player is facing up close. Pets sit around the player all the time, so a pet merely nearby
+   * must not stop digging.
+   */
+  public hasActivityForShovel(pos: THREE.Vector3): boolean {
+    if (this.fishing.busy || this.panel) return false;
+    const facing = this.character.getFacingDirection();
+    const p = this.computePrompt(pos, facing, true);
+    if (!p) return false;
+    if (p.action !== 'pet') return true;
+    const pet = this.pets.nearest(pos, 1.7);
+    if (!pet) return false;
+    const dx = pet.group.position.x - pos.x;
+    const dz = pet.group.position.z - pos.z;
+    const len = Math.hypot(dx, dz) || 1;
+    return (dx * facing.x + dz * facing.z) / len > 0.35;
+  }
+
+  private computePrompt(pos: THREE.Vector3, facing: THREE.Vector3, ignoreTools = false): GameplayPrompt | null {
     if (this.fishing.busy) return null;
-    if (this.character.farmingAbility?.currentPrompt || this.character.gatheringAbility?.currentPrompt) return null;
+    if (!ignoreTools && (this.character.farmingAbility?.currentPrompt || this.character.gatheringAbility?.currentPrompt)) return null;
 
     // Chests, cave doorways and beach finds come first: they sit at fixed spots
     if (this.explore?.prompt) return { text: this.explore.prompt.text, key: 'E', action: 'explore' };
@@ -145,6 +167,10 @@ export class GameplayManager {
     }
     if (this.props.findNearest('campfire', pos, 2.6)) return { text: t('play.cook'), key: 'E', action: 'cook' };
     if (this.props.findNearest('mailbox', pos, 2.4)) return { text: t('play.shop'), key: 'E', action: 'shop' };
+    if (this.props.findNearest('millstone', pos, 2.4)) {
+      const crates = this.inventory.getItemCount('crate_wheat');
+      return { text: crates > 0 ? t('play.mill', { n: FLOUR_PER_CRATE, have: crates }) : t('play.millNeed'), key: 'E', action: 'mill' };
+    }
 
     const npc = this.companion;
     if (npc && npc.getPosition(this.tmp).distanceTo(pos) < 2.6) {
@@ -200,8 +226,26 @@ export class GameplayManager {
       }
     } else if (action === 'cook' || action === 'shop') {
       this.openPanel(action);
+    } else if (action === 'mill') {
+      this.grindFlour(pos);
     }
     this.revision++;
+  }
+
+  /** Millstone: one crate of wheat -> FLOUR_PER_CRATE flour, with a puff of flour dust. */
+  private grindFlour(pos: THREE.Vector3): void {
+    const mill = this.props.findNearest('millstone', pos, 2.4);
+    if (!mill) return;
+    if (!this.inventory.removeItem('crate_wheat', 1)) {
+      this.onNotify(t('play.millNeed'), 'info');
+      return;
+    }
+    this.inventory.addItem('flour', FLOUR_PER_CRATE);
+    audioEngine.at(mill.position).playBuildPlace(false);
+    this.particles?.emitBuildPuff(this.tmp.copy(mill.position).setY(mill.position.y + 0.7), false, 22);
+    this.character.model?.triggerJumpSquash();
+    this.onNotify(t('play.milled', { n: FLOUR_PER_CRATE, name: dataName('item', 'flour', 'Борошно') }), 'success');
+    this.promptTimer = 0;
   }
 
   private pressFishing(): void {

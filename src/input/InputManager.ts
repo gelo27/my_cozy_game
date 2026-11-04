@@ -117,7 +117,10 @@ export class InputManager {
     crouch: false,
     dashJustPressed: false,
     interactJustPressed: false,
+    /** Touch E / use buttons currently held (for hold-to-act, e.g. the shovel). */
+    interactHeld: false,
     chopJustPressed: false,
+    chopHeld: false,
     buildToggleJustPressed: false,
     buildRotateJustPressed: false,
     buildSnapToggleJustPressed: false,
@@ -452,8 +455,10 @@ export class InputManager {
     const resetDown = !!this.keys['KeyR'];
     const resetJustPressed = resetDown && !this.previousKeys['KeyR'];
 
-    const interactDown = !!(this.keys['KeyE'] || this.keys['KeyF']);
-    const interactJustPressed = (interactDown && !(this.previousKeys['KeyE'] || this.previousKeys['KeyF'])) || this.touchState.interactJustPressed;
+    // Touch buttons report "held" separately so holding one doesn't re-fire the just-pressed edge
+    const interactKeyDown = !!(this.keys['KeyE'] || this.keys['KeyF']);
+    const interactDown = interactKeyDown || this.touchState.interactHeld;
+    const interactJustPressed = (interactKeyDown && !(this.previousKeys['KeyE'] || this.previousKeys['KeyF'])) || this.touchState.interactJustPressed;
 
     const weapon1JustPressed = !!this.keys['Digit1'] && !this.previousKeys['Digit1'];
     const weapon2JustPressed = !!this.keys['Digit2'] && !this.previousKeys['Digit2'];
@@ -468,8 +473,8 @@ export class InputManager {
     const reloadDown = !!this.keys['KeyR'];
     const reloadJustPressed = reloadDown && !this.previousKeys['KeyR'];
 
-    const shootDown = this.isMouseDown || this.touchState.chopJustPressed;
-    const shootJustPressed = (shootDown && !this.isMouseDownPrevious) || this.touchState.chopJustPressed;
+    const shootDown = this.isMouseDown || this.touchState.chopJustPressed || this.touchState.chopHeld;
+    const shootJustPressed = (this.isMouseDown && !this.isMouseDownPrevious) || this.touchState.chopJustPressed;
 
     const buildToggleJustPressed = (!!this.keys['KeyB'] && !this.previousKeys['KeyB']) || this.touchState.buildToggleJustPressed;
     const buildRotateJustPressed = (!!this.keys['KeyR'] && !this.previousKeys['KeyR']) || this.touchState.buildRotateJustPressed;

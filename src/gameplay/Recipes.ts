@@ -10,7 +10,8 @@ export interface Recipe {
 }
 
 export const RECIPES: Recipe[] = [
-  { id: 'bread', dishId: 'dish_bread', name: 'Хліб', ingredients: [{ itemId: 'crate_wheat', count: 2 }], seconds: 3 },
+  // Wheat crate -> millstone (3 flour) -> bread: 18 coins of wheat become a 30-coin loaf
+  { id: 'bread', dishId: 'dish_bread', name: 'Хліб', ingredients: [{ itemId: 'flour', count: 3 }], seconds: 3 },
   {
     id: 'salad',
     dishId: 'dish_salad',

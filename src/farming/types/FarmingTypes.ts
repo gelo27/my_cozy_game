@@ -88,6 +88,8 @@ export interface FarmInteractionPrompt {
   shovel?: 'dig' | 'fill' | 'blocked';
   /** The shovel can act right now. */
   canDig?: boolean;
+  /** 0..1 while E / LMB is being held to dig or fill. */
+  holdProgress?: number;
   actionText: string;
   hintText: string;
 }

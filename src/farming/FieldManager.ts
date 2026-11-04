@@ -30,6 +30,10 @@ export interface FarmField {
   prevTiles: number[];
   crop: CropState | null;
   indicator: THREE.Sprite;
+  /** Dark damp-soil overlay, built on first watering and freed with the field. */
+  wetMesh: THREE.Mesh | null;
+  /** 0..1, eases towards 1 while watered so the soil darkens and dries gradually. */
+  wetness: number;
 }
 
 export type DigBlockReason = 'tile' | 'water' | 'slope' | 'blocked' | 'overlap';
@@ -193,6 +197,16 @@ export class FieldManager {
       this.group.add(mesh);
     };
     warm(wheatProbe, FIELD_CROP_MATERIAL);
+
+    // Damp-soil overlay: same material setup as createWetMesh (per-field copies share the program)
+    const dampProbe = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshLambertMaterial({ color: 0x1e1009, alphaMap: FieldManager.wetAlphaTexture(), transparent: true, depthWrite: false })
+    );
+    dampProbe.name = 'FieldShaderWarmer';
+    dampProbe.visible = false;
+    dampProbe.frustumCulled = false;
+    this.group.add(dampProbe);
 
     const seen = new Set<THREE.Material>();
     for (const type of ['carrot', 'tomato'] as CropType[]) {
@@ -359,6 +373,8 @@ export class FieldManager {
       prevTiles: prevTiles && prevTiles.length === prev.length ? prevTiles : prev,
       crop,
       indicator,
+      wetMesh: null,
+      wetness: crop?.isWatered ? 1 : 0,
     };
     this.fields.set(field.id, field);
     this.dirty = true;
@@ -377,13 +393,17 @@ export class FieldManager {
       }
     }
     this.group.remove(field.indicator);
+    this.disposeWetMesh(field);
     this.fields.delete(id);
     this.dirty = true;
     return true;
   }
 
   public clear(): void {
-    for (const f of this.fields.values()) this.group.remove(f.indicator);
+    for (const f of this.fields.values()) {
+      this.group.remove(f.indicator);
+      this.disposeWetMesh(f);
+    }
     this.fields.clear();
     this.dirty = true;
   }
@@ -482,7 +502,89 @@ export class FieldManager {
         const s = 0.8 + Math.sin(animTime * 4.5 + i * 0.5) * 0.05;
         f.indicator.scale.set(s, s, 1);
       }
+      this.updateWetness(f, dt);
     }
+  }
+
+  // ---------------------------------------------------------------- damp soil
+
+  /** Soaks in quickly after watering, dries out slowly once the stage has used the water up. */
+  private updateWetness(f: FarmField, dt: number): void {
+    const target = f.crop?.isWatered ? 1 : 0;
+    if (f.wetness === target && (target === 0 || f.wetMesh)) return;
+    f.wetness = target > f.wetness ? Math.min(1, f.wetness + dt * 1.6) : Math.max(0, f.wetness - dt * 0.25);
+    if (f.wetness > 0 && !f.wetMesh) f.wetMesh = this.createWetMesh(f);
+    if (f.wetMesh) {
+      f.wetMesh.visible = f.wetness > 0.01;
+      (f.wetMesh.material as THREE.MeshLambertMaterial).opacity = 0.55 * f.wetness;
+    }
+  }
+
+  /** A terrain-hugging dark patch with soft edges over the field's soil (one per field, 81 verts). */
+  private createWetMesh(f: FarmField): THREE.Mesh {
+    const geo = new THREE.PlaneGeometry(FIELD_CELLS + 0.6, FIELD_CELLS + 0.6, 8, 8);
+    geo.rotateX(-Math.PI / 2);
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    const cx = f.gx + HALF;
+    const cz = f.gz + HALF;
+    for (let i = 0; i < pos.count; i++) {
+      const h = this.terrain ? this.terrain.getHeight(cx + pos.getX(i), cz + pos.getZ(i)) : f.center.y;
+      pos.setY(i, h + 0.035);
+    }
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshLambertMaterial({
+      color: 0x1e1009,
+      alphaMap: FieldManager.wetAlphaTexture(),
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = `FieldDamp_${f.id}`;
+    mesh.position.set(cx, 0, cz);
+    mesh.renderOrder = 1;
+    mesh.visible = false;
+    this.group.add(mesh);
+    return mesh;
+  }
+
+  private disposeWetMesh(f: FarmField): void {
+    if (!f.wetMesh) return;
+    this.group.remove(f.wetMesh);
+    f.wetMesh.geometry.dispose();
+    (f.wetMesh.material as THREE.Material).dispose(); // the shared alpha texture stays
+    f.wetMesh = null;
+  }
+
+  private static wetAlpha: THREE.CanvasTexture | null = null;
+
+  /** Shared soft-edged square mask (with a little mottling so the damp patch isn't flat). */
+  private static wetAlphaTexture(): THREE.CanvasTexture {
+    if (this.wetAlpha) return this.wetAlpha;
+    const S = 64;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = S;
+    const ctx = canvas.getContext('2d')!;
+    const img = ctx.createImageData(S, S);
+    const rand = rng(1234);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        // Distance to the square's edge, 0 at the border, fading over ~18% of the side
+        const u = Math.min(x, S - 1 - x) / S;
+        const v = Math.min(y, S - 1 - y) / S;
+        const edge = Math.min(1, Math.min(u, v) / 0.18);
+        const a = edge * edge * (3 - 2 * edge) * (0.82 + rand() * 0.18);
+        const o = (y * S + x) * 4;
+        img.data[o] = img.data[o + 1] = img.data[o + 2] = Math.round(a * 255);
+        img.data[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    this.wetAlpha = new THREE.CanvasTexture(canvas);
+    return this.wetAlpha;
   }
 
   // ---------------------------------------------------------------- proximity push

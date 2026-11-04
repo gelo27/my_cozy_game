@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Coins, Zap, Settings2, Heart,
 } from 'lucide-react';
-import { GameplayHudState } from '../../gameplay/GameplayManager';
+import { GameplayHudState, GameplayPrompt } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji, InventoryItem } from '../../inventory/types/InventoryTypes';
 import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
@@ -30,7 +30,7 @@ interface GameHUDProps {
   onOpenEditor(): void;
   onOpenMap(): void;
   onCallMoped(): void;
-  onAction(action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'explore' | 'treat'): void;
+  onAction(action: GameplayPrompt['action'] | 'treat'): void;
 }
 
 /** Hotbar shows what the player can hold; 1-8 keys or a tap equips. */

@@ -92,6 +92,14 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
     if (!inputManager) return;
     inputManager.touchState[flag] = true;
     if (flag === 'jumpJustPressed') inputManager.touchState.jump = true;
+    if (flag === 'interactJustPressed') inputManager.touchState.interactHeld = true;
+    if (flag === 'chopJustPressed') inputManager.touchState.chopHeld = true;
+  };
+  /** Ends a hold on the E / use buttons. */
+  const release = (flag: 'interactHeld' | 'chopHeld') => (e: React.TouchEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (inputManager) inputManager.touchState[flag] = false;
   };
   const releaseJump = (e: React.TouchEvent) => {
     e.stopPropagation();
@@ -134,7 +142,11 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
 
           {/* Action cluster, kept above the hotbar */}
           <div className="pointer-events-auto absolute bottom-24 right-3 grid grid-cols-2 gap-2.5 items-end select-none">
-            <button onTouchStart={tap('interactJustPressed')} className={`${roundBtn} w-14 h-14`} title={t('touch.interact')}>
+            <button
+              onTouchStart={tap('interactJustPressed')}
+              onTouchEnd={release('interactHeld')}
+              onTouchCancel={release('interactHeld')}
+              className={`${roundBtn} w-14 h-14`} title={t('touch.interact')}>
               <Hand className="w-6 h-6" />
             </button>
             <button
@@ -148,7 +160,11 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
             >
               <Footprints className="w-5 h-5" />
             </button>
-            <button onTouchStart={tap('chopJustPressed')} className={`${roundBtn} w-14 h-14`} title={t('touch.use')}>
+            <button
+              onTouchStart={tap('chopJustPressed')}
+              onTouchEnd={release('chopHeld')}
+              onTouchCancel={release('chopHeld')}
+              className={`${roundBtn} w-14 h-14`} title={t('touch.use')}>
               <Sparkles className="w-6 h-6" />
             </button>
             <button

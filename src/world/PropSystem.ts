@@ -296,6 +296,19 @@ export const PROP_DEFS: PropDef[] = [
     },
   },
   {
+    // Hand quern: two stacked millstones on a low stone plinth, with a wooden crank handle
+    id: 'millstone', name: 'Жорна', icon: 'Wheat', category: 'stations',
+    collider: { kind: 'cyl', r: 0.75, h: 0.9 },
+    build: (b) => {
+      b.cyl(M.stone, 0.78, 0.85, 0.35, 0, 0.175, 0, 10);
+      b.cyl(M.rock, 0.62, 0.62, 0.2, 0, 0.45, 0, 12);
+      b.cyl(M.rock, 0.6, 0.62, 0.2, 0, 0.66, 0, 12);
+      b.cyl(M.darkWood, 0.09, 0.09, 0.06, 0, 0.79, 0, 8);
+      b.box(M.wood, 0.07, 0.42, 0.07, 0.45, 0.95, 0);
+      b.cyl(M.white, 0.5, 0.5, 0.02, 0, 0.36, 0, 12); // flour dusted on the plinth
+    },
+  },
+  {
     id: 'mailbox', name: 'Поштова скринька', icon: 'Mailbox', category: 'decor',
     build: (b) => {
       b.box(M.darkWood, 0.1, 1.0, 0.1, 0, 0.5, 0);
@@ -305,6 +318,9 @@ export const PROP_DEFS: PropDef[] = [
 ];
 
 export const PROP_DEF_MAP = new Map(PROP_DEFS.map((d) => [d.id, d]));
+
+/** Where the farm's millstone stands (between the well and the campfire). */
+export const MILLSTONE_SPOT = { x: -1.5, z: 13 };
 
 // ------------------------------------------------------------------ system
 
@@ -650,6 +666,15 @@ export class PropSystem {
   }
 
   /** Default decoration so a fresh world does not look empty. */
+  /**
+   * Adds a station prop if the world has none of that type yet. Called for new worlds and after
+   * loading a save, so worlds saved before the station existed still get one.
+   */
+  public ensureStation(type: string, x: number, z: number, rotationY = 0): void {
+    for (const p of this.props.values()) if (p.type === type) return;
+    this.add(type, x, z, rotationY, 1);
+  }
+
   public populateDefault(): void {
     const ring = (type: string, cx: number, cz: number, n: number, r0: number, r1: number, seed: number) => {
       let s = seed;
@@ -671,6 +696,7 @@ export class PropSystem {
     this.add('bench', 4, 16.6, Math.PI, 1);
     this.add('well', -6, 10, 0, 1);
     this.add('mailbox', 3, 5, -Math.PI / 2, 1);
+    this.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);
     this.add('lamp', 9, 12, 0, 1);
     this.add('hay', -3, 20, 0.4, 1);
     for (let i = 0; i < 5; i++) this.add('fence', 18 + i * 2, 24, 0, 1);
