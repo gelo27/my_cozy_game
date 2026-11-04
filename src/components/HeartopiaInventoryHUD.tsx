@@ -3,6 +3,7 @@ import { InventoryManager } from '../inventory/InventoryManager';
 import { InventoryItem, InventoryCategory, getItemEmoji } from '../inventory/types/InventoryTypes';
 import { X, Sparkles, Check, Droplets, Sprout, Package, Trees, Info, Fish } from 'lucide-react';
 import { t, useLang, dataName, itemDesc } from '../i18n/i18n';
+import { ItemIcon } from './ItemIcon';
 
 interface HeartopiaInventoryHUDProps {
   inventoryManager: InventoryManager;
@@ -190,7 +191,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
                     {item ? (
                       <>
                         <div className="text-3xl filter drop-shadow-sm transition-transform hover:scale-110">
-                          {getItemEmoji(item)}
+                          <ItemIcon item={item} />
                         </div>
                         <span className="text-[10px] font-bold text-center line-clamp-1 mt-1 text-amber-900">
                           {dataName('item', item.id, item.name)}
@@ -225,7 +226,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
               <div className="space-y-3">
                 <div className="flex items-center gap-3">
                   <div className="w-14 h-14 rounded-2xl bg-white border-2 border-[#dbcbb8] flex items-center justify-center text-4xl shadow-sm">
-                    {getItemEmoji(selectedItem)}
+                    <ItemIcon item={selectedItem} />
                   </div>
                   <div>
                     <h3 className="font-extrabold text-base text-amber-950">

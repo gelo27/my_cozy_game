@@ -1,9 +1,29 @@
 import * as THREE from 'three';
 import { t, dataName } from '../i18n/i18n';
-import { CropType, CropStage, FarmPlot, CROP_DEFINITIONS, FarmInteractionPrompt } from './types/FarmingTypes';
+import { CropType, CropState, FarmPlot, CROP_DEFINITIONS, FarmInteractionPrompt } from './types/FarmingTypes';
 import { FarmingMeshGenerator, FARMING_MATERIALS } from './FarmingMeshGenerator';
 import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
+import { FieldManager, FarmField, FieldSaveData, FIELD_CELLS, FIELD_CRATE_YIELD, FIELD_SEED_COST } from './FieldManager';
+import { fieldCropTime } from './WheatModel';
+import type { TerrainSystem } from '../world/TerrainSystem';
+import type { PhysicsWorld } from '../physics/PhysicsWorld';
+
+const SEED_TO_CROP: Record<string, CropType> = { wheat_seed: 'wheat', carrot_seed: 'carrot', tomato_seed: 'tomato' };
+
+/** Crop type a seed item grows into (null for anything else). */
+export function cropForSeed(itemId: string | null | undefined): CropType | null {
+  return (itemId && SEED_TO_CROP[itemId]) || null;
+}
+
+const isFieldId = (id: string) => id.startsWith('field_');
+
+export interface HarvestResult {
+  cropType: CropType;
+  crateItemId: string;
+  crates: number;
+  bonusSeeds: number;
+}
 
 export class FarmingManager {
   private plots: Map<string, FarmPlot> = new Map();
@@ -15,12 +35,27 @@ export class FarmingManager {
   /** 0..1 from the weather system; rain waters thirsty crops on its own. */
   public rainIntensity = 0;
   private rainTimer = 0;
+  /** Big shovel-dug fields (instanced crops on terrain soil). */
+  public readonly fields: FieldManager;
 
   constructor(scene: THREE.Scene, particleManager?: ParticleManager) {
     this.scene = scene;
     if (particleManager) {
       this.particleManager = particleManager;
     }
+    this.fields = new FieldManager(scene, () => this.getWaterDropMaterial());
+    // Garden beds have no static collider to block a field: keep fields clear of them explicitly
+    this.fields.isAreaReserved = (minX, minZ, maxX, maxZ) => {
+      for (const plot of this.plots.values()) {
+        const p = plot.position;
+        if (p.x + 1.1 > minX && p.x - 1.1 < maxX && p.z + 1.1 > minZ && p.z - 1.1 < maxZ) return true;
+      }
+      return false;
+    };
+  }
+
+  public setWorld(terrain: TerrainSystem, physics: PhysicsWorld): void {
+    this.fields.setWorld(terrain, physics);
   }
 
   private getWaterDropMaterial(): THREE.SpriteMaterial {
@@ -101,22 +136,59 @@ export class FarmingManager {
   }
 
   /**
+   * Advances a watered crop. Returns the stage it just reached (2 or 3) or 0 when nothing changed.
+   * Each stage dries the soil again, so a crop needs one watering per stage.
+   */
+  private advanceCrop(crop: CropState, dt: number): 0 | 2 | 3 {
+    if (!crop.isWatered || crop.stage >= 3) return 0;
+    crop.growthTimer += dt;
+    if (crop.growthTimer < crop.stageDuration) return 0;
+    crop.isWatered = false;
+    if (crop.stage === 1) {
+      crop.stage = 2;
+      crop.growthTimer = 0;
+      return 2;
+    }
+    crop.stage = 3;
+    crop.growthTimer = crop.stageDuration;
+    return 3;
+  }
+
+  private celebrateStage(position: THREE.Vector3, reached: 2 | 3): void {
+    if (reached === 2) audioEngine.at(position).playHitSound();
+    else audioEngine.at(position).playHarvest();
+    this.particleManager?.emitBuildPuff(position, reached === 2);
+  }
+
+  /**
    * Main update loop advancing crop growth timers and handling stage transitions.
    */
   public update(dt: number): void {
     this.animTime += dt;
+    fieldCropTime.value = this.animTime;
 
-    // Rain waters one thirsty plot every ~0.4 s (staggered so it reads as rain soaking in)
+    // Rain waters one thirsty plot or field every ~0.4 s (staggered so it reads as rain soaking in)
     if (this.rainIntensity > 0.35) {
       this.rainTimer -= dt;
       if (this.rainTimer <= 0) {
         this.rainTimer = 0.4;
+        let done = false;
         for (const plot of this.plots.values()) {
           if (plot.crop && !plot.crop.isWatered && plot.crop.stage < 3) {
             plot.crop.isWatered = true;
             plot.crop.waterCount += 1;
             this.setSoilVisual(plot, true);
+            done = true;
             break;
+          }
+        }
+        if (!done) {
+          for (const field of this.fields.getAll()) {
+            if (field.crop && !field.crop.isWatered && field.crop.stage < 3) {
+              field.crop.isWatered = true;
+              field.crop.waterCount += 1;
+              break;
+            }
           }
         }
       }
@@ -126,44 +198,11 @@ export class FarmingManager {
     for (const plot of this.plots.values()) {
       plotIndex++;
       if (plot.crop) {
-        // Only grows if currently watered!
-        if (plot.crop.isWatered && plot.crop.stage < 3) {
-          plot.crop.growthTimer += dt;
-
-          // Check if ready for next stage
-          if (plot.crop.growthTimer >= plot.crop.stageDuration) {
-            if (plot.crop.stage === 1) {
-              // Advance to stage 2: plant grows bigger, but needs watering again!
-              plot.crop.stage = 2;
-              plot.crop.isWatered = false; // Dries out for 2nd required watering!
-              plot.crop.growthTimer = 0;
-
-              // Update visuals
-              this.updateCropVisual(plot);
-              this.setSoilVisual(plot, false);
-
-              // Audio & particles
-              audioEngine.at(plot.position).playHitSound();
-              if (this.particleManager) {
-                this.particleManager.emitBuildPuff(plot.position, true);
-              }
-            } else if (plot.crop.stage === 2) {
-              // Advance to stage 3: Ripe, ready to harvest!
-              plot.crop.stage = 3;
-              plot.crop.isWatered = false;
-              plot.crop.growthTimer = plot.crop.stageDuration;
-
-              // Update visuals
-              this.updateCropVisual(plot);
-              this.setSoilVisual(plot, false);
-
-              // Celebration sound & particles
-              audioEngine.at(plot.position).playHarvest();
-              if (this.particleManager) {
-                this.particleManager.emitBuildPuff(plot.position, false);
-              }
-            }
-          }
+        const reached = this.advanceCrop(plot.crop, dt);
+        if (reached) {
+          this.updateCropVisual(plot);
+          this.setSoilVisual(plot, false);
+          this.celebrateStage(plot.position, reached);
         }
       }
 
@@ -184,24 +223,38 @@ export class FarmingManager {
         }
       }
     }
+
+    for (const field of this.fields.getAll()) {
+      if (!field.crop) continue;
+      const reached = this.advanceCrop(field.crop, dt);
+      if (reached) {
+        this.fields.markCropsDirty();
+        this.celebrateStage(field.center, reached);
+      }
+    }
+    this.fields.update(dt, this.animTime);
+  }
+
+  /** Seeds one planting takes on this plot or field. */
+  public getSeedCost(id: string): number {
+    return isFieldId(id) ? FIELD_SEED_COST : 1;
+  }
+
+  /** Ground position of a plot or field (for facing it). */
+  public getTargetPosition(id: string): THREE.Vector3 | null {
+    if (isFieldId(id)) return this.fields.get(id)?.center ?? null;
+    return this.plots.get(id)?.position ?? null;
   }
 
   /**
-   * Plants seeds in an empty plot.
+   * Plants seeds in an empty plot or field.
    */
   public plant(pieceId: string, cropType: CropType): boolean {
+    if (isFieldId(pieceId)) return this.plantField(pieceId, cropType);
     const plot = this.plots.get(pieceId);
     if (!plot || plot.crop !== null) return false;
 
-    const def = CROP_DEFINITIONS[cropType];
-    plot.crop = {
-      cropType,
-      stage: 1,
-      waterCount: 0,
-      isWatered: false,
-      growthTimer: 0,
-      stageDuration: def.stageSeconds,
-    };
+    plot.crop = this.newCrop(cropType);
 
     this.updateCropVisual(plot);
     this.setSoilVisual(plot, false);
@@ -214,9 +267,10 @@ export class FarmingManager {
   }
 
   /**
-   * Waters a thirsty plot.
+   * Waters a thirsty plot or field.
    */
   public water(pieceId: string): boolean {
+    if (isFieldId(pieceId)) return this.waterField(pieceId);
     const plot = this.plots.get(pieceId);
     if (!plot || !plot.crop) return false;
 
@@ -237,9 +291,10 @@ export class FarmingManager {
   }
 
   /**
-   * Harvests a fully grown mature crop (yields 1 crate).
+   * Harvests a fully grown crop (a bed yields 1 crate, a field several).
    */
-  public harvest(pieceId: string): { cropType: CropType; crateItemId: string; bonusSeeds: number } | null {
+  public harvest(pieceId: string): HarvestResult | null {
+    if (isFieldId(pieceId)) return this.harvestField(pieceId);
     const plot = this.plots.get(pieceId);
     if (!plot || !plot.crop || plot.crop.stage < 3) return null;
 
@@ -264,7 +319,71 @@ export class FarmingManager {
 
     // Half the harvests give 1-2 seeds back, so a farm keeps itself going
     const bonusSeeds = Math.random() < 0.5 ? 1 + Math.floor(Math.random() * 2) : 0;
-    return { cropType, crateItemId, bonusSeeds };
+    return { cropType, crateItemId, crates: 1, bonusSeeds };
+  }
+
+  private newCrop(cropType: CropType): CropState {
+    return {
+      cropType,
+      stage: 1,
+      waterCount: 0,
+      isWatered: false,
+      growthTimer: 0,
+      stageDuration: CROP_DEFINITIONS[cropType].stageSeconds,
+    };
+  }
+
+  // ---------------------------------------------------------------- fields
+
+  /** Sprinkles soil clods across a field (digging, sowing, harvesting). */
+  public puffField(field: { gx: number; gz: number; center: THREE.Vector3 }, count = 5): void {
+    if (!this.particleManager) return;
+    for (let i = 0; i < count; i++) {
+      this.tempVec.set(
+        field.gx + 0.6 + Math.random() * (FIELD_CELLS - 1.2),
+        field.center.y,
+        field.gz + 0.6 + Math.random() * (FIELD_CELLS - 1.2)
+      );
+      this.particleManager.emitDirtClods(this.tempVec, 6);
+    }
+  }
+
+  private plantField(id: string, cropType: CropType): boolean {
+    const field = this.fields.get(id);
+    if (!field || field.crop) return false;
+    field.crop = this.newCrop(cropType);
+    this.fields.markCropsDirty();
+    audioEngine.at(field.center).playPlantSeed();
+    this.puffField(field);
+    return true;
+  }
+
+  private waterField(id: string): boolean {
+    const field = this.fields.get(id);
+    if (!field?.crop || field.crop.isWatered || field.crop.stage >= 3) return false;
+    field.crop.isWatered = true;
+    field.crop.waterCount += 1;
+    audioEngine.at(field.center).playWatering();
+    if (this.particleManager) {
+      for (const [ox, oz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+        this.particleManager.emitSplash(this.tempVec.set(field.center.x + ox, field.center.y, field.center.z + oz), 6);
+      }
+    }
+    return true;
+  }
+
+  private harvestField(id: string): HarvestResult | null {
+    const field: FarmField | null = this.fields.get(id);
+    if (!field?.crop || field.crop.stage < 3) return null;
+    const cropType = field.crop.cropType;
+    field.crop = null;
+    this.fields.markCropsDirty();
+    audioEngine.at(field.center).playHarvest();
+    this.puffField(field, 6);
+    this.particleManager?.emitBuildPuff(field.center, true, 24);
+    // A field always returns some seed (2-4), so it can be sown again
+    const bonusSeeds = 2 + Math.floor(Math.random() * 3);
+    return { cropType, crateItemId: CROP_DEFINITIONS[cropType].crateItemId, crates: FIELD_CRATE_YIELD, bonusSeeds };
   }
 
   private updateCropVisual(plot: FarmPlot): void {
@@ -286,12 +405,14 @@ export class FarmingManager {
   }
 
   /**
-   * Evaluates the nearest plot to player and generates tactical interaction prompt data.
+   * Evaluates the nearest plot or field to the player and builds the interaction prompt.
+   * `seedCount` is how many of the equipped seeds the player has (a field takes several).
    */
   public getNearbyInteraction(
     playerPosition: THREE.Vector3,
     equippedItemId: string | null,
-    maxDistance: number = 3.2
+    maxDistance: number = 3.2,
+    seedCount: number = Infinity
   ): FarmInteractionPrompt | null {
     let closestPlot: FarmPlot | null = null;
     let minDist = maxDistance;
@@ -304,88 +425,89 @@ export class FarmingManager {
       }
     }
 
+    // Fields are measured to their edge, so standing on (or right beside) one targets it.
+    // A bed's edge is ~1 m from its centre: compare like with like.
+    const nearField = this.fields.nearest(playerPosition.x, playerPosition.z, 1.4);
+    if (nearField && (!closestPlot || nearField.dist < minDist - 1)) {
+      return this.buildPrompt(nearField.field.id, nearField.field.crop, equippedItemId, true, seedCount);
+    }
     if (!closestPlot) return null;
+    return this.buildPrompt(closestPlot.pieceId, closestPlot.crop, equippedItemId, false, seedCount);
+  }
 
+  private buildPrompt(
+    id: string,
+    crop: CropState | null,
+    equippedItemId: string | null,
+    isField: boolean,
+    seedCount: number
+  ): FarmInteractionPrompt {
     const isWateringCan = equippedItemId === 'watering_can';
-    const isSeed = equippedItemId?.endsWith('_seed');
-    const cropType = closestPlot.crop?.cropType || null;
-    const stage = closestPlot.crop?.stage || null;
-    const waterCount = closestPlot.crop?.waterCount ?? 0;
-    const isWatered = closestPlot.crop?.isWatered ?? false;
+    const cropType = crop?.cropType || null;
+    const stage = crop?.stage || null;
+    const waterCount = crop?.waterCount ?? 0;
+    const isWatered = crop?.isWatered ?? false;
+    const base = { plotId: id, isField, cropType, stage, waterCount, isWatered, canPlant: false, canWater: false, canHarvest: false };
 
-    // 1. Empty plot: can plant if holding seed
-    if (!closestPlot.crop) {
-      let seedCropType: CropType | null = null;
-      if (equippedItemId === 'wheat_seed') seedCropType = 'wheat';
-      else if (equippedItemId === 'carrot_seed') seedCropType = 'carrot';
-      else if (equippedItemId === 'tomato_seed') seedCropType = 'tomato';
-
+    // 1. Empty: can plant if holding (enough) seeds
+    if (!crop) {
+      const seedCropType = cropForSeed(equippedItemId);
+      const cost = isField ? FIELD_SEED_COST : 1;
+      const enough = seedCount >= cost;
+      let actionText = t('farm.needSeeds');
+      if (seedCropType) {
+        const def = CROP_DEFINITIONS[seedCropType];
+        const name = dataName('item', def.seedItemId, def.seedNameUk);
+        actionText = !enough
+          ? t('field.notEnoughSeeds', { n: cost, have: seedCount })
+          : isField
+            ? t('field.sow', { name, n: cost })
+            : t('farm.plant', { name });
+      }
       return {
-        plotId: closestPlot.pieceId,
-        cropType: null,
-        stage: null,
-        waterCount: 0,
-        isWatered: false,
-        canPlant: seedCropType !== null,
-        canWater: false,
-        canHarvest: false,
+        ...base,
+        canPlant: seedCropType !== null && enough,
         growthProgress: 0,
-        actionText: seedCropType
-          ? t('farm.plant', { name: dataName('item', CROP_DEFINITIONS[seedCropType].seedItemId, CROP_DEFINITIONS[seedCropType].seedNameUk) })
-          : t('farm.needSeeds'),
-        hintText: t('farm.plantHint'),
+        actionText,
+        hintText: isField ? t('field.sowHint', { n: cost, crates: FIELD_CRATE_YIELD }) : t('farm.plantHint'),
       };
     }
 
+    const def = CROP_DEFINITIONS[cropType!];
+
     // 2. Stage 3 (Mature): ready to harvest!
     if (stage === 3) {
-      const def = CROP_DEFINITIONS[cropType!];
+      const crateName = dataName('item', def.crateItemId, def.crateNameUk);
       return {
-        plotId: closestPlot.pieceId,
-        cropType,
-        stage: 3,
-        waterCount,
-        isWatered,
-        canPlant: false,
-        canWater: false,
+        ...base,
         canHarvest: true,
         growthProgress: 1.0,
         actionText: t('farm.harvest', { name: dataName('crop', def.type, def.nameUk) }),
-        hintText: t('farm.harvestHint', { name: dataName('item', def.crateItemId, def.crateNameUk) }),
+        hintText: isField
+          ? t('field.harvestHint', { n: FIELD_CRATE_YIELD, name: crateName })
+          : t('farm.harvestHint', { name: crateName }),
       };
     }
 
     // 3. Stage 1 or 2: growing or needs water
-    const def = CROP_DEFINITIONS[cropType!];
-    const progress = Math.min(1.0, closestPlot.crop.growthTimer / closestPlot.crop.stageDuration);
+    const progress = Math.min(1.0, crop.growthTimer / crop.stageDuration);
 
     if (!isWatered) {
       const waterStepText = stage === 1 ? t('farm.water1') : t('farm.water2');
       return {
-        plotId: closestPlot.pieceId,
-        cropType,
-        stage,
-        waterCount,
-        isWatered: false,
-        canPlant: false,
+        ...base,
         canWater: isWateringCan,
-        canHarvest: false,
         growthProgress: progress,
-        actionText: isWateringCan ? t('farm.water', { step: waterStepText }) : t('farm.needCan', { step: waterStepText }),
+        actionText: isWateringCan
+          ? t(isField ? 'field.water' : 'farm.water', { step: waterStepText })
+          : t('farm.needCan', { step: waterStepText }),
         hintText: t('farm.dryHint'),
       };
     }
 
     // Currently watered and growing
     return {
-      plotId: closestPlot.pieceId,
-      cropType,
-      stage,
-      waterCount,
-      isWatered: true,
-      canPlant: false,
-      canWater: false,
-      canHarvest: false,
+      ...base,
       growthProgress: progress,
       actionText: t('farm.growing', { stage, name: dataName('crop', def.type, def.nameUk), pct: Math.round(progress * 100) }),
       hintText: stage === 1 ? t('farm.growHint1') : t('farm.growHint2'),
@@ -407,5 +529,13 @@ export class FarmingManager {
       this.updateCropVisual(plot);
       this.setSoilVisual(plot, plot.crop.isWatered);
     }
+  }
+
+  public serializeFields(): FieldSaveData[] {
+    return this.fields.serialize();
+  }
+
+  public deserializeFields(data: FieldSaveData[]): void {
+    this.fields.deserialize(data);
   }
 }

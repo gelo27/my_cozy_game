@@ -7,6 +7,7 @@ import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji, InventoryItem } from '../../inventory/types/InventoryTypes';
 import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
 import { t, useLang, setLang, dataName, Lang } from '../../i18n/i18n';
+import { ItemIcon } from '../ItemIcon';
 
 const WEATHER_ICON: Record<WeatherType, React.ElementType> = {
   clear: Sun,
@@ -150,7 +151,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                   : 'bg-white/70 hover:bg-amber-50'
               }`}
             >
-              {getItemEmoji(item)}
+              <ItemIcon item={item} />
               <span className="absolute top-0.5 left-1 text-[9px] font-bold text-[#a08a68] hidden sm:block">{i + 1}</span>
               {item.maxStack > 1 && (
                 <span className="absolute bottom-0 right-1 text-[10px] font-bold text-[#4a3b2a]">{item.count}</span>

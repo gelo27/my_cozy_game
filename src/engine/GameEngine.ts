@@ -270,6 +270,7 @@ export class GameEngine {
 
       const inventoryManager = new InventoryManager();
       const farmingManager = new FarmingManager(scene, particleManager);
+      farmingManager.setWorld(terrain, physics);
       buildingManager.setFarmingManager(farmingManager);
       // Lamp furniture inside buildings and the landmarks' torches feed the night lighting
       let exploration: ExplorationManager | null = null;

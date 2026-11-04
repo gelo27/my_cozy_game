@@ -7,6 +7,7 @@ import { WeatherType } from './WeatherSystem';
 import { worldSettings } from './WorldSettings';
 import type { GameWorld } from '../engine/GameEngine';
 import type { CropState } from '../farming/types/FarmingTypes';
+import type { FieldSaveData } from '../farming/FieldManager';
 import type { ExplorationSaveData } from '../explore/ExplorationManager';
 
 export const SAVE_VERSION = 2;
@@ -23,6 +24,8 @@ export interface WorldSaveData {
   props: PropSaveData[];
   buildings: BuildingSceneExportData | null;
   crops: { x: number; z: number; crop: CropState }[];
+  /** Shovel-dug fields (their soil tiles are part of the terrain save). */
+  fields?: FieldSaveData[];
   inventory: { items: Record<string, number>; equipped: string | null };
   player: [number, number, number];
   vehicle: { p: [number, number, number]; yaw: number } | null;
@@ -74,6 +77,7 @@ export class SaveSystem {
       props: w.props.serialize(),
       buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
       crops: w.farmingManager.serializeCrops(),
+      fields: w.farmingManager.serializeFields(),
       inventory: { items, equipped: w.inventoryManager.getEquippedItemId() },
       player: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
       vehicle: { p: [vt.x, vt.y + 0.3, vt.z], yaw: Math.atan2(fwd.x, fwd.z) },
@@ -103,6 +107,7 @@ export class SaveSystem {
       bm.flushPendingRegeneration();
     }
     w.farmingManager.deserializeCrops(data.crops ?? []);
+    w.farmingManager.deserializeFields(data.fields ?? []);
 
     const inv = w.inventoryManager;
     for (const item of inv.getItems()) {

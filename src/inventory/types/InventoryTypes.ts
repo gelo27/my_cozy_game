@@ -58,6 +58,17 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     description: 'Кайло для каменоломні. Розбиває брили на камінь і видобуває залізну руду.',
     isEquippable: true,
   },
+  {
+    id: 'shovel',
+    name: 'Лопата',
+    category: 'tools',
+    count: 1,
+    maxStack: 1,
+    iconName: 'Shovel',
+    color: '#8b5a2b',
+    description: 'Міцна лопата. Викопує поле 4×4 м на траві для 25 рослин; засипає порожнє поле назад.',
+    isEquippable: true,
+  },
   // Seeds
   {
     id: 'wheat_seed',
@@ -263,6 +274,7 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'watering_can') return '💧';
   if (item.id === 'axe') return '🪓';
   if (item.id === 'pickaxe') return '⛏️';
+  if (item.id === 'shovel') return '🪏';
   if (item.id === 'iron_ore') return '🔶';
   if (item.id === 'copper_ore') return '🟤';
   if (item.id === 'gold_ore') return '🟡';

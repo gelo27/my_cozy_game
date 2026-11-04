@@ -82,6 +82,12 @@ export interface FarmInteractionPrompt {
   canPlant: boolean;
   canHarvest: boolean;
   growthProgress: number; // 0 to 1
+  /** Target is a big shovel-dug field rather than a garden bed. */
+  isField?: boolean;
+  /** Set while the shovel is in hand: dig a new field, fill an empty one back in, or blocked. */
+  shovel?: 'dig' | 'fill' | 'blocked';
+  /** The shovel can act right now. */
+  canDig?: boolean;
   actionText: string;
   hintText: string;
 }

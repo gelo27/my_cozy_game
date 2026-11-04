@@ -470,6 +470,8 @@ export class CharacterModel {
       this.activeWeapon = 6;
     } else if (itemId === 'pickaxe') {
       this.activeWeapon = 12;
+    } else if (itemId === 'shovel') {
+      this.activeWeapon = 14;
     } else if (itemId === 'watering_can') {
       this.activeWeapon = 10;
     } else if (itemId === 'fishing_rod') {
@@ -561,6 +563,27 @@ export class CharacterModel {
       pickGroup.add(collar);
 
       this.weaponPivot.add(pickGroup);
+    } else if (this.activeWeapon === 14) {
+      // Shovel: long wooden shaft, D-grip on top, rounded steel spade blade below the hand
+      const shovel = new THREE.Group();
+      const wood = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
+      const steel = new THREE.MeshLambertMaterial({ color: 0x94a3b8 });
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 1.0, 8), wood);
+      shaft.position.set(0, 0.12, 0);
+      shovel.add(shaft);
+      const grip = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.016, 6, 12), wood);
+      grip.position.set(0, -0.42, 0);
+      shovel.add(grip);
+      const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 0.1, 8), steel);
+      collar.position.set(0, 0.64, 0);
+      shovel.add(collar);
+      // Blade at the far (+y) end, like the axe / pickaxe heads, so the MINE swing drives it into the soil
+      const bladeGeo = new THREE.SphereGeometry(0.13, 10, 8);
+      bladeGeo.scale(1, 1.45, 0.18);
+      const blade = new THREE.Mesh(bladeGeo, steel);
+      blade.position.set(0, 0.84, 0.0);
+      shovel.add(blade);
+      this.weaponPivot.add(shovel);
     } else if (this.activeWeapon === 10) {
       // Heartopia Watering Can
       const can = FarmingMeshGenerator.createWateringCan();

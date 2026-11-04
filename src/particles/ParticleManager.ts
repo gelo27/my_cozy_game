@@ -12,6 +12,8 @@ interface Particle {
   color: THREE.Color;
 }
 
+const DIRT_COLORS = [new THREE.Color('#5b3a1e'), new THREE.Color('#7a4f2a'), new THREE.Color('#3e2714'), new THREE.Color('#8d6239')];
+
 export class ParticleManager {
   public group: THREE.Group;
   private maxParticles = CHARACTER_CONFIG.PARTICLE_MAX_COUNT;
@@ -425,6 +427,25 @@ export class ParticleManager {
         this.instancedMesh.material.dispose();
       }
       this.group.remove(this.instancedMesh);
+    }
+  }
+
+  /** Clods of soil thrown up by the shovel or when sowing a field. */
+  public emitDirtClods(position: THREE.Vector3, count: number = 10): void {
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 0.6 + Math.random() * 1.4;
+      this.spawnParticle(
+        position.x + (Math.random() - 0.5) * 0.3,
+        position.y + 0.08,
+        position.z + (Math.random() - 0.5) * 0.3,
+        Math.cos(angle) * speed,
+        1.6 + Math.random() * 1.8,
+        Math.sin(angle) * speed,
+        0.09 + Math.random() * 0.09,
+        0.45 + Math.random() * 0.3,
+        DIRT_COLORS[(Math.random() * DIRT_COLORS.length) | 0]
+      );
     }
   }
 
