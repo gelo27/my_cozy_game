@@ -130,7 +130,7 @@ export class WaterEffects {
 
     const textureLoader = new THREE.TextureLoader();
     textureLoader.load(
-      '/Caustic_Free.jpg',
+      `${import.meta.env.BASE_URL}Caustic_Free.jpg`,
       (loadedTex) => {
         loadedTex.wrapS = THREE.RepeatWrapping;
         loadedTex.wrapT = THREE.RepeatWrapping;

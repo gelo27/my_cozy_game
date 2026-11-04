@@ -24,7 +24,7 @@ export interface AnimationState {
 }
 
 /** Roblox-style character exported from roblox_animation.blend (6-bone rig, clips named in CAPS). */
-const MODEL_URL = '/models/roblox_character.glb';
+const MODEL_URL = `${import.meta.env.BASE_URL}models/roblox_character.glb`;
 
 /** Bone that holds tools in the source rig (the Axe/Pickaxe previews are parented to it). */
 const TOOL_HAND_BONE = 'arm_1_left';

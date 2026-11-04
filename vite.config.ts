@@ -47,8 +47,11 @@ function devWorldDataPlugin(): Plugin {
   };
 }
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
   return {
+    // Production builds use relative URLs so the game also works from a sub-path
+    // (GitHub Pages serves it at https://<user>.github.io/<repo>/)
+    base: command === 'build' ? './' : '/',
     plugins: [react(), tailwindcss(), devWorldDataPlugin()],
     resolve: {
       alias: {
