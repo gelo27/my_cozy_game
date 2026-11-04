@@ -22,6 +22,37 @@ const isMobileDevice = (): boolean => {
   return false;
 };
 
+/**
+ * Tapers a segmented box (length along Z) into a stylised fish: pointed snout at +Z, full belly,
+ * narrow peduncle and a flat, flared tail at -Z. Shared with the wildlife fish schools.
+ */
+export function shapeFishGeometry(geometry: THREE.BufferGeometry, length: number): void {
+  const pos = geometry.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    let x = pos.getX(i);
+    let y = pos.getY(i);
+    const z = pos.getZ(i);
+    const nz = z / length;
+    if (nz > 0.4) {
+      x *= 0.1;
+      y *= 0.2;
+    } else if (nz > 0.1) {
+      x *= 0.8;
+      y *= 0.9;
+    } else if (nz > -0.2) {
+      // full body
+    } else if (nz > -0.4) {
+      x *= 0.2;
+      y *= 0.5;
+    } else {
+      x *= 0.05; // tail is flat
+      y *= 1.5; // and flares out
+    }
+    pos.setXYZ(i, x, y, z);
+  }
+  geometry.computeVertexNormals();
+}
+
 // Zero-allocation reusable helpers
 const _dummy = new THREE.Object3D();
 const _centerPos = new YUKA.Vector3(95, -12, 0);
@@ -60,35 +91,7 @@ export class FishFlockSystem {
 
     // Stylized fish geometry from a Box
     const geometry = new THREE.BoxGeometry(0.2 * config.scale, 0.4 * config.scale, 1.0 * config.scale, 1, 2, 4);
-    const pos = geometry.attributes.position;
-    for (let i = 0; i < pos.count; i++) {
-      let x = pos.getX(i);
-      let y = pos.getY(i);
-      let z = pos.getZ(i);
-      
-      // Normalize z to -0.5..0.5 space based on length (1.0 * scale)
-      const nz = z / (1.0 * config.scale);
-      
-      if (nz > 0.4) {
-          x *= 0.1;
-          y *= 0.2;
-      } else if (nz > 0.1) {
-          x *= 0.8;
-          y *= 0.9;
-      } else if (nz > -0.2) {
-          x *= 1.0;
-          y *= 1.0;
-      } else if (nz > -0.4) {
-          x *= 0.2;
-          y *= 0.5;
-      } else {
-          x *= 0.05; // Tail is flat
-          y *= 1.5;  // Tail flares out
-      }
-      
-      pos.setXYZ(i, x, y, z);
-    }
-    geometry.computeVertexNormals();
+    shapeFishGeometry(geometry, 1.0 * config.scale);
     
     const material = new THREE.MeshLambertMaterial({ 
       color: config.color,

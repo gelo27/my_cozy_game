@@ -351,39 +351,6 @@ export function drawAutoTiledTile(
       }
     }
 
-  } else if (tileDef.id === TerrainTileType.WOOD_DECK) {
-    // Wooden Planks with Grain
-    ctx.strokeStyle = tileDef.borderColor;
-    ctx.lineWidth = 1.5;
-    const planks = 5;
-    const step = size / planks;
-    for (let i = 1; i < planks; i++) {
-      ctx.beginPath();
-      ctx.moveTo(px, py + i * step);
-      ctx.lineTo(px + size, py + i * step);
-      ctx.stroke();
-    }
-
-    // Plank nail accents
-    ctx.fillStyle = '#452b12';
-    for (let i = 0; i < planks; i++) {
-      const ny = py + i * step + step * 0.5;
-      ctx.fillRect(px + 3, ny - 1, 2, 2);
-      ctx.fillRect(px + size - 5, ny - 1, 2, 2);
-    }
-
-  } else if (tileDef.id === TerrainTileType.WATER_CHANNEL) {
-    // Water Surface Wave Highlights & Foam Shoreline
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-    ctx.beginPath();
-    ctx.arc(cx - size * 0.15, cy - size * 0.1, size * 0.18, 0, Math.PI * 2);
-    ctx.arc(cx + size * 0.2, cy + size * 0.15, size * 0.14, 0, Math.PI * 2);
-    ctx.fill();
-
-    // White foam trim on grass edges
-    ctx.strokeStyle = '#e0f2fe';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
   }
 
   ctx.restore();

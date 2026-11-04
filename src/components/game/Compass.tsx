@@ -44,6 +44,10 @@ export const Compass: React.FC<{ world: GameWorld; heading(): number }> = ({ wor
         const p = world.moped.getPosition();
         next.push({ key: 'moped', icon: '🛵', x: p.x, z: p.z, faded: true });
       }
+      if (!world.boat.isPlayerInside) {
+        const p = world.boat.getPosition();
+        next.push({ key: 'boat', icon: '🚤', x: p.x, z: p.z, faded: true });
+      }
       const sig = next.map((n) => `${n.key}${n.icon}${n.faded}`).join('|');
       if (sig !== lastSig) {
         lastSig = sig;
@@ -70,7 +74,7 @@ export const Compass: React.FC<{ world: GameWorld; heading(): number }> = ({ wor
       if (!strip) return;
       const h = (heading() * 180) / Math.PI;
       const player = ex.surfacePosition(world.character.getPosition());
-      const ride = world.vehicle.isPlayerInside ? world.vehicle : world.moped.isPlayerInside ? world.moped : null;
+      const ride = world.vehicle.isPlayerInside ? world.vehicle : world.moped.isPlayerInside ? world.moped : world.boat.isPlayerInside ? world.boat : null;
       if (ride) player.copy(ride.getPosition());
       for (const el of strip.querySelectorAll<HTMLElement>('[data-bearing]')) place(el, Number(el.dataset.bearing), h);
       for (const el of strip.querySelectorAll<HTMLElement>('[data-tx]')) {

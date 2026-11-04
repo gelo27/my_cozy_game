@@ -73,7 +73,7 @@ export const WorldMap: React.FC<{ world: GameWorld; heading(): number; onClose()
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const player = ex.surfacePosition(world.character.getPosition());
-      const ride = world.vehicle.isPlayerInside ? world.vehicle : world.moped.isPlayerInside ? world.moped : null;
+      const ride = world.vehicle.isPlayerInside ? world.vehicle : world.moped.isPlayerInside ? world.moped : world.boat.isPlayerInside ? world.boat : null;
       if (ride) player.copy(ride.getPosition());
 
       for (const s of ex.getMapSites(player)) {
@@ -95,6 +95,10 @@ export const WorldMap: React.FC<{ world: GameWorld; heading(): number; onClose()
       if (!world.moped.isPlayerInside) {
         ctx.font = `${Math.round(S * 0.03)}px sans-serif`;
         ctx.fillText('🛵', px(mp.x), px(mp.z));
+      }
+      if (!world.boat.isPlayerInside) {
+        const bp = world.boat.getPosition();
+        ctx.fillText('🚤', px(bp.x), px(bp.z));
       }
       ctx.save();
       ctx.translate(px(player.x), px(player.z));

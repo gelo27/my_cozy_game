@@ -29,6 +29,9 @@ import { GatherPrompt } from '../character/abilities/GatheringAbility';
 import { ConsoleLogEntry } from '../components/ConsoleFooter';
 import { VehicleController } from '../vehicle/VehicleController';
 import { MopedController } from '../vehicle/MopedController';
+import { BoatController } from '../vehicle/BoatController';
+import { buildLighthousePier } from '../world/Pier';
+import { WildlifeSystem } from '../wildlife/WildlifeSystem';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
 import { RiverSystem } from '../world/rivers/RiverSystem';
@@ -109,6 +112,8 @@ export interface GameWorld {
   particleManager: ParticleManager;
   vehicle: VehicleController;
   moped: MopedController;
+  boat: BoatController;
+  wildlife: WildlifeSystem;
   exploration: ExplorationManager;
   gameplay: GameplayManager;
   editor: EditorController;
@@ -333,6 +338,12 @@ export class GameEngine {
         },
         interact: () => explorer.interact(character, this.camera),
       };
+      // Wooden jetty at the lighthouse with the motorboat moored alongside
+      const lighthouse = exploration.sites.find((s) => s.kind === 'lighthouse')!;
+      const pier = buildLighthousePier(lighthouse, terrain, scene, physics);
+      const boat = new BoatController(physics, scene, terrain, pier.boatSpawn, pier.boatYaw);
+      boat.dock.copy(pier.end).lerp(pier.start, 0.25);
+      const wildlife = new WildlifeSystem(scene, terrain, props, weather);
       const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers);
       const debugRenderer = new DebugRenderer(physics, scene);
 
@@ -354,6 +365,8 @@ export class GameEngine {
         particleManager,
         vehicle,
         moped,
+        boat,
+        wildlife,
         exploration,
         gameplay,
         editor,
@@ -420,6 +433,7 @@ export class GameEngine {
       tpCamera.handleMouseInput(mouseDelta.x, mouseDelta.y);
       vehicle.notifyMouseLook();
       moped.notifyMouseLook();
+      w.boat.notifyMouseLook();
     }
     const mouseScroll = inputManager.consumeMouseScroll();
     if (mouseScroll !== 0 && !editing) tpCamera.handleZoom(mouseScroll);
@@ -427,8 +441,10 @@ export class GameEngine {
     // Vehicle forces are applied before the physics step; one interact press enters one vehicle
     const truckDriving = !editing && vehicle.update(dt, inputManager, tpCamera, character);
     const mopedDriving = !editing && !truckDriving && moped.update(dt, inputManager, tpCamera, character, !vehicle.isPlayerNear);
-    const isDriving = truckDriving || mopedDriving;
-    const ride = truckDriving ? vehicle : mopedDriving ? moped : null;
+    const boatDriving =
+      !editing && !truckDriving && !mopedDriving && w.boat.update(dt, inputManager, tpCamera, character, !vehicle.isPlayerNear && !moped.isPlayerNear);
+    const isDriving = truckDriving || mopedDriving || boatDriving;
+    const ride = truckDriving ? vehicle : mopedDriving ? moped : boatDriving ? w.boat : null;
 
     const pStart = performance.now();
     if (dt > 0) physics.step(dt);
@@ -436,6 +452,8 @@ export class GameEngine {
     this.lastStepMs = stepTime;
     vehicle.syncVisuals(dt);
     moped.syncVisuals(dt);
+    w.boat.night = w.weather.nightFactor;
+    w.boat.syncVisuals(dt);
 
     if (!editing && !isDriving) character.update(dt, inputManager, tpCamera);
     character.buildAbility?.buildingManager?.flushPendingRegeneration();
@@ -469,6 +487,7 @@ export class GameEngine {
     w.propTrees.update(dt);
     rocks.update(dt);
     w.exploration.update(dt, ride ? ride.getPosition() : character.getPosition(), !editing && !isDriving);
+    w.wildlife.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), tpCamera.camera, !!w.exploration.inCave);
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
 
     // Push prompts to React only when they actually change (each push re-renders the HUD tree)
@@ -578,7 +597,7 @@ export class GameEngine {
   }
 
   /** Listener at the camera; ambience (rain, wind, campfire, engine) around the player. */
-  private updateAudio(dt: number, playerPos: THREE.Vector3, ride: VehicleController | MopedController | null): void {
+  private updateAudio(dt: number, playerPos: THREE.Vector3, ride: VehicleController | MopedController | BoatController | null): void {
     const w = this.world;
     if (!w) return;
     const camera = this.camera.camera;
@@ -627,7 +646,7 @@ export class GameEngine {
       underRoof: !outdoors || weather.isSheltered(playerPos),
       campfire: this.nearestCampfire,
       engine: ride
-        ? { position: ride.getPosition(), speedKmh: ride.speedKmh, kind: ride === w.moped ? 'scooter' : 'truck' }
+        ? { position: ride.getPosition(), speedKmh: ride.speedKmh, kind: ride === w.moped ? 'scooter' : ride === w.boat ? 'boat' : 'truck' }
         : null,
     });
   }
@@ -635,7 +654,7 @@ export class GameEngine {
   /** Brings the scooter to the player (V key / HUD button). Not underground or while riding. */
   public callMoped(): void {
     const w = this.world;
-    if (!w || w.moped.isPlayerInside || w.vehicle.isPlayerInside || this.mode !== 'play') return;
+    if (!w || w.moped.isPlayerInside || w.vehicle.isPlayerInside || w.boat.isPlayerInside || this.mode !== 'play') return;
     const ok = !w.exploration.inCave && w.moped.callTo(w.character);
     this.callbacks.onNotify(t(ok ? 'moped.called' : 'moped.cantCall'), ok ? 'info' : 'warning');
   }
@@ -710,6 +729,8 @@ export class GameEngine {
       npcPath: (on = true) => w.gameplay.companion?.setDebug(on),
       /** Rivers: defs, samples (`riverWorld.get(id)`), water queries. */
       rivers: riverWorld,
+      /** Wildlife: `dev.wild.stats`, `dev.wild.enabled = false` to measure its cost. */
+      wild: w.wildlife,
     };
   }
 }

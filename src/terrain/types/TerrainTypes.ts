@@ -4,8 +4,20 @@ export enum TerrainTileType {
   ASPHALT_ROAD = 2,
   STONE_COBBLE = 3,
   SAND_BEACH = 4,
-  WATER_CHANNEL = 5,
-  WOOD_DECK = 6,
+  // 5 (water channel) and 6 (wooden deck) were removed; old saves remap them via LEGACY_TILE_REMAP
+  SNOW = 7,
+}
+
+/** Tile ids that no longer exist, mapped to what old saves should show instead. */
+export const LEGACY_TILE_REMAP: Readonly<Record<number, TerrainTileType>> = {
+  5: TerrainTileType.SAND_BEACH,
+  6: TerrainTileType.DIRT_ROAD,
+};
+
+/** Any stored tile byte -> a valid tile type (unknown ids fall back to grass). */
+export function sanitizeTile(v: number): TerrainTileType {
+  if (v in TILE_DEFINITIONS) return v as TerrainTileType;
+  return LEGACY_TILE_REMAP[v] ?? TerrainTileType.GRASS;
 }
 
 export type TerrainToolMode = 'brush' | 'line' | 'rectangle' | 'eraser' | 'fill';
@@ -100,28 +112,16 @@ export const TILE_DEFINITIONS: Record<TerrainTileType, TileDefinition> = {
     icon: '🏖️',
     description: 'М’який золотистий піщаний покрив',
   },
-  [TerrainTileType.WATER_CHANNEL]: {
-    id: TerrainTileType.WATER_CHANNEL,
-    name: 'Water Channel',
-    ukrainianName: 'Водний канал / Річка',
+  [TerrainTileType.SNOW]: {
+    id: TerrainTileType.SNOW,
+    name: 'Snow Cover',
+    ukrainianName: 'Сніговий покрив',
     category: 'nature',
-    primaryColor: '#2b79a0',
-    secondaryColor: '#1d5472',
-    accentColor: '#4bb2e6',
-    borderColor: '#12384d',
-    icon: '🌊',
-    description: 'Прозорий водний канал з береговою лінією',
-  },
-  [TerrainTileType.WOOD_DECK]: {
-    id: TerrainTileType.WOOD_DECK,
-    name: 'Wooden Deck',
-    ukrainianName: 'Дерев’яний настил',
-    category: 'building',
-    primaryColor: '#965d34',
-    secondaryColor: '#754421',
-    accentColor: '#b87948',
-    borderColor: '#542f14',
-    icon: '🛖',
-    description: 'Дерев’яний паркетний настил для тераси',
+    primaryColor: '#eef3f8',
+    secondaryColor: '#d6e2ef',
+    accentColor: '#ffffff',
+    borderColor: '#b7c8dc',
+    icon: '❄️',
+    description: 'Пухкий сніг з блискітками та блакитними тінями',
   },
 };

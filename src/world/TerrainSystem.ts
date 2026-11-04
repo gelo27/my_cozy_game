@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
-import { TerrainTileType, TILE_DEFINITIONS } from '../terrain/types/TerrainTypes';
+import { TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/types/TerrainTypes';
 import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, worldSettings } from './WorldSettings';
 import { islandHeight } from './IslandGenerator';
 import { riverWorld, GridRect } from './rivers/RiverWorld';
@@ -421,15 +421,14 @@ export class TerrainSystem {
   private uploadSplat(): void {
     const a = this.splatA.image.data as Uint8Array;
     const b = this.splatB.image.data as Uint8Array;
-    // Layer order: A = dirt, asphalt, cobble, sand | B = water, wood
+    // Layer order: A = dirt, asphalt, cobble, sand | B = snow
     const slot: Record<number, [Uint8Array, number] | null> = {
       [TerrainTileType.GRASS]: null,
       [TerrainTileType.DIRT_ROAD]: [a, 0],
       [TerrainTileType.ASPHALT_ROAD]: [a, 1],
       [TerrainTileType.STONE_COBBLE]: [a, 2],
       [TerrainTileType.SAND_BEACH]: [a, 3],
-      [TerrainTileType.WATER_CHANNEL]: [b, 0],
-      [TerrainTileType.WOOD_DECK]: [b, 1],
+      [TerrainTileType.SNOW]: [b, 0],
     };
     const r = this.splatRect;
     for (let z = r.z0; z <= r.z1; z++) {
@@ -453,8 +452,7 @@ export class TerrainSystem {
       tAsphalt: createLayerTexture(TerrainTileType.ASPHALT_ROAD),
       tCobble: createLayerTexture(TerrainTileType.STONE_COBBLE),
       tSand: createLayerTexture(TerrainTileType.SAND_BEACH),
-      tWater: createLayerTexture(TerrainTileType.WATER_CHANNEL),
-      tWood: createLayerTexture(TerrainTileType.WOOD_DECK),
+      tSnow: createLayerTexture(TerrainTileType.SNOW),
       tRock: createRockTexture(),
     };
     mat.onBeforeCompile = (shader) => {
@@ -479,7 +477,7 @@ export class TerrainSystem {
           `#include <common>
 varying vec3 vTerrWorld;
 varying float vTerrUpY;
-uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tWater, tWood, tRock, tSplatA, tSplatB, tRiver;
+uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tSnow, tRock, tSplatA, tSplatB, tRiver;
 uniform float uWorldSize;
 uniform float uWaterLevel;
 vec3 terrainColor() {
@@ -505,10 +503,25 @@ vec3 terrainColor() {
     : smoothstep(waterY + 0.55, waterY + 0.15, vTerrWorld.y);
   float sandW = max(wa.a, beach);
   if (sandW > 0.001) c = mix(c, texture2D(tSand, uv).rgb, sandW);
-  if (wb.r > 0.001) c = mix(c, texture2D(tWater, uv).rgb, wb.r);
-  if (wb.g > 0.001) c = mix(c, texture2D(tWood, uv).rgb, wb.g);
   float rock = smoothstep(0.8, 0.62, vTerrUpY);
   if (rock > 0.001) c = mix(c, texture2D(tRock, uv).rgb, rock);
+  // Snow: settles last, over everything incl. rock, but thins out on steep slopes and melts
+  // into slush at the waterline. Drifts (macro noise) are bright, hollows take a cold blue tint,
+  // and sparse view-dependent glints twinkle as the camera moves.
+  if (wb.r > 0.001) {
+    float sw = wb.r * (1.0 - smoothstep(0.55, 0.35, vTerrUpY) * 0.7) * smoothstep(waterY + 0.05, waterY + 0.35, vTerrWorld.y);
+    vec3 sTex = texture2D(tSnow, uv * 0.5).rgb;
+    float drift = clamp(n * 2.2 + 0.5, 0.0, 1.0);
+    vec3 snow = mix(vec3(0.74, 0.82, 0.93), vec3(1.0, 1.0, 1.02), drift) * mix(0.93, 1.04, sTex.g);
+    snow = mix(snow, vec3(0.70, 0.78, 0.90), smoothstep(0.97, 0.75, vTerrUpY) * 0.5);
+    vec2 cell = floor(vTerrWorld.xz * 9.0);
+    float h = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+    vec3 toCam = cameraPosition - vTerrWorld;
+    float tw = fract(sin(dot(cell + floor(toCam.xz * 2.5 + toCam.y), vec2(269.5, 183.3))) * 17853.13);
+    float glint = step(0.93, h) * step(0.6, tw) * smoothstep(40.0, 8.0, length(toCam));
+    snow += glint * 0.9;
+    c = mix(c, snow, sw);
+  }
   // River beds are gravel; everything below the waterline is wet and darker
   float underRiver = smoothstep(waterY - 0.05, waterY - 0.4, vTerrWorld.y) * step(0.5, river.g);
   if (underRiver > 0.001) c = mix(c, texture2D(tRock, uv * 1.7).rgb * vec3(0.95, 0.9, 0.8), underRiver * 0.75);
@@ -587,7 +600,7 @@ vec3 terrainColor() {
       const dh = rleDecode(data.heights, V * V);
       for (let i = 0; i < dh.length; i++) this.heights[i] = (base.heights[i] + dh[i]) / 100;
       const dt = rleDecode(data.tiles, N * N);
-      for (let i = 0; i < dt.length; i++) this.tiles[i] = dt[i];
+      for (let i = 0; i < dt.length; i++) this.tiles[i] = sanitizeTile(dt[i]);
     } else if (!data.enc && data.size <= N) {
       this.loadLegacy(data, base);
     } else {
@@ -620,7 +633,7 @@ vec3 terrainColor() {
     }
     this.tiles.set(base.tiles);
     for (let z = 0; z < s; z++) {
-      for (let x = 0; x < s; x++) this.tiles[(z + o) * N + x + o] = oldTiles[z * s + x] ?? TerrainTileType.GRASS;
+      for (let x = 0; x < s; x++) this.tiles[(z + o) * N + x + o] = sanitizeTile(oldTiles[z * s + x] ?? TerrainTileType.GRASS);
     }
     this.expandedFromLegacy = s < N;
   }
@@ -700,13 +713,17 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
         }
       }
       break;
-    case TerrainTileType.WOOD_DECK:
-      for (let y = 0; y < 8; y++) {
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = y % 2 ? def.secondaryColor : def.primaryColor;
-        ctx.fillRect(0, y * 32, size, 30);
-        ctx.fillStyle = def.borderColor;
-        ctx.fillRect(0, y * 32 + 30, size, 2);
+    case TerrainTileType.SNOW:
+      // Soft wind-blown ripples and fine crystals; the shader adds drifts, blue shade and glints
+      for (let i = 0; i < 90; i++) {
+        ctx.fillStyle = rnd() < 0.5 ? def.secondaryColor : def.accentColor;
+        ctx.globalAlpha = 0.18 + rnd() * 0.2;
+        wrapRect(rnd() * size, rnd() * size, 30 + rnd() * 60, 3 + rnd() * 5);
+      }
+      for (let i = 0; i < 900; i++) {
+        ctx.fillStyle = rnd() < 0.7 ? def.accentColor : def.secondaryColor;
+        ctx.globalAlpha = 0.3 + rnd() * 0.4;
+        wrapRect(rnd() * size, rnd() * size, 1, 1);
       }
       break;
     case TerrainTileType.ASPHALT_ROAD:

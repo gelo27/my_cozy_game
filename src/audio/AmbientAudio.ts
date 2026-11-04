@@ -17,7 +17,7 @@ export interface AmbientState {
   /** Waterfalls within earshot, each at a fixed spot. */
   falls: { id: string; position: THREE.Vector3; loud: number }[];
   /** Vehicle engine while the player drives it, or null. */
-  engine: { position: THREE.Vector3; speedKmh: number; kind: 'truck' | 'scooter' } | null;
+  engine: { position: THREE.Vector3; speedKmh: number; kind: 'truck' | 'scooter' | 'boat' } | null;
 }
 
 /** Seconds of looping noise; long enough that the loop point is not audible. */
@@ -118,13 +118,15 @@ export class AmbientAudio {
       if (!this.engine) this.engine = this.startEngine(ctx, s.engine.position);
       if (this.engine) {
         // A scooter's small two-stroke buzzes about twice as high as the truck
+        // ...and an outboard sits in between, muffled by the water around its leg
         const scooter = s.engine.kind === 'scooter';
-        const k = Math.min(s.engine.speedKmh / (scooter ? 60 : 55), 1);
-        const pitch = scooter ? 2.1 : 1;
-        this.engine.osc.frequency.setTargetAtTime((48 + k * 95) * pitch, t, 0.12);
-        this.engine.sub.frequency.setTargetAtTime((24 + k * 47) * pitch, t, 0.12);
-        this.engine.filter.frequency.setTargetAtTime((380 + k * 900) * (scooter ? 1.6 : 1), t, 0.15);
-        this.engine.gain.gain.setTargetAtTime((0.04 + k * 0.05) * (scooter ? 0.75 : 1), t, 0.15);
+        const boat = s.engine.kind === 'boat';
+        const k = Math.min(s.engine.speedKmh / (scooter ? 60 : boat ? 42 : 55), 1);
+        const pitch = scooter ? 2.1 : boat ? 1.55 : 1;
+        this.engine.osc.frequency.setTargetAtTime((48 + k * 95) * pitch, t, boat ? 0.25 : 0.12);
+        this.engine.sub.frequency.setTargetAtTime((24 + k * 47) * pitch, t, boat ? 0.25 : 0.12);
+        this.engine.filter.frequency.setTargetAtTime((380 + k * 900) * (scooter ? 1.6 : boat ? 0.85 : 1), t, 0.15);
+        this.engine.gain.gain.setTargetAtTime((0.04 + k * 0.05) * (scooter ? 0.75 : boat ? 0.9 : 1), t, 0.15);
         audioEngine.setPannerPos(this.engine.panner, s.engine.position);
       }
     } else if (this.engine) {
