@@ -26,8 +26,12 @@ interface WeatherProfile {
   dark: number; // 0..1 how grey the clouds are
 }
 
+/** Light teal haze used in clear weather (colour and how strongly it replaces the horizon colour). */
+const CLEAR_HAZE = 0x4db3b5;
+const CLEAR_HAZE_MIX = 0.75;
+
 const PROFILES: Record<WeatherType, WeatherProfile> = {
-  clear: { light: 1, fog: 0.0072, tint: new THREE.Color(1, 1, 1), precipitation: 'none', amount: 0, cover: 0.36, dark: 0 },
+  clear: { light: 1, fog: 0.029, tint: new THREE.Color(1, 1, 1), precipitation: 'none', amount: 0, cover: 0.36, dark: 0 },
   cloudy: { light: 0.65, fog: 0.0098, tint: new THREE.Color(0.86, 0.88, 0.9), precipitation: 'none', amount: 0, cover: 0.68, dark: 0.25 },
   rain: { light: 0.5, fog: 0.014, tint: new THREE.Color(0.7, 0.74, 0.8), precipitation: 'rain', amount: 0.7, cover: 0.88, dark: 0.6 },
   storm: { light: 0.32, fog: 0.02, tint: new THREE.Color(0.5, 0.54, 0.62), precipitation: 'rain', amount: 1, cover: 0.97, dark: 0.85 },
@@ -86,7 +90,7 @@ export class WeatherSystem {
   public onLightning: (() => void) | null = null;
   private readonly fog: THREE.FogExp2;
   private readonly sky = new THREE.Color();
-  private current = { light: 1, fog: 0.006, amount: 0, cover: 0.28, dark: 0, tint: new THREE.Color(1, 1, 1) };
+  private current = { teal: 1, light: 1, fog: 0.029, amount: 0, cover: 0.28, dark: 0, tint: new THREE.Color(1, 1, 1) };
   /** 0 by day, 1 at full night; drives night lighting. */
   public nightFactor = 0;
   /** Target 0..1 for being underground: sunlight, sky light and precipitation fade out, fog turns black. */
@@ -224,6 +228,11 @@ export class WeatherSystem {
     // Sky = time-of-day key colour x weather tint; fog matches the horizon
     this.sampleKeys(SKY_KEYS, t, this.sky).multiply(cur.tint);
     if (this.flash > 0) this.sky.lerp(WeatherSystem._c.setRGB(1, 1, 1), this.flash * 0.5);
+    // Clear weather: a light teal haze that tints the horizon and fog together
+    cur.teal += ((this.weather === 'clear' ? 1 : 0) - cur.teal) * k;
+    if (cur.teal > 0.001) {
+      this.sky.lerp(WeatherSystem._c.set(CLEAR_HAZE).multiplyScalar(daylight * 0.8 + 0.2), CLEAR_HAZE_MIX * cur.teal);
+    }
     this.fog.color.copy(this.sky);
     this.fog.density = cur.fog * FOG_SCALE;
 
