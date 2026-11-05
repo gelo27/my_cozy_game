@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Compact HUD on phones and tablets (html.touch-ui is set in main.tsx) */
+@custom-variant touch (&:where(.touch-ui, .touch-ui *));
+/* Landscape phones: very little height to spare */
+@custom-variant short (@media (max-height: 500px));
+
 @layer base {
   body {
     font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;

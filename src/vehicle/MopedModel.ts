@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeColoredGroups } from '../scene/MergeColored';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createPromptSprite } from './VehicleModel';
 
@@ -138,6 +139,8 @@ export class MopedModel {
     this.promptSprite = createPromptSprite();
     this.promptSprite.position.set(0, 1.6, 0);
     this.group.add(this.promptSprite);
+    // One draw call per rigid part (body, steering, each wheel); the brake light stays separate
+    mergeColoredGroups([this.group, this.steerPivot, this.frontSpinner, this.rearSpinner], new Set([this.tailLight]));
   }
 
   private static buckets(): Record<Bucket, THREE.BufferGeometry[]> {

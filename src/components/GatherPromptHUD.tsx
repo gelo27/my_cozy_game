@@ -14,8 +14,8 @@ export const GatherPromptHUD: React.FC<GatherPromptHUDProps> = ({ prompt }) => {
   const NodeIcon = isForest ? TreePine : Gem;
 
   return (
-    <div className="fixed bottom-60 sm:bottom-24 left-1/2 -translate-x-1/2 z-40 pointer-events-none select-none">
-      <div className="flex items-center gap-3 px-5 py-3 bg-[#2d1c10]/90 rounded-2xl border-2 border-amber-400/80 shadow-2xl text-white">
+    <div className="fixed bottom-60 sm:bottom-24 touch:sm:bottom-16 left-1/2 -translate-x-1/2 z-40 pointer-events-none select-none">
+      <div className="flex items-center gap-3 px-5 py-3 touch:px-3 touch:py-2 touch:gap-2 bg-[#2d1c10]/90 rounded-2xl border-2 border-amber-400/80 shadow-2xl text-white">
         <div className="w-10 h-10 rounded-xl bg-amber-500/30 border border-amber-400/50 flex items-center justify-center shrink-0">
           {prompt.canAct ? (
             <ToolIcon className="w-5 h-5 text-amber-200" />

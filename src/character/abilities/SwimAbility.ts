@@ -35,6 +35,8 @@ export class SwimAbility implements IAbility {
   /** Held at the surface (floating) rather than swimming free underwater. */
   private surfaced = false;
   private bobTime = 0;
+  /** Extra height while gliding along the surface (eased in and out). */
+  private glideLift = 0;
   private groundFilter = 0;
   private readonly rayOrigin = new THREE.Vector3();
 
@@ -214,8 +216,11 @@ export class SwimAbility implements IAbility {
       } else if (this.surfaced) {
         const bob = Math.sin(this.bobTime * 2.1) * 0.035;
         const err = surfaceY + bob - pos.y;
-        // Spring (k) + damping toward the target; jump just lifts the body a bit higher
-        const lift = context.input.jump ? 0.12 : 0;
+        // Spring (k) + damping toward the target; jump just lifts the body a bit higher. Swimming
+        // along, the body lies flat: it rides higher so the back and shoulders stay above water
+        const glide = THREE.MathUtils.smoothstep(Math.hypot(vel.x, vel.z), 0.4, 2.5);
+        this.glideLift += (glide * WATER_PHYSICS_CONFIG.SWIM_GLIDE_LIFT - this.glideLift) * (1 - Math.exp(-4 * dt));
+        const lift = (context.input.jump ? 0.12 : 0) + this.glideLift;
         const target = (err + lift) * 9;
         vy = THREE.MathUtils.lerp(vy, THREE.MathUtils.clamp(target, -3, 3), 1 - Math.exp(-10 * dt));
       } else if (hasVerticalInput) {

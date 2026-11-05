@@ -4,6 +4,9 @@ import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
 import { GATHERING_CONFIG, ROCK_TYPES, RockKind, rollDrop } from './GatheringConfig';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { injectNightLights } from '../world/NightLighting';
+import { injectWaterline } from '../scene/WaterDetails';
 
 export interface RockNode {
   id: number;
@@ -12,7 +15,10 @@ export interface RockNode {
   radius: number;
   maxHealth: number;
   health: number;
-  group: THREE.Group;
+  /** Transform holder (not in the scene): its matrix is copied into the batch. */
+  group: THREE.Object3D;
+  /** This rock's instance in the shared batch. */
+  instanceId: number;
   baseScale: number;
   body: RAPIER.RigidBody | null;
   isDepleted: boolean;
@@ -22,10 +28,24 @@ export interface RockNode {
   growProgress: number;
 }
 
+/** Diffuse colours of the stone bodies and the ore, and how much the ore glows. */
+const STONE = new THREE.Color(0x8b8f96);
+const DARK_STONE = new THREE.Color(0x6b6f76);
+const ORE: Partial<Record<RockKind, { color: THREE.Color; glow: number }>> = {
+  iron: { color: new THREE.Color(0xc2703d), glow: 0 },
+  copper: { color: new THREE.Color(0x4fa88a), glow: 0 },
+  gold: { color: new THREE.Color(0xf2c14e), glow: 0.05 },
+  crystal: { color: new THREE.Color(0xb69bff), glow: 0.16 },
+};
+
 /**
  * Mineable boulders (stone) and ore rocks (iron + stone).
  * Each pickaxe hit chips the rock smaller; the last hit breaks it and drops resources.
  * Broken rocks grow back after ROCK_REGROW_SECONDS.
+ *
+ * Rendering: every rock (its boulder and ore nuggets / crystal shards merged into one geometry,
+ * coloured per vertex) is an instance of ONE BatchedMesh: a single draw call for all of them,
+ * with per-rock frustum culling, hiding and transforms. The ore's glow is a vertex attribute.
  */
 export class RockField {
   public group: THREE.Group;
@@ -33,14 +53,9 @@ export class RockField {
   public onMined: ((drops: { itemId: string; amount: number }[], at: THREE.Vector3) => void) | null = null;
 
   private rocks: RockNode[] = [];
-  private stoneMaterial = new THREE.MeshLambertMaterial({ color: 0x8b8f96, flatShading: true });
-  private darkStoneMaterial = new THREE.MeshLambertMaterial({ color: 0x6b6f76, flatShading: true });
-  private oreMaterials: Partial<Record<RockKind, THREE.Material>> = {
-    iron: new THREE.MeshLambertMaterial({ color: 0xc2703d, flatShading: true }),
-    copper: new THREE.MeshLambertMaterial({ color: 0x4fa88a, flatShading: true }),
-    gold: new THREE.MeshLambertMaterial({ color: 0xf2c14e, emissive: 0x3a2800, flatShading: true }),
-    crystal: new THREE.MeshLambertMaterial({ color: 0xb69bff, emissive: 0x3a2a80, flatShading: true }),
-  };
+  private batch: THREE.BatchedMesh;
+  private vertexCapacity = 0;
+  private verticesUsed = 0;
 
   constructor(
     private physics: PhysicsWorld,
@@ -51,6 +66,26 @@ export class RockField {
     this.group = new THREE.Group();
     this.group.name = 'RockField';
     scene.add(this.group);
+
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+    mat.customProgramCacheKey = () => 'rock-batch';
+    mat.onBeforeCompile = (shader) => {
+      injectNightLights(shader);
+      injectWaterline(shader);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float aGlow;\nvarying float vGlow;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGlow = aGlow;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vGlow;')
+        .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vColor.rgb * vGlow;');
+    };
+    const instances = Math.max(64, spots.length + 32);
+    this.vertexCapacity = instances * 420;
+    this.batch = new THREE.BatchedMesh(instances, this.vertexCapacity, 0, mat);
+    this.batch.name = 'Rocks';
+    // Culled per rock inside the batch; its own bounds would need recomputing on every change
+    this.batch.frustumCulled = false;
+    this.group.add(this.batch);
 
     spots.forEach((spot, i) => this.createRock(i, spot.position, spot.kind, spot.scale));
   }
@@ -93,6 +128,7 @@ export class RockField {
       // Chip the rock smaller with every hit
       const remaining = rock.health / rock.maxHealth;
       rock.group.scale.setScalar(rock.baseScale * (0.7 + 0.3 * remaining));
+      this.syncRock(rock);
       return false;
     }
 
@@ -114,6 +150,7 @@ export class RockField {
         const t = rock.growProgress;
         const pop = 1 + 2.2 * Math.pow(t - 1, 3) + 1.2 * Math.pow(t - 1, 2);
         rock.group.scale.setScalar(rock.baseScale * Math.max(0.01, pop));
+        this.syncRock(rock);
       }
 
       if (rock.shake > 0) {
@@ -124,6 +161,7 @@ export class RockField {
           rock.position.y,
           rock.position.z + (Math.random() - 0.5) * s
         );
+        this.syncRock(rock);
       }
     }
   }
@@ -134,57 +172,22 @@ export class RockField {
   }
 
   private createRock(id: number, position: THREE.Vector3, kind: RockKind, scale: number): void {
-    const group = new THREE.Group();
+    const group = new THREE.Object3D();
     group.name = `Rock_${kind}_${id}`;
     group.position.copy(position);
-
-    // Low-poly boulder: jittered icosahedron squashed onto the ground
-    const geo = new THREE.IcosahedronGeometry(1, 1);
-    const pos = geo.attributes.position;
-    const v = new THREE.Vector3();
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i);
-      const n = 0.82 + 0.3 * Math.abs(Math.sin(v.x * 3.1 + id) * Math.cos(v.z * 2.7 - id));
-      v.multiplyScalar(n);
-      v.y = v.y * 0.62 + 0.42;
-      pos.setXYZ(i, v.x, v.y, v.z);
-    }
-    geo.computeVertexNormals();
-
-    const body = new THREE.Mesh(geo, id % 2 === 0 ? this.stoneMaterial : this.darkStoneMaterial);
-    body.rotation.y = id * 1.3;
-    if (kind === 'crystal') body.scale.set(0.7, 0.45, 0.7);
-    group.add(body);
-
-    const oreMat = this.oreMaterials[kind];
-    if (kind === 'crystal') {
-      // A cluster of tall glowing prisms
-      const prism = new THREE.CylinderGeometry(0, 0.16, 1, 5);
-      prism.translate(0, 0.5, 0);
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2 + id;
-        const shard = new THREE.Mesh(prism, oreMat);
-        const r = i === 0 ? 0 : 0.35;
-        shard.position.set(Math.cos(a) * r, 0.2, Math.sin(a) * r);
-        shard.rotation.set(Math.sin(a) * (r ? 0.45 : 0), 0, Math.cos(a) * (r ? 0.45 : 0));
-        shard.scale.set(1, i === 0 ? 1.5 : 0.8 + (i % 3) * 0.25, 1);
-        group.add(shard);
-      }
-    } else if (oreMat) {
-      // Ore nuggets poking out of the surface
-      const nuggetGeo = new THREE.OctahedronGeometry(0.2, 0);
-      for (let i = 0; i < 7; i++) {
-        const a = (i / 7) * Math.PI * 2 + id;
-        const nugget = new THREE.Mesh(nuggetGeo, oreMat);
-        nugget.position.set(Math.cos(a) * 0.78, 0.45 + (i % 3) * 0.22, Math.sin(a) * 0.78);
-        nugget.rotation.set(a, a * 0.7, 0);
-        nugget.scale.setScalar(0.8 + (i % 2) * 0.5);
-        group.add(nugget);
-      }
-    }
-
     group.scale.setScalar(scale);
-    this.group.add(group);
+
+    const geo = this.buildRockGeometry(id, kind);
+    const verts = geo.getAttribute('position').count;
+    if (this.verticesUsed + verts > this.vertexCapacity) {
+      this.vertexCapacity = Math.max(this.vertexCapacity * 2, this.verticesUsed + verts);
+      this.batch.setGeometrySize(this.vertexCapacity, 0);
+    }
+    if (this.batch.instanceCount >= this.batch.maxInstanceCount) this.batch.setInstanceCount(this.batch.maxInstanceCount * 2);
+    const geometryId = this.batch.addGeometry(geo);
+    this.verticesUsed += verts;
+    geo.dispose();
+    const instanceId = this.batch.addInstance(geometryId);
 
     const radius = 0.95 * scale;
     const rock: RockNode = {
@@ -195,6 +198,7 @@ export class RockField {
       maxHealth: ROCK_TYPES[kind].hits,
       health: ROCK_TYPES[kind].hits,
       group,
+      instanceId,
       baseScale: scale,
       body: null,
       isDepleted: false,
@@ -202,8 +206,79 @@ export class RockField {
       shake: 0,
       growProgress: 1,
     };
+    this.syncRock(rock);
     this.addCollider(rock);
     this.rocks.push(rock);
+  }
+
+  /** Copies the rock's transform and visibility into the batch. */
+  private syncRock(rock: RockNode): void {
+    rock.group.updateMatrix();
+    this.batch.setMatrixAt(rock.instanceId, rock.group.matrix);
+    this.batch.setVisibleAt(rock.instanceId, !rock.isDepleted);
+  }
+
+  /** One rock as a single non-indexed geometry: the boulder plus its ore, coloured per vertex. */
+  private buildRockGeometry(id: number, kind: RockKind): THREE.BufferGeometry {
+    const parts: THREE.BufferGeometry[] = [];
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const e = new THREE.Euler();
+    const add = (g: THREE.BufferGeometry, matrix: THREE.Matrix4, color: THREE.Color, glow: number) => {
+      const part = (g.index ? g.toNonIndexed() : g.clone()).applyMatrix4(matrix);
+      part.deleteAttribute('uv');
+      const n = part.getAttribute('position').count;
+      const col = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) col.set([color.r, color.g, color.b], i * 3);
+      part.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      part.setAttribute('aGlow', new THREE.BufferAttribute(new Float32Array(n).fill(glow), 1));
+      parts.push(part);
+    };
+
+    // Low-poly boulder: jittered icosahedron squashed onto the ground
+    const body = new THREE.IcosahedronGeometry(1, 1);
+    const pos = body.attributes.position;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      const n = 0.82 + 0.3 * Math.abs(Math.sin(v.x * 3.1 + id) * Math.cos(v.z * 2.7 - id));
+      v.multiplyScalar(n);
+      v.y = v.y * 0.62 + 0.42;
+      pos.setXYZ(i, v.x, v.y, v.z);
+    }
+    body.computeVertexNormals();
+    q.setFromEuler(e.set(0, id * 1.3, 0));
+    const bs = kind === 'crystal' ? new THREE.Vector3(0.7, 0.45, 0.7) : new THREE.Vector3(1, 1, 1);
+    add(body, m.compose(new THREE.Vector3(), q, bs), id % 2 === 0 ? STONE : DARK_STONE, 0);
+    body.dispose();
+
+    const ore = ORE[kind];
+    if (kind === 'crystal' && ore) {
+      // A cluster of tall glowing prisms
+      const prism = new THREE.CylinderGeometry(0, 0.16, 1, 5);
+      prism.translate(0, 0.5, 0);
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2 + id;
+        const r = i === 0 ? 0 : 0.35;
+        q.setFromEuler(e.set(Math.sin(a) * (r ? 0.45 : 0), 0, Math.cos(a) * (r ? 0.45 : 0)));
+        m.compose(new THREE.Vector3(Math.cos(a) * r, 0.2, Math.sin(a) * r), q, new THREE.Vector3(1, i === 0 ? 1.5 : 0.8 + (i % 3) * 0.25, 1));
+        add(prism, m, ore.color, ore.glow);
+      }
+      prism.dispose();
+    } else if (ore) {
+      // Ore nuggets poking out of the surface
+      const nugget = new THREE.OctahedronGeometry(0.2, 0);
+      for (let i = 0; i < 7; i++) {
+        const a = (i / 7) * Math.PI * 2 + id;
+        q.setFromEuler(e.set(a, a * 0.7, 0));
+        m.compose(new THREE.Vector3(Math.cos(a) * 0.78, 0.45 + (i % 3) * 0.22, Math.sin(a) * 0.78), q, new THREE.Vector3().setScalar(0.8 + (i % 2) * 0.5));
+        add(nugget, m, ore.color, ore.glow);
+      }
+      nugget.dispose();
+    }
+    const merged = mergeGeometries(parts)!;
+    for (const p of parts) p.dispose();
+    return merged;
   }
 
   private addCollider(rock: RockNode): void {
@@ -219,7 +294,7 @@ export class RockField {
 
   private breakRock(rock: RockNode): void {
     rock.isDepleted = true;
-    rock.group.visible = false;
+    this.syncRock(rock);
     rock.regrowAt = performance.now() + GATHERING_CONFIG.ROCK_REGROW_SECONDS * 1000;
     if (rock.body) {
       this.physics.removeRigidBody(rock.body);
@@ -238,10 +313,10 @@ export class RockField {
   private regrowRock(rock: RockNode): void {
     rock.isDepleted = false;
     rock.health = rock.maxHealth;
-    rock.group.visible = true;
     rock.group.position.copy(rock.position);
     rock.growProgress = 0;
     rock.group.scale.setScalar(0.01);
+    this.syncRock(rock);
     this.addCollider(rock);
   }
 }

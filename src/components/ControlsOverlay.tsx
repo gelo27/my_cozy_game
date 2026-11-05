@@ -1,13 +1,15 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { ArrowUp, Move, Hand, Footprints, Sparkles } from 'lucide-react';
+import { ArrowUp, ArrowDown, Move, Hand, Footprints, Sparkles } from 'lucide-react';
 import { InputManager } from '../input/InputManager';
 import { t } from '../i18n/i18n';
 
 interface ControlsOverlayProps {
   inputManager: InputManager | null;
+  /** The character's live telemetry (read a few times a second: the dive button shows while swimming). */
+  telemetry?: { isSwimming?: boolean } | null;
 }
 
-export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }) => {
+export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, telemetry }) => {
   const [isTouchDevice, setIsTouchDevice] = useState(false);
   const joystickTouchIdRef = useRef<number | null>(null);
   const joystickOriginRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -18,6 +20,25 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
   useEffect(() => {
     setIsTouchDevice('ontouchstart' in window || navigator.maxTouchPoints > 0);
   }, []);
+
+  // Swimming state for the dive button (telemetry is a mutable engine object, so it is polled)
+  const [isSwimming, setIsSwimming] = useState(false);
+  useEffect(() => {
+    if (!isTouchDevice) return;
+    const id = window.setInterval(() => setIsSwimming(!!telemetry?.isSwimming), 200);
+    return () => window.clearInterval(id);
+  }, [isTouchDevice, telemetry]);
+  // Leaving the water while the button is held must not leave the dive stuck on
+  useEffect(() => {
+    if (!isSwimming && inputManager) inputManager.touchState.crouch = false;
+  }, [isSwimming, inputManager]);
+
+  /** Dive: held down = swim down (the same as holding C on a keyboard). */
+  const setDive = (on: boolean) => (e: React.TouchEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (inputManager) inputManager.touchState.crouch = on;
+  };
 
   // Touch joystick handling anywhere on the left half of the screen
   const handleLeftZoneTouchStart = (e: React.TouchEvent) => {
@@ -121,7 +142,7 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
             onTouchMove={handleLeftZoneTouchMove}
             onTouchEnd={handleLeftZoneTouchEnd}
             onTouchCancel={handleLeftZoneTouchEnd}
-            className="pointer-events-auto absolute bottom-20 left-0 w-[45%] h-[55%] touch-none z-20"
+            className="pointer-events-auto absolute bottom-20 short:bottom-14 left-0 w-[45%] h-[55%] touch-none z-20"
           >
             {isJoystickActive && joystickCenterPos ? (
               <div
@@ -134,20 +155,20 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
                 />
               </div>
             ) : (
-              <div className="absolute bottom-4 left-6 w-24 h-24 rounded-full bg-[#fffaf0]/25 border-2 border-[#fffaf0]/60 flex items-center justify-center pointer-events-none">
-                <Move className="w-7 h-7 text-white/80" />
+              <div className="absolute bottom-4 left-6 short:bottom-1 short:left-4 w-20 h-20 rounded-full bg-[#fffaf0]/25 border-2 border-[#fffaf0]/60 flex items-center justify-center pointer-events-none">
+                <Move className="w-6 h-6 text-white/80" />
               </div>
             )}
           </div>
 
           {/* Action cluster, kept above the hotbar */}
-          <div className="pointer-events-auto absolute bottom-24 right-3 grid grid-cols-2 gap-2.5 items-end select-none">
+          <div className="pointer-events-auto absolute bottom-20 right-3 short:bottom-3 short:right-2 grid grid-cols-2 gap-2 items-end select-none">
             <button
               onTouchStart={tap('interactJustPressed')}
               onTouchEnd={release('interactHeld')}
               onTouchCancel={release('interactHeld')}
-              className={`${roundBtn} w-14 h-14`} title={t('touch.interact')}>
-              <Hand className="w-6 h-6" />
+              className={`${roundBtn} w-12 h-12`} title={t('touch.interact')}>
+              <Hand className="w-5 h-5" />
             </button>
             <button
               onTouchStart={(e) => {
@@ -155,26 +176,37 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager }
                 e.preventDefault();
                 if (inputManager) inputManager.touchState.sprint = !inputManager.touchState.sprint;
               }}
-              className={`${roundBtn} w-12 h-12 justify-self-end ${inputManager?.touchState.sprint ? '!bg-amber-400 !text-white !border-amber-300' : ''}`}
+              className={`${roundBtn} w-10 h-10 justify-self-end ${inputManager?.touchState.sprint ? '!bg-amber-400 !text-white !border-amber-300' : ''}`}
               title={t('touch.sprint')}
             >
-              <Footprints className="w-5 h-5" />
+              <Footprints className="w-4 h-4" />
             </button>
             <button
               onTouchStart={tap('chopJustPressed')}
               onTouchEnd={release('chopHeld')}
               onTouchCancel={release('chopHeld')}
-              className={`${roundBtn} w-14 h-14`} title={t('touch.use')}>
-              <Sparkles className="w-6 h-6" />
+              className={`${roundBtn} w-12 h-12`} title={t('touch.use')}>
+              <Sparkles className="w-5 h-5" />
             </button>
+            {isSwimming && (
+              <button
+                onTouchStart={setDive(true)}
+                onTouchEnd={setDive(false)}
+                onTouchCancel={setDive(false)}
+                className={`${roundBtn} w-12 h-12 !bg-sky-500 !text-white !border-sky-300`}
+                title={t('touch.dive')}
+              >
+                <ArrowDown className="w-6 h-6" />
+              </button>
+            )}
             <button
               onTouchStart={tap('jumpJustPressed')}
               onTouchEnd={releaseJump}
               onTouchCancel={releaseJump}
-              className={`${roundBtn} w-16 h-16 !bg-emerald-500 !text-white !border-emerald-300`}
+              className={`${roundBtn} w-14 h-14 !bg-emerald-500 !text-white !border-emerald-300`}
               title={t('touch.jump')}
             >
-              <ArrowUp className="w-8 h-8" />
+              <ArrowUp className="w-7 h-7" />
             </button>
           </div>
         </>

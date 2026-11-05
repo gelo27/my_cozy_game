@@ -16,6 +16,7 @@ export const uk: Record<TKey, string> = {
   'touch.sprint': 'Біг',
   'touch.use': 'Використати інструмент',
   'touch.jump': 'Стрибок',
+  'touch.dive': 'Пірнути (утримуйте)',
 
   'play.cast': 'Закинути вудку',
   'play.cook': 'Готувати їжу',
@@ -276,6 +277,8 @@ export const uk: Record<TKey, string> = {
   'pause.title': 'Пауза',
   'pause.resume': 'Продовжити',
   'pause.save': 'Зберегти гру',
+  'pause.fullscreen': 'На весь екран',
+  'pause.exitFullscreen': 'Вийти з повного екрана',
   'pause.saved': 'Гру збережено',
   'pause.sound': 'Звук',
   'pause.master': 'Гучність',

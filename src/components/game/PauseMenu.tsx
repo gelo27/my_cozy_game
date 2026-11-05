@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Play, Save, Volume2, VolumeX, RotateCcw } from 'lucide-react';
+import { Play, Save, Volume2, VolumeX, RotateCcw, Maximize, Minimize } from 'lucide-react';
 import { userSettings, updateUserSettings, onUserSettingsChange, resetUserSettings, UserSettings } from '../../config/userSettings';
 import { t, useLang, setLang, LANGS } from '../../i18n/i18n';
 import { TKey } from '../../i18n/en';
@@ -53,11 +53,28 @@ const Toggle: React.FC<{ on: boolean; label: string; onClick(): void }> = ({ on,
   </button>
 );
 
+/** Tracks whether the page is in full screen (the user can also leave it with Esc / the system back gesture). */
+function useFullscreen(): [boolean, () => void] {
+  const [on, setOn] = useState(() => !!document.fullscreenElement);
+  useEffect(() => {
+    const sync = () => setOn(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, []);
+  const toggle = () => {
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    else void document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {});
+  };
+  return [on, toggle];
+}
+
 /** Pause overlay: resume, save, sound mixer and a couple of control options. */
 export const PauseMenu: React.FC<{ onResume(): void; onSave(): void }> = ({ onResume, onSave }) => {
   const s = useUserSettings();
   const lang = useLang();
   const pct = (v: number) => `${Math.round(v * 100)}%`;
+  const [fullscreen, toggleFullscreen] = useFullscreen();
+  const canFullscreen = typeof document.documentElement.requestFullscreen === 'function';
 
   return (
     <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/35 backdrop-blur-[2px] px-4" onClick={onResume}>
@@ -80,6 +97,16 @@ export const PauseMenu: React.FC<{ onResume(): void; onSave(): void }> = ({ onRe
           >
             <Save className="w-4 h-4" /> {t('pause.save')}
           </button>
+          {/* Temporary: full-screen toggle (handy on phones, where the browser bars eat the screen) */}
+          {canFullscreen && (
+            <button
+              onClick={toggleFullscreen}
+              className="col-span-2 h-10 rounded-2xl bg-white border border-[#e9dcc3] hover:bg-amber-50 font-semibold flex items-center justify-center gap-2 active:scale-[0.98] transition"
+            >
+              {fullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+              {t(fullscreen ? 'pause.exitFullscreen' : 'pause.fullscreen')}
+            </button>
+          )}
         </div>
 
         <p className="text-[11px] font-bold uppercase tracking-wider text-[#a08d70] mb-1">{t('pause.sound')}</p>

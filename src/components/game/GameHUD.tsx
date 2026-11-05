@@ -65,18 +65,18 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   return (
     <div className="absolute inset-0 pointer-events-none select-none z-30 font-sans">
       {/* Top-left: clock, weather, coins, active buff */}
-      <div className="absolute top-3 left-3 flex flex-wrap items-center gap-2">
-        <div className={`${panel} rounded-2xl px-3 py-1.5 flex items-center gap-2`}>
+      <div className="absolute top-3 left-3 flex flex-wrap items-center gap-2 touch:top-2 touch:left-2 touch:gap-1.5">
+        <div className={`${panel} rounded-2xl px-3 py-1.5 touch:px-2.5 touch:py-1 flex items-center gap-2`}>
           <WeatherIcon className="w-4 h-4 text-amber-600" />
           <span className="text-sm font-bold tabular-nums">{hud.clock}</span>
           <span className="text-xs text-[#8a7556] hidden sm:inline">{dataName('weather', hud.weather, WEATHER_LABELS[hud.weather])}</span>
         </div>
-        <div className={`${panel} rounded-2xl px-3 py-1.5 flex items-center gap-1.5`}>
+        <div className={`${panel} rounded-2xl px-3 py-1.5 touch:px-2.5 touch:py-1 flex items-center gap-1.5`}>
           <Coins className="w-4 h-4 text-yellow-500" />
           <span className="text-sm font-bold tabular-nums">{hud.coins}</span>
         </div>
         {hud.buff && (
-          <div className={`${panel} rounded-2xl px-3 py-1.5 flex items-center gap-1.5`}>
+          <div className={`${panel} rounded-2xl px-3 py-1.5 touch:px-2.5 touch:py-1 flex items-center gap-1.5`}>
             <Zap className="w-4 h-4 text-emerald-600" />
             <span className="text-xs font-semibold">{t('hud.seconds', { n: hud.buff.secondsLeft })}</span>
           </div>
@@ -84,7 +84,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       </div>
 
       {/* Top-right: the few menus a player needs */}
-      <div className="absolute top-3 right-3 flex items-center gap-2 pointer-events-auto">
+      <div className="absolute top-3 right-3 flex items-center gap-2 pointer-events-auto touch:top-2 touch:right-2 touch:gap-1.5 max-sm:flex-col max-sm:items-end">
         {hud.pets.length > 0 && (
           <div className={`${panel} rounded-2xl px-3 py-1.5 hidden md:flex items-center gap-2`}>
             {hud.pets.map((p) => (
@@ -119,7 +119,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
       {/* Interaction prompt */}
       {hud.prompt && !hud.fishing && (
-        <div className="absolute bottom-60 sm:bottom-28 left-1/2 -translate-x-1/2 flex gap-2 pointer-events-auto">
+        <div className="absolute bottom-60 sm:bottom-28 touch:sm:bottom-16 left-1/2 -translate-x-1/2 flex gap-2 pointer-events-auto">
           <PromptButton keyLabel={hud.prompt.key} text={hud.prompt.text} onClick={() => onAction(hud.prompt!.action)} />
           {hud.prompt.secondary && (
             <PromptButton
@@ -135,22 +135,22 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
       {/* Hotbar */}
       {items.length > 0 && (
-        <div className={`absolute bottom-3 left-1/2 -translate-x-1/2 ${panel} rounded-2xl p-1.5 flex gap-1.5 pointer-events-auto`}>
+        <div className={`absolute bottom-3 left-1/2 -translate-x-1/2 ${panel} rounded-2xl p-1.5 flex gap-1.5 pointer-events-auto touch:bottom-2 touch:p-1 touch:gap-1 touch:rounded-xl`}>
           {items.map((item, i) => (
             <button
               key={item.id}
               onClick={() => inventory.equipItem(item.id)}
               title={dataName('item', item.id, item.name)}
-              className={`relative w-11 h-11 sm:w-12 sm:h-12 rounded-xl flex items-center justify-center text-xl transition-all ${
+              className={`relative w-11 h-11 sm:w-12 sm:h-12 touch:w-9 touch:h-9 touch:text-lg rounded-xl touch:rounded-lg flex items-center justify-center text-xl transition-all ${
                 equipped === item.id
                   ? 'bg-amber-200 ring-2 ring-amber-500 scale-105'
                   : 'bg-white/70 hover:bg-amber-50'
               }`}
             >
               <ItemIcon item={item} />
-              <span className="absolute top-0.5 left-1 text-[9px] font-bold text-[#a08a68] hidden sm:block">{i + 1}</span>
+              <span className="absolute top-0.5 left-1 text-[9px] font-bold text-[#a08a68] hidden sm:block touch:hidden">{i + 1}</span>
               {item.maxStack > 1 && (
-                <span className="absolute bottom-0 right-1 text-[10px] font-bold text-[#4a3b2a]">{item.count}</span>
+                <span className="absolute bottom-0 right-1 text-[10px] touch:text-[9px] touch:right-0.5 font-bold text-[#4a3b2a]">{item.count}</span>
               )}
             </button>
           ))}
@@ -166,7 +166,7 @@ const HudButton: React.FC<{ label: string; hotkey: string; onClick(): void; chil
   <button
     onClick={onClick}
     title={`${label} (${hotkey})`}
-    className={`${panel} rounded-2xl w-11 h-11 flex items-center justify-center hover:bg-amber-50 active:scale-95 transition`}
+    className={`${panel} rounded-2xl w-11 h-11 touch:w-9 touch:h-9 touch:rounded-xl touch:[&_svg]:w-4 touch:[&_svg]:h-4 flex items-center justify-center hover:bg-amber-50 active:scale-95 transition`}
   >
     {children}
   </button>
@@ -196,7 +196,7 @@ const FishingWidget: React.FC<{ hud: GameplayHudState; onPress(): void }> = ({ h
   };
   const urgent = f.phase === 'bite' || f.phase === 'reel';
   return (
-    <div className="absolute bottom-60 sm:bottom-24 left-1/2 -translate-x-1/2 w-[min(90vw,340px)] pointer-events-auto">
+    <div className="absolute bottom-60 sm:bottom-24 touch:sm:bottom-16 left-1/2 -translate-x-1/2 w-[min(90vw,340px)] pointer-events-auto">
       <button
         onClick={onPress}
         className={`${panel} w-full rounded-2xl px-4 py-3 flex flex-col items-center gap-2 active:scale-[0.98] transition ${

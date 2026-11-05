@@ -545,7 +545,12 @@ export class GameEngine {
   private frameMsAccum = 0;
   private lastStepMs = 0;
 
-  private animate = (): void => {
+  /** Frame cap (0 = every vsync). On 120 / 144 Hz screens this halves the work for the same look. */
+  public maxFps = 60;
+  /** Ideal time of the last simulated frame (ms, requestAnimationFrame clock). */
+  private lastFrameAt = -1e9;
+
+  private animate = (now: number = performance.now()): void => {
     if (this.isDisposed || !this.world) return;
     this.animationFrameId = requestAnimationFrame(this.animate);
     if (this.paused) {
@@ -555,6 +560,13 @@ export class GameEngine {
         this.renderer.render(this.scene, this.camera.camera);
       }
       return;
+    }
+    if (this.maxFps > 0) {
+      // Skip vsyncs that come too early; the ideal schedule advances by exactly one interval, so on
+      // 144 Hz the frames alternate between 2 and 3 vsyncs and still average the target rate
+      const interval = 1000 / this.maxFps;
+      if (now - this.lastFrameAt < interval - 2) return;
+      this.lastFrameAt = Math.max(this.lastFrameAt + interval, now - interval);
     }
     const frameStart = performance.now();
 

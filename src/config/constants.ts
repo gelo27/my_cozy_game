@@ -157,7 +157,8 @@ export const WATER_FOG_CONFIG = {
 
 export const WATER_PHYSICS_CONFIG = {
   SURFACE_Y: 0.0,
-  SWIM_SURFACE_OFFSET: 0.25, // Resting depth of the body centre below the surface (meters): head and shoulders out
+  SWIM_SURFACE_OFFSET: 0.03, // Resting depth of the body centre below the surface (meters): about half the body out
+  SWIM_GLIDE_LIFT: 0.15, // Extra height (m) while swimming along the surface: the flat body rides with its back out
   SWIM_BASE_SPEED: 4.5, // m/s, independent of the (slow) walking speed
   SWIM_WALK_SPEED_RATIO: 0.95,
   SWIM_SPRINT_SPEED_RATIO: 1.5,

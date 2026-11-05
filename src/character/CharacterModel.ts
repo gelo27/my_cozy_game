@@ -86,6 +86,8 @@ const WATER_POUR_WINDOW: [number, number] = [0.2, 0.8];
 const SWIM_CLIP_SPEED = 2.5;
 /** Within this depth (m) of the surface the character swims on top of the water. */
 const SURFACE_SWIM_DEPTH = 0.5;
+/** Body pitch (rad) while swimming on the surface: legs lower, head up. */
+const SURFACE_SWIM_PITCH = -0.32;
 
 export class CharacterModel {
   public group: THREE.Group;
@@ -790,7 +792,9 @@ export class CharacterModel {
         const dirY = vy / Math.max(0.001, moveSpeed);
         underwaterPitch = -Math.asin(THREE.MathUtils.clamp(dirY, -0.999, 0.999));
       }
-      targetPitchLean = THREE.MathUtils.lerp(underwaterPitch, 0, surfaceFactor);
+      // Swimming along the surface: hips sink and the head rises (negative pitch = head up); upright when idle
+      const surfacePitch = isMoving ? SURFACE_SWIM_PITCH : 0;
+      targetPitchLean = THREE.MathUtils.lerp(underwaterPitch, surfacePitch, surfaceFactor);
     } else if (state.isClimbing) {
       targetPitchLean = 0.15;
     } else if (state.isGrounded) {

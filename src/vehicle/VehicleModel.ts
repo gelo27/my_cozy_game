@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeColoredGroups } from '../scene/MergeColored';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 /**
@@ -100,6 +101,8 @@ export class VehicleModel {
     this.promptSprite = createPromptSprite();
     this.promptSprite.position.set(0, 2.2, 0);
     this.group.add(this.promptSprite);
+    // One draw call for the chassis and one per wheel; the brake lights stay separate
+    mergeColoredGroups([this.chassisMesh, ...this.wheelSpinners], new Set([this.tailLightMaterial]));
   }
 
   public setPromptVisible(visible: boolean): void {

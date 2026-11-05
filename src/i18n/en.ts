@@ -20,6 +20,7 @@ export const en = {
   'touch.sprint': 'Sprint',
   'touch.use': 'Use tool',
   'touch.jump': 'Jump',
+  'touch.dive': 'Dive (hold)',
 
   // Gameplay prompts and notifications
   'play.cast': 'Cast the line',
@@ -289,6 +290,8 @@ export const en = {
   'pause.title': 'Paused',
   'pause.resume': 'Resume',
   'pause.save': 'Save game',
+  'pause.fullscreen': 'Full screen',
+  'pause.exitFullscreen': 'Exit full screen',
   'pause.saved': 'Game saved',
   'pause.sound': 'Sound',
   'pause.master': 'Volume',

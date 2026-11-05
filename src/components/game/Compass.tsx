@@ -121,7 +121,7 @@ export const Compass: React.FC<{ world: GameWorld; heading(): number }> = ({ wor
   }, [world, ex, heading, targets]);
 
   return (
-    <div className={`absolute top-16 left-1/2 -translate-x-1/2 w-[min(440px,70vw)] h-10 rounded-2xl ${panel} overflow-hidden pointer-events-none`}>
+    <div className={`absolute top-16 left-1/2 -translate-x-1/2 w-[min(440px,70vw)] h-10 rounded-2xl touch:top-12 touch:h-8 touch:w-[min(360px,50vw)] touch:rounded-xl ${panel} overflow-hidden pointer-events-none`}>
       <div ref={stripRef} className="relative w-full h-full">
         {/* Degree ticks every 15° */}
         {Array.from({ length: 24 }, (_, i) => (
