@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { FootSurface } from '../audio/Footsteps';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 
@@ -25,6 +26,8 @@ export type StructureMaterial = keyof typeof STRUCTURE_MATERIALS;
  * places it in the world with one transform. Box and cylinder colliders follow the same transform.
  */
 export class StructureBuilder {
+  /** What its walkable colliders sound like underfoot (tagged on each collider's userData). */
+  public surface: FootSurface = 'stone';
   private readonly parts = new Map<StructureMaterial, THREE.BufferGeometry[]>();
   private readonly colliders: (
     | { kind: 'box'; pos: THREE.Vector3; size: THREE.Vector3; rotY: number }
@@ -103,8 +106,10 @@ export class StructureBuilder {
     const world = new THREE.Vector3();
     for (const c of this.colliders) {
       world.copy(c.pos).applyEuler(rot).add(origin);
-      if (c.kind === 'box') physics.createStaticBox(world, c.size, new THREE.Euler(0, yaw + c.rotY, 0));
-      else physics.createStaticCylinder(world, c.radius, c.height);
+      const res = c.kind === 'box'
+        ? physics.createStaticBox(world, c.size, new THREE.Euler(0, yaw + c.rotY, 0))
+        : physics.createStaticCylinder(world, c.radius, c.height);
+      (res.collider as unknown as { userData: unknown }).userData = { surface: this.surface };
     }
     return group;
   }

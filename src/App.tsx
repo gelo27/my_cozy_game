@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BuildingTelemetry } from './building/types/BuildingTypes';
 import { FarmInteractionPrompt } from './farming/types/FarmingTypes';
 import { GameEngine, DevStats, EngineMode, DEV_TOOLS_ENABLED } from './engine/GameEngine';
+import { AUTOSAVE_SLOT } from './world/SaveSystem';
 import { GameplayHudState } from './gameplay/GameplayManager';
 import { useConsoleLog } from './hooks/useConsoleLog';
 import { useToast } from './hooks/useToast';
@@ -21,8 +22,9 @@ import { GameHUD } from './components/game/GameHUD';
 import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
 import { WorldMap } from './components/game/WorldMap';
 import { Compass } from './components/game/Compass';
+import { PauseMenu } from './components/game/PauseMenu';
 import { EditorUI } from './components/editor/EditorUI';
-import { useLang, dataName } from './i18n/i18n';
+import { useLang, dataName, t } from './i18n/i18n';
 import { ErrorOverlay, JsonDropOverlay, LoadingOverlay, ToastPill } from './components/ViewportOverlays';
 
 export default function App() {
@@ -46,6 +48,10 @@ export default function App() {
   const [isMapOpen, setIsMapOpen] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
   const [showCharacterInspector, setShowCharacterInspector] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  /** What Escape should close first (read from the engine's key handler, so kept in a ref). */
+  const openUiRef = useRef({ inventory: false, map: false, building: false });
+  const pausedAtRef = useRef(0);
 
   useLang();
   const { logs, addLog, clearLogs } = useConsoleLog();
@@ -70,6 +76,26 @@ export default function App() {
       if (next !== prev) engineRef.current?.input.setInventoryMode(next);
       return next;
     });
+  };
+
+  const setPaused = (paused: boolean) => {
+    const e = engineRef.current;
+    if (!e || e.mode === 'editor') return;
+    e.setPaused(paused);
+    pausedAtRef.current = paused ? performance.now() : 0;
+    e.input.setInventoryMode(paused || openUiRef.current.inventory || openUiRef.current.map || !!e.world?.gameplay.panel);
+    setIsPaused(paused);
+  };
+
+  /** Escape: pause, unless Escape is about to close the backpack, map or build mode. */
+  const handlePauseHotkey = () => {
+    const e = engineRef.current;
+    if (!e) return;
+    const ui = openUiRef.current;
+    if (!e.isPaused && (ui.inventory || ui.map || ui.building)) return;
+    // The same Escape that released the mouse (and so already paused) must not resume at once
+    if (e.isPaused && performance.now() - pausedAtRef.current < 250) return;
+    setPaused(!e.isPaused);
   };
 
   /** The map frees the cursor like the backpack. */
@@ -103,6 +129,7 @@ export default function App() {
       onWireframeToggled: setIsWireframe,
       onInventoryHotkey: handleToggleInventory,
       onMapHotkey: handleToggleMap,
+      onPauseHotkey: handlePauseHotkey,
       onGameplayHud: setHud,
       onNotify: (text, type) => notify(text, type),
       onModeChange: setMode,
@@ -118,6 +145,21 @@ export default function App() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Browsers spend the first Escape on releasing the mouse: losing the lock while just playing
+  // (no backpack, map, panel or build mode freed it) opens the pause menu like games do
+  useEffect(() => {
+    if (!engine) return;
+    const onLockChange = () => {
+      if (document.pointerLockElement || document.hidden) return;
+      const inp = engine.input;
+      if (engine.mode !== 'play' || engine.isPaused || inp.isInventoryOpen || inp.isBuildMode || inp.isPaintMode || inp.isTerrainMode) return;
+      if (engine.world?.gameplay.panel) return;
+      setPaused(true);
+    };
+    document.addEventListener('pointerlockchange', onLockChange);
+    return () => document.removeEventListener('pointerlockchange', onLockChange);
+  }, [engine]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Panels free the mouse cursor like the backpack does
   const panelOpen = !!hud?.panel;
   useEffect(() => {
@@ -127,6 +169,7 @@ export default function App() {
   const isEditor = mode === 'editor';
   const isBuildingUI = !!(buildingTelemetry?.isBuildModeActive || buildingTelemetry?.isPaintingModeActive);
   const closePanel = () => world?.gameplay.openPanel(null);
+  openUiRef.current = { inventory: isInventoryOpen, map: isMapOpen, building: isBuildingUI };
 
   return (
     <div className="flex h-[100dvh] w-screen bg-[#0c0c0c] text-[#e0e0e0] select-none overflow-hidden">
@@ -171,6 +214,7 @@ export default function App() {
                   onOpenEditor={() => engine!.setMode('editor')}
                   onOpenMap={() => handleToggleMap()}
                   onCallMoped={() => engine!.callMoped()}
+                  onPause={() => setPaused(true)}
                   onAction={(a) => world.gameplay.runAction(a)}
                 />
 
@@ -227,6 +271,16 @@ export default function App() {
 
                 {!isBuildingUI && hud && <Compass world={world} heading={engine!.getHeading} />}
                 {isMapOpen && <WorldMap world={world} heading={engine!.getHeading} onClose={() => handleToggleMap(false)} />}
+
+                {isPaused && (
+                  <PauseMenu
+                    onResume={() => setPaused(false)}
+                    onSave={() => {
+                      world.saves.save(AUTOSAVE_SLOT);
+                      showToast({ text: t('pause.saved'), type: 'success' });
+                    }}
+                  />
+                )}
 
                 {hud?.panel === 'cook' && <CookingPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'shop' && <ShopPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}

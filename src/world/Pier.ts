@@ -46,6 +46,7 @@ export function buildLighthousePier(site: IslandSite, terrain: TerrainSystem, sc
   z1 = Math.min(z0 + 52, z1 + 7);
 
   const b = new StructureBuilder();
+  b.surface = 'wood';
   const len = z1 - z0;
   // Planks across the deck, alternating tone, with thin gaps between them
   const plank = 0.42;

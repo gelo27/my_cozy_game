@@ -3,7 +3,6 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { CHARACTER_CONFIG } from '../config/constants';
 import { FarmingMeshGenerator } from '../farming/FarmingMeshGenerator';
-import { buildRunClip } from './ProceduralRunClip';
 
 export interface AnimationState {
   isGrounded: boolean;
@@ -23,16 +22,14 @@ export interface AnimationState {
   velocity3D?: THREE.Vector3;
 }
 
-/** Roblox-style character exported from roblox_animation.blend (6-bone rig, clips named in CAPS). */
-const MODEL_URL = `${import.meta.env.BASE_URL}models/roblox_character.glb`;
+/** Blocky character (6-bone rig, clips named in CAPS: locomotion, jump phases, swimming, tool use). */
+const MODEL_URL = `${import.meta.env.BASE_URL}models/character.glb`;
 
 /** Bone that holds tools in the source rig (the Axe/Pickaxe previews are parented to it). */
 const TOOL_HAND_BONE = 'arm_1_left';
 /** Grip point along the arm bone, matching the tool previews in Blender (bone tail - 0.1). */
 const TOOL_GRIP_OFFSET = new THREE.Vector3(0, 1.25, 0);
 
-/** Root bone whose translation keys are dropped from JUMP: the physics body already does the hop. */
-const ROOT_BONE = 'body';
 /** Leg bones whose meshes are sampled to measure how fast each clip moves the feet over the ground. */
 const LEG_BONES = ['leg_1_right', 'leg_1_left'];
 /** Ground speed fallbacks (m/s) measured on the exported clips, used if measuring fails. */
@@ -42,17 +39,51 @@ const MAX_WALK_TIME_SCALE = 2.0;
 /** Speed band (m/s) around the WALK/RUN switch so the clip does not flicker. */
 const GAIT_HYSTERESIS = 0.2;
 const MAX_LOCOMOTION_TIME_SCALE = 4.0;
+/**
+ * The RUN clip has a short stride, so matching the feet exactly makes jogging / sprinting look frantic.
+ * Above this playback rate only RUN_RATE_ABOVE_KNEE of the extra speed goes into cadence (feet slide a little).
+ */
+const RUN_RATE_KNEE = 1.3;
+const RUN_RATE_ABOVE_KNEE = 0.45;
 
-type LocomotionClip = 'IDLE' | 'WALK' | 'RUN' | 'JUMP' | 'FALL';
-type OneShotClip = 'CHOP' | 'MINE' | 'PICKUP_ONE_HAND';
+type LocomotionClip =
+  | 'IDLE' | 'WALK' | 'RUN' | 'JUMP_AIR' | 'FALL'
+  | 'SWIM_IDLE' | 'SWIM_SURFACE' | 'SWIM_UNDERWATER';
+type OneShotClip = 'CHOP' | 'MINE' | 'WATER' | 'JUMP_START' | 'LAND';
 
-const LOOPING_CLIPS: LocomotionClip[] = ['IDLE', 'WALK', 'RUN', 'FALL'];
-const ONE_SHOT_CLIPS: OneShotClip[] = ['CHOP', 'MINE', 'PICKUP_ONE_HAND'];
+const LOOPING_CLIPS: LocomotionClip[] = ['IDLE', 'WALK', 'RUN', 'JUMP_AIR', 'FALL', 'SWIM_IDLE', 'SWIM_SURFACE', 'SWIM_UNDERWATER'];
+const ONE_SHOT_CLIPS: OneShotClip[] = ['CHOP', 'MINE', 'WATER', 'JUMP_START', 'LAND'];
+/** Older exports lack some clips: play the closest one instead. */
+const CLIP_FALLBACKS: Partial<Record<LocomotionClip | OneShotClip, string>> = {
+  JUMP_AIR: 'FALL',
+  SWIM_IDLE: 'IDLE',
+  SWIM_SURFACE: 'WALK',
+  SWIM_UNDERWATER: 'WALK',
+  WATER: 'PICKUP_ONE_HAND',
+};
 
 const LOCOMOTION_FADE = 0.2;
+const SWIM_FADE = 0.35;
 const ONE_SHOT_FADE = 0.08;
 const AXE_SWING_DURATION = 0.6;
 const MINE_SWING_DURATION = 0.7;
+/** JUMP_START skips its crouch (physics already launched the body) and plays the push-off at 1x. */
+const JUMP_START_SKIP = 0.12;
+const LAND_DURATION = 0.5;
+/** LAND opens with the arms raised (the JUMP_AIR pose), so it needs a softer blend in. */
+const LAND_FADE = 0.15;
+/** A jump keeps the arms-up JUMP_AIR pose; FALL only takes over when dropping this fast (m/s, long falls). */
+const JUMP_TO_FALL_SPEED = -9;
+/** Leaving the ground without jumping keeps the ground clip this long, so bumps and slopes do not flash FALL. */
+const FALL_DELAY = 0.25;
+/** Default watering clip length (s); the WATER clip is ~3.2s at 1x. */
+const WATERING_DURATION = 2.0;
+/** Part of the WATER clip (fraction of its length) where the can is tipped and water flows. */
+const WATER_POUR_WINDOW: [number, number] = [0.2, 0.8];
+/** Speed (m/s) at which the swim stroke clips play at 1x. */
+const SWIM_CLIP_SPEED = 2.5;
+/** Within this depth (m) of the surface the character swims on top of the water. */
+const SURFACE_SWIM_DEPTH = 0.5;
 
 export class CharacterModel {
   public group: THREE.Group;
@@ -68,6 +99,12 @@ export class CharacterModel {
   private actions: Map<string, THREE.AnimationAction> = new Map();
   private currentLocomotion: LocomotionClip | null = null;
   private oneShot: THREE.AnimationAction | null = null;
+  /** Clip times (s) where a foot touches down, per gait clip (measured from the clip itself). */
+  private readonly footPlants = new Map<LocomotionClip, number[]>();
+  private gaitClip: LocomotionClip | null = null;
+  private gaitTime = 0;
+  /** Called when a foot touches the ground while walking/running; intensity ~0.35 sneak, 0.6 walk, 1 run. */
+  public onFootstep: ((intensity: number) => void) | null = null;
   // Ground speed (m/s) at which each clip's feet stay planted, measured once the model loads
   private walkGroundSpeed: number = FALLBACK_GROUND_SPEED.WALK;
   private runGroundSpeed: number = FALLBACK_GROUND_SPEED.RUN;
@@ -89,6 +126,11 @@ export class CharacterModel {
   public weaponRecoilKick: number = 0;
   public axeSwingProgress: number = 0;
   public wateringProgress: number = 0;
+  private wateringDuration: number = WATERING_DURATION;
+  private swimAtSurface = true;
+  /** Set by a jump, cleared on touching ground: picks JUMP_AIR over FALL while airborne. */
+  private airborneFromJump = false;
+  private airborneTime = 0;
 
   // Caustics projection callback holder
   private waterEffectsProjection: { applyProjectedCaustics: (mat: THREE.Material) => void } | null = null;
@@ -235,43 +277,31 @@ export class CharacterModel {
     this.currentLocomotion = null;
     this.oneShot = null;
 
-    const register = (name: string, clip: THREE.AnimationClip, loop: THREE.AnimationActionLoopStyles) => {
-      const action = this.mixer!.clipAction(clip);
+    const register = (name: LocomotionClip | OneShotClip, loop: THREE.AnimationActionLoopStyles) => {
+      const fallback = CLIP_FALLBACKS[name];
+      const clip = THREE.AnimationClip.findByName(clips, name) ?? (fallback ? THREE.AnimationClip.findByName(clips, fallback) : null);
+      if (!clip) return;
+      // A fallback clip gets its own copy so timeScale / loop settings do not clash with the original
+      const own = clip.name === name ? clip : clip.clone();
+      own.name = name;
+      const action = this.mixer!.clipAction(own);
       action.setLoop(loop, loop === THREE.LoopOnce ? 1 : Infinity);
-      // JUMP holds its airborne pose until FALL takes over
-      action.clampWhenFinished = name === 'JUMP';
+      // One-shots hold their last frame so they can cross-fade back into locomotion instead of
+      // vanishing at once (which briefly blends the rig towards its bind pose)
+      action.clampWhenFinished = loop === THREE.LoopOnce;
       this.actions.set(name, action);
     };
 
-    // RUN is generated in code (energetic arm pump, longer stride); the Blender RUN is the fallback
-    const generatedRun = buildRunClip(root);
-    for (const name of LOOPING_CLIPS) {
-      const clip = name === 'RUN' && generatedRun ? generatedRun.clip : THREE.AnimationClip.findByName(clips, name);
-      if (clip) register(name, clip, THREE.LoopRepeat);
-    }
-
-    const jumpClip = THREE.AnimationClip.findByName(clips, 'JUMP');
-    if (jumpClip) {
-      const inPlace = jumpClip.clone();
-      inPlace.tracks = inPlace.tracks.filter((t) => t.name !== `${ROOT_BONE}.position`);
-      register('JUMP', inPlace, THREE.LoopOnce);
-    }
-
-    for (const name of ONE_SHOT_CLIPS) {
-      const clip = THREE.AnimationClip.findByName(clips, name);
-      if (clip) register(name, clip, THREE.LoopOnce);
-    }
+    for (const name of LOOPING_CLIPS) register(name, THREE.LoopRepeat);
+    for (const name of ONE_SHOT_CLIPS) register(name, THREE.LoopOnce);
 
     // When a one-shot (chop, watering) ends, blend back into the current locomotion clip
     this.mixer.addEventListener('finished', (e) => {
-      if (e.action !== this.oneShot) return;
-      this.oneShot = null;
-      if (this.currentLocomotion) this.playLocomotion(this.currentLocomotion, true);
+      if (e.action === this.oneShot) this.cancelOneShot();
     });
 
     this.walkGroundSpeed = this.measureGroundSpeed(root, 'WALK') ?? FALLBACK_GROUND_SPEED.WALK;
-    // The generated RUN knows its exact ground speed; Blender clips are measured
-    this.runGroundSpeed = generatedRun?.groundSpeed ?? this.measureGroundSpeed(root, 'RUN') ?? FALLBACK_GROUND_SPEED.RUN;
+    this.runGroundSpeed = this.measureGroundSpeed(root, 'RUN') ?? FALLBACK_GROUND_SPEED.RUN;
 
     this.playLocomotion('IDLE', true);
   }
@@ -328,6 +358,20 @@ export class CharacterModel {
     const groundY = Math.min(...samples.map((frame) => Math.min(...frame.map((f) => Math.min(...f.ys)))));
     const groundedEps = 0.003;
 
+    // Footstep moments: the frames where a foot comes down onto the ground (for the step sounds)
+    const plants: number[] = [];
+    for (let k = 0; k < feet.length; k++) {
+      const low = samples.map((frame) => Math.min(...frame[k].ys) < groundY + 0.012);
+      for (let i = 0; i < steps; i++) if (low[i] && !low[(i - 1 + steps) % steps]) plants.push(i * dt);
+    }
+    // The heel-to-toe roll touches down several times per step: keep the first touch of each step
+    plants.sort((x, y) => x - y);
+    const minGap = duration * 0.2;
+    const merged: number[] = [];
+    for (const p of plants) if (!merged.length || p - merged[merged.length - 1] >= minGap) merged.push(p);
+    if (merged.length > 1 && merged[0] + duration - merged[merged.length - 1] < minGap) merged.pop();
+    this.footPlants.set(name, merged.length ? merged : [0, duration / 2]);
+
     // Track the material point touching the ground: the lowest vertex in one frame, followed into the next.
     // Summed over every frame a foot is down (cyclic sampling), that gives how fast planted feet move back.
     let distance = 0;
@@ -358,31 +402,65 @@ export class CharacterModel {
     this.currentLocomotion = name;
     if (this.oneShot) return; // resumed when the one-shot finishes
 
-    if (prev && prev !== next) prev.fadeOut(LOCOMOTION_FADE);
-    next.reset().setEffectiveWeight(1).fadeIn(LOCOMOTION_FADE).play();
+    // Rolling between the upright and lying-flat swim poses needs a longer blend
+    const swimBlend = name.startsWith('SWIM') || !!prev?.getClip().name.startsWith('SWIM');
+    const fade = swimBlend ? SWIM_FADE : LOCOMOTION_FADE;
+    if (prev && prev !== next) prev.fadeOut(fade);
+    next.reset().setEffectiveWeight(1).fadeIn(fade).play();
+  }
+
+  /** Stops the playing one-shot early and blends back into locomotion. */
+  private cancelOneShot(): void {
+    if (!this.oneShot) return;
+    this.oneShot.fadeOut(LOCOMOTION_FADE);
+    this.oneShot = null;
+    const name = this.currentLocomotion;
+    if (name) {
+      this.currentLocomotion = null;
+      this.playLocomotion(name, true);
+    }
+  }
+
+  private isPlayingOneShot(name: OneShotClip): boolean {
+    return !!this.oneShot && this.oneShot === this.actions.get(name);
   }
 
   /** Plays a full-body clip once, stretched to `duration` seconds, then returns to locomotion. */
-  private playOneShot(name: OneShotClip, duration: number): void {
+  private playOneShot(name: OneShotClip, duration: number, startAt = 0, fade = ONE_SHOT_FADE): void {
     const action = this.actions.get(name);
     if (!action) return;
 
-    if (this.oneShot && this.oneShot !== action) this.oneShot.fadeOut(ONE_SHOT_FADE);
+    if (this.oneShot && this.oneShot !== action) this.oneShot.fadeOut(fade);
     const locomotion = this.currentLocomotion ? this.actions.get(this.currentLocomotion) : undefined;
-    locomotion?.fadeOut(ONE_SHOT_FADE);
+    locomotion?.fadeOut(fade);
 
     action.reset();
-    action.timeScale = action.getClip().duration / duration;
-    action.setEffectiveWeight(1).fadeIn(ONE_SHOT_FADE).play();
+    action.time = startAt;
+    action.timeScale = (action.getClip().duration - startAt) / duration;
+    action.setEffectiveWeight(1).fadeIn(fade).play();
     this.oneShot = action;
   }
 
   private selectLocomotion(state: AnimationState): LocomotionClip {
-    if (state.isSwimming || state.isClimbing) {
-      return state.isMoving || state.isClimbingMoving ? 'WALK' : 'IDLE';
+    if (state.isSwimming) {
+      // Hysteresis so bobbing at the surface does not flip between the two strokes
+      const depth = state.swimDepth ?? 0;
+      if (this.swimAtSurface ? depth > SURFACE_SWIM_DEPTH + 0.15 : depth < SURFACE_SWIM_DEPTH - 0.1) {
+        this.swimAtSurface = !this.swimAtSurface;
+      }
+      if (!state.isMoving) return 'SWIM_IDLE';
+      return this.swimAtSurface ? 'SWIM_SURFACE' : 'SWIM_UNDERWATER';
+    }
+    this.swimAtSurface = true;
+    if (state.isClimbing) {
+      return state.isClimbingMoving ? 'WALK' : 'IDLE';
     }
     if (!state.isGrounded) {
-      return state.verticalVelocity > 0 ? 'JUMP' : 'FALL';
+      if (this.airborneFromJump) return state.verticalVelocity < JUMP_TO_FALL_SPEED ? 'FALL' : 'JUMP_AIR';
+      if (state.verticalVelocity > 0) return 'JUMP_AIR';
+      const onGroundClip = this.currentLocomotion === 'IDLE' || this.currentLocomotion === 'WALK' || this.currentLocomotion === 'RUN';
+      if (onGroundClip && this.airborneTime < FALL_DELAY) return this.currentLocomotion!;
+      return 'FALL';
     }
     if (!state.isMoving) return 'IDLE';
     return this.selectGait(state.speed);
@@ -405,6 +483,22 @@ export class CharacterModel {
   public triggerJumpLaunch(): void {
     // Stretch Y scale upward immediately upon takeoff
     this.squashVelocity = 9.0;
+    // Push-off pose that ends in the JUMP_AIR pose; never cuts into a tool swing
+    this.airborneFromJump = true;
+    if (!this.oneShot || this.isPlayingOneShot('LAND')) {
+      const clip = this.actions.get('JUMP_START')?.getClip();
+      if (clip) {
+        const skip = Math.min(JUMP_START_SKIP, clip.duration * 0.5);
+        this.playOneShot('JUMP_START', clip.duration - skip, skip);
+      }
+    }
+  }
+
+  /** Recovery crouch after a real fall; skipped when landing on the move (and cancelled as soon as you move). */
+  public triggerLand(impactSpeed: number, horizontalSpeed: number): void {
+    if (impactSpeed > -3.0 || horizontalSpeed > 1.0) return;
+    if (this.oneShot && !this.isPlayingOneShot('JUMP_START')) return;
+    this.playOneShot('LAND', LAND_DURATION, 0, LAND_FADE);
   }
 
   public triggerLandingSquash(impactSpeed: number): void {
@@ -426,13 +520,16 @@ export class CharacterModel {
     this.playOneShot('MINE', MINE_SWING_DURATION);
   }
 
-  public triggerWatering(duration: number = 1.1): void {
+  public triggerWatering(duration: number = WATERING_DURATION): void {
     this.wateringProgress = duration;
-    this.playOneShot('PICKUP_ONE_HAND', duration);
+    this.wateringDuration = duration;
+    this.playOneShot('WATER', duration);
   }
 
   public isActivelyPouringWater(): boolean {
-    return this.activeWeapon === 10 && this.wateringProgress > 0.20 && this.wateringProgress < 0.88;
+    if (this.activeWeapon !== 10 || this.wateringProgress <= 0) return false;
+    const played = 1 - this.wateringProgress / this.wateringDuration;
+    return played > WATER_POUR_WINDOW[0] && played < WATER_POUR_WINDOW[1];
   }
 
   public getWateringNozzleWorldPosition(target: THREE.Vector3): boolean {
@@ -675,16 +772,13 @@ export class CharacterModel {
       const moveSpeed = Math.sqrt(vx * vx + vy * vy + vz * vz);
       const isMoving = moveSpeed > 0.15;
 
+      // The stroke clips already lie flat; underwater, tilt them to follow the swim direction
       let underwaterPitch = 0;
       if (isMoving) {
         const dirY = vy / Math.max(0.001, moveSpeed);
-        underwaterPitch = (Math.PI / 2) - Math.asin(THREE.MathUtils.clamp(dirY, -0.999, 0.999));
-      } else {
-        underwaterPitch = 0.0;
+        underwaterPitch = -Math.asin(THREE.MathUtils.clamp(dirY, -0.999, 0.999));
       }
-
-      const surfacePitch = isMoving ? 0.80 : 0.15;
-      targetPitchLean = THREE.MathUtils.lerp(underwaterPitch, surfacePitch, surfaceFactor);
+      targetPitchLean = THREE.MathUtils.lerp(underwaterPitch, 0, surfaceFactor);
     } else if (state.isClimbing) {
       targetPitchLean = 0.15;
     } else if (state.isGrounded) {
@@ -732,6 +826,21 @@ export class CharacterModel {
     }
     this.weaponRecoilKick = THREE.MathUtils.lerp(this.weaponRecoilKick, 0, 1.0 - Math.exp(-22.0 * dt));
 
+    // Full-body one-shots that no longer fit once the situation changes
+    if (this.isPlayingOneShot('LAND') && (state.isMoving || !state.isGrounded || state.isSwimming)) this.cancelOneShot();
+    if (this.isPlayingOneShot('JUMP_START') && state.isSwimming) this.cancelOneShot();
+    if (this.isPlayingOneShot('WATER') && state.isSwimming) {
+      this.cancelOneShot();
+      this.wateringProgress = 0;
+    }
+
+    if (state.isGrounded || state.isSwimming || state.isClimbing) {
+      this.airborneTime = 0;
+      // Ignore the first frames after takeoff, when the ground probe may still touch
+      if (!this.isPlayingOneShot('JUMP_START')) this.airborneFromJump = false;
+    } else {
+      this.airborneTime += dt;
+    }
     this.playLocomotion(this.selectLocomotion(state));
 
     // Play gait clips exactly as fast as the body moves, so planted feet do not slide
@@ -742,13 +851,50 @@ export class CharacterModel {
       walkAction.timeScale = THREE.MathUtils.clamp(currentSpeed / this.walkGroundSpeed, 0.3, MAX_LOCOMOTION_TIME_SCALE);
     }
     if (runAction) {
-      runAction.timeScale = THREE.MathUtils.clamp(currentSpeed / this.runGroundSpeed, 0.3, MAX_LOCOMOTION_TIME_SCALE);
+      const footLocked = currentSpeed / this.runGroundSpeed;
+      const rate = footLocked <= RUN_RATE_KNEE ? footLocked : RUN_RATE_KNEE + (footLocked - RUN_RATE_KNEE) * RUN_RATE_ABOVE_KNEE;
+      runAction.timeScale = THREE.MathUtils.clamp(rate, 0.3, MAX_LOCOMOTION_TIME_SCALE);
+    }
+    if (state.isSwimming) {
+      const swimSpeed = state.velocity3D ? state.velocity3D.length() : currentSpeed;
+      const strokeScale = THREE.MathUtils.clamp(swimSpeed / SWIM_CLIP_SPEED, 0.7, 1.8);
+      for (const name of ['SWIM_SURFACE', 'SWIM_UNDERWATER'] as const) {
+        const a = this.actions.get(name);
+        if (a) a.timeScale = strokeScale;
+      }
     }
 
     if (this.mixer) {
       this.mixer.update(dt);
     }
+    this.detectFootsteps(state);
     if (this.isRiding) this.applyRidingPose();
+  }
+
+  /** Fires onFootstep each time the playing gait clip passes one of its foot-plant moments. */
+  private detectFootsteps(state: AnimationState): void {
+    const clip = this.currentLocomotion;
+    const walking = (clip === 'WALK' || clip === 'RUN') && !this.oneShot && !this.isRiding &&
+      state.isGrounded && !state.isSwimming && !state.isClimbing;
+    const action = walking ? this.actions.get(clip!) : undefined;
+    if (!action || !this.onFootstep) {
+      this.gaitClip = null;
+      return;
+    }
+    const t = action.time;
+    if (this.gaitClip === clip) {
+      const prev = this.gaitTime;
+      const d = action.getClip().duration;
+      const plants = this.footPlants.get(clip!) ?? [0, d / 2];
+      {
+        for (const p of plants) {
+          const crossed = prev <= t ? p > prev && p <= t : p > prev || p <= t; // the clip looped
+          if (crossed) this.onFootstep(state.isCrouching ? 0.35 : clip === 'RUN' ? 1 : 0.6);
+        }
+      }
+    }
+    this.gaitClip = clip;
+    this.gaitTime = t;
   }
 
   private static readonly _poseQ = new THREE.Quaternion();

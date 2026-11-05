@@ -16,6 +16,9 @@ export function cropForSeed(itemId: string | null | undefined): CropType | null 
   return (itemId && SEED_TO_CROP[itemId]) || null;
 }
 
+/** Growth speed of a dry crop relative to a watered one. */
+const UNWATERED_GROWTH_SPEED = 0.3;
+
 const isFieldId = (id: string) => id.startsWith('field_');
 
 export interface HarvestResult {
@@ -34,7 +37,7 @@ export class FarmingManager {
   private animTime: number = 0;
   /** 0..1 from the weather system; rain waters thirsty crops on its own. */
   public rainIntensity = 0;
-  private rainTimer = 0;
+  private rainWasOn = false;
   /** Big shovel-dug fields (instanced crops on terrain soil). */
   public readonly fields: FieldManager;
 
@@ -140,8 +143,9 @@ export class FarmingManager {
    * Each stage dries the soil again, so a crop needs one watering per stage.
    */
   private advanceCrop(crop: CropState, dt: number): 0 | 2 | 3 {
-    if (!crop.isWatered || crop.stage >= 3) return 0;
-    crop.growthTimer += dt;
+    if (crop.stage >= 3) return 0;
+    // Crops ripen on their own; water makes them grow much faster
+    crop.growthTimer += dt * (crop.isWatered ? 1 : UNWATERED_GROWTH_SPEED);
     if (crop.growthTimer < crop.stageDuration) return 0;
     crop.isWatered = false;
     if (crop.stage === 1) {
@@ -154,12 +158,6 @@ export class FarmingManager {
     return 3;
   }
 
-  private celebrateStage(position: THREE.Vector3, reached: 2 | 3): void {
-    if (reached === 2) audioEngine.at(position).playHitSound();
-    else audioEngine.at(position).playHarvest();
-    this.particleManager?.emitBuildPuff(position, reached === 2);
-  }
-
   /**
    * Main update loop advancing crop growth timers and handling stage transitions.
    */
@@ -167,31 +165,28 @@ export class FarmingManager {
     this.animTime += dt;
     fieldCropTime.value = this.animTime;
 
-    // Rain waters one thirsty plot or field every ~0.4 s (staggered so it reads as rain soaking in)
-    if (this.rainIntensity > 0.35) {
-      this.rainTimer -= dt;
-      if (this.rainTimer <= 0) {
-        this.rainTimer = 0.4;
-        let done = false;
-        for (const plot of this.plots.values()) {
-          if (plot.crop && !plot.crop.isWatered && plot.crop.stage < 3) {
-            plot.crop.isWatered = true;
-            plot.crop.waterCount += 1;
-            this.setSoilVisual(plot, true);
-            done = true;
-            break;
-          }
+    // Rain replaces manual watering: every plot and field is soaked, exactly as if watered by hand
+    const raining = this.rainIntensity > 0.35;
+    this.fields.rainWet = raining;
+    if (raining) {
+      for (const plot of this.plots.values()) {
+        if (plot.crop && !plot.crop.isWatered && plot.crop.stage < 3) {
+          plot.crop.isWatered = true;
+          plot.crop.waterCount += 1;
         }
-        if (!done) {
-          for (const field of this.fields.getAll()) {
-            if (field.crop && !field.crop.isWatered && field.crop.stage < 3) {
-              field.crop.isWatered = true;
-              field.crop.waterCount += 1;
-              break;
-            }
-          }
+        // Wet soil look even for empty beds
+        this.setSoilVisual(plot, true);
+      }
+      for (const field of this.fields.getAll()) {
+        if (field.crop && !field.crop.isWatered && field.crop.stage < 3) {
+          field.crop.isWatered = true;
+          field.crop.waterCount += 1;
         }
       }
+      this.rainWasOn = true;
+    } else if (this.rainWasOn) {
+      this.rainWasOn = false;
+      for (const plot of this.plots.values()) this.setSoilVisual(plot, plot.crop?.isWatered ?? false);
     }
 
     let plotIndex = 0;
@@ -202,7 +197,6 @@ export class FarmingManager {
         if (reached) {
           this.updateCropVisual(plot);
           this.setSoilVisual(plot, false);
-          this.celebrateStage(plot.position, reached);
         }
       }
 
@@ -229,7 +223,6 @@ export class FarmingManager {
       const reached = this.advanceCrop(field.crop, dt);
       if (reached) {
         this.fields.markCropsDirty();
-        this.celebrateStage(field.center, reached);
       }
     }
     this.fields.update(dt, this.animTime);

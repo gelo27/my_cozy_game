@@ -12,8 +12,9 @@ import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool } from '../../editor/EditorController';
 import { PROP_DEFS, PropCategory } from '../../world/PropSystem';
 import { TerrainTileType, TILE_DEFINITIONS } from '../../terrain/types/TerrainTypes';
-import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
+import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, WeatherSound } from '../../world/WeatherSystem';
 import { worldSettings } from '../../world/WorldSettings';
+import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
 
 const ICONS: Record<string, React.ElementType> = {
@@ -372,6 +373,132 @@ const ScenePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ engine
   );
 };
 
+const SOUND_ROWS: { key: keyof WeatherSound; label: string; max: number }[] = [
+  { key: 'rain', label: 'Дощ', max: 2 },
+  { key: 'wind', label: 'Вітер', max: 1.5 },
+  { key: 'thunder', label: 'Грім', max: 2 },
+  { key: 'birds', label: 'Птахи (у лісі)', max: 1.5 },
+  { key: 'birdRate', label: 'Частота співу птахів', max: 3 },
+  { key: 'insects', label: 'Цвіркуни вночі', max: 1.5 },
+  { key: 'breeze', label: 'Легкий вітерець', max: 1.5 },
+];
+
+const PRECIP_LABELS: Record<'none' | 'rain' | 'snow', string> = { none: 'Нема', rain: 'Дощ', snow: 'Сніг' };
+
+const ColorRow: React.FC<{ label: string; value: THREE.Color; onChange(hex: number): void }> = ({ label, value, onChange }) => (
+  <label className="flex items-center justify-between text-zinc-400">
+    <span>{label}</span>
+    <span className="flex items-center gap-2">
+      <span className="text-zinc-200 tabular-nums">#{value.getHexString()}</span>
+      <input
+        type="color"
+        value={`#${value.getHexString()}`}
+        onChange={(e) => onChange(parseInt(e.target.value.slice(1), 16))}
+        className="w-8 h-6 bg-transparent border border-white/10 rounded cursor-pointer"
+      />
+    </span>
+  </label>
+);
+
+/** Live editor for every parameter of one weather type; edits apply instantly and persist in localStorage. */
+const WeatherTuner: React.FC<{ type: WeatherType; rerender(): void }> = ({ type: current, rerender }) => {
+  const [type, setType] = useState<WeatherType>(current);
+  const p = WEATHER_PROFILES[type];
+  const edit = (fn: () => void) => {
+    fn();
+    WeatherProfiles.save();
+    rerender();
+  };
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  return (
+    <Section
+      title={`Налаштування: ${WEATHER_LABELS[type]}`}
+      right={
+        <button className="text-sky-400 hover:text-sky-300 normal-case" onClick={() => edit(() => WeatherProfiles.reset(type))}>
+          скинути
+        </button>
+      }
+    >
+      <div className="grid grid-cols-3 gap-1">
+        {(Object.keys(WEATHER_LABELS) as WeatherType[]).map((t) => (
+          <button key={t} className={chip(type === t)} onClick={() => setType(t)}>
+            {WEATHER_LABELS[t]}
+          </button>
+        ))}
+      </div>
+      {type !== current && <p className="text-amber-400">Зараз активна інша погода — зміни видно після її вибору вище.</p>}
+      <Slider label="Світло сонця" value={p.light} min={0} max={1.5} step={0.01} onChange={(v) => edit(() => (p.light = v))} fmt={pct} />
+      <Slider label="Густина туману" value={p.fog} min={0} max={0.12} step={0.0005} onChange={(v) => edit(() => (p.fog = v))} fmt={(v) => v.toFixed(4)} />
+      <ColorRow label="Тон неба" value={p.tint} onChange={(h) => edit(() => p.tint.setHex(h))} />
+      <ColorRow label="Колір серпанку" value={p.haze} onChange={(h) => edit(() => p.haze.setHex(h))} />
+      <Slider label="Сила серпанку" value={p.hazeMix} min={0} max={1} step={0.01} onChange={(v) => edit(() => (p.hazeMix = v))} fmt={pct} />
+      <Slider label="Хмарність" value={p.cover} min={0} max={1} step={0.01} onChange={(v) => edit(() => (p.cover = v))} fmt={pct} />
+      <Slider label="Темрява хмар" value={p.dark} min={0} max={1} step={0.01} onChange={(v) => edit(() => (p.dark = v))} fmt={pct} />
+      <div className="grid grid-cols-3 gap-1">
+        {(['none', 'rain', 'snow'] as const).map((k) => (
+          <button key={k} className={chip(p.precipitation === k)} onClick={() => edit(() => (p.precipitation = k))}>
+            {PRECIP_LABELS[k]}
+          </button>
+        ))}
+      </div>
+      <Slider label="Інтенсивність опадів" value={p.amount} min={0} max={1} step={0.01} onChange={(v) => edit(() => (p.amount = v))} fmt={pct} />
+      <p className="text-zinc-500 uppercase tracking-wide pt-1">Звуки</p>
+      {SOUND_ROWS.map((r) => (
+        <Slider
+          key={r.key}
+          label={r.label}
+          value={p.sound[r.key]}
+          min={0}
+          max={r.max}
+          step={0.01}
+          onChange={(v) => edit(() => (p.sound[r.key] = v))}
+          fmt={r.key === 'birdRate' ? (v) => `×${v.toFixed(2)}` : pct}
+        />
+      ))}
+      {type !== 'storm' && p.sound.thunder > 0 && <p className="text-zinc-500">Грім лунає лише після блискавок (тільки гроза).</p>}
+      <div className="flex gap-1">
+        <button className={`${chip(false)} flex-1`} onClick={() => edit(() => WeatherProfiles.resetAll())}>
+          Скинути все
+        </button>
+        <button
+          className={`${chip(false)} flex-1`}
+          onClick={() => navigator.clipboard?.writeText(JSON.stringify(Object.fromEntries(Object.entries(WEATHER_PROFILES).map(([k, v]) => [k, { ...v, tint: `#${v.tint.getHexString()}`, haze: `#${v.haze.getHexString()}` }])), null, 2))}
+        >
+          Копіювати JSON
+        </button>
+      </div>
+    </Section>
+  );
+};
+
+/** Listen to each bird voice and switch off the ones that should not sing in the forests. */
+const BirdVoices: React.FC<{ engine: GameEngine; rerender(): void }> = ({ engine, rerender }) => (
+  <Section title="Голоси птахів">
+    {BIRD_SPECIES.map((b, i) => (
+      <div key={b.id} className="flex items-center gap-2">
+        <button
+          className={`${chip(false)} w-8 shrink-0`}
+          title="Прослухати"
+          onClick={() => engine.ambient.previewBird(i)}
+        >
+          ▶
+        </button>
+        <span className={`flex-1 ${birdSpeciesEnabled[i] ? 'text-zinc-200' : 'text-zinc-500 line-through'}`}>{b.label}</span>
+        <button
+          className={chip(birdSpeciesEnabled[i])}
+          onClick={() => {
+            setBirdSpeciesEnabled(i, !birdSpeciesEnabled[i]);
+            rerender();
+          }}
+        >
+          {birdSpeciesEnabled[i] ? 'увімк.' : 'вимк.'}
+        </button>
+      </div>
+    ))}
+    {!birdSpeciesEnabled.some(Boolean) && <p className="text-amber-400">Усі голоси вимкнені — у лісі буде тихо.</p>}
+  </Section>
+);
+
 const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ engine, rerender }) => {
   const w = engine.world!;
   const set = (fn: () => void) => {
@@ -409,6 +536,8 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
           ))}
         </div>
       </Section>
+      <WeatherTuner type={w.weather.weather} rerender={rerender} />
+      <BirdVoices engine={engine} rerender={rerender} />
       <Section title="Вода">
         <Slider
           label="Рівень води"

@@ -20,6 +20,11 @@ export const MOPED_CONFIG = {
   TURN_RATE: 2.5, // rad/s at low speed
   TURN_RATE_AT_SPEED: 1.35, // rad/s at top speed
   STEER_SPEED: 7,
+  STEER_SPEED_LOSS: 0.5, // fraction of steer speed lost at top speed when turning in
+  STEER_RETURN_LOSS: 0.65, // same, when the bars centre again: slower, so it never twitches
+  GRIP: 8, // 1/s: how fast momentum follows the heading (lower = more slide)
+  AIR_TURN: 0.35, // share of the yaw rate that still works in the air
+  PROBE_HALF_BASE: 0.4, // ground rays sit this far ahead of and behind the centre
   MAX_LEAN: 0.42,
   MAX_CLIMB_DEG: 38, // steeper ground slows the scooter to a crawl
   RIDE_RADIUS: 0.28, // capsule radius; the capsule lies along the scooter
@@ -59,10 +64,15 @@ export class MopedController {
   private lastSafeYaw = 0;
   private safeTimer = 0;
   private readonly groundNormal = new THREE.Vector3(0, 1, 0);
+  private rayPitch: number | null = null; // slope angle measured between the two probe rays
+  // Planar momentum; it chases the heading with a little lag, which gives the slight sideways slip
+  private velX = 0;
+  private velZ = 0;
 
   private static readonly _v = new THREE.Vector3();
   private static readonly _fwd = new THREE.Vector3();
   private static readonly _down = new THREE.Vector3(0, -1, 0);
+  private static readonly _n = new THREE.Vector3();
   private static readonly _q = new THREE.Quaternion();
   private static readonly _e = new THREE.Euler(0, 0, 0, 'YXZ');
 
@@ -129,6 +139,7 @@ export class MopedController {
   public place(pos: THREE.Vector3, yaw: number): void {
     this.yaw = yaw;
     this.speed = 0;
+    this.velX = this.velZ = 0;
     this.body.setTranslation({ x: pos.x, y: pos.y, z: pos.z }, true);
     this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
     this.applyYaw();
@@ -223,13 +234,28 @@ export class MopedController {
     return this.body.translation().y < worldSettings.waterLevel - 0.15;
   }
 
+  /** Two rays (front and rear of the capsule): steadier on crests and ledges than a single centre ray. */
   private probeGround(): void {
     const t = this.body.translation();
-    const reach = MOPED_CONFIG.RIDE_RADIUS + 0.35;
-    const hit = this.physics.castRayAndGetNormal(MopedController._v.set(t.x, t.y, t.z), MopedController._down, reach, this.collider);
-    this.grounded = !!hit && hit.normal.y > 0.35;
-    if (hit && this.grounded) this.groundNormal.lerp(hit.normal, 0.35).normalize();
-    else this.groundNormal.lerp(MopedController._v.set(0, 1, 0), 0.05).normalize();
+    const H = MOPED_CONFIG.PROBE_HALF_BASE;
+    const reach = MOPED_CONFIG.RIDE_RADIUS + 0.45;
+    const sx = Math.sin(this.yaw) * H, sz = Math.cos(this.yaw) * H;
+    const cast = (x: number, z: number) => {
+      const r = this.physics.castRayAndGetNormal(MopedController._v.set(x, t.y, z), MopedController._down, reach, this.collider);
+      return r && r.normal.y > 0.35 ? r : null;
+    };
+    const front = cast(t.x + sx, t.z + sz);
+    const back = cast(t.x - sx, t.z - sz);
+    this.grounded = !!front || !!back;
+    this.rayPitch = front && back ? -Math.atan2(front.point.y - back.point.y, 2 * H) : null;
+    if (this.grounded) {
+      const n = MopedController._n.set(0, 0, 0);
+      if (front) n.add(front.normal);
+      if (back) n.add(back.normal);
+      this.groundNormal.lerp(n.normalize(), 0.35).normalize();
+    } else {
+      this.groundNormal.lerp(MopedController._v.set(0, 1, 0), 0.05).normalize();
+    }
   }
 
   private trackSafeSpot(dt: number): void {
@@ -284,25 +310,31 @@ export class MopedController {
 
     // Steering eases in; the turn rate narrows with speed and is zero at a standstill
     const speedAbs = Math.abs(this.speed);
-    this.steer += (steerInput - this.steer) * (1 - Math.exp(-C.STEER_SPEED * dt));
     const speedT = Math.min(speedAbs / (C.MAX_SPEED_KMH / 3.6), 1);
+    // Turning in and centring both slow down with speed, so the bars never snap at 50 km/h
+    const centring = Math.abs(steerInput) < Math.abs(this.steer) || steerInput * this.steer < 0;
+    const steerRate = C.STEER_SPEED * (1 - (centring ? C.STEER_RETURN_LOSS : C.STEER_SPEED_LOSS) * speedT);
+    this.steer += (steerInput - this.steer) * (1 - Math.exp(-steerRate * dt));
     const turnRate = THREE.MathUtils.lerp(C.TURN_RATE, C.TURN_RATE_AT_SPEED, speedT) * Math.min(speedAbs / 2.5, 1);
-    const yawRate = -this.steer * turnRate * Math.sign(this.speed || 1);
+    const yawRate = -this.steer * turnRate * Math.sign(this.speed || 1) * (this.grounded ? 1 : C.AIR_TURN);
     this.yaw += yawRate * dt;
     this.applyYaw();
 
-    // Velocity along the ground plane; airborne keeps the physics-integrated velocity
     const v = this.body.linvel();
     const fwd = MopedController._fwd.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     if (this.grounded) {
       const n = this.groundNormal;
       fwd.addScaledVector(n, -fwd.dot(n)).normalize();
+      // Momentum follows the heading with a short lag: a light slide in fast turns
+      const k = 1 - Math.exp(-C.GRIP * dt);
+      this.velX += (fwd.x * this.speed - this.velX) * k;
+      this.velZ += (fwd.z * this.speed - this.velZ) * k;
       // A small push into the ground keeps the wheels planted over crests
-      this.body.setLinvel({ x: fwd.x * this.speed, y: Math.min(fwd.y * this.speed - 0.6, v.y + 0.5), z: fwd.z * this.speed }, true);
+      this.body.setLinvel({ x: this.velX, y: Math.min(fwd.y * this.speed - 0.6, v.y + 0.5), z: this.velZ }, true);
     } else {
-      // Mid-air the heading still steers the momentum a little
-      const h = Math.hypot(v.x, v.z);
-      this.body.setLinvel({ x: fwd.x * h * Math.sign(this.speed || 1), y: v.y, z: fwd.z * h * Math.sign(this.speed || 1) }, true);
+      // Mid-air the momentum is left to physics; the heading no longer redirects it
+      this.velX = v.x;
+      this.velZ = v.z;
     }
 
     this.speedKmh = speedAbs * 3.6;
@@ -316,6 +348,15 @@ export class MopedController {
     const v = this.body.linvel();
     const actual = v.x * Math.sin(this.yaw) + v.z * Math.cos(this.yaw);
     if (Math.abs(actual) + 1.2 < Math.abs(this.speed)) this.speed = Math.sign(this.speed) * (Math.abs(actual) + 1.2);
+    // Walls and props scrub momentum too. Only a real hit counts: copying the solver's small
+    // per-frame losses on slopes back into the momentum would make hills eat the speed.
+    const carried = Math.hypot(this.velX, this.velZ);
+    const real = Math.hypot(v.x, v.z);
+    if (real + 1.2 < carried) {
+      const s = (real + 1.2) / carried;
+      this.velX *= s;
+      this.velZ *= s;
+    }
   }
 
   private applyYaw(): void {
@@ -336,7 +377,8 @@ export class MopedController {
     if (this.isPlayerInside) this.reconcileSpeed();
     const t = this.body.translation();
     const fwd = MopedController._fwd.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
-    const targetPitch = this.grounded ? Math.asin(THREE.MathUtils.clamp(this.groundNormal.dot(fwd), -1, 1)) : this.pitch * 0.98;
+    const slopePitch = this.rayPitch ?? Math.asin(THREE.MathUtils.clamp(this.groundNormal.dot(fwd), -1, 1));
+    const targetPitch = this.grounded ? slopePitch : this.pitch * 0.98;
     this.pitch += (targetPitch - this.pitch) * (1 - Math.exp(-10 * dt));
     if (!this.isPlayerInside) this.lean *= Math.exp(-4 * dt);
 
@@ -344,7 +386,7 @@ export class MopedController {
     g.position.set(t.x, t.y - MOPED_CONFIG.RIDE_RADIUS, t.z);
     g.quaternion.setFromEuler(MopedController._e.set(this.pitch, this.yaw, this.lean));
     this.spin += (this.speed / MOPED_WHEEL_RADIUS) * dt;
-    this.model.setRig(this.steer * 0.45 * (1 - Math.min(Math.abs(this.speed) / 14, 0.7)), this.spin);
+    this.model.setRig(-this.steer * 0.45 * (1 - Math.min(Math.abs(this.speed) / 14, 0.7)), this.spin);
 
     if (this.isPlayerInside && this.character) {
       const rider = this.character.model;
@@ -370,6 +412,9 @@ export class MopedController {
     character.model.isRiding = true;
     character.model.weaponPivot.visible = false;
     this.body.wakeUp();
+    const lv = this.body.linvel();
+    this.velX = lv.x;
+    this.velZ = lv.z;
 
     camera.targetDistance = 5.2;
     camera.heightOffset = 1.0;

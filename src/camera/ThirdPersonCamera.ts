@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { userSettings } from '../config/userSettings';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { CAMERA_CONFIG, COLLISION_GROUPS } from '../config/constants';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
@@ -60,8 +61,9 @@ export class ThirdPersonCamera {
   }
 
   public handleMouseInput(deltaX: number, deltaY: number): void {
-    this.targetYaw -= deltaX * this.sensitivity;
-    this.targetPitch += deltaY * this.sensitivity;
+    const k = this.sensitivity * userSettings.sensitivity;
+    this.targetYaw -= deltaX * k;
+    this.targetPitch += deltaY * k * (userSettings.invertY ? -1 : 1);
 
     // Clamp pitch to avoid gimbal lock / flipping upside down
     this.targetPitch = THREE.MathUtils.clamp(this.targetPitch, CAMERA_CONFIG.PITCH_MIN, CAMERA_CONFIG.PITCH_MAX);
@@ -246,6 +248,11 @@ export class ThirdPersonCamera {
         COLLISION_GROUPS.CAMERA_RAY,
         COLLISION_GROUPS.ENVIRONMENT | COLLISION_GROUPS.DYNAMIC_PROPS
       );
+      // Only static geometry (terrain, buildings, trees, rocks) pushes the camera in. Moving bodies — the
+      // companion and pets running behind the player, animals, loose props — snapped it from 4 m to ~1 m
+      // for a split second whenever they crossed the ray.
+      const flags = physics.rapier.QueryFilterFlags;
+      const filterFlags = flags.EXCLUDE_DYNAMIC | flags.EXCLUDE_KINEMATIC | flags.EXCLUDE_SENSORS;
 
       // Multi-probe raycast bundle (center ray + 4 surrounding frustum boundary rays)
       // This catches walls, low ceilings, and tight corners even when standing right against geometry
@@ -267,7 +274,7 @@ export class ThirdPersonCamera {
           rayDir,
           queryDistance,
           true,
-          undefined,
+          filterFlags,
           filterGroup,
           characterCollider
         );

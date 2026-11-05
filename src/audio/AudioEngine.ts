@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 import { isMobileDevice } from '../world/WorldSettings';
+import { userSettings, onUserSettingsChange } from '../config/userSettings';
+
+/** Mixer channels, each with its own volume in the pause menu. */
+/** `sfxDry`: effects heard inside the water (after the underwater muffle), e.g. bubbles. */
+export type AudioChannel = 'sfx' | 'ambient' | 'music' | 'sfxDry';
 
 export interface SoundPos {
   x: number;
@@ -18,6 +23,11 @@ export interface SoundPos {
 class AudioEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  /** Player volume after everything else (pause menu "Master"). */
+  private volume: GainNode | null = null;
+  private readonly channels: Partial<Record<AudioChannel, GainNode>> = {};
+  /** Everything is silent while the game is paused. */
+  private paused = false;
   private pendingPos: SoundPos | null = null;
   private pendingRef = 0;
   /** Low-pass on the master bus: wide open in air, closes underwater. */
@@ -60,8 +70,51 @@ class AudioEngine {
       this.muffle.type = 'lowpass';
       this.muffle.frequency.value = 20000;
       this.muffle.Q.value = 0.5;
-      this.master.connect(this.muffle).connect(this.ctx.destination);
+      this.volume = this.ctx.createGain();
+      this.master.connect(this.muffle).connect(this.volume).connect(this.ctx.destination);
+      for (const ch of ['sfx', 'ambient', 'music', 'sfxDry'] as AudioChannel[]) {
+        const g = this.ctx.createGain();
+        g.connect(ch === 'sfxDry' ? this.volume : this.master);
+        this.channels[ch] = g;
+      }
+      this.applyVolumes(true);
+      onUserSettingsChange(() => this.applyVolumes());
     }
+  }
+
+  /** Pushes the pause-menu volumes into the mixer (smoothly, so sliders do not click). */
+  private applyVolumes(instant = false): void {
+    if (!this.ctx || !this.volume) return;
+    const u = userSettings;
+    const t = this.ctx.currentTime;
+    const set = (g: GainNode | undefined, v: number) => {
+      if (!g) return;
+      if (instant) g.gain.value = v;
+      else g.gain.setTargetAtTime(v, t, 0.05);
+    };
+    // Squared: a slider feels linear to the ear. Nature sounds are effects too: one slider for both
+    const sfx = u.sfxOn ? u.sfx * u.sfx : 0;
+    set(this.volume, this.paused ? 0 : u.master * u.master);
+    set(this.channels.sfx, sfx);
+    set(this.channels.ambient, sfx);
+    set(this.channels.sfxDry, sfx);
+    set(this.channels.music, u.musicOn ? u.music * u.music : 0);
+  }
+
+  /** Pause mutes every channel (quick fade, no click); resuming fades them back in. */
+  public setPaused(paused: boolean): void {
+    if (paused === this.paused) return;
+    this.paused = paused;
+    this.applyVolumes();
+  }
+
+  /** Input of one mixer channel (null before the first user gesture). */
+  public channel(ch: AudioChannel): AudioNode | null {
+    return this.channels[ch] ?? null;
+  }
+
+  public get isUnderwater(): boolean {
+    return this.underwater;
   }
 
   /** The running audio context, or null before the first user gesture. */
@@ -83,16 +136,18 @@ class AudioEngine {
    * A panner at `pos` feeding the master bus (also used by ambient loops). Volume is full up to
    * `refDistance` and falls linearly to silence at `maxDistance`, so far sounds really go quiet.
    */
-  public createPanner(pos: SoundPos, refDistance = 3, maxDistance = refDistance * 12): PannerNode | null {
-    if (!this.ctx || !this.master) return null;
+  /** `cheap`: plain equal-power panning even on desktop (many quiet sources, e.g. birds). */
+  public createPanner(pos: SoundPos, refDistance = 3, maxDistance = refDistance * 12, channel: AudioChannel = 'sfx', cheap = false): PannerNode | null {
+    const out = this.channels[channel];
+    if (!this.ctx || !out) return null;
     const p = this.ctx.createPanner();
-    p.panningModel = this.hrtf ? 'HRTF' : 'equalpower';
+    p.panningModel = this.hrtf && !cheap ? 'HRTF' : 'equalpower';
     p.distanceModel = 'linear';
     p.refDistance = refDistance;
     p.maxDistance = maxDistance;
     p.rolloffFactor = 1;
     this.setPannerPos(p, pos);
-    p.connect(this.master);
+    p.connect(out);
     return p;
   }
 
@@ -106,9 +161,9 @@ class AudioEngine {
     }
   }
 
-  /** Flat (non-positional) input of the master bus. */
+  /** Flat (non-positional) input of the ambience channel. */
   public get bus(): AudioNode | null {
-    return this.master;
+    return this.channels.ambient ?? null;
   }
 
   /**
@@ -168,7 +223,7 @@ class AudioEngine {
         return p;
       }
     }
-    return this.master ?? this.ctx!.destination;
+    return this.channels.sfx ?? this.master ?? this.ctx!.destination;
   }
 
   public playHitSound() {
@@ -830,6 +885,46 @@ class AudioEngine {
     gain.connect(out);
     osc.start(t);
     osc.stop(t + 0.15);
+  }
+
+  private holdOsc: OscillatorNode | null = null;
+  private holdGain: GainNode | null = null;
+
+  /**
+   * Soft rising tone that follows a hold-to-act ring while it fills (0..1). Pass null to stop it.
+   */
+  public setHoldFill(progress: number | null) {
+    if (progress === null) {
+      if (this.holdOsc && this.holdGain && this.ctx) {
+        const t = this.ctx.currentTime;
+        const osc = this.holdOsc;
+        this.holdGain.gain.cancelScheduledValues(t);
+        this.holdGain.gain.setTargetAtTime(0.0001, t, 0.03);
+        osc.stop(t + 0.15);
+        this.holdOsc = null;
+        this.holdGain = null;
+      }
+      return;
+    }
+    if (!this.ctx) this.init();
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    if (!this.holdOsc || !this.holdGain) {
+      if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0.0001, t);
+      osc.connect(gain);
+      gain.connect(this.output());
+      osc.start(t);
+      this.holdOsc = osc;
+      this.holdGain = gain;
+    }
+    const p = Math.min(1, Math.max(0, progress));
+    // Pentatonic-ish rise from ~330 Hz to ~990 Hz, a little louder as it fills
+    this.holdOsc.frequency.setTargetAtTime(330 * Math.pow(3, p), t, 0.03);
+    this.holdGain.gain.setTargetAtTime(0.05 + 0.07 * p, t, 0.04);
   }
 
   /**

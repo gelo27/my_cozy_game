@@ -636,12 +636,16 @@ vec3 terrainColor() {
     vec3 sTex = texture2D(tSnow, uv * 0.5).rgb;
     vec3 snow = mix(vec3(0.74, 0.82, 0.93), vec3(1.0, 1.0, 1.02), drift) * mix(0.93, 1.04, sTex.g);
     snow = mix(snow, vec3(0.70, 0.78, 0.90), smoothstep(0.97, 0.75, vTerrUpY) * 0.5);
-    vec2 cell = floor(vTerrWorld.xz * 9.0);
+    // Fine crystal grid (~3.5cm cells); each glint is a small round dot, not the whole cell
+    vec2 gp = vTerrWorld.xz * 28.0;
+    vec2 cell = floor(gp);
     float h = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+    vec2 off = vec2(h, fract(h * 17.31)) * 0.5 + 0.25;
+    float dotM = smoothstep(0.3, 0.1, length(fract(gp) - off));
     vec3 toCam = cameraPosition - vTerrWorld;
     float tw = fract(sin(dot(cell + floor(toCam.xz * 2.5 + toCam.y), vec2(269.5, 183.3))) * 17853.13);
-    float glint = step(0.93, h) * step(0.6, tw) * smoothstep(40.0, 8.0, length(toCam));
-    snow += glint * 0.9;
+    float glint = step(0.9, h) * step(0.6, tw) * dotM * smoothstep(28.0, 5.0, length(toCam));
+    snow += glint * 1.1;
 #endif
     c = mix(c, snow, sw);
   }

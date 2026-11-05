@@ -285,6 +285,20 @@ export const en = {
   'map.done': "looted",
   'hud.map': "Map",
   'hud.callMoped': "Call the scooter",
+  'hud.pause': 'Pause',
+  'pause.title': 'Paused',
+  'pause.resume': 'Resume',
+  'pause.save': 'Save game',
+  'pause.saved': 'Game saved',
+  'pause.sound': 'Sound',
+  'pause.master': 'Volume',
+  'pause.sfx': 'Sounds',
+  'pause.music': 'Music',
+  'pause.controls': 'Controls',
+  'pause.sensitivity': 'Mouse speed',
+  'pause.invertY': 'Invert Y',
+  'pause.hint': 'Esc — resume',
+  'pause.reset': 'Defaults',
 } as const;
 
 export type TKey = keyof typeof en;

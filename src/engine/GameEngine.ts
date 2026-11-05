@@ -20,6 +20,27 @@ import { FURNITURE_LIGHTS, FURNITURE_MATERIALS } from '../building/furniture/Fur
 import type { ExtraLight } from '../world/NightLighting';
 import { AmbientAudio } from '../audio/AmbientAudio';
 import { audioEngine } from '../audio/AudioEngine';
+import { FootstepAudio, FootSurface } from '../audio/Footsteps';
+import { TerrainTileType } from '../terrain/types/TerrainTypes';
+import type RAPIER from '@dimforge/rapier3d-compat';
+
+/** Painted terrain tile -> footstep recipe. */
+const TILE_SURFACE: Record<TerrainTileType, FootSurface> = {
+  [TerrainTileType.GRASS]: 'grass',
+  [TerrainTileType.DIRT_ROAD]: 'dirt',
+  [TerrainTileType.ASPHALT_ROAD]: 'asphalt',
+  [TerrainTileType.STONE_COBBLE]: 'cobble',
+  [TerrainTileType.SAND_BEACH]: 'sand',
+  [TerrainTileType.SNOW]: 'snow',
+};
+
+/** Floor paint (building) -> footstep recipe; unpainted floors are wooden planks. */
+function floorSurface(wallpaperId: string): FootSurface {
+  if (/carpet|rug/.test(wallpaperId)) return 'carpet';
+  if (/marble|mosaic|tile/.test(wallpaperId)) return 'tile';
+  if (/flagstone|cotto|stone|brick|concrete|cobble/.test(wallpaperId)) return 'stone';
+  return 'wood';
+}
 import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
 import { GridNavigator } from '../navigation/GridNavigator';
 import { CompanionNPC } from '../npc/CompanionNPC';
@@ -40,7 +61,7 @@ import { WaterSystem } from '../world/WaterSystem';
 import { RiverSystem } from '../world/rivers/RiverSystem';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { WeatherSystem } from '../world/WeatherSystem';
-import { PropSystem, PROP_GLOW_MATERIALS } from '../world/PropSystem';
+import { PropSystem, PropInstance, PROP_GLOW_MATERIALS } from '../world/PropSystem';
 import { NightLighting, installGlobalNightLights } from '../world/NightLighting';
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
 import { VIEW_DISTANCE, isMobileDevice, worldSettings } from '../world/WorldSettings';
@@ -89,6 +110,8 @@ export interface GameEngineCallbacks {
   onInventoryHotkey(open?: boolean): void;
   /** `undefined` toggles the island map, `false` closes it. */
   onMapHotkey(open?: boolean): void;
+  /** Escape with nothing else to close: toggle the pause menu. */
+  onPauseHotkey(): void;
   onGameplayHud(state: GameplayHudState): void;
   onNotify(text: string, type?: 'success' | 'info' | 'warning'): void;
   onModeChange(mode: EngineMode): void;
@@ -141,8 +164,23 @@ export class GameEngine {
   private animationFrameId = 0;
   private isDisposed = false;
   private keyG = false;
-  private readonly ambient = new AmbientAudio();
+  public readonly ambient = new AmbientAudio();
+  private readonly footsteps = new FootstepAudio();
+  private prevSwimming = false;
+  private prevVelY = 0;
   private campfireTimer = 0;
+  private landTimer = 0;
+  /** Pause menu open: no simulation, no rendering (the last frame stays on the canvas). */
+  private paused = false;
+  /** Draw one frame while paused (after a resize the canvas is cleared). */
+  private pausedRedraw = false;
+  /** 1 on land, fading to 0 when the player is far out at sea (no crickets there). */
+  private landNear = 1;
+  private perchTimer = 0;
+  /** Tree tops around the listener that birds sing from (rebuilt once a second). */
+  private readonly birdPerches: THREE.Vector3[] = [];
+  /** 0..1 how much forest is around the player (number of trees within earshot). */
+  private forestNear = 0;
   private nearestCampfire: THREE.Vector3 | null = null;
   private waterTimer = 0;
   /** Where the river sound is aimed: glides after the nearest point on the river. */
@@ -234,6 +272,20 @@ export class GameEngine {
     return this.world?.debugRenderer.toggle() ?? false;
   }
 
+  public get isPaused(): boolean {
+    return this.paused;
+  }
+
+  /** Freezes the whole game (simulation, clock, rendering) and ducks the ambience. */
+  public setPaused(paused: boolean): void {
+    if (paused === this.paused) return;
+    this.paused = paused;
+    audioEngine.setPaused(paused);
+    if (paused && this.world) this.world.saves.save(AUTOSAVE_SLOT);
+    // Do not let the paused time arrive as one big step
+    this.clock.getDelta();
+  }
+
   public setMode(mode: EngineMode): void {
     if (!this.world || this.mode === mode || (mode === 'editor' && !DEV_TOOLS_ENABLED)) return;
     const { character, editor } = this.world;
@@ -260,7 +312,7 @@ export class GameEngine {
       const water = new WaterSystem(scene);
       const rivers = new RiverSystem(scene, terrain);
       const weather = new WeatherSystem(scene);
-      weather.onLightning = () => this.ambient.thunder(this.listenerPos);
+      weather.onLightning = () => this.ambient.thunder(this.listenerPos, weather.sound.thunder);
       weather.setOcclusion(new PrecipitationOcclusion(physics, WeatherSystem.PRECIP_BOX));
       const props = new PropSystem(scene, physics, terrain);
       const nightLighting = new NightLighting(scene, props, weather, PROP_GLOW_MATERIALS);
@@ -294,6 +346,7 @@ export class GameEngine {
       const character = new CharacterController(physics, scene, SPAWN_POSITION.clone(), particleManager);
       character.setWaterSystems(waterEffects, waterParticles);
       character.setBuildingSystems(buildingManager, previewGhostRenderer);
+      character.onFootstep = (intensity, point, collider) => this.playFootstep(intensity, point, collider);
       character.setFarmingSystems(farmingManager, inventoryManager);
 
       const giveResources = (items: { itemId: string; amount: number }[]) => {
@@ -463,6 +516,14 @@ export class GameEngine {
   private animate = (): void => {
     if (this.isDisposed || !this.world) return;
     this.animationFrameId = requestAnimationFrame(this.animate);
+    if (this.paused) {
+      this.clock.getDelta();
+      if (this.pausedRedraw) {
+        this.pausedRedraw = false;
+        this.renderer.render(this.scene, this.camera.camera);
+      }
+      return;
+    }
     const frameStart = performance.now();
 
     const w = this.world;
@@ -708,14 +769,58 @@ export class GameEngine {
     this.listenerPos.copy(camera.position);
     if (!audioEngine.context) return;
 
+    // Swimming: entry splash, strokes, lapping, bubbles and the underwater bed
+    const tel = w.character.telemetry;
+    const swimming = tel.isSwimming;
+    if (swimming && !this.prevSwimming && this.prevVelY < -2.5) this.footsteps.splash(-this.prevVelY);
+    this.prevSwimming = swimming;
+    this.prevVelY = tel.velocity.y;
+    this.footsteps.updateSwim(dt, swimming, swimming && !!w.character.oxygenAbility?.isUnderwater, tel.speed);
+
     this.campfireTimer -= dt;
     if (this.campfireTimer <= 0) {
       this.campfireTimer = 0.5;
       const fire = w.props.findNearest('campfire', playerPos, 30);
       this.nearestCampfire = fire ? fire.position.clone().setY(fire.position.y + 0.4) : null;
     }
+    // Distance to the nearest dry land: ring-sample the terrain twice a second
+    this.landTimer -= dt;
+    if (this.landTimer <= 0) {
+      this.landTimer = 0.5;
+      let nearest = Infinity;
+      outer: for (const r of [0, 20, 45, 80, 120, 170]) {
+        for (let k = 0; k < (r === 0 ? 1 : 12); k++) {
+          const a = (k / 12) * Math.PI * 2;
+          const hx = playerPos.x + Math.cos(a) * r, hz = playerPos.z + Math.sin(a) * r;
+          if (w.terrain.getHeight(hx, hz) > worldSettings.waterLevel + 0.4) { nearest = r; break outer; }
+        }
+      }
+      this.landNear = 1 - Math.min(Math.max((nearest - 40) / 100, 0), 1);
+    }
+    // Birds sit in the trees around the player: sample up to 40 tree tops within earshot
+    this.perchTimer -= dt;
+    if (this.perchTimer <= 0) {
+      this.perchTimer = 1;
+      const R = 65;
+      const perches = this.birdPerches;
+      let seen = 0;
+      const visit = (p: PropInstance) => {
+        const dx = p.position.x - playerPos.x, dz = p.position.z - playerPos.z;
+        if (dx * dx + dz * dz > R * R) return;
+        seen++;
+        // Reservoir sampling: an even spread over the whole forest, not the first cells visited
+        const slot = seen <= 40 ? seen - 1 : Math.floor(Math.random() * seen);
+        if (slot >= 40) return;
+        const v = perches[slot] ?? (perches[slot] = new THREE.Vector3());
+        v.set(p.position.x, p.position.y + (2.8 + Math.random() * 1.8) * p.scale, p.position.z);
+      };
+      w.props.forEachNear(playerPos.x, playerPos.z, R, visit, 'tree_pine');
+      w.props.forEachNear(playerPos.x, playerPos.z, R, visit, 'tree_round');
+      perches.length = Math.min(seen, 40);
+      this.forestNear = Math.min(seen / 30, 1);
+    }
     const weather = w.weather;
-    const storm = weather.weather === 'storm' ? 1 : 0;
+    const snd = weather.sound;
     const outdoors = w.exploration.inCave ? 0 : 1;
     // Rivers: the nearest point on a centre line, looked up 10x a second through a spatial hash,
     // and the panner glides after it every frame (no hops between sample points). Waterfalls are
@@ -743,14 +848,51 @@ export class GameEngine {
       listener: this.listenerPos,
       river: this.riverSound,
       falls: this.fallSounds,
-      rain: weather.rainIntensity * (1 - weather.snowAmount) * outdoors,
-      wind: Math.max(storm * 0.9, weather.snowAmount * 0.7, weather.weather === 'rain' ? 0.25 : 0) * outdoors,
+      // Every level below is scaled by the weather's sound profile (developer panel → weather)
+      rain: weather.rainIntensity * (1 - weather.snowAmount) * outdoors * snd.rain,
+      wind: snd.wind * outdoors,
+      birds: snd.birds * (1 - weather.nightFactor) * outdoors * (0.35 + 0.65 * this.forestNear),
+      birdRate: snd.birdRate,
+      birdPerches: outdoors ? this.birdPerches : [],
+      breeze: snd.breeze * outdoors * (1 - weather.nightFactor * 0.4),
+      night: snd.insects * weather.nightFactor * outdoors * this.landNear,
       underRoof: !outdoors || weather.isSheltered(playerPos),
       campfire: this.nearestCampfire,
       engine: ride
         ? { position: ride.getPosition(), speedKmh: ride.speedKmh, kind: ride === w.moped ? 'scooter' : ride === w.boat ? 'boat' : 'truck' }
         : null,
     });
+  }
+
+  /** What the foot landed on: building floor paint, structure/prop tag, wading water or the painted terrain tile. */
+  private surfaceUnder(p: THREE.Vector3, collider: RAPIER.Collider | null): FootSurface {
+    const w = this.world!;
+    if (riverWorld.waterLevelAt(p.x, p.z) > p.y + 0.04) return 'water';
+    const ud = (collider as unknown as { userData?: { pieceId?: string; pieceType?: string; surface?: FootSurface } } | null)?.userData;
+    if (ud?.pieceId) {
+      const type = ud.pieceType ?? '';
+      if (type.startsWith('STONE')) return 'stone';
+      const bm = w.character.buildAbility?.buildingManager;
+      if (type.includes('FLOOR') && bm) return floorSurface(bm.wallPaintingSystem.getCellWallpaper(ud.pieceId, 'top'));
+      return 'wood';
+    }
+    if (ud?.surface) return ud.surface;
+    if (w.exploration.inCave) return 'stone';
+    if (Math.abs(p.y - w.terrain.getHeight(p.x, p.z)) < 0.3) {
+      return TILE_SURFACE[w.terrain.getTile(Math.floor(p.x), Math.floor(p.z))] ?? 'grass';
+    }
+    return 'stone';
+  }
+
+  private playFootstep(intensity: number, point: THREE.Vector3, collider: RAPIER.Collider | null): void {
+    const w = this.world;
+    if (!w || this.paused || this.mode !== 'play' || !audioEngine.context) return;
+    const surface = this.surfaceUnder(point, collider);
+    // Rain soaks open ground: steps get a squelch layer (not under roofs, in caves or on floors)
+    const weather = w.weather;
+    const exposed = !w.exploration.inCave && !weather.isSheltered(point) && !(collider as unknown as { userData?: { pieceId?: string } } | null)?.userData?.pieceId;
+    const wet = exposed ? weather.rainIntensity * (1 - weather.snowAmount) : 0;
+    this.footsteps.step(surface, intensity, wet);
   }
 
   /** Brings the scooter to the player (V key / HUD button). Not underground or while riding. */
@@ -770,6 +912,10 @@ export class GameEngine {
   private handleKeyDown = (e: KeyboardEvent): void => {
     const tag = (e.target as HTMLElement)?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (this.paused) {
+      if (e.code === 'Escape') this.callbacks.onPauseHotkey();
+      return;
+    }
     if (e.code === 'F1' || (e.code === 'Backquote' && DEV_TOOLS_ENABLED)) {
       e.preventDefault();
       this.setMode(this.mode === 'editor' ? 'play' : 'editor');
@@ -791,6 +937,8 @@ export class GameEngine {
     } else if (e.code === 'KeyQ') {
       this.callbacks.onInventoryHotkey();
     } else if (e.code === 'Escape') {
+      // Esc closes what is open; with nothing open it pauses (App decides, it knows the panels)
+      if (!this.world?.gameplay.panel) this.callbacks.onPauseHotkey();
       this.callbacks.onInventoryHotkey(false);
       this.callbacks.onMapHotkey(false);
       if (this.world?.gameplay.panel) this.world.gameplay.openPanel(null);
@@ -809,6 +957,7 @@ export class GameEngine {
     this.camera.camera.aspect = w / h;
     this.camera.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.pausedRedraw = true;
   };
 
   /** `window.dev` console helpers (dev builds only). */

@@ -712,6 +712,9 @@ export class PropSystem {
       c.kind === 'cyl'
         ? this.physics.createStaticCylinder(pos, c.r * s, c.h * s, rot)
         : this.physics.createStaticBox(pos, new THREE.Vector3(c.w * s, c.h * s, c.d * s), rot);
+    // Step sounds: rocks and stone stations sound like stone, everything else is timber
+    const stone = /rock|stone|mill|quern|campfire|well/.test(def.id);
+    (res.collider as unknown as { userData: unknown }).userData = { surface: stone ? 'stone' : 'wood' };
     this.bodies.set(prop.id, res.body);
   }
 

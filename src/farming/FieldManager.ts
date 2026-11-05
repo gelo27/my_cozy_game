@@ -119,6 +119,8 @@ export class FieldManager {
   private dirty = false;
   private nextId = 1;
   private terrain: TerrainSystem | null = null;
+  /** Set by FarmingManager while it rains: all fields look soaked, crops or not. */
+  public rainWet = false;
   private physics: PhysicsWorld | null = null;
   /** Extra placement check for things without static colliders (garden beds). */
   public isAreaReserved: ((minX: number, minZ: number, maxX: number, maxZ: number) => boolean) | null = null;
@@ -510,7 +512,7 @@ export class FieldManager {
 
   /** Soaks in quickly after watering, dries out slowly once the stage has used the water up. */
   private updateWetness(f: FarmField, dt: number): void {
-    const target = f.crop?.isWatered ? 1 : 0;
+    const target = f.crop?.isWatered || this.rainWet ? 1 : 0;
     if (f.wetness === target && (target === 0 || f.wetMesh)) return;
     f.wetness = target > f.wetness ? Math.min(1, f.wetness + dt * 1.6) : Math.max(0, f.wetness - dt * 0.25);
     if (f.wetness > 0 && !f.wetMesh) f.wetMesh = this.createWetMesh(f);

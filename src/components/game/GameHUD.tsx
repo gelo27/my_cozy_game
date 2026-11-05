@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Coins, Zap, Settings2, Heart,
+  Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Coins, Zap, Settings2, Heart, Pause,
 } from 'lucide-react';
 import { GameplayHudState, GameplayPrompt } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji, InventoryItem } from '../../inventory/types/InventoryTypes';
 import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
-import { t, useLang, setLang, dataName, Lang } from '../../i18n/i18n';
+import { t, dataName } from '../../i18n/i18n';
 import { ItemIcon } from '../ItemIcon';
 
 const WEATHER_ICON: Record<WeatherType, React.ElementType> = {
@@ -30,6 +30,7 @@ interface GameHUDProps {
   onOpenEditor(): void;
   onOpenMap(): void;
   onCallMoped(): void;
+  onPause(): void;
   onAction(action: GameplayPrompt['action'] | 'treat'): void;
 }
 
@@ -42,10 +43,9 @@ function useHotbar(inventory: InventoryManager): { items: InventoryItem[]; equip
 }
 
 export const GameHUD: React.FC<GameHUDProps> = ({
-  hud, inventory, hidden, devToolsEnabled, onOpenBackpack, onToggleBuild, onOpenEditor, onOpenMap, onCallMoped, onAction,
+  hud, inventory, hidden, devToolsEnabled, onOpenBackpack, onToggleBuild, onOpenEditor, onOpenMap, onCallMoped, onPause, onAction,
 }) => {
   const { items, equipped } = useHotbar(inventory);
-  const lang = useLang();
 
   useEffect(() => {
     if (hidden) return;
@@ -95,13 +95,6 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             ))}
           </div>
         )}
-        <button
-          onClick={() => setLang(lang === 'en' ? 'uk' : ('en' as Lang))}
-          title={t('hud.language')}
-          className={`${panel} rounded-2xl h-11 px-3 text-xs font-extrabold hover:bg-amber-50 active:scale-95 transition`}
-        >
-          {lang === 'en' ? 'EN' : 'UA'}
-        </button>
         <HudButton label={t('hud.map')} hotkey="M" onClick={onOpenMap}>
           <MapIcon className="w-5 h-5" />
         </HudButton>
@@ -119,6 +112,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <Settings2 className="w-5 h-5" />
           </HudButton>
         )}
+        <HudButton label={t('hud.pause')} hotkey="Esc" onClick={onPause}>
+          <Pause className="w-5 h-5" />
+        </HudButton>
       </div>
 
       {/* Interaction prompt */}

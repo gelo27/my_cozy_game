@@ -41,7 +41,7 @@ export const CHARACTER_CONFIG = {
   MAX_WALKABLE_SLOPE_DEG: 48.0, // Max walkable slope before sliding
 
   // Locomotion balance & acceleration curves
-  // Normal movement is a jog on the generated RUN cycle (~4.7 m/s at 1x, see ProceduralRunClip);
+  // Normal movement is a jog on the RUN clip;
   // CharacterModel scales clip playback to the actual speed so feet stay planted
   WALK_SPEED: 4.5, // m/s
   SPRINT_SPEED: 7.0, // m/s

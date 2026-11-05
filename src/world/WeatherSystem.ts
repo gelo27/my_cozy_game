@@ -16,7 +16,7 @@ export const WEATHER_LABELS: Record<WeatherType, string> = {
   snow: 'Сніг',
 };
 
-interface WeatherProfile {
+export interface WeatherProfile {
   light: number; // sun intensity multiplier
   fog: number; // fog density
   tint: THREE.Color; // sky tint multiplier
@@ -24,20 +24,98 @@ interface WeatherProfile {
   amount: number; // 0..1 share of particles visible
   cover: number; // 0..1 cloud cover
   dark: number; // 0..1 how grey the clouds are
+  haze: THREE.Color; // colour of the haze that replaces the horizon / fog colour
+  hazeMix: number; // 0..1 how strongly the haze replaces it (0 = off)
+  sound: WeatherSound;
 }
 
-/** Light teal haze used in clear weather (colour and how strongly it replaces the horizon colour). */
-const CLEAR_HAZE = 0x4db3b5;
-const CLEAR_HAZE_MIX = 0.75;
+/** Ambient sound mix of one weather type (all 0..~1.5 multipliers, edited in the developer panel). */
+export interface WeatherSound {
+  rain: number; // loudness of rain (scaled by precipitation)
+  wind: number; // storm / snow wind
+  thunder: number; // thunder after lightning (only storms flash)
+  birds: number; // daytime birdsong in forests
+  birdRate: number; // how often the birds sing (1 = default pauses)
+  insects: number; // night crickets
+  breeze: number; // soft breeze and leaf rustle
+}
 
-const PROFILES: Record<WeatherType, WeatherProfile> = {
-  clear: { light: 1, fog: 0.029, tint: new THREE.Color(1, 1, 1), precipitation: 'none', amount: 0, cover: 0.36, dark: 0 },
-  cloudy: { light: 0.65, fog: 0.0098, tint: new THREE.Color(0.86, 0.88, 0.9), precipitation: 'none', amount: 0, cover: 0.68, dark: 0.25 },
-  rain: { light: 0.5, fog: 0.014, tint: new THREE.Color(0.7, 0.74, 0.8), precipitation: 'rain', amount: 0.7, cover: 0.88, dark: 0.6 },
-  storm: { light: 0.32, fog: 0.02, tint: new THREE.Color(0.5, 0.54, 0.62), precipitation: 'rain', amount: 1, cover: 0.97, dark: 0.85 },
-  fog: { light: 0.6, fog: 0.045, tint: new THREE.Color(0.9, 0.9, 0.9), precipitation: 'none', amount: 0, cover: 0.6, dark: 0.3 },
-  snow: { light: 0.7, fog: 0.016, tint: new THREE.Color(0.92, 0.95, 1), precipitation: 'snow', amount: 0.8, cover: 0.82, dark: 0.35 },
+export const WEATHER_SOUND_KEYS = ['rain', 'wind', 'thunder', 'birds', 'birdRate', 'insects', 'breeze'] as const;
+
+const snd = (rain: number, wind: number, thunder: number, birds: number, birdRate: number, insects: number, breeze: number): WeatherSound => ({
+  rain, wind, thunder, birds, birdRate, insects, breeze,
+});
+
+const mk = (
+  light: number, fog: number, tint: number, precipitation: WeatherProfile['precipitation'],
+  amount: number, cover: number, dark: number, haze: number, hazeMix: number, sound: WeatherSound,
+): WeatherProfile => ({
+  light, fog, tint: new THREE.Color(tint), precipitation, amount, cover, dark, haze: new THREE.Color(haze), hazeMix, sound,
+});
+
+const makeDefaults = (): Record<WeatherType, WeatherProfile> => ({
+  //                                                                      rain wind thun birds rate insects breeze
+  clear: mk(1, 0.0155, 0xffffff, 'none', 0, 0.25, 0.5, 0x1aa7ff, 0.75, snd(1, 0, 0, 0.9, 1, 1, 1)),
+  cloudy: mk(0.65, 0.02, 0xeff1f3, 'none', 0, 0.68, 0.25, 0x42adff, 0.5, snd(1, 0, 0, 0.6, 0.7, 1, 1)),
+  rain: mk(0.5, 0.0305, 0xdadfe7, 'rain', 0.5, 0.88, 0.6, 0xffffff, 0, snd(1, 0.25, 0, 0, 0.5, 0, 0)),
+  storm: mk(0.2, 0.05, 0x8b93a2, 'rain', 1, 1, 1, 0xffffff, 0, snd(1, 0.9, 1, 0, 0.5, 0, 0)),
+  fog: mk(0.6, 0.045, 0xf3f3f3, 'none', 0, 1, 0, 0xffffff, 0, snd(1, 0, 0, 0, 0.5, 0, 0)),
+  snow: mk(0.7, 0.03, 0xa9e5fe, 'snow', 0.8, 1, 0.35, 0x71d4fe, 1, snd(1, 0.6, 0, 0, 0.5, 0, 0)),
+});
+
+/** Live, editable weather profiles (the developer panel mutates these; the weather eases toward them). */
+export const WEATHER_PROFILES: Record<WeatherType, WeatherProfile> = makeDefaults();
+const PROFILES = WEATHER_PROFILES;
+
+const STORAGE_KEY = 'farm-weather-profiles';
+const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+
+export const WeatherProfiles = {
+  reset(type: WeatherType): void {
+    const d = makeDefaults()[type];
+    const t = PROFILES[type];
+    Object.assign(t, d, { tint: t.tint.copy(d.tint), haze: t.haze.copy(d.haze), sound: Object.assign(t.sound, d.sound) });
+    WeatherProfiles.save();
+  },
+  resetAll(): void {
+    (Object.keys(PROFILES) as WeatherType[]).forEach((k) => WeatherProfiles.reset(k));
+  },
+  save(): void {
+    try {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(PROFILES) as WeatherType[]) {
+        const p = PROFILES[k];
+        out[k] = { ...p, tint: p.tint.getHex(), haze: p.haze.getHex(), sound: { ...p.sound } };
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(out));
+    } catch { /* storage unavailable */ }
+  },
+  load(): void {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      const d = makeDefaults();
+      for (const k of Object.keys(PROFILES) as WeatherType[]) {
+        const s = data[k];
+        if (!s) continue;
+        const p = PROFILES[k];
+        p.light = num(s.light, d[k].light);
+        p.fog = num(s.fog, d[k].fog);
+        p.amount = num(s.amount, d[k].amount);
+        p.cover = num(s.cover, d[k].cover);
+        p.dark = num(s.dark, d[k].dark);
+        p.hazeMix = num(s.hazeMix, d[k].hazeMix);
+        if (s.precipitation === 'none' || s.precipitation === 'rain' || s.precipitation === 'snow') p.precipitation = s.precipitation;
+        if (typeof s.tint === 'number') p.tint.setHex(s.tint);
+        if (typeof s.haze === 'number') p.haze.setHex(s.haze);
+        const ss = s.sound ?? {};
+        for (const key of WEATHER_SOUND_KEYS) p.sound[key] = num(ss[key], d[k].sound[key]);
+      }
+    } catch { /* corrupt data: keep defaults */ }
+  },
 };
+WeatherProfiles.load();
 
 const SUNRISE = 6;
 const SUNSET = 19.5;
@@ -90,7 +168,9 @@ export class WeatherSystem {
   public onLightning: (() => void) | null = null;
   private readonly fog: THREE.FogExp2;
   private readonly sky = new THREE.Color();
-  private current = { teal: 1, light: 1, fog: 0.029, amount: 0, cover: 0.28, dark: 0, tint: new THREE.Color(1, 1, 1) };
+  private current = { light: 1, fog: 0.0155, amount: 0, cover: 0.25, dark: 0, hazeMix: 0, tint: new THREE.Color(1, 1, 1), haze: new THREE.Color(1, 1, 1) };
+  /** Sound mix eased toward the current weather's profile (read by the ambience every frame). */
+  public readonly sound: WeatherSound = { ...PROFILES.clear.sound };
   /** 0 by day, 1 at full night; drives night lighting. */
   public nightFactor = 0;
   /** Target 0..1 for being underground: sunlight, sky light and precipitation fade out, fog turns black. */
@@ -183,6 +263,9 @@ export class WeatherSystem {
     cur.fog += (p.fog - cur.fog) * k;
     cur.amount += (p.amount - cur.amount) * k;
     cur.tint.lerp(p.tint, k);
+    cur.haze.lerp(p.haze, k);
+    cur.hazeMix += (p.hazeMix - cur.hazeMix) * k;
+    for (const key of WEATHER_SOUND_KEYS) this.sound[key] += (p.sound[key] - this.sound[key]) * k;
     this.rainIntensity = p.precipitation === 'rain' ? cur.amount : cur.amount * 0.2;
 
     // Sun path: rises in the east at 6, sets in the west at 19:30; the night half is the remaining
@@ -228,10 +311,9 @@ export class WeatherSystem {
     // Sky = time-of-day key colour x weather tint; fog matches the horizon
     this.sampleKeys(SKY_KEYS, t, this.sky).multiply(cur.tint);
     if (this.flash > 0) this.sky.lerp(WeatherSystem._c.setRGB(1, 1, 1), this.flash * 0.5);
-    // Clear weather: a light teal haze that tints the horizon and fog together
-    cur.teal += ((this.weather === 'clear' ? 1 : 0) - cur.teal) * k;
-    if (cur.teal > 0.001) {
-      this.sky.lerp(WeatherSystem._c.set(CLEAR_HAZE).multiplyScalar(daylight * 0.8 + 0.2), CLEAR_HAZE_MIX * cur.teal);
+    // Weather haze: tints the horizon and fog together (darker at night)
+    if (cur.hazeMix > 0.001) {
+      this.sky.lerp(WeatherSystem._c.copy(cur.haze).multiplyScalar(daylight * 0.8 + 0.2), cur.hazeMix);
     }
     this.fog.color.copy(this.sky);
     this.fog.density = cur.fog * FOG_SCALE;
@@ -271,7 +353,8 @@ export class WeatherSystem {
     if (this.underwater > 0.001) this.applyUnderwater(this.underwater, daylight);
     this.skyDome.mesh.visible = this.underwater < 0.5;
     this.precipitation.update(dt, cameraPos, cur.amount * (1 - this.caveMix), this.snowMix, bright, storm, Math.min(window.devicePixelRatio || 1, 1.5), worldSettings.waterLevel);
-    if (this.precipitation.active) this.occlusion?.update(cameraPos);
+    // Also at night: the night ambience needs to know when a roof is overhead
+    if (this.precipitation.active || this.nightFactor > 0.05) this.occlusion?.update(cameraPos);
   }
 
   private applyUnderwater(k: number, daylight: number): void {

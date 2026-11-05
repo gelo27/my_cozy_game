@@ -76,14 +76,50 @@ export class FarmingAbility implements IAbility {
       return;
     }
     this.farmingManager.fields.showGhost(0, 0, null);
-    this.resetHold();
 
     // 1. Evaluate nearby farm plot / field interaction
     const seedCount = equippedId ? this.inventoryManager.getItemCount(equippedId) : 0;
     this.currentPrompt = this.farmingManager.getNearbyInteraction(playerPos, equippedId, 3.2, seedCount);
 
     // If build mode or inventory is open, do not execute farming clicks
-    if (blocked) return;
+    if (blocked) {
+      this.resetHold();
+      return;
+    }
+
+    // A. Harvest mature crop: hold E / LMB, same as digging
+    if (this.currentPrompt?.canHarvest) {
+      const prompt = this.currentPrompt;
+      const key = `h${prompt.plotId}`;
+      if (input.interactJustPressed || input.shootJustPressed) {
+        this.holdArmed = true;
+        this.holdKey = key;
+        this.holdTime = 0;
+        const target = this.farmingManager.getTargetPosition(prompt.plotId);
+        if (target && context.model) {
+          const dx = target.x - playerPos.x;
+          const dz = target.z - playerPos.z;
+          if (dx * dx + dz * dz > 0.001) context.model.setFacingAngleInstant(Math.atan2(dx, dz));
+        }
+      }
+      if (!this.holdArmed || key !== this.holdKey || !(input.interact || input.shoot)) {
+        this.resetHold();
+        return;
+      }
+      this.holdTime += dt;
+      prompt.holdProgress = Math.min(1, this.holdTime / HOLD_TIME);
+      audioEngine.setHoldFill(prompt.holdProgress);
+      if (this.holdTime < HOLD_TIME) return;
+      this.resetHold();
+      const result = this.farmingManager.harvest(prompt.plotId);
+      if (result) {
+        this.inventoryManager.addItem(result.crateItemId, result.crates);
+        if (result.bonusSeeds) this.inventoryManager.addItem(CROP_DEFINITIONS[result.cropType].seedItemId, result.bonusSeeds);
+        context.model?.triggerJumpSquash();
+      }
+      return;
+    }
+    this.resetHold();
 
     // 2. Check for interaction trigger (E key or Left Click)
     const interactTriggered = input.interactJustPressed || (input.shootJustPressed && this.currentPrompt !== null);
@@ -101,20 +137,9 @@ export class FarmingAbility implements IAbility {
         }
       }
 
-      // A. Harvest mature crop
-      if (prompt.canHarvest) {
-        const result = this.farmingManager.harvest(prompt.plotId);
-        if (result) {
-          this.inventoryManager.addItem(result.crateItemId, result.crates);
-          if (result.bonusSeeds) this.inventoryManager.addItem(CROP_DEFINITIONS[result.cropType].seedItemId, result.bonusSeeds);
-          context.model?.triggerJumpSquash();
-        }
-        return;
-      }
-
       // B. Water thirsty crop
       if (prompt.canWater) {
-        if (this.farmingManager.water(prompt.plotId)) context.model?.triggerWatering(1.1);
+        if (this.farmingManager.water(prompt.plotId)) context.model?.triggerWatering();
         return;
       }
 
@@ -132,7 +157,7 @@ export class FarmingAbility implements IAbility {
       }
     } else if (input.shootJustPressed && equippedId === 'watering_can') {
       // Freeform watering click with watering can equipped
-      context.model?.triggerWatering(1.1);
+      context.model?.triggerWatering();
     }
 
     // 3. Emit sparkling water stream ONLY while actively pouring water from nozzle
@@ -192,6 +217,7 @@ export class FarmingAbility implements IAbility {
     }
     this.holdTime += dt;
     prompt.holdProgress = Math.min(1, this.holdTime / HOLD_TIME);
+    audioEngine.setHoldFill(prompt.holdProgress);
     if (this.holdTime < HOLD_TIME) return;
     this.resetHold();
 
@@ -212,6 +238,7 @@ export class FarmingAbility implements IAbility {
   private resetHold(): void {
     this.holdArmed = false;
     this.holdTime = 0;
+    audioEngine.setHoldFill(null);
   }
 
   /** The player stands on the field, so they dig the way they already face. */

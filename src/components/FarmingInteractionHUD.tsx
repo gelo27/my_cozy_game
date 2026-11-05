@@ -73,8 +73,8 @@ export const FarmingInteractionHUD: React.FC<FarmingInteractionHUDProps> = ({
           <div className="flex items-center gap-3 px-5 py-3 bg-[#2d1c10]/90 rounded-2xl border-2 border-amber-400/80 shadow-2xl text-white">
             {/* Status Icon */}
             <div className="relative w-10 h-10 rounded-xl bg-amber-500/30 border border-amber-400/50 flex items-center justify-center shrink-0">
-              {/* Hold-to-dig progress ring */}
-              {prompt.shovel && prompt.canDig && (
+              {/* Hold-to-dig / hold-to-harvest progress ring */}
+              {((prompt.shovel && prompt.canDig) || prompt.canHarvest) && (
                 <svg className="absolute -inset-1.5 w-[52px] h-[52px] -rotate-90" viewBox="0 0 52 52">
                   <circle cx="26" cy="26" r="23" fill="none" stroke="rgba(251,191,36,0.25)" strokeWidth="4" />
                   <circle
@@ -110,7 +110,7 @@ export const FarmingInteractionHUD: React.FC<FarmingInteractionHUDProps> = ({
             {/* Quick action button hint */}
             {canAct && (
               <div className="ml-2 px-2.5 py-1 bg-amber-500 text-amber-950 font-black text-xs rounded-lg shadow-sm">
-                {prompt.shovel ? t('field.holdKeys') : t('common.actKeys')}
+                {prompt.shovel || prompt.canHarvest ? t('field.holdKeys') : t('common.actKeys')}
               </div>
             )}
           </div>

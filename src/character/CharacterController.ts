@@ -110,6 +110,13 @@ export class CharacterController {
   public groundRaysDebug: GroundRayDebugInfo[] = [];
 
   private wasGrounded: boolean = false;
+  /** Collider under the feet from the last ground probe (null in the air). */
+  public groundCollider: RAPIER.Collider | null = null;
+  /**
+   * Step sounds: called on every foot plant (intensity ~0.35..1) and on landing (intensity > 1),
+   * with the point on the ground and the collider it belongs to.
+   */
+  public onFootstep: ((intensity: number, point: THREE.Vector3, collider: RAPIER.Collider | null) => void) | null = null;
   private previousYVelocity: number = 0;
 
   // Real-time tweakable parameters
@@ -187,6 +194,7 @@ export class CharacterController {
   ) {
     this.spawnPosition = spawnPos.clone();
     this.model = new CharacterModel();
+    this.model.onFootstep = (intensity) => this.onFootstep?.(intensity, this.groundInfo.surfaceHitPoint, this.groundCollider);
     this.scene.add(this.model.group);
     if (particleManager) {
       this.particleManager = particleManager;
@@ -359,6 +367,7 @@ export class CharacterController {
     let minDistance = Infinity;
     const avgNormal = new THREE.Vector3(0, 0, 0);
     const closestPoint = new THREE.Vector3();
+    let closestCollider: RAPIER.Collider | null = null;
     this.groundRaysDebug = [];
 
     // Only skip ground check if character is actively launching upward in a jump
@@ -418,6 +427,7 @@ export class CharacterController {
         if (hitResult.hit.timeOfImpact < minDistance) {
           minDistance = hitResult.hit.timeOfImpact;
           closestPoint.copy(hitResult.point);
+          closestCollider = hitResult.hit.collider;
         }
 
         this.groundRaysDebug.push({
@@ -466,6 +476,7 @@ export class CharacterController {
         isWalkableSlope: isWalkable,
         surfaceHitPoint: closestPoint,
       };
+      this.groundCollider = closestCollider;
     } else {
       this.groundInfo = {
         isGrounded: false,
@@ -503,6 +514,11 @@ export class CharacterController {
       // Check for landing impact to trigger particles and Squash & Stretch
       if (!this.wasGrounded && this.groundInfo.isGrounded) {
         this.model.triggerLandingSquash(this.previousYVelocity);
+        this.model.triggerLand(this.previousYVelocity, Math.hypot(linvel.x, linvel.z));
+        // Landing thud on the surface: harder falls are louder
+        if (this.previousYVelocity < -2.5) {
+          this.onFootstep?.(Math.min(1.6, 0.7 + -this.previousYVelocity * 0.08), this.groundInfo.surfaceHitPoint, this.groundCollider);
+        }
         if (Math.abs(this.previousYVelocity) > 1.2 && this.particleManager && CHARACTER_CONFIG.FOOT_DUST_ENABLED) {
           this.particleManager.emitLandDust(this.getFeetPosition(), this.previousYVelocity);
         }

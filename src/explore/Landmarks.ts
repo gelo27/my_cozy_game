@@ -137,6 +137,7 @@ function buildRuins(site: IslandSite, origin: THREE.Vector3, scene: THREE.Scene,
 
 function buildHut(site: IslandSite, origin: THREE.Vector3, scene: THREE.Scene, physics: PhysicsWorld): LandmarkAnchors {
   const b = new StructureBuilder();
+  b.surface = 'wood';
   const W = 5, D = 4, H = 2.6, T = 0.22;
   // Log walls with a doorway in the front
   b.box('wood', W, H, T, 0, H / 2, -D / 2).colliderBox(W, H, T, 0, H / 2, -D / 2);

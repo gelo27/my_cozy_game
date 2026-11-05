@@ -208,11 +208,13 @@ export class RockField {
 
   private addCollider(rock: RockNode): void {
     const height = 1.1 * rock.baseScale;
-    rock.body = this.physics.createStaticCylinder(
+    const res = this.physics.createStaticCylinder(
       new THREE.Vector3(rock.position.x, rock.position.y + height / 2, rock.position.z),
       rock.radius * 0.85,
       height
-    ).body;
+    );
+    (res.collider as unknown as { userData: unknown }).userData = { surface: 'stone' };
+    rock.body = res.body;
   }
 
   private breakRock(rock: RockNode): void {
