@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { injectNightLights } from '../world/NightLighting';
+import { injectWaterline } from '../scene/WaterDetails';
 
 /**
  * How an animal's vertices move. All motion runs in the vertex shader from a per-instance
@@ -64,6 +65,7 @@ export function createAnimalMaterial(mode: AnimalAnimMode, length: number, opts:
   });
   mat.onBeforeCompile = (shader) => {
     injectNightLights(shader);
+    injectWaterline(shader);
     shader.uniforms.uTime = animalTime;
     shader.uniforms.uLength = { value: length };
     shader.vertexShader = shader.vertexShader

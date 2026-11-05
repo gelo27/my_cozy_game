@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { isMobileDevice } from './WorldSettings';
 import type { PropSystem } from './PropSystem';
 import type { WeatherSystem } from './WeatherSystem';
+import { injectWaterline } from '../scene/WaterDetails';
 
 /**
  * Cheap night lighting for mobile-friendly scenes.
@@ -93,7 +94,8 @@ let installed = false;
 /**
  * Patches every lit built-in material through the Material prototype, so materials created later
  * (buildings, crops, furniture) get night lights without any registration. Materials that set their
- * own onBeforeCompile must call injectNightLights themselves.
+ * own onBeforeCompile must call injectNightLights themselves. Also adds the white waterline
+ * (`injectWaterline`) where objects cross the water.
  */
 export function installGlobalNightLights(): void {
   if (installed) return;
@@ -105,6 +107,7 @@ export function installGlobalNightLights(): void {
     const m = this as THREE.Material & Record<string, unknown>;
     if (m.isMeshLambertMaterial || m.isMeshStandardMaterial || m.isMeshPhongMaterial || m.isMeshToonMaterial) {
       injectNightLights(shader);
+      injectWaterline(shader);
     }
   };
 }

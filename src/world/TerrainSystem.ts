@@ -7,6 +7,7 @@ import { TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/type
 import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
 import { islandHeight } from './IslandGenerator';
 import { riverWorld, GridRect } from './rivers/RiverWorld';
+import { causticsUniforms, CAUSTICS_GLSL, CAUSTICS_TINT } from '../scene/WaterEffects';
 
 const N = WORLD_SIZE; // cells per side (1 m cells)
 const V = N + 1; // vertices per side
@@ -127,6 +128,14 @@ export class TerrainSystem {
   private readonly uniforms = { uWaterLevel: { value: worldSettings.waterLevel } };
   /** Bumped on every height edit so dependants (props, water) can re-snap lazily. */
   public revision = 0;
+  /** Bumped whenever a tile changes (grass density follows it). */
+  public tileRevision = 0;
+  /** Told which cells' tiles changed (inclusive cell rect), e.g. so the 3D grass redoes only them. */
+  public onTilesDirty: ((x0: number, z0: number, x1: number, z1: number) => void) | null = null;
+  /** Told which vertices' heights changed (inclusive vertex rect). */
+  public onHeightsDirty: ((x0: number, z0: number, x1: number, z1: number) => void) | null = null;
+  /** The grass surface texture (3D grass takes its colour from it). */
+  public grassLayer!: THREE.Texture;
 
   constructor(scene: THREE.Scene, private readonly physics: PhysicsWorld) {
     this.group.name = 'Terrain';
@@ -264,6 +273,8 @@ export class TerrainSystem {
       r.z1 = Math.max(r.z1, z1);
     }
     this.splatDirty = true;
+    this.tileRevision++;
+    this.onTilesDirty?.(x0, z0, x1, z1);
   }
 
   /**
@@ -324,6 +335,7 @@ export class TerrainSystem {
       }
     }
     this.revision++;
+    this.onHeightsDirty?.(minX, minZ, maxX, maxZ);
   }
 
   /** Call once per frame: uploads changed chunks / weights; physics rebuilds at most 4x per second. */
@@ -567,9 +579,10 @@ export class TerrainSystem {
       tSnow: createLayerTexture(TerrainTileType.SNOW),
       tRock: createRockTexture(),
     };
+    this.grassLayer = layers.tGrass;
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader, { perVertex: lite });
-      Object.assign(shader.uniforms, this.uniforms, {
+      Object.assign(shader.uniforms, this.uniforms, causticsUniforms, {
         tRiver: { value: riverWorld.texture },
         tSplatA: { value: this.splatA },
         tSplatB: { value: this.splatB },
@@ -593,12 +606,15 @@ varying float vShade;
 uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tSnow, tRock, tSplatA, tSplatB, tRiver;
 uniform float uWorldSize;
 uniform float uWaterLevel;
+float terrWaterY;
+${CAUSTICS_GLSL}
 vec3 terrainColor() {
   vec2 suv = (vTerrWorld.xz + uWorldSize * 0.5) / uWorldSize;
   vec2 uv = vTerrWorld.xz * 0.5;
   // Local water: the sea, or a river's surface near its channel
   vec2 river = texture2D(tRiver, (vTerrWorld.xz + uWorldSize * 0.5 + 0.5) / (uWorldSize + 1.0)).rg;
   float waterY = river.g > 0.5 ? max(uWaterLevel, river.r) : uWaterLevel;
+  terrWaterY = waterY;
   vec4 g = texture2D(tGrass, uv);
 #ifdef TERRAIN_LITE
   // Phones: analytic border noise instead of a second grass fetch
@@ -664,7 +680,9 @@ vec3 terrainColor() {
         // Baked static shadows dim the sun / moon; a little contact darkening of the sky light too
         .replace(
           '#include <lights_fragment_end>',
-          '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= 1.0 - vShade;\nreflectedLight.indirectDiffuse *= 1.0 - vShade * 0.3;'
+          '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= 1.0 - vShade;\nreflectedLight.indirectDiffuse *= 1.0 - vShade * 0.3;\n' +
+            // Sea floor and river beds: the sun's caustics
+            `reflectedLight.directDiffuse *= 1.0 + causticsLight(vTerrWorld, terrWaterY, vTerrUpY) * ${CAUSTICS_TINT};`
         );
     };
     return mat;

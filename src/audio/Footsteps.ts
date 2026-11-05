@@ -190,6 +190,42 @@ function swish(out: Float32Array, sr: number, at: number, attack: number, decay:
 }
 
 /**
+ * Moving water: noise through a resonant band-pass whose centre glides f0 -> peak -> f1 and
+ * wobbles randomly (a state-variable filter retuned every sample). The wandering resonance is
+ * what makes noise sound liquid ("glug / sloosh") instead of grainy like snow or gravel.
+ */
+function slosh(out: Float32Array, sr: number, at: number, attack: number, decay: number, f0: number, peak: number, f1: number, q: number, amp: number): void {
+  const s = Math.floor(at * sr);
+  const len = Math.min(Math.ceil((attack + decay * 4) * sr), out.length - s);
+  let low = 0, band = 0, wob = 0, wobV = 0, pink = 0;
+  const damp = 1 / q;
+  for (let i = 0; i < len; i++) {
+    const t = i / sr;
+    const k = i / len;
+    const env = t < attack ? Math.sin((Math.PI / 2) * (t / attack)) : Math.exp(-(t - attack) / decay);
+    // Slow random wobble of the resonance (+-25 %)
+    wobV = wobV * 0.995 + (R() * 2 - 1) * 0.00002;
+    wob = Math.max(-0.25, Math.min(0.25, (wob + wobV) * 0.9995));
+    const f = (k < 0.3 ? f0 + (peak - f0) * (k / 0.3) : peak + (f1 - peak) * ((k - 0.3) / 0.7)) * (1 + wob);
+    const fc = 2 * Math.sin((Math.PI * Math.min(f, sr * 0.2)) / sr);
+    pink = pink * 0.6 + (R() * 2 - 1) * 0.4; // a softer, darker noise
+    const high = pink - low - damp * band;
+    band += fc * high;
+    low += fc * band;
+    out[s + i] += band * env * amp;
+  }
+}
+
+/** A cluster of `n` Minnaert bubbles spread over [from, to] s with frequencies in [fLo, fHi]. */
+function bubbles(out: Float32Array, sr: number, n: number, from: number, to: number, fLo: number, fHi: number, amp: number): void {
+  for (let i = 0; i < n; i++) {
+    // Smaller bubbles (higher) are shorter
+    const f = fLo * Math.pow(fHi / fLo, R());
+    bubble(out, sr, rr(from, to), f, Math.min(0.06, 22 / f) * rr(0.7, 1.3), amp * rr(0.5, 1));
+  }
+}
+
+/**
  * High-pass (24 dB/oct) at `hp`, gentle low-pass at `lp` (a rubber sole and the air soften the
  * very top: this is what keeps steps from sounding harsh), peak-normalise and fade the tail.
  */
@@ -296,11 +332,9 @@ function renderStep(sr: number, surface: FootSurface): Float32Array {
     }
     case 'water': {
       // Wading: the foot pushes water (a soft slosh) and drops fall back with liquid "plinks"
-      swish(o, sr, 0, 0.04, 0.09, 520 * p, 0.6, 1);
-      swish(o, sr, 0.02, 0.04, 0.08, 1100 * p, 0.7, 0.35);
-      phisem(o, sr, grf(0.06, 0.1, 0.15, 0.5, 0.03, 0.08), 500, 0.985, [res(rr(900, 1300), 0.92), res(rr(1700, 2300), 0.9, 0.5)], 0.6, 0.05);
-      for (let i = 0, n = 2 + Math.floor(R() * 3); i < n; i++) bubble(o, sr, rr(0.04, 0.25), rr(450, 1000), rr(0.03, 0.06), rr(0.04, 0.08));
-      return finish(o, sr, 150, 4000);
+      slosh(o, sr, 0, 0.05, 0.07, 300 * p, 700 * p, 380 * p, 4, 1);
+      bubbles(o, sr, 5 + Math.floor(R() * 4), 0.03, 0.3, 450, 1500, 0.12);
+      return finish(o, sr, 140, 3500);
     }
   }
 }
@@ -320,20 +354,22 @@ function renderWet(sr: number): Float32Array {
  */
 function renderStroke(sr: number): Float32Array {
   const o = new Float32Array(Math.ceil(sr * 0.8));
-  swish(o, sr, 0, 0.11, 0.17, rr(420, 560), 0.55, 1);
-  swish(o, sr, 0.05, 0.09, 0.13, rr(900, 1200), 0.65, 0.35);
-  phisem(o, sr, grf(0.05, 0.14, 0.2, 0.4, 0.05, 0.1), 600, 0.988, [res(rr(850, 1200), 0.93), res(rr(1600, 2200), 0.9, 0.5)], 0.7, 0.12);
-  for (let i = 0, n = 3 + Math.floor(R() * 4); i < n; i++) bubble(o, sr, rr(0.12, 0.55), rr(380, 900), rr(0.03, 0.06), rr(0.03, 0.06));
-  return finish(o, sr, 110, 3500, 0.8);
+  // The arm pulls a body of water: a low, gliding "sloosh"...
+  slosh(o, sr, 0, 0.12, 0.13, rr(240, 300), rr(520, 650), rr(300, 360), 3.5, 1);
+  // ...the hand leaves the water with a short gurgle...
+  slosh(o, sr, 0.18, 0.04, 0.06, rr(500, 600), rr(900, 1100), rr(600, 700), 5, 0.35);
+  // ...and the thrown water falls back: a scatter of bubbles and small drops
+  bubbles(o, sr, 10 + Math.floor(R() * 6), 0.06, 0.6, 380, 1400, 0.1);
+  bubbles(o, sr, 4, 0.3, 0.7, 1300, 2400, 0.05);
+  return finish(o, sr, 110, 3200, 0.8);
 }
 
-/** Calm water lapping at the body while floating still: a slow, low slosh. */
+/** Calm water lapping at the body while floating still: a slow, low slosh and a few bloops. */
 function renderLap(sr: number): Float32Array {
   const o = new Float32Array(Math.ceil(sr * 0.7));
-  swish(o, sr, 0, 0.16, 0.2, rr(330, 450), 0.6, 1);
-  swish(o, sr, 0.08, 0.12, 0.14, rr(700, 900), 0.7, 0.25);
-  for (let i = 0; i < 2; i++) bubble(o, sr, rr(0.1, 0.45), rr(300, 600), rr(0.04, 0.07), 0.04);
-  return finish(o, sr, 100, 2500, 0.6);
+  slosh(o, sr, 0, 0.18, 0.14, rr(180, 230), rr(360, 460), rr(220, 280), 3, 1);
+  bubbles(o, sr, 3 + Math.floor(R() * 3), 0.1, 0.55, 300, 900, 0.09);
+  return finish(o, sr, 90, 2200, 0.6);
 }
 
 /** Jumping or falling in: the impact crack, the plunge and a cloud of bubbles. */
@@ -415,6 +451,9 @@ export class FootstepAudio {
   private readonly last: Record<Kind, number> = Object.fromEntries(WARM_ORDER.map((k) => [k, -1])) as Record<Kind, number>;
   private readonly pools: Partial<Record<AudioChannel, VoicePool>> = {};
   private bed: { src: AudioBufferSourceNode; gain: GainNode } | null = null;
+  /** Steps, strokes and lapping sound from the player's body (HRTF on desktop), not inside the head. */
+  private panner: PannerNode | null = null;
+  private readonly sourcePos = { x: 0, y: 0, z: 0 };
   private bedBuffer: AudioBuffer | null = null;
   private strokeTimer = 0;
   private lapTimer = 2;
@@ -422,9 +461,17 @@ export class FootstepAudio {
   private wasUnder = false;
   private warmIndex = -1;
 
+  /** Where the player's body sounds come from (call every frame; the feet / swimmer position). */
+  public setPosition(x: number, y: number, z: number): void {
+    this.sourcePos.x = x;
+    this.sourcePos.y = y;
+    this.sourcePos.z = z;
+    if (this.panner) audioEngine.setPannerPos(this.panner, this.sourcePos);
+  }
+
   /** One footstep. `intensity` ~0.35 sneaking, 0.6 walking, 1 running, >1 landing. `wet` 0..1 rain-soaked ground. */
   public step(surface: FootSurface, intensity: number, wet = 0): void {
-    const g = 0.32 * intensity * SURFACE_GAIN[surface];
+    const g = 0.22 * intensity * SURFACE_GAIN[surface];
     // Running lands harder: a touch brighter
     this.play(surface, g, rr(0.94, 1.06) * (intensity > 0.9 ? 1.04 : 1), false);
     if (wet > 0.15 && surface !== 'water' && surface !== 'snow') this.play('wet', g * 0.5 * wet, rr(0.9, 1.1), false);
@@ -547,8 +594,13 @@ export class FootstepAudio {
   private pool(ctx: AudioContext, ch: AudioChannel): VoicePool | null {
     let p = this.pools[ch];
     if (p) return p;
-    const out = audioEngine.channel(ch);
+    let out: AudioNode | null | undefined = audioEngine.channel(ch);
     if (!out) return null;
+    if (ch === 'sfx') {
+      // Close to the player: full level within a few metres (the camera distance), fading beyond
+      this.panner = audioEngine.createPanner(this.sourcePos, 4, 60, 'sfx');
+      if (this.panner) out = this.panner;
+    }
     p = { gains: [], next: 0 };
     for (let i = 0; i < VOICES; i++) {
       const g = ctx.createGain();

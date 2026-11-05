@@ -11,6 +11,13 @@ import {
 import { WaterEffects } from '../../scene/WaterEffects';
 import { WaterParticleSystem } from '../../particles/WaterParticleSystem';
 
+/** Water shallower than this (m, surface to bed) is waded on foot; deeper is swum. */
+const WADE_DEPTH_ENTER = 1.15;
+const WADE_DEPTH_EXIT = 1.0;
+/** Within this distance (m) below the resting height the swimmer is caught by the surface. */
+const SURFACE_CAPTURE = 0.55;
+const DOWN = new THREE.Vector3(0, -1, 0);
+
 export class SwimAbility implements IAbility {
   public name = 'Swim';
   public enabled = true;
@@ -25,6 +32,11 @@ export class SwimAbility implements IAbility {
   private bubbleTimer = 0;
   private bubblePauseTimer = 0;
   private mantleCooldown = 0;
+  /** Held at the surface (floating) rather than swimming free underwater. */
+  private surfaced = false;
+  private bobTime = 0;
+  private groundFilter = 0;
+  private readonly rayOrigin = new THREE.Vector3();
 
   // Water boundaries
   private waterMin = new THREE.Vector3(
@@ -69,8 +81,11 @@ export class SwimAbility implements IAbility {
     // Local surface: the sea, or a river (only deep enough stretches are swum; shallows are waded)
     const level = riverWorld.waterLevelAt(pos.x, pos.z);
     this.waterMax.y = level;
-    const shallowRiver = level > worldSettings.waterLevel + 0.01 && riverWorld.depthAt(pos.x, pos.z) < 0.95;
     riverWorld.flowAt(pos.x, pos.z, this.flow);
+    // Shallows are waded, not swum: the player stands up wherever the water is at most about
+    // waist / chest deep (hysteresis so walking along the edge does not flicker)
+    const bed = pos.y <= level + 0.45 ? this.waterDepthUnder(context, pos, level) : Infinity;
+    const shallow = bed < (this.isSwimming ? WADE_DEPTH_EXIT : WADE_DEPTH_ENTER);
 
     // 1. Water Bounds Check
     // Capsule height is 1.5m (center at pos.y). Enter water when center drops below water level + 0.45m.
@@ -81,9 +96,10 @@ export class SwimAbility implements IAbility {
       pos.z <= this.waterMax.z &&
       pos.y >= this.waterMin.y &&
       pos.y <= this.waterMax.y + 0.45 &&
-      !shallowRiver;
+      !shallow;
 
     this.isSwimming = inWaterVolume && !this.isMantling;
+    if (!this.isSwimming) this.surfaced = false;
     context.isSwimming = this.isSwimming;
 
     // Water Depth (distance from surface to head)
@@ -185,31 +201,28 @@ export class SwimAbility implements IAbility {
         hasVerticalInput = true;
       }
 
-      if (hasVerticalInput) {
-        if (targetVy > 0 && pos.y >= surfaceY) {
-          // Smoothly dampen upward swimming near surface so character rests naturally
-          const overSurface = pos.y - surfaceY;
-          targetVy *= Math.max(0, 1 - overSurface / 0.25);
-        }
+      // Surface capture: once the body comes up near the surface (and the player is not diving),
+      // it is held there by a stiff, critically damped spring with a gentle bob, like floating in
+      // most games: swimming forward never drifts the body under, and coming up from a dive the
+      // body pops up and settles instead of sinking back.
+      this.bobTime += dt;
+      if (context.input.crouch) this.surfaced = false;
+      else if (pos.y > surfaceY - SURFACE_CAPTURE) this.surfaced = true;
+
+      if (context.input.crouch) {
         vy = THREE.MathUtils.lerp(vy, targetVy, 1 - Math.exp(-12 * dt));
-      } else if (isMoving) {
-        // If moving, camera pitch influences vy, but cap upward movement near surface
-        let moveVy = targetVel.y;
-        if (pos.y >= surfaceY && moveVy > 0) {
-          const overSurface = pos.y - surfaceY;
-          moveVy *= Math.max(0, 1 - overSurface / 0.25);
-        }
-        vy = THREE.MathUtils.lerp(vy, moveVy, 1 - Math.exp(-8 * dt));
+      } else if (this.surfaced) {
+        const bob = Math.sin(this.bobTime * 2.1) * 0.035;
+        const err = surfaceY + bob - pos.y;
+        // Spring (k) + damping toward the target; jump just lifts the body a bit higher
+        const lift = context.input.jump ? 0.12 : 0;
+        const target = (err + lift) * 9;
+        vy = THREE.MathUtils.lerp(vy, THREE.MathUtils.clamp(target, -3, 3), 1 - Math.exp(-10 * dt));
+      } else if (hasVerticalInput) {
+        vy = THREE.MathUtils.lerp(vy, targetVy, 1 - Math.exp(-12 * dt));
       } else {
-        // Idle treading water
-        if (depth < 0.35) {
-          // Near surface: gently stabilize around surfaceY
-          const diffY = surfaceY - pos.y;
-          vy = THREE.MathUtils.lerp(vy, diffY * 3.5, 1 - Math.exp(-7 * dt));
-        } else {
-          // Deep underwater idle drag
-          vy *= Math.pow(0.12, dt);
-        }
+        // Underwater: neutral buoyancy with water drag
+        vy *= Math.pow(0.12, dt);
       }
 
       // Horizontal plane interpolation
@@ -252,7 +265,8 @@ export class SwimAbility implements IAbility {
       const totalSpeed = Math.sqrt(
         currentLat.x * currentLat.x + currentLat.z * currentLat.z + vy * vy
       );
-      const isSubmerged = pos.y < this.waterMax.y - 0.25;
+      // Head (mouth) well under the surface: no bubbles while floating
+      const isSubmerged = pos.y + 0.65 < this.waterMax.y - 0.3 && !this.surfaced;
       const isMovingUnderwater = totalSpeed > 0.45 || context.isDashing;
 
       if (isSubmerged && isMovingUnderwater) {
@@ -274,7 +288,8 @@ export class SwimAbility implements IAbility {
               this.waterParticles.emitUnderwaterBubbles(
                 headPos,
                 new THREE.Vector3(currentLat.x, vy, currentLat.z),
-                count
+                count,
+                this.waterMax.y
               );
             }
 
@@ -291,6 +306,25 @@ export class SwimAbility implements IAbility {
     } else {
       context.body.setGravityScale(1, true);
     }
+  }
+
+  /**
+   * Water depth (surface to bed) under the player: a ray down to the ground / seabed / dock,
+   * falling back to the river bed sample. Deep water past the ray counts as very deep.
+   */
+  private waterDepthUnder(context: CharacterContext, pos: { x: number; y: number; z: number }, level: number): number {
+    if (!this.groundFilter) {
+      this.groundFilter = context.physics.packCollisionGroups(
+        COLLISION_GROUPS.CHARACTER,
+        COLLISION_GROUPS.ENVIRONMENT | COLLISION_GROUPS.DYNAMIC_PROPS
+      );
+    }
+    // Probe from the surface (or the body, if it is lower) so ground just under the feet is found
+    this.rayOrigin.set(pos.x, Math.min(pos.y, level + 0.5), pos.z);
+    const hit = context.physics.castRayAndGetNormal(this.rayOrigin, DOWN, 6, context.collider, this.groundFilter);
+    if (hit) return level - hit.point.y;
+    if (level > worldSettings.waterLevel + 0.01) return riverWorld.depthAt(pos.x, pos.z);
+    return Infinity;
   }
 
   /**

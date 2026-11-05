@@ -248,12 +248,16 @@ export class AmbientAudio {
   }
 
   /** Thunder after a lightning flash: farther strikes rumble later and lower. */
-  public thunder(listener: THREE.Vector3, volume = 1): void {
+  /** A distant rumble, or with `at` a bolt that landed there: a sharp crack, then the roll. */
+  public thunder(listener: THREE.Vector3, volume = 1, at?: THREE.Vector3): void {
     const ctx = audioEngine.context;
     if (!ctx || volume <= 0.001) return;
-    const dist = 150 + Math.random() * 450;
+    if (at) this.crack(ctx, listener, at, volume);
+    const dist = at ? Math.max(at.distanceTo(listener), 5) : 150 + Math.random() * 450;
     const a = Math.random() * Math.PI * 2;
-    const pos = { x: listener.x + Math.cos(a) * 60, y: listener.y + 25, z: listener.z + Math.sin(a) * 60 };
+    const pos = at
+      ? { x: at.x, y: at.y + 10, z: at.z }
+      : { x: listener.x + Math.cos(a) * 60, y: listener.y + 25, z: listener.z + Math.sin(a) * 60 };
     const panner = audioEngine.createPanner(pos, 60, 2000, 'ambient');
     if (!panner) return;
     const t = ctx.currentTime + dist / 343;
@@ -274,6 +278,30 @@ export class AmbientAudio {
     src.connect(filter).connect(gain).connect(panner);
     src.start(t);
     src.stop(t + 3.3);
+    src.onended = () => panner.disconnect();
+  }
+
+  /** The snap of a close strike: a short burst of bright noise falling in pitch. */
+  private crack(ctx: AudioContext, listener: THREE.Vector3, at: THREE.Vector3, volume: number): void {
+    const panner = audioEngine.createPanner({ x: at.x, y: at.y + 2, z: at.z }, 20, 2000, 'ambient');
+    if (!panner) return;
+    const dist = at.distanceTo(listener);
+    const t = ctx.currentTime + dist / 343;
+    const src = ctx.createBufferSource();
+    src.buffer = this.getNoise(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(7000, t);
+    filter.frequency.exponentialRampToValueAtTime(300, t + 0.9);
+    const gain = ctx.createGain();
+    const peak = Math.max(0.001, Math.min(1.4, 1.6 - dist / 40) * volume);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(peak, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(peak * 0.25, t + 0.25);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 1.2);
+    src.connect(filter).connect(gain).connect(panner);
+    src.start(t);
+    src.stop(t + 1.3);
     src.onended = () => panner.disconnect();
   }
 

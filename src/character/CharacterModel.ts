@@ -49,10 +49,10 @@ const RUN_RATE_ABOVE_KNEE = 0.45;
 type LocomotionClip =
   | 'IDLE' | 'WALK' | 'RUN' | 'JUMP_AIR' | 'FALL'
   | 'SWIM_IDLE' | 'SWIM_SURFACE' | 'SWIM_UNDERWATER';
-type OneShotClip = 'CHOP' | 'MINE' | 'WATER' | 'JUMP_START' | 'LAND';
+type OneShotClip = 'CHOP' | 'MINE' | 'WATER' | 'JUMP_START' | 'LAND' | 'PICKUP_ONE_HAND';
 
 const LOOPING_CLIPS: LocomotionClip[] = ['IDLE', 'WALK', 'RUN', 'JUMP_AIR', 'FALL', 'SWIM_IDLE', 'SWIM_SURFACE', 'SWIM_UNDERWATER'];
-const ONE_SHOT_CLIPS: OneShotClip[] = ['CHOP', 'MINE', 'WATER', 'JUMP_START', 'LAND'];
+const ONE_SHOT_CLIPS: OneShotClip[] = ['CHOP', 'MINE', 'WATER', 'JUMP_START', 'LAND', 'PICKUP_ONE_HAND'];
 /** Older exports lack some clips: play the closest one instead. */
 const CLIP_FALLBACKS: Partial<Record<LocomotionClip | OneShotClip, string>> = {
   JUMP_AIR: 'FALL',
@@ -78,6 +78,8 @@ const JUMP_TO_FALL_SPEED = -9;
 const FALL_DELAY = 0.25;
 /** Default watering clip length (s); the WATER clip is ~3.2s at 1x. */
 const WATERING_DURATION = 2.0;
+/** One-hand pick-up after a harvest (the clip is ~1.9 s at 1x; a little brisker reads better). */
+const PICKUP_DURATION = 1.3;
 /** Part of the WATER clip (fraction of its length) where the can is tipped and water flows. */
 const WATER_POUR_WINDOW: [number, number] = [0.2, 0.8];
 /** Speed (m/s) at which the swim stroke clips play at 1x. */
@@ -526,6 +528,16 @@ export class CharacterModel {
     this.playOneShot('WATER', duration);
   }
 
+  /** Bends down and picks the harvest up with one hand. */
+  public triggerPickup(): void {
+    this.playOneShot('PICKUP_ONE_HAND', PICKUP_DURATION);
+  }
+
+  /** True while an action that roots the player plays (watering, the harvest pick-up). */
+  public isActionLocked(): boolean {
+    return this.isPlayingOneShot('WATER') || this.isPlayingOneShot('PICKUP_ONE_HAND');
+  }
+
   public isActivelyPouringWater(): boolean {
     if (this.activeWeapon !== 10 || this.wateringProgress <= 0) return false;
     const played = 1 - this.wateringProgress / this.wateringDuration;
@@ -864,6 +876,9 @@ export class CharacterModel {
       }
     }
 
+    // The mixer only writes a bone when the clip's value changed since its last write, so the
+    // riding offset of the previous frame must be undone first, or it is applied twice (arms flip up)
+    this.restoreRidingPose();
     if (this.mixer) {
       this.mixer.update(dt);
     }
@@ -907,6 +922,21 @@ export class CharacterModel {
    * Rotates limb bones about the character's own sideways axis on top of whatever the mixer posed.
    * Working in model space keeps this independent of the rig's odd bone rolls.
    */
+  /** Bones' mixer pose before the riding offset was layered on (restored before the next mixer update). */
+  private readonly ridingBase = new Map<THREE.Object3D, THREE.Quaternion>();
+
+  private readonly ridingBaseCache = new Map<THREE.Object3D, THREE.Quaternion>();
+  private newBase(bone: THREE.Object3D): THREE.Quaternion {
+    const q = new THREE.Quaternion();
+    this.ridingBaseCache.set(bone, q);
+    return q;
+  }
+
+  private restoreRidingPose(): void {
+    for (const [bone, q] of this.ridingBase) bone.quaternion.copy(q);
+    this.ridingBase.clear();
+  }
+
   private applyRidingPose(): void {
     if (!this.rig) return;
     this.rig.updateMatrixWorld(true);
@@ -921,6 +951,7 @@ export class CharacterModel {
     for (const [name, angle] of pose) {
       const bone = this.rig.getObjectByName(name);
       if (!bone?.parent) continue;
+      this.ridingBase.set(bone, (this.ridingBaseCache.get(bone) ?? this.newBase(bone)).copy(bone.quaternion));
       // R_world = root * R_model * root^-1; local' = parent^-1 * R_world * parent * local
       const world = CharacterModel._poseQ.setFromAxisAngle(CharacterModel._xAxis, angle).premultiply(rootQ).multiply(rootInv);
       const parentQ = bone.parent.getWorldQuaternion(CharacterModel._parentQ);

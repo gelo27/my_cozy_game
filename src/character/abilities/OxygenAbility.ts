@@ -112,7 +112,8 @@ export class OxygenAbility implements IAbility {
             this.waterParticles.emitUnderwaterBubbles(
               new THREE.Vector3(pos.x, pos.y + 0.65, pos.z),
               new THREE.Vector3(vel.x * 0.3, 1.2, vel.z * 0.3),
-              2
+              2,
+              riverWorld.waterLevelAt(pos.x, pos.z)
             );
           }
         }

@@ -6,6 +6,7 @@ import type { ForestZone } from '../forest/ForestZone';
 import type { RockField } from '../gathering/RockField';
 import type { PropTreeField } from '../gathering/PropTreeField';
 import type { BuildingManager } from '../building/BuildingManager';
+import type { GrassField } from './GrassField';
 
 /** A round caster (canopy, bush, boulder) of radius `r`; its shadow lies straight below it. */
 interface Disc {
@@ -28,6 +29,8 @@ const S = TERRAIN_CHUNK + 1;
 const NCHUNKS = TERRAIN_CHUNKS * TERRAIN_CHUNKS;
 /** Soft edge around casters, metres: a caster near a border also touches the next chunk. */
 const PAD = 2;
+/** Props no grass grows through (radius multiplier of the caster disc). */
+const GRASS_BLOCKERS: Record<string, number> = { well: 1.1, hay: 1.1, rock_big: 0.9 };
 const PROP_CASTERS: Record<string, { r: number; k: number }> = {
   tree_pine: { r: 1.5, k: 0.55 },
   tree_round: { r: 1.8, k: 0.6 },
@@ -51,7 +54,11 @@ export class StaticShadows {
   /** Statistics for the dev tools. */
   public readonly stats = { casters: 0, chunksBaked: 0, ms: 0 };
 
-  private readonly buckets: { discs: Disc[]; boxes: Box[] }[] = Array.from({ length: NCHUNKS }, () => ({ discs: [], boxes: [] }));
+  /** Discs / boxes cast shade; `blocks` are footprints the 3D grass must not poke through. */
+  private readonly buckets: { discs: Disc[]; boxes: Box[]; blocks: Box[] }[] = Array.from({ length: NCHUNKS }, () => ({ discs: [], boxes: [], blocks: [] }));
+  /** Receives each baked chunk's shade and grass blockers. */
+  public grass: GrassField | null = null;
+  private readonly blockBuf = new Uint8Array(S * S);
   /** Per-chunk fingerprint of its casters at the last bake (NaN = never baked). */
   private readonly baked = new Float64Array(NCHUNKS).fill(NaN);
   private readonly queue: number[] = [];
@@ -106,8 +113,9 @@ export class StaticShadows {
 
   /** Order-independent fingerprint of a chunk's casters. */
   private fingerprint(c: number): number {
-    const { discs, boxes } = this.buckets[c];
-    let h = discs.length * 7919 + boxes.length * 104729;
+    const { discs, boxes, blocks } = this.buckets[c];
+    let h = discs.length * 7919 + boxes.length * 104729 + blocks.length * 15485863;
+    for (const b of blocks) h += Math.sin(b.x0 * 3.17 + b.z0 * 51.3 + b.x1 * 7.7 + b.z1 * 2.9) * 9871.31;
     for (const d of discs) h += Math.sin(d.x * 12.9898 + d.z * 78.233 + d.r * 37.719 + d.k * 3.1) * 43758.5453;
     for (const b of boxes) h += Math.sin(b.x0 * 12.9898 + b.z0 * 78.233 + b.x1 * 9.17 + b.z1 * 5.71) * 24634.6345;
     return h;
@@ -140,7 +148,9 @@ export class StaticShadows {
     for (const b of this.buckets) {
       b.discs.length = 0;
       b.boxes.length = 0;
+      b.blocks.length = 0;
     }
+    const addBlock = (box: Box) => this.bucketRange(box.x0, box.z0, box.x1, box.z1, (c) => this.buckets[c].blocks.push(box));
     let n = 0;
     const addDisc = (d: Disc) => {
       n++;
@@ -151,6 +161,11 @@ export class StaticShadows {
       if (!def) continue;
       if ((p.type === 'tree_pine' || p.type === 'tree_round') && this.propTrees.isDown(p.id)) continue;
       addDisc({ x: p.position.x, z: p.position.z, r: def.r * p.scale, k: def.k });
+      const br = GRASS_BLOCKERS[p.type];
+      if (br) {
+        const r = def.r * p.scale * br * 0.7;
+        addBlock({ x0: p.position.x - r, z0: p.position.z - r, x1: p.position.x + r, z1: p.position.z + r, k: 1 });
+      }
     }
     this.forest.forEachStandingTree((pos) => addDisc({ x: pos.x, z: pos.z, r: 3.4, k: 0.6 }));
     this.rocks.forEachIntact((pos, radius) => addDisc({ x: pos.x, z: pos.z, r: radius * 1.1, k: 0.45 }));
@@ -158,7 +173,9 @@ export class StaticShadows {
       const bb = piece.worldBoundingBox;
       if (!bb) continue;
       const ground = this.terrain.getHeight((bb.min.x + bb.max.x) / 2, (bb.min.z + bb.max.z) / 2);
-      if (bb.max.y - ground < 0.4) continue; // floors and paths lie on the ground
+      // Every piece near the ground (floors and paths too) keeps the 3D grass out of its footprint
+      if (bb.min.y - ground < 0.6) addBlock({ x0: bb.min.x, z0: bb.min.z, x1: bb.max.x, z1: bb.max.z, k: 1 });
+      if (bb.max.y - ground < 0.4) continue; // floors and paths lie on the ground: no shade
       const box: Box = { x0: bb.min.x, z0: bb.min.z, x1: bb.max.x, z1: bb.max.z, k: 0.6 };
       n++;
       this.bucketRange(box.x0, box.z0, box.x1, box.z1, (c) => this.buckets[c].boxes.push(box));
@@ -207,6 +224,18 @@ export class StaticShadows {
     const out = this.buf;
     for (let i = 0; i < out.length; i++) out[i] = Math.round(f[i] * 255);
     this.terrain.setChunkShade(c, out);
+
+    if (this.grass) {
+      // Grass blockers: the footprint (expanded by half a metre, so no blade leans in), hard edge
+      const bl = this.blockBuf;
+      bl.fill(0);
+      for (const b of this.buckets[c].blocks) {
+        const x0 = Math.max(Math.ceil(b.x0 - 0.5), ox), x1 = Math.min(Math.floor(b.x1 + 0.5), ox + TERRAIN_CHUNK);
+        const z0 = Math.max(Math.ceil(b.z0 - 0.5), oz), z1 = Math.min(Math.floor(b.z1 + 0.5), oz + TERRAIN_CHUNK);
+        for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) bl[(z - oz) * S + (x - ox)] = 255;
+      }
+      this.grass.setChunk(c, out, bl);
+    }
     this.stats.chunksBaked++;
   }
 }

@@ -25,6 +25,9 @@ interface PlayerSpriteBubble {
   maxLife: number;
   life: number;
   active: boolean;
+  /** Surface the bubble rises to (sea or river level where it was released). */
+  surfaceY: number;
+  material: THREE.SpriteMaterial;
 }
 
 export class WaterParticleSystem {
@@ -107,9 +110,13 @@ export class WaterParticleSystem {
       );
     };
 
-    // Player 2D Sprite bubble pool (shared single material)
+    // Each bubble fades on its own, so each gets its own material (same shader program: the
+    // clones share the compiled program, only the opacity uniform differs)
     for (let i = 0; i < this.maxBubbles; i++) {
-      const sprite = new THREE.Sprite(this.bubbleMaterial);
+      const material = this.bubbleMaterial.clone();
+      material.onBeforeCompile = this.bubbleMaterial.onBeforeCompile;
+      material.customProgramCacheKey = () => 'player-bubble';
+      const sprite = new THREE.Sprite(material);
       sprite.visible = false;
       sprite.scale.set(0.05, 0.05, 1.0);
       this.group.add(sprite);
@@ -126,6 +133,8 @@ export class WaterParticleSystem {
         maxLife: 1.4,
         life: 0,
         active: false,
+        surfaceY: worldSettings.waterLevel,
+        material,
       });
     }
   }
@@ -276,7 +285,8 @@ export class WaterParticleSystem {
   public emitUnderwaterBubbles(
     headPosition: THREE.Vector3,
     velocity: THREE.Vector3,
-    count: number = 2
+    count: number = 2,
+    surfaceY: number = worldSettings.waterLevel
   ): void {
     // Only spawn if inside pool and below water surface
     if (
@@ -284,7 +294,7 @@ export class WaterParticleSystem {
       headPosition.x > WATER_FOG_CONFIG.BOUNDS_MAX_X ||
       headPosition.z < WATER_FOG_CONFIG.BOUNDS_MIN_Z ||
       headPosition.z > WATER_FOG_CONFIG.BOUNDS_MAX_Z ||
-      headPosition.y > worldSettings.waterLevel - 0.1
+      headPosition.y > surfaceY - 0.25
     ) {
       return;
     }
@@ -315,7 +325,8 @@ export class WaterParticleSystem {
       const vy = 1.3 + Math.random() * 0.7; // Upward buoyant rise velocity
       const vz = -velocity.z * 0.12 + (Math.random() - 0.5) * 0.2;
 
-      b.position.set(headPosition.x + jitterX, headPosition.y + jitterY, headPosition.z + jitterZ);
+      b.position.set(headPosition.x + jitterX, Math.min(headPosition.y + jitterY, surfaceY - 0.2), headPosition.z + jitterZ);
+      b.surfaceY = surfaceY;
       b.velocity.set(vx, vy, vz);
       b.baseScale = baseScale;
       b.scale = baseScale;
@@ -328,7 +339,7 @@ export class WaterParticleSystem {
 
       b.sprite.position.copy(b.position);
       b.sprite.scale.set(baseScale, baseScale, 1.0);
-      (b.sprite.material as THREE.SpriteMaterial).opacity = 0.85;
+      b.material.opacity = 0;
       b.sprite.visible = true;
     }
   }
@@ -406,8 +417,8 @@ export class WaterParticleSystem {
       b.position.y += b.velocity.y * dt;
       b.position.z += b.velocity.z * dt;
 
-      // Pop when reaching water surface
-      if (b.position.y >= worldSettings.waterLevel - 0.05) {
+      // Pop just below the surface (the water mesh's waves dip lower than the rest level)
+      if (b.position.y >= b.surfaceY - 0.12) {
         b.active = false;
         b.sprite.visible = false;
         continue;
@@ -420,17 +431,13 @@ export class WaterParticleSystem {
       const currentScale = b.baseScale * (1.0 + (1.0 - lifeRatio) * 0.35);
       b.sprite.scale.set(currentScale, currentScale, 1.0);
 
-      // Fade out near end of life or near surface
-      let opacity = 0.85;
-      if (lifeRatio < 0.3) {
-        opacity *= lifeRatio / 0.3;
-      }
-      if (b.position.y > worldSettings.waterLevel - 0.4) {
-        const surfFade = Math.max(0, (worldSettings.waterLevel - 0.05 - b.position.y) / 0.35);
-        opacity *= surfFade;
-      }
-      (b.sprite.material as THREE.SpriteMaterial).opacity = opacity;
-      b.sprite.visible = true;
+      // Quick fade in, fade out at the end of life and over the last half metre to the surface
+      let opacity = 0.85 * Math.min(1, (b.maxLife - b.life) / 0.08);
+      if (lifeRatio < 0.3) opacity *= lifeRatio / 0.3;
+      const toSurface = b.surfaceY - 0.12 - b.position.y;
+      if (toSurface < 0.5) opacity *= Math.max(0, toSurface / 0.5);
+      b.material.opacity = opacity;
+      b.sprite.visible = opacity > 0.01;
     }
   }
 
@@ -447,7 +454,7 @@ export class WaterParticleSystem {
       this.bubbleMaterial.dispose();
     }
     for (const b of this.bubbleSprites) {
-      (b.sprite.material as THREE.Material).dispose();
+      b.material.dispose();
       this.group.remove(b.sprite);
     }
     this.bubbleSprites = [];

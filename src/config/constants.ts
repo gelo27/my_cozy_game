@@ -157,7 +157,7 @@ export const WATER_FOG_CONFIG = {
 
 export const WATER_PHYSICS_CONFIG = {
   SURFACE_Y: 0.0,
-  SWIM_SURFACE_OFFSET: 0.35, // Resting depth below surface (meters)
+  SWIM_SURFACE_OFFSET: 0.25, // Resting depth of the body centre below the surface (meters): head and shoulders out
   SWIM_BASE_SPEED: 4.5, // m/s, independent of the (slow) walking speed
   SWIM_WALK_SPEED_RATIO: 0.95,
   SWIM_SPRINT_SPEED_RATIO: 1.5,
@@ -209,7 +209,7 @@ export const WATER_EFFECTS_CONFIG = {
   MAX_BUBBLE_PARTICLES: 80,
   CAUSTICS_SPEED: 2.2,
   CAUSTICS_SCALE: 0.3,
-  CAUSTICS_INTENSITY: 0.25,
+  CAUSTICS_INTENSITY: 2.0,
   CAUSTICS_MAX_DISTANCE: 42.0, // Distance in meters beyond which caustics are culled
   CAUSTICS_FADE_START: 20.0, // Distance where smooth distance fading begins
 } as const;

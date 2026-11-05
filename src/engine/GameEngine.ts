@@ -56,6 +56,8 @@ import { BoatController } from '../vehicle/BoatController';
 import { buildLighthousePier } from '../world/Pier';
 import { WildlifeSystem } from '../wildlife/WildlifeSystem';
 import { StaticShadows } from '../world/StaticShadows';
+import { GrassField } from '../world/GrassField';
+import { LightningStrikes } from '../world/Lightning';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
 import { RiverSystem } from '../world/rivers/RiverSystem';
@@ -141,6 +143,8 @@ export interface GameWorld {
   boat: BoatController;
   wildlife: WildlifeSystem;
   shadows: StaticShadows;
+  grass: GrassField;
+  lightning: LightningStrikes;
   exploration: ExplorationManager;
   gameplay: GameplayManager;
   editor: EditorController;
@@ -310,6 +314,7 @@ export class GameEngine {
       const terrain = new TerrainSystem(scene, physics);
       terrain.commit();
       const water = new WaterSystem(scene);
+      water.setTerrain(terrain);
       const rivers = new RiverSystem(scene, terrain);
       const weather = new WeatherSystem(scene);
       weather.onLightning = () => this.ambient.thunder(this.listenerPos, weather.sound.thunder);
@@ -414,6 +419,31 @@ export class GameEngine {
       boat.dock.copy(pier.end).lerp(pier.start, 0.25);
       const wildlife = new WildlifeSystem(scene, terrain, props, weather);
       const shadows = new StaticShadows(terrain, props, forest, rocks, propTrees, buildingManager);
+      const grass = new GrassField(scene, terrain);
+      shadows.grass = grass;
+      // Storm bolts that land near the player: a warning, then the strike, flash and thunder
+      const lightning = new LightningStrikes(scene, (x, z) => terrain.getHeight(x, z));
+      lightning.onStrike = (pos) => {
+        weather.flashNow(1);
+        this.ambient.thunder(this.listenerPos, Math.max(weather.sound.thunder, 0.6), pos);
+      };
+      weather.onGroundStrike = () => {
+        const wd = this.world;
+        if (!wd || lightning.busy || wd.exploration.inCave || weather.underwater > 0.5) return false;
+        const p = wd.character.getPosition();
+        if (weather.isSheltered(p)) return false;
+        for (let tries = 0; tries < 6; tries++) {
+          const a = Math.random() * Math.PI * 2;
+          const d = 7 + Math.random() * 19;
+          const x = p.x + Math.cos(a) * d, z = p.z + Math.sin(a) * d;
+          if (!terrain.isInside(x, z)) continue;
+          const y = Math.max(terrain.getHeight(x, z), riverWorld.waterLevelAt(x, z));
+          if (weather.isSheltered(new THREE.Vector3(x, y, z))) continue;
+          lightning.schedule(x, y, z);
+          return true;
+        }
+        return false;
+      };
       const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers);
       const debugRenderer = new DebugRenderer(physics, scene);
 
@@ -438,6 +468,8 @@ export class GameEngine {
         boat,
         wildlife,
         shadows,
+        grass,
+        lightning,
         exploration,
         gameplay,
         editor,
@@ -567,6 +599,10 @@ export class GameEngine {
     w.boat.syncVisuals(dt);
 
     if (!editing && !isDriving) character.update(dt, inputManager, tpCamera);
+    // Splash drops, the swimmer's rising air bubbles and the caustics' clock
+    character.swimAbility?.waterParticles?.update(dt);
+    const camPos = this.camera.camera.position;
+    character.swimAbility?.waterEffects?.update(dt, camPos.y < riverWorld.waterLevelAt(camPos.x, camPos.z));
     character.buildAbility?.buildingManager?.flushPendingRegeneration();
     if (character.buildAbility) {
       inputManager.setBuildMode(character.buildAbility.isBuildModeActive);
@@ -577,8 +613,9 @@ export class GameEngine {
     terrain.update(rawDt);
     w.props.update();
     w.props.updateVisibility(this.camera.camera.position);
-    w.water.update(dt, this.camera.camera.position);
-    w.rivers.update(dt, w.weather.nightFactor, w.exploration.inCave ? 0 : w.weather.rainIntensity * (1 - w.weather.snowAmount));
+    const rainOnWater = w.exploration.inCave ? 0 : w.weather.rainIntensity * (1 - w.weather.snowAmount);
+    w.water.update(dt, this.camera.camera.position, rainOnWater);
+    w.rivers.update(dt, w.weather.nightFactor, rainOnWater);
     if (editing) {
       editor.update(rawDt);
     } else {
@@ -589,6 +626,7 @@ export class GameEngine {
     }
     w.weather.update(dt, tpCamera.camera.position);
     w.nightLighting.setViewportHeight(this.renderer.domElement.height);
+    w.lightning.update(dt, tpCamera.camera, this.renderer.domElement.height);
     w.nightLighting.update(dt, tpCamera.camera, editing ? null : ride ? ride.getPosition() : character.getPosition());
     farmingManager.rainIntensity = w.weather.rainIntensity;
     this.updateAudio(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), ride);
@@ -609,6 +647,9 @@ export class GameEngine {
         fields.addPusher(pp.x, pp.y, pp.z, 0.55);
       }
     }
+    const grass = w.grass;
+    grass.enabled = !w.exploration.inCave;
+    grass.update(dt, tpCamera.camera, w.weather.sound.wind);
     farmingManager.update(dt);
     forest.update(dt);
     w.propTrees.update(dt);
@@ -772,6 +813,8 @@ export class GameEngine {
     // Swimming: entry splash, strokes, lapping, bubbles and the underwater bed
     const tel = w.character.telemetry;
     const swimming = tel.isSwimming;
+    // Body sounds (steps, strokes) come from the player, a little below the centre
+    this.footsteps.setPosition(playerPos.x, playerPos.y - 0.4, playerPos.z);
     if (swimming && !this.prevSwimming && this.prevVelY < -2.5) this.footsteps.splash(-this.prevVelY);
     this.prevSwimming = swimming;
     this.prevVelY = tel.velocity.y;
@@ -966,6 +1009,12 @@ export class GameEngine {
     return {
       engine: this,
       world: w,
+      /** Lands a bolt (after its warning) at x, z, or a few metres in front of the player. */
+      strike: (x?: number, z?: number) => {
+        const p = w.character.getPosition();
+        const sx = x ?? p.x + 6, sz = z ?? p.z;
+        w.lightning.schedule(sx, Math.max(w.terrain.getHeight(sx, sz), riverWorld.waterLevelAt(sx, sz)), sz);
+      },
       tp: (x: number, z: number, y?: number) =>
         w.character.respawn(new THREE.Vector3(x, (y ?? w.terrain.getHeight(x, z)) + 1.5, z)),
       time: (hour: number) => (worldSettings.timeOfDay = ((hour % 24) + 24) % 24),
@@ -983,6 +1032,7 @@ export class GameEngine {
       /** Wildlife: `dev.wild.stats`, `dev.wild.enabled = false` to measure its cost. */
       wild: w.wildlife,
       shadows: w.shadows,
+      grass: w.grass,
     };
   }
 }

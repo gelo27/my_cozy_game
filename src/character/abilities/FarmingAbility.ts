@@ -45,6 +45,11 @@ export class FarmingAbility implements IAbility {
   private holdKey = '';
   private holdTime = 0;
   private readonly playerPos = new THREE.Vector3();
+
+  /** E / LMB is held on a ripe crop and the bar is filling: the player stands still. */
+  public get isHarvestHolding(): boolean {
+    return this.holdArmed && this.holdKey.startsWith('h');
+  }
   private readonly tmpVec = new THREE.Vector3();
 
   public setManagers(farming: FarmingManager, inventory: InventoryManager): void {
@@ -81,9 +86,11 @@ export class FarmingAbility implements IAbility {
     const seedCount = equippedId ? this.inventoryManager.getItemCount(equippedId) : 0;
     this.currentPrompt = this.farmingManager.getNearbyInteraction(playerPos, equippedId, 3.2, seedCount);
 
-    // If build mode or inventory is open, do not execute farming clicks
-    if (blocked) {
+    // If build mode or inventory is open, or watering / the harvest pick-up is still playing,
+    // do not start anything new (the pouring stream below keeps running)
+    if (blocked || context.model?.isActionLocked()) {
       this.resetHold();
+      this.emitWateringStream(context);
       return;
     }
 
@@ -115,7 +122,7 @@ export class FarmingAbility implements IAbility {
       if (result) {
         this.inventoryManager.addItem(result.crateItemId, result.crates);
         if (result.bonusSeeds) this.inventoryManager.addItem(CROP_DEFINITIONS[result.cropType].seedItemId, result.bonusSeeds);
-        context.model?.triggerJumpSquash();
+        context.model?.triggerPickup();
       }
       return;
     }
@@ -160,7 +167,11 @@ export class FarmingAbility implements IAbility {
       context.model?.triggerWatering();
     }
 
-    // 3. Emit sparkling water stream ONLY while actively pouring water from nozzle
+    this.emitWateringStream(context);
+  }
+
+  /** Sparkling water stream, only while the can is actually tipped. */
+  private emitWateringStream(context: CharacterContext): void {
     if (context.model && context.model.isActivelyPouringWater() && context.particleManager) {
       const nozzlePos = new THREE.Vector3();
       if (context.model.getWateringNozzleWorldPosition(nozzlePos)) {

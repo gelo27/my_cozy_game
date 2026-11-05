@@ -16,6 +16,7 @@ import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, Weather
 import { worldSettings } from '../../world/WorldSettings';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
+import { causticsSettings, applyCausticsSettings, resetCausticsSettings, CausticsSettings } from '../../scene/WaterEffects';
 
 const ICONS: Record<string, React.ElementType> = {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
@@ -549,7 +550,41 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
           fmt={(v) => `${v.toFixed(2)} м`}
         />
       </Section>
+      <CausticsTuner rerender={rerender} />
     </>
+  );
+};
+
+/** Live look of the underwater caustics (saved in this browser). */
+const CausticsTuner: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const c = causticsSettings;
+  const set = <K extends keyof CausticsSettings>(k: K, v: CausticsSettings[K]) => {
+    c[k] = v;
+    applyCausticsSettings();
+    rerender();
+  };
+  const sliders: { k: Exclude<keyof CausticsSettings, 'alwaysOn'>; label: string; min: number; max: number; step: number; fmt(v: number): string }[] = [
+    { k: 'intensity', label: 'Яскравість', min: 0, max: 5, step: 0.05, fmt: (v) => v.toFixed(2) },
+    { k: 'scale', label: 'Щільність візерунка', min: 0.03, max: 0.5, step: 0.01, fmt: (v) => `${(1 / v).toFixed(1)} м на повтор` },
+    { k: 'speed', label: 'Швидкість', min: 0, max: 4, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
+    { k: 'contrast', label: 'Різкість ліній', min: 0.5, max: 4, step: 0.05, fmt: (v) => v.toFixed(2) },
+    { k: 'aberration', label: 'Хроматична аберація', min: 0, max: 12, step: 0.5, fmt: (v) => (v === 0 ? 'вимк.' : `${v} текс.`) },
+    { k: 'depthFalloff', label: 'Згасання з глибиною', min: 0, max: 0.5, step: 0.01, fmt: (v) => `${v.toFixed(2)} / м` },
+    { k: 'maxDistance', label: 'Дальність', min: 10, max: 120, step: 1, fmt: (v) => `${v} м` },
+  ];
+  return (
+    <Section title="Каустика">
+      {sliders.map((s) => (
+        <Slider key={s.k} label={s.label} value={c[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(v) => set(s.k, v)} />
+      ))}
+      <label className="flex items-center gap-2 text-zinc-400">
+        <input type="checkbox" checked={c.alwaysOn} onChange={(e) => set('alwaysOn', e.target.checked)} className="accent-sky-500" />
+        Показувати й з камерою над водою
+      </label>
+      <button className={chip(false)} onClick={() => (resetCausticsSettings(), rerender())}>
+        Скинути
+      </button>
+    </Section>
   );
 };
 

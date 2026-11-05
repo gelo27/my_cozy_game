@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { injectNightLights } from '../NightLighting';
 import type { TerrainSystem } from '../TerrainSystem';
 import { riverWorld } from './RiverWorld';
+import { WATER_DETAIL_GLSL } from '../../scene/WaterDetails';
 import { buildLakeGeometry, buildRiverGeometry } from './RiverMesh';
 import type { RiverDef, RiverSample, WaterfallInfo } from './RiverTypes';
 
@@ -180,7 +181,6 @@ export class RiverSystem {
   private waterMesh(geo: THREE.BufferGeometry, mat: THREE.Material, name: string): THREE.Mesh {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.name = name;
-    mesh.renderOrder = 2;
     mesh.matrixAutoUpdate = false;
     return mesh;
   }
@@ -268,13 +268,15 @@ export class RiverSystem {
   // ---------------------------------------------------------------- materials
 
   private createMaterial(lake: boolean): THREE.MeshLambertMaterial {
+    // Opaque (like the sea): no blending or sorting. Where the ribbon used to fade out (its ends,
+    // the estuary over the sea) pixels are dropped with a screen-space dither instead. Pulled a
+    // little toward the camera so it never z-fights the sea plane in the estuary.
     const mat = new THREE.MeshLambertMaterial({
       color: 0x3a9fc0,
-      transparent: true,
-      opacity: 0.8,
-      depthWrite: false,
       side: THREE.DoubleSide,
-      forceSinglePass: true, // see WaterSystem: avoids two program lookups per frame
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -4,
     });
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader);
@@ -285,7 +287,7 @@ export class RiverSystem {
         .replace('#include <common>', '#include <common>\nattribute vec4 aRiver;\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;')
         .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRiver = aRiver;\nvRiverUv = uv;');
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;\nuniform float uTime;\nuniform float uDay;\nuniform float uRain;\n${NOISE_GLSL}`)
+        .replace('#include <common>', `#include <common>\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;\nuniform float uTime;\nuniform float uDay;\nuniform float uRain;\n${NOISE_GLSL}\n${WATER_DETAIL_GLSL}`)
         .replace(
           '#include <map_fragment>',
           `// Calm flow: stretched ripples drifting downstream (lakes: slow, round ripples that barely move)
@@ -298,16 +300,11 @@ float foam = vRiver.x * smoothstep(0.32, 0.62, streak + vRiver.x * 0.25);
 // Lacy foam where the water laps against the banks
 foam = max(foam, smoothstep(0.82, 1.05, vRiver.z) * smoothstep(0.35, 0.75, rip) * 0.7);
 vec3 water = mix(diffuseColor.rgb, vec3(0.78, 0.93, 0.98), smoothstep(0.55, 0.85, rip) * 0.35);
+// Shallower, lighter water along the banks
+water = mix(water, vec3(0.08, 0.48, 0.46), smoothstep(0.5, 1.0, vRiver.z) * 0.35);
 water *= 0.93 + rip * 0.1;
-// Rain: small rings spreading where drops hit, one per 0.6 m cell at a random spot and phase
-if (uRain > 0.01) {
-  vec2 rp = vRiverUv * 1.7;
-  vec2 ci = floor(rp);
-  float ph = fract(uTime * 1.4 + rHash(ci) * 7.0);
-  vec2 c = vec2(rHash(ci + 3.1), rHash(ci + 7.7)) * 0.6 + 0.2;
-  float ring = 1.0 - smoothstep(0.0, 0.06, abs(length(fract(rp) - c) - ph * 0.42));
-  water += vec3(0.16) * ring * (1.0 - ph) * step(rHash(ci + 1.3), uRain * 0.8);
-}
+// Rain: crisp white rings spreading where drops hit (the same chunk as the sea's)
+float rainRings = wdRainRings(vRiverUv, uTime, uRain);
 // Estuary: the colour turns into the sea's, a lighter silty plume drifts out past the shore, and
 // a soft band of foam marks where the current meets the waves
 float mouth = vRiver.w;
@@ -318,12 +315,19 @@ water = mix(water, vec3(0.62, 0.78, 0.72), plume * 0.35);
 float meet = smoothstep(0.85, 1.0, mouth) * (1.0 - smoothstep(1.0, 1.35, mouth));
 foam = max(foam, meet * smoothstep(0.5, 0.8, rNoise(vec2(vRiverUv.x * 1.3, vRiverUv.y * 0.6 + uTime * 0.4) + 5.0)) * 0.6);
 foam *= 1.0 - smoothstep(1.3, 1.8, mouth);
+if (uRain > 0.01) foam = max(foam, rainRings * 0.9);
 diffuseColor.rgb = mix(water, vec3(0.94, 0.97, 1.0), foam);
 diffuseColor.a = mix(diffuseColor.a, 0.96, foam) * vRiver.y;
 // Over open water no bank hides the ribbon's sides: feather them out in the estuary, with a
 // ragged noisy edge so the plume has no straight outline
 float edgeNoise = rNoise(vec2(vRiverUv.x * 0.4, vRiverUv.y * 0.25 - uTime * 0.3)) * 0.35;
-diffuseColor.a *= mix(1.0, 1.0 - smoothstep(0.35 + edgeNoise, 1.0, vRiver.z), smoothstep(0.6, 1.0, mouth));`
+diffuseColor.a *= mix(1.0, 1.0 - smoothstep(0.35 + edgeNoise, 1.0, vRiver.z), smoothstep(0.6, 1.0, mouth));
+// Opaque surface: the fade becomes a stable screen-space dither (interleaved gradient noise)
+float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+// (foam used to be 96 % opaque: that still counts as solid)
+float keep = min(diffuseColor.a / 0.96, 1.0);
+if (keep < 0.999 && keep < ign) discard;
+diffuseColor.a = 1.0;`
         )
         // White water scatters light: keeps falls bright even on faces turned from the sun
         // (same scope as map_fragment, so `foam` is still in reach)

@@ -492,6 +492,21 @@ export class CharacterController {
   /**
    * Main per-frame update loop
    */
+  private lockedMovement: InputManager['movement'] | null = null;
+
+  /** A copy of this frame's input with every way of moving cleared (actions like E still pass). */
+  private lockMovement(src: InputManager['movement']): InputManager['movement'] {
+    const m = Object.assign(this.lockedMovement ?? (this.lockedMovement = { ...src }), src);
+    m.forward = 0;
+    m.right = 0;
+    m.jump = false;
+    m.jumpJustPressed = false;
+    m.sprint = false;
+    m.crouch = false;
+    m.dash = false;
+    return m;
+  }
+
   public update(dt: number, input: InputManager, camera: ThirdPersonCamera): void {
     if (!this.body || !this.body.isValid() || !this.physics.isInitialized()) return;
 
@@ -526,6 +541,11 @@ export class CharacterController {
       this.wasGrounded = this.groundInfo.isGrounded;
       this.previousYVelocity = linvel.y;
 
+      // Harvesting (while the hold bar fills and the pick-up plays) and watering root the player:
+      // movement, jumping and dashing are ignored until the action's animation has finished
+      const actionLocked = this.model.isActionLocked() || !!this.farmingAbility?.isHarvestHolding;
+      const move = actionLocked ? this.lockMovement(input.movement) : input.movement;
+
       const cameraForward = camera.getForwardVector();
       const cameraRight = camera.getRightVector();
       const cameraPosition = camera.getPosition();
@@ -536,7 +556,7 @@ export class CharacterController {
         body: this.body,
         collider: this.collider,
         physics: this.physics,
-        input: input.movement,
+        input: move,
         ground: this.groundInfo,
         cameraForward,
         cameraRight,
@@ -597,7 +617,7 @@ export class CharacterController {
 
       // Compute target facing rotation angle based on movement or input
       let targetFacingAngle: number | null = null;
-      const isMovingInput = Math.abs(input.movement.forward) > 0.01 || Math.abs(input.movement.right) > 0.01;
+      const isMovingInput = Math.abs(move.forward) > 0.01 || Math.abs(move.right) > 0.01;
 
       if (context.isClimbing && this.wallClimbAbility) {
         const wallNorm = this.wallClimbAbility.wallNormal;
@@ -610,15 +630,15 @@ export class CharacterController {
       } else if (isMovingInput) {
         // Naturally face the movement direction when walking/running (in normal mode, build mode, and paint mode)
         const moveDir = new THREE.Vector3()
-          .addScaledVector(cameraForward, input.movement.forward)
-          .addScaledVector(cameraRight, input.movement.right);
+          .addScaledVector(cameraForward, move.forward)
+          .addScaledVector(cameraRight, move.right);
         targetFacingAngle = Math.atan2(moveDir.x, moveDir.z);
       } else if (context.isSwimming && (linvel.x * linvel.x + linvel.z * linvel.z) > 0.02) {
         targetFacingAngle = Math.atan2(linvel.x, linvel.z);
       }
 
       const horizontalSpeed = Math.sqrt(linvel.x * linvel.x + linvel.z * linvel.z);
-      const isClimbingMoving = context.isClimbing && (Math.abs(input.movement.forward) > 0.05 || Math.abs(input.movement.right) > 0.05);
+      const isClimbingMoving = context.isClimbing && (Math.abs(move.forward) > 0.05 || Math.abs(move.right) > 0.05);
 
       camera.isAiming = context.isAiming;
       camera.isBuilding = this.buildAbility ? this.buildAbility.isBuildModeActive : false;

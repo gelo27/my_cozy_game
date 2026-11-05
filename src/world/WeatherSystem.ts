@@ -166,6 +166,11 @@ export class WeatherSystem {
   private snowMix = 0;
   /** Called when a storm lightning flash starts (thunder sound). */
   public onLightning: (() => void) | null = null;
+  /**
+   * Asked on some storm flashes to land a bolt near the player instead; returns false when it
+   * cannot (indoors, in a cave, under water), and the flash happens far away as usual.
+   */
+  public onGroundStrike: (() => boolean) | null = null;
   private readonly fog: THREE.FogExp2;
   private readonly sky = new THREE.Color();
   private current = { light: 1, fog: 0.0155, amount: 0, cover: 0.25, dark: 0, hazeMix: 0, tint: new THREE.Color(1, 1, 1), haze: new THREE.Color(1, 1, 1) };
@@ -223,6 +228,11 @@ export class WeatherSystem {
   }
 
   /** True when a roof or another large static collider covers `pos` (only tracked while it rains). */
+  /** A lightning flash right now (a bolt that landed nearby). */
+  public flashNow(strength = 1): void {
+    this.flash = Math.max(this.flash, strength);
+  }
+
   public isSheltered(pos: THREE.Vector3): boolean {
     const h = this.occlusion?.heightAt(pos.x, pos.z);
     return h !== null && h !== undefined && h > pos.y + 1.2;
@@ -285,9 +295,11 @@ export class WeatherSystem {
     if (this.weather === 'storm') {
       this.lightningTimer -= dt;
       if (this.lightningTimer <= 0) {
-        this.flash = 1;
         this.lightningTimer = 5 + Math.random() * 9;
-        this.onLightning?.();
+        if (!(Math.random() < 0.35 && this.onGroundStrike?.())) {
+          this.flash = 1;
+          this.onLightning?.();
+        }
       }
     }
     this.flash = Math.max(0, this.flash - dt * 3);
