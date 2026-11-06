@@ -581,8 +581,10 @@ export class PropSystem {
     this.writeMatrix(this.batchOf.get(id)!, this.slotOf.get(id)!, prop);
   }
 
+  private transientRevision = 0;
   public setTransient(id: number): void {
     this.transient.add(id);
+    this.transientRevision++;
   }
 
   /** Removes or restores a prop's collider (e.g. a felled tree). */
@@ -718,14 +720,21 @@ export class PropSystem {
     this.bodies.set(prop.id, res.body);
   }
 
+  private saveCache: { key: string; data: PropSaveData[] } | null = null;
+
   public serialize(): PropSaveData[] {
-    return this.list().filter((p) => !this.transient.has(p.id)).map((p) => ({
+    // Reused while nothing moved (props change only through this class; grounded ones follow the terrain)
+    const key = `${this.revision}|${this.terrain.revision}|${this.transientRevision}`;
+    if (this.saveCache?.key === key) return this.saveCache.data;
+    const data = this.list().filter((p) => !this.transient.has(p.id)).map((p): PropSaveData => ({
       type: p.type,
       p: [+p.position.x.toFixed(3), +p.position.y.toFixed(3), +p.position.z.toFixed(3)],
       r: +p.rotationY.toFixed(4),
       s: +p.scale.toFixed(3),
       g: p.grounded ? undefined : false,
     }));
+    this.saveCache = { key, data };
+    return data;
   }
 
   public deserialize(data: PropSaveData[]): void {

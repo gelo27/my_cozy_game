@@ -260,6 +260,7 @@ export class TerrainSystem {
   }
 
   private markSplatDirty(x0: number, z0: number, x1: number, z1: number): void {
+    this.saveEdits++;
     const r = this.splatRect;
     if (!this.splatDirty) {
       r.x0 = x0;
@@ -335,6 +336,7 @@ export class TerrainSystem {
       }
     }
     this.revision++;
+    this.saveEdits++;
     this.onHeightsDirty?.(minX, minZ, maxX, maxZ);
   }
 
@@ -735,7 +737,25 @@ vec3 terrainColor() {
 
   // ---------------------------------------------------------------- save / load
 
+  /** Bumped by every height or tile edit: the autosave reuses the last encoding while it's unchanged. */
+  private saveEdits = 0;
+  private saveCache: { edits: number; data: TerrainSaveData } | null = null;
+
+  /** For code that writes `heights` / `tiles` directly (editor undo) before serializing. */
+  public invalidateSaveCache(): void {
+    this.saveEdits++;
+  }
+
   public serialize(): TerrainSaveData {
+    // Encoding is ~0.5 M cells of diff + RLE (tens of ms and MBs of garbage on a phone) for a world
+    // that usually hasn't been sculpted since the last autosave
+    if (this.saveCache?.edits === this.saveEdits) return this.saveCache.data;
+    const data = this.encode();
+    this.saveCache = { edits: this.saveEdits, data };
+    return data;
+  }
+
+  private encode(): TerrainSaveData {
     const base = TerrainSystem.base();
     const dh = new Int16Array(V * V);
     for (let i = 0; i < dh.length; i++) dh[i] = Math.round(this.heights[i] * 100) - base.heights[i];

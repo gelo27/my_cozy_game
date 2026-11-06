@@ -158,20 +158,19 @@ export class BoatController {
     const fx = Math.sin(yaw), fz = Math.cos(yaw);
     const L = BOAT_HALF_LENGTH * 0.92;
     const W = BOAT_HALF_WIDTH * 0.9;
-    // Bow, stern, middle and the two beam points
-    const pts = [
-      [x + fx * L, z + fz * L],
-      [x - fx * L, z - fz * L],
-      [x, z],
-      [x + fz * W, z - fx * W],
-      [x - fz * W, z + fx * W],
-    ];
-    for (const [px, pz] of pts) {
-      const w = riverWorld.waterLevelAt(px, pz);
-      if (w - this.terrain.getHeight(px, pz) < BOAT_CONFIG.MIN_DEPTH) return false;
-      if (w > level + BOAT_CONFIG.MAX_STEP_UP) return false;
-    }
-    return true;
+    // Bow, stern, middle and the two beam points (no temp arrays: this runs every frame)
+    return (
+      this.deepEnough(x + fx * L, z + fz * L, level) &&
+      this.deepEnough(x - fx * L, z - fz * L, level) &&
+      this.deepEnough(x, z, level) &&
+      this.deepEnough(x + fz * W, z - fx * W, level) &&
+      this.deepEnough(x - fz * W, z + fx * W, level)
+    );
+  }
+
+  private deepEnough(px: number, pz: number, level: number): boolean {
+    const w = riverWorld.waterLevelAt(px, pz);
+    return w - this.terrain.getHeight(px, pz) >= BOAT_CONFIG.MIN_DEPTH && w <= level + BOAT_CONFIG.MAX_STEP_UP;
   }
 
   /** Something solid (pier post, rock, building) within `dist` along `dir` at hull height? */

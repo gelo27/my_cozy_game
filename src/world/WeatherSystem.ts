@@ -389,8 +389,9 @@ export class WeatherSystem {
 
   private sampleKeys(keys: [number, number][], hour: number, out: THREE.Color): THREE.Color {
     for (let i = 0; i < keys.length - 1; i++) {
-      const [h0, c0] = keys[i];
-      const [h1, c1] = keys[i + 1];
+      // Indexed, not destructured: array destructuring allocates an iterator (called many times a frame)
+      const k0 = keys[i], k1 = keys[i + 1];
+      const h0 = k0[0], c0 = k0[1], h1 = k1[0], c1 = k1[1];
       if (hour >= h0 && hour <= h1) {
         const f = (hour - h0) / (h1 - h0);
         return out.copy(WeatherSystem._c.setHex(c0)).lerp(WeatherSystem._c2.setHex(c1), f);

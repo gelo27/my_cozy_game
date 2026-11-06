@@ -35,6 +35,8 @@ export class DebugRenderer {
   }
 
   public update(controller?: CharacterController): void {
+    // The controller builds its per-frame ground-ray list only while someone draws it
+    if (controller) controller.collectGroundRaysDebug = this.enabled;
     if (!this.enabled || !this.physics.isInitialized()) return;
 
     try {

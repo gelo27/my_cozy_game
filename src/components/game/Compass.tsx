@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { GameWorld } from '../../engine/GameEngine';
 import { SITE_ICON, MARKER_ICON } from './WorldMap';
-import { t } from '../../i18n/i18n';
+import { t, useLang } from '../../i18n/i18n';
 
 const panel = 'bg-[#fffaf0]/90 text-[#4a3b2a] border border-[#e9dcc3] shadow-[0_6px_20px_rgba(60,40,10,0.18)]';
 /** Half of the visible arc, in degrees. */
@@ -23,7 +23,9 @@ interface Target {
  * React state refreshed twice a second; positions on the strip are written straight to the DOM every
  * animation frame, so turning the camera never re-renders React.
  */
-export const Compass: React.FC<{ world: GameWorld; heading(): number }> = ({ world, heading }) => {
+// Memoized: its props never change, so the HUD pushes that re-render App don't rebuild the strip
+export const Compass = React.memo(function Compass({ world, heading, inCave }: { world: GameWorld; heading(): number; inCave: boolean }) {
+  useLang();
   const [targets, setTargets] = useState<Target[]>([]);
   const stripRef = useRef<HTMLDivElement>(null);
   const ex = world.exploration;
@@ -149,11 +151,11 @@ export const Compass: React.FC<{ world: GameWorld; heading(): number }> = ({ wor
         ))}
         <div className="absolute left-1/2 bottom-0 -translate-x-1/2 w-0 h-0 border-l-[5px] border-r-[5px] border-b-[6px] border-l-transparent border-r-transparent border-b-[#4a3b2a]" />
       </div>
-      {world.exploration.inCave && (
+      {inCave && (
         <div className="absolute inset-0 flex items-center justify-center bg-[#2a2420]/85 text-[#f3e6cc] text-xs font-bold">
           🕯️ {t('explore.inCave')}
         </div>
       )}
     </div>
   );
-};
+});

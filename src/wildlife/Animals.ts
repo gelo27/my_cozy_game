@@ -363,7 +363,7 @@ export class FishSchools extends Species {
     const w = this.deep(ctx, x, z, 1.6);
     if (!w) return false;
     // Big water only: a few metres around must be water too (skips puddles and narrow creeks)
-    for (const [ox, oz] of [[4, 0], [-4, 0], [0, 4], [0, -4]]) if (!this.deep(ctx, x + ox, z + oz, 0.9)) return false;
+    if (!this.deep(ctx, x + 4, z, 0.9) || !this.deep(ctx, x - 4, z, 0.9) || !this.deep(ctx, x, z + 4, 0.9) || !this.deep(ctx, x, z - 4, 0.9)) return false;
     a.x = a.tx = x;
     a.z = a.tz = z;
     a.y = a.ty = THREE.MathUtils.lerp(w.bed + 0.5, w.surface - 0.6, 0.3 + this.rnd() * 0.5);

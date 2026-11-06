@@ -541,6 +541,8 @@ export class GameEngine {
   private autosaveTimer = 60;
   private hudTimer = 0;
   private lastHudKey = '';
+  private lastHudJson = '';
+  private lastBuildingTelemetry: BuildingTelemetry | null = null;
   private lastEditorRevision = -1;
   private frameMsAccum = 0;
   private lastStepMs = 0;
@@ -699,7 +701,14 @@ export class GameEngine {
     // The reel minigame marker moves continuously: stream it while active
     if (w.gameplay.fishing.state.phase === 'reel' && this.frameCount % 2 === 0) callbacks.onGameplayHud(w.gameplay.getHudState());
     if (this.hudTimer <= 0 || hudKey !== this.lastHudKey) {
-      if (hudKey !== this.lastHudKey || this.hudTimer <= 0) callbacks.onGameplayHud(w.gameplay.getHudState());
+      // Each push re-renders the whole React tree (hundreds of KB of garbage on a phone): the
+      // periodic refresh (buff / cooking timers, pet affection) only goes out when something changed
+      const state = w.gameplay.getHudState();
+      const json = JSON.stringify(state);
+      if (hudKey !== this.lastHudKey || json !== this.lastHudJson) {
+        this.lastHudJson = json;
+        callbacks.onGameplayHud(state);
+      }
       this.lastHudKey = hudKey;
       this.hudTimer = 0.5;
     }
@@ -746,7 +755,8 @@ export class GameEngine {
       const fps = (this.frameCount * 1000) / (now - this.lastFpsUpdate);
       this.adaptResolution(fps, now - this.lastFpsUpdate);
       callbacks.onStats(fps, stepTime);
-      if (DEV_TOOLS_ENABLED) {
+      // Only the editor shows these: in play mode they'd re-render the whole UI 3x a second
+      if (DEV_TOOLS_ENABLED && this.mode === 'editor') {
         const info = this.renderer.info;
         const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
         callbacks.onDevStats({
@@ -767,10 +777,27 @@ export class GameEngine {
       this.frameMsAccum = 0;
       this.lastFpsUpdate = now;
 
-      if (character.buildAbility) callbacks.onBuildingTelemetry({ ...character.buildAbility.getTelemetry() });
+      if (character.buildAbility) this.pushBuildingTelemetry(character.buildAbility.getTelemetry());
     } else if (character.buildAbility && (character.buildAbility.isBuildModeActive || character.buildAbility.isPaintingModeActive)) {
-      if (this.frameCount % 4 === 0) callbacks.onBuildingTelemetry({ ...character.buildAbility.getTelemetry() });
+      if (this.frameCount % 4 === 0) this.pushBuildingTelemetry(character.buildAbility.getTelemetry());
     }
+  }
+
+  /** Sends building telemetry to React only when a field changed (each push re-renders the UI). */
+  private pushBuildingTelemetry(next: BuildingTelemetry): void {
+    const prev = this.lastBuildingTelemetry;
+    if (prev) {
+      let same = true;
+      for (const k in next) {
+        if (next[k as keyof BuildingTelemetry] !== prev[k as keyof BuildingTelemetry]) {
+          same = false;
+          break;
+        }
+      }
+      if (same && Object.keys(prev).length === Object.keys(next).length) return;
+    }
+    this.lastBuildingTelemetry = next;
+    this.callbacks.onBuildingTelemetry({ ...next });
   }
 
   /** Called ~3x per second. Ignores hidden tabs (rAF is paused/throttled there, fps means nothing). */

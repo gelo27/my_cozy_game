@@ -83,6 +83,13 @@ export class RockField {
     this.vertexCapacity = instances * 420;
     this.batch = new THREE.BatchedMesh(instances, this.vertexCapacity, 0, mat);
     this.batch.name = 'Rocks';
+    // three r185 bug: WebGLRenderer.setProgram checks `object.colorTexture`, but BatchedMesh keeps it
+    // in `_colorsTexture`. `undefined !== null` made it re-resolve the shader program (getParameters,
+    // a fresh object of ~80 fields) on every draw: steady garbage for the GC. Alias the field.
+    const batch = this.batch;
+    Object.defineProperty(batch, 'colorTexture', {
+      get: () => (batch as unknown as { _colorsTexture: THREE.DataTexture | null })._colorsTexture,
+    });
     // Culled per rock inside the batch; its own bounds would need recomputing on every change
     this.batch.frustumCulled = false;
     this.group.add(this.batch);

@@ -137,6 +137,11 @@ export abstract class Species {
   }
 
   /** Frame update. Returns the spawn attempts used (for the shared budget). */
+  private freeAgent(): Agent | undefined {
+    for (const a of this.agents) if (!a.active) return a;
+    return undefined;
+  }
+
   public update(dt: number, ctx: WildContext, frustum: THREE.Frustum | null, frame: number, stride: number, allowSpawn: boolean): void {
     const T = this.tune;
     const p = ctx.player;
@@ -165,7 +170,7 @@ export abstract class Species {
     // Spawn a few per frame in a ring around the player
     if (allowSpawn && active < want) {
       for (let t = 0; t < T.triesPerFrame && active < want; t++) {
-        const slot = this.agents.find((a) => !a.active);
+        const slot = this.freeAgent();
         if (!slot) break;
         const ang = this.rnd() * Math.PI * 2;
         const r = T.spawnMin + Math.sqrt(this.rnd()) * (T.spawnMax - T.spawnMin);

@@ -25,6 +25,16 @@ export class PhysicsWorld {
     this.initialized = true;
   }
 
+  /** One reusable ray: casts run many times a frame and Rapier copies it into WASM on each call. */
+  private scratchRay: RAPIER.Ray | null = null;
+  private rayFor(origin: THREE.Vector3, direction: THREE.Vector3): RAPIER.Ray {
+    if (!this.scratchRay) this.scratchRay = new this.rapier.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
+    const r = this.scratchRay;
+    r.origin.x = origin.x; r.origin.y = origin.y; r.origin.z = origin.z;
+    r.dir.x = direction.x; r.dir.y = direction.y; r.dir.z = direction.z;
+    return r;
+  }
+
   public isInitialized(): boolean {
     return this.initialized && !!this.world;
   }
@@ -271,10 +281,7 @@ export class PhysicsWorld {
     }
 
     try {
-      const ray = new this.rapier.Ray(
-        { x: origin.x, y: origin.y, z: origin.z },
-        { x: direction.x, y: direction.y, z: direction.z }
-      );
+      const ray = this.rayFor(origin, direction);
 
       return this.world.castRay(
         ray,
@@ -321,10 +328,7 @@ export class PhysicsWorld {
     }
 
     try {
-      const ray = new this.rapier.Ray(
-        { x: origin.x, y: origin.y, z: origin.z },
-        { x: direction.x, y: direction.y, z: direction.z }
-      );
+      const ray = this.rayFor(origin, direction);
 
       const hit = this.world.castRayAndGetNormal(
         ray,

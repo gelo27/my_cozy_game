@@ -48,7 +48,9 @@ export class PrecipitationOcclusion {
     this.size = 32;
     this.cellSize = boxSize / this.size;
     this.castBudget = mobile ? 40 : 120;
-    this.refreshBudget = mobile ? 6 : 20;
+    // The refresh only catches new roofs / removed buildings: every cast allocates Rapier wrappers,
+    // so a full pass every ~2-4 s (instead of < 1 s) keeps the rain from feeding the GC
+    this.refreshBudget = mobile ? 4 : 8;
     const n = this.size * this.size;
     this.heights = new Float32Array(n).fill(OPEN_SKY);
     this.keysX = new Float32Array(n).fill(NaN);

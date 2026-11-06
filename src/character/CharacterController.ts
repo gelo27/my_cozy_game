@@ -108,6 +108,9 @@ export class CharacterController {
   };
 
   public groundRaysDebug: GroundRayDebugInfo[] = [];
+  /** Set by DebugRenderer: the ray list (5 entries + 10 vectors a frame) is garbage when nobody draws it. */
+  public collectGroundRaysDebug = false;
+  private readonly probeScratch = new THREE.Vector3();
 
   private wasGrounded: boolean = false;
   /** Collider under the feet from the last ground probe (null in the air). */
@@ -352,7 +355,8 @@ export class CharacterController {
     ) {
       return;
     }
-    const centerOrigin = new THREE.Vector3(translation.x, translation.y, translation.z);
+    const centerOrigin = translation;
+    const debug = this.collectGroundRaysDebug;
 
     const radius = CHARACTER_CONFIG.GROUND_RAY_OFFSET_RADIUS;
     const rayLength = CHARACTER_CONFIG.GROUND_RAY_LENGTH;
@@ -368,7 +372,7 @@ export class CharacterController {
     const avgNormal = new THREE.Vector3(0, 0, 0);
     const closestPoint = new THREE.Vector3();
     let closestCollider: RAPIER.Collider | null = null;
-    this.groundRaysDebug = [];
+    if (debug || this.groundRaysDebug.length) this.groundRaysDebug = [];
 
     // Only skip ground check if character is actively launching upward in a jump
     if (this.jumpAbility.isJumping && linvel.y > 1.2) {
@@ -382,7 +386,7 @@ export class CharacterController {
       };
       
       // Still populate ray debug origins and targets for wireframe rendering
-      for (const probe of PROBE_OFFSETS) {
+      if (debug) for (const probe of PROBE_OFFSETS) {
         const probeOrigin = new THREE.Vector3(
           centerOrigin.x + probe.dx * radius,
           centerOrigin.y,
@@ -404,12 +408,12 @@ export class CharacterController {
     }
 
     for (const probe of PROBE_OFFSETS) {
-      const probeOrigin = new THREE.Vector3(
+      // The cast doesn't keep the origin: one scratch vector unless the debug view keeps them
+      const probeOrigin = (debug ? new THREE.Vector3() : this.probeScratch).set(
         centerOrigin.x + probe.dx * radius,
         centerOrigin.y,
         centerOrigin.z + probe.dz * radius
       );
-      const probeTarget = new THREE.Vector3(probeOrigin.x, probeOrigin.y - rayLength, probeOrigin.z);
 
       const hitResult = this.physics.castRayAndGetNormal(
         probeOrigin,
@@ -430,22 +434,22 @@ export class CharacterController {
           closestCollider = hitResult.hit.collider;
         }
 
-        this.groundRaysDebug.push({
+        if (debug) this.groundRaysDebug.push({
           id: probe.id,
           name: probe.name,
           origin: probeOrigin,
-          target: probeTarget,
+          target: new THREE.Vector3(probeOrigin.x, probeOrigin.y - rayLength, probeOrigin.z),
           hitPoint: hitResult.point,
           hitNormal: hitResult.normal,
           isHit: true,
           distance: hitResult.hit.timeOfImpact,
         });
-      } else {
+      } else if (debug) {
         this.groundRaysDebug.push({
           id: probe.id,
           name: probe.name,
           origin: probeOrigin,
-          target: probeTarget,
+          target: new THREE.Vector3(probeOrigin.x, probeOrigin.y - rayLength, probeOrigin.z),
           hitPoint: null,
           hitNormal: null,
           isHit: false,
@@ -462,7 +466,7 @@ export class CharacterController {
       }
       
       // Calculate angle with global up vector (0, 1, 0)
-      const dotUp = THREE.MathUtils.clamp(avgNormal.dot(new THREE.Vector3(0, 1, 0)), -1, 1);
+      const dotUp = THREE.MathUtils.clamp(avgNormal.y, -1, 1);
       const slopeAngleRad = Math.acos(dotUp);
       const slopeAngleDeg = THREE.MathUtils.radToDeg(slopeAngleRad);
 

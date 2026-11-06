@@ -261,6 +261,7 @@ export class EditorController {
     }
     this.terrain.heights.set(s.heights);
     this.terrain.tiles.set(s.tiles);
+    this.terrain.invalidateSaveCache();
     const save = this.terrain.serialize();
     this.terrain.deserialize(save); // marks all chunks/splat/physics dirty
     this.props.deserialize(s.props);
