@@ -6,6 +6,8 @@ import { PropSystem } from '../world/PropSystem';
 import { WeatherSystem, WeatherType } from '../world/WeatherSystem';
 import { FishingSystem, FishingState } from './FishingSystem';
 import { PetSystem, Pet } from './PetSystem';
+import { PestSystem, PestKind } from './Pests';
+import { critterSounds } from './CritterSounds';
 import { RECIPES, FISH_IDS, SEA_FISH_IDS, DISH_BUFF, Recipe } from './Recipes';
 import { audioEngine } from '../audio/AudioEngine';
 import { CompanionNPC } from '../npc/CompanionNPC';
@@ -15,6 +17,9 @@ import { t, dataName, getLang } from '../i18n/i18n';
 const FLOUR_PER_CRATE = 3;
 
 export type GameplayPanel = 'cook' | 'shop' | null;
+
+/** Coins a pest knocks out of the player's pockets per hit. */
+const HIT_COIN_LOSS = 5;
 
 export interface GameplayPrompt {
   text: string;
@@ -56,6 +61,7 @@ export class GameplayManager {
   public prompt: GameplayPrompt | null = null;
   public readonly fishing: FishingSystem;
   public readonly pets: PetSystem;
+  public readonly pests: PestSystem;
   public companion: CompanionNPC | null = null;
   public explore: ExplorePort | null = null;
   /** Pets and the companion wait here instead of following (the cave mouth while the player is inside). */
@@ -71,6 +77,7 @@ export class GameplayManager {
   private readonly castTarget = new THREE.Vector3();
   private readonly tmp = new THREE.Vector3();
   private lastPlayerPos = new THREE.Vector3();
+  private invulnerable = 0;
 
   public onNotify: (text: string, type?: 'success' | 'info' | 'warning') => void = () => {};
 
@@ -85,6 +92,28 @@ export class GameplayManager {
   ) {
     this.fishing = new FishingSystem(scene, terrain);
     this.pets = new PetSystem(scene, terrain, particles);
+    this.pests = new PestSystem(scene, terrain, particles);
+    this.pests.port = {
+      hurt: (from, power, kind) => this.hurtPlayer(from, power, kind),
+    };
+  }
+
+  // ---------------------------------------------------------------- pests
+
+  /** A rolling hedgehog or a fireball hit: knockback, a short stun and a few lost coins. */
+  private hurtPlayer(from: THREE.Vector3, power: number, kind: PestKind): boolean {
+    if (this.invulnerable > 0) return false;
+    this.invulnerable = 1.6;
+    const pos = this.character.getPosition();
+    this.tmp.set(pos.x - from.x, 0, pos.z - from.z);
+    if (this.tmp.lengthSq() < 1e-4) this.tmp.copy(this.character.getFacingDirection()).negate();
+    this.character.knockback(this.tmp, power, 0.55);
+    critterSounds.ouch();
+    const lost = Math.min(HIT_COIN_LOSS, this.inventory.getItemCount('coins'));
+    if (lost > 0) this.inventory.removeItem('coins', lost);
+    this.onNotify(t(kind === 'hedgehog' ? 'pest.hitHedgehog' : 'pest.hitDragon', { n: lost }), 'warning');
+    this.revision++;
+    return true;
   }
 
   // ---------------------------------------------------------------- frame
@@ -98,6 +127,8 @@ export class GameplayManager {
     this.companion?.update(dt, anchor);
     this.updateBuff(dt);
     this.updateCooking(dt);
+    this.invulnerable -= dt;
+    this.pests.update(dt, pos, !this.explore?.inCave && !isDriving);
 
     // Rod tip ~ above the right hand, in front of the player
     const facing = this.character.getFacingDirection();

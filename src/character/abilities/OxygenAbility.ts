@@ -70,7 +70,7 @@ export class OxygenAbility implements IAbility {
     const headY = pos.y + 0.45;
     
     // Check if character's head is submerged under water surface
-    const isSubmerged = context.isSwimming && (headY < riverWorld.waterLevelAt(pos.x, pos.z) - 0.05 || context.swimDepth > 0.15);
+    const isSubmerged = context.isSwimming && (headY < riverWorld.waterLevelAt3(pos.x, pos.y, pos.z) - 0.05 || context.swimDepth > 0.15);
     this.isUnderwater = isSubmerged;
     context.isUnderwater = this.isUnderwater;
 
@@ -113,7 +113,7 @@ export class OxygenAbility implements IAbility {
               new THREE.Vector3(pos.x, pos.y + 0.65, pos.z),
               new THREE.Vector3(vel.x * 0.3, 1.2, vel.z * 0.3),
               2,
-              riverWorld.waterLevelAt(pos.x, pos.z)
+              riverWorld.waterLevelAt3(pos.x, pos.y, pos.z)
             );
           }
         }

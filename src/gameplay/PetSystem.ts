@@ -305,6 +305,8 @@ export class PetSystem {
   public deserialize(data: PetSaveData[]): void {
     this.clear();
     for (const d of data) {
+      // Saves can hold pet kinds this version does not know (e.g. from removed features): skip them
+      if (!(d.kind in LOOKS)) continue;
       const pet = this.add(d.kind, d.name, new THREE.Vector3(d.p[0], 0, d.p[1]));
       pet.affection = d.affection;
     }

@@ -358,7 +358,7 @@ export class WeatherSystem {
     if (this.caveMix > 0.001) this.applyCave(this.caveMix);
     // Under water: a dense blue-green fog (darker deeper down and at night), and the sky behind
     // it turns the same colour, so nothing above the surface shows through the water
-    const surface = riverWorld.waterLevelAt(cameraPos.x, cameraPos.z);
+    const surface = riverWorld.waterLevelAt3(cameraPos.x, cameraPos.y, cameraPos.z);
     const below = surface - cameraPos.y;
     this.underDepth = Math.max(0, below);
     this.underwater += ((below > 0.02 ? 1 : 0) - this.underwater) * (1 - Math.exp(-dt * 25));

@@ -1,9 +1,10 @@
 import { injectNightLights } from './NightLighting';
 import * as THREE from 'three';
-import { SEA_BED_TOP, WORLD_SIZE, worldSettings } from './WorldSettings';
+import { SEA_FLOOR_Y, WORLD_SIZE, worldSettings } from './WorldSettings';
 import type { TerrainSystem } from './TerrainSystem';
 import { injectCaustics } from '../scene/WaterEffects';
 import { WATER_DETAIL_GLSL, updateWaterDetails } from '../scene/WaterDetails';
+import { waterSettings } from './WaterSettings';
 
 /** The sea planes follow the camera and reach past the far plane, so the ocean meets the horizon. */
 const OCEAN_SIZE = 1200;
@@ -32,18 +33,34 @@ const HEIGHT_REFRESH = 0.25;
 export class WaterSystem {
   public readonly mesh: THREE.Mesh;
   private readonly seabed: THREE.Mesh;
+  private readonly material: THREE.MeshLambertMaterial;
   private readonly uniforms = {
     uTime: { value: 0 },
     uWaterNormals: { value: null as THREE.Texture | null },
     uBedHeight: { value: null as THREE.Texture | null },
     /** 0..1: rain rings on the surface. */
     uRain: { value: 0 },
+    /** Dev-panel tunables (see WaterSettings.ts). */
+    uShallow: { value: new THREE.Color() },
+    uDeep: { value: new THREE.Color() },
+    uFoamCol: { value: new THREE.Color() },
+    /** x depthFalloff, y waveNear, z waveFar, w waveSpeed */
+    uWaveA: { value: new THREE.Vector4() },
+    /** x scale1, y scale2, z detailStart, w detailEnd */
+    uWaveB: { value: new THREE.Vector4() },
+    /** x fresnel, y glint, z glintSharpness, w foamAmount */
+    uShine: { value: new THREE.Vector4() },
+    /** x foamLine, y rippleFoam(0/1), z rippleSpeed */
+    uFoam: { value: new THREE.Vector3() },
+    uOpacity: { value: 1 },
   };
   private readonly heightData = new Uint8Array(V * V);
   private readonly heightTex: THREE.DataTexture;
   private terrain: TerrainSystem | null = null;
   private terrainRevision = -1;
   private heightTimer = 0;
+  /** The terrain's sand texture, for the open-sea bed (set with the terrain). */
+  private readonly bedSand = { value: null as THREE.Texture | null };
 
   constructor(scene: THREE.Scene) {
     this.heightData.fill(0);
@@ -80,6 +97,14 @@ uniform float uTime;
 uniform sampler2D uWaterNormals;
 uniform sampler2D uBedHeight;
 uniform float uRain;
+uniform vec3 uShallow;
+uniform vec3 uDeep;
+uniform vec3 uFoamCol;
+uniform vec4 uWaveA;
+uniform vec4 uWaveB;
+uniform vec4 uShine;
+uniform vec3 uFoam;
+uniform float uOpacity;
 ${WATER_DETAIL_GLSL}
 float seaDepth;
 float seaFoam;
@@ -90,38 +115,39 @@ vec3 seaWorldN;`
           `// Depth to the bed under this pixel (outside the island: the flat sea bed)
 vec2 bedUv = (vSeaW.xz + ${(HALF + 0.5).toFixed(1)}) / ${V.toFixed(1)};
 float inIsland = step(abs(vSeaW.x), ${HALF.toFixed(1)}) * step(abs(vSeaW.z), ${HALF.toFixed(1)});
-float bedY = mix(${SEA_BED_TOP.toFixed(2)}, texture2D(uBedHeight, bedUv).r * 15.9375 - ${HEIGHT_OFFSET.toFixed(2)}, inIsland);
+float bedY = mix(${SEA_FLOOR_Y.toFixed(2)},texture2D(uBedHeight, bedUv).r * 15.9375 - ${HEIGHT_OFFSET.toFixed(2)}, inIsland);
 seaDepth = max(vSeaW.y - bedY, 0.0);
 
 // Waves: two normal-map layers drifting apart; flatter with distance so far water stays calm
 float seaDist = distance(vSeaW, cameraPosition);
-float detail = 1.0 - smoothstep(25.0, 160.0, seaDist);
-vec3 n1 = texture2D(uWaterNormals, vSeaW.xz * 0.045 + uTime * vec2(0.011, 0.007)).xyz * 2.0 - 1.0;
-vec3 n2 = texture2D(uWaterNormals, vSeaW.xz * 0.12 + uTime * vec2(-0.015, 0.010)).xyz * 2.0 - 1.0;
-vec2 slope = (n1.xy * 0.6 + n2.xy * 0.4) * mix(0.08, 0.35, detail);
+float detail = 1.0 - smoothstep(uWaveB.z, uWaveB.w, seaDist);
+vec3 n1 = texture2D(uWaterNormals, vSeaW.xz * uWaveB.x + uTime * uWaveA.w * vec2(0.011, 0.007)).xyz * 2.0 - 1.0;
+vec3 n2 = texture2D(uWaterNormals, vSeaW.xz * uWaveB.y + uTime * uWaveA.w * vec2(-0.015, 0.010)).xyz * 2.0 - 1.0;
+vec2 slope = (n1.xy * 0.6 + n2.xy * 0.4) * mix(uWaveA.z, uWaveA.y, detail);
 seaWorldN = normalize(vec3(slope.x, 1.0, slope.y));
 
 // Shallow turquoise -> deep blue (linear colours)
-vec3 seaCol = mix(vec3(0.05, 0.50, 0.47), vec3(0.006, 0.11, 0.25), 1.0 - exp(-seaDepth * 0.35));
+vec3 seaCol = mix(uShallow, uDeep, 1.0 - exp(-seaDepth * uWaveA.x));
 seaCol *= 0.94 + (n1.z + n2.z) * 0.04;
 // Shore (flat white details, crisp edges): a line at the waterline, and ripple bands following
 // the depth contours that drift in toward the shore. Each band is cut into pieces by noise, so
 // it reads as separate ripples, and thins out over deeper water. No branches: fwidth inside.
 float wobble = (n1.x + n2.y) * 0.6;
-float ripPh = seaDepth * 2.6 + uTime * 0.22 + wobble * 0.12;
+float ripPh = seaDepth * 2.6 + uTime * uFoam.z + wobble * 0.12;
 float ripAa = fwidth(ripPh) * 1.2 + 0.002;
 float ripBreak = wdNoise(vSeaW.xz * 0.45 + floor(ripPh) * 13.7);
 float ripW = mix(0.3, 0.05, smoothstep(0.0, 1.4, seaDepth));
 float ripF = fract(ripPh);
 seaFoam = smoothstep(1.0 - ripW - ripAa, 1.0 - ripW, ripF) * (1.0 - smoothstep(1.0 - ripAa, 1.0, ripF));
-seaFoam *= smoothstep(0.45, 0.5, ripBreak) * (1.0 - smoothstep(1.1, 1.6, seaDepth)) * (1.0 - smoothstep(60.0, 140.0, seaDist));
+seaFoam *= uFoam.y * smoothstep(0.45, 0.5, ripBreak) * (1.0 - smoothstep(1.1, 1.6, seaDepth)) * (1.0 - smoothstep(60.0, 140.0, seaDist));
 float lineD = seaDepth + wobble * 0.04;
-seaFoam = max(seaFoam, 1.0 - smoothstep(0.09, 0.09 + fwidth(lineD) * 1.5 + 0.005, lineD));
-seaFoam *= inIsland;
+seaFoam = max(seaFoam, 1.0 - smoothstep(uFoam.x, uFoam.x + fwidth(lineD) * 1.5 + 0.005, lineD));
+seaFoam *= inIsland * uShine.w;
 // Rain: crisp rings where the drops hit (open sea too); the uniform test skips them in dry weather
 float seaRings = wdRainRings(vSeaW.xz, uTime, uRain) * (1.0 - smoothstep(25.0, 55.0, seaDist));
 if (uRain > 0.01) seaFoam = max(seaFoam, seaRings);
-diffuseColor.rgb = mix(seaCol, vec3(0.85, 0.92, 0.95), seaFoam);`
+diffuseColor.rgb = mix(seaCol, uFoamCol, clamp(seaFoam, 0.0, 1.0));
+diffuseColor.a = max(uOpacity, clamp(seaFoam, 0.0, 1.0));`
         )
         .replace(
           '#include <normal_fragment_maps>',
@@ -139,12 +165,12 @@ seaSky += hemisphereLights[0].skyColor;
 #endif
 if (gl_FrontFacing) {
   // Fresnel: grazing angles mirror the sky
-  float fres = 0.02 + 0.3 * pow(1.0 - seaNV, 5.0);
+  float fres = 0.02 + uShine.x * pow(1.0 - seaNV, 5.0);
   totalEmissiveRadiance += seaSky * vec3(0.55, 0.75, 0.95) * fres * (1.0 - seaFoam);
   #if NUM_DIR_LIGHTS > 0
   // Sun glint: a sharp highlight plus a soft sheen around it
   float nh = max(dot(normal, normalize(directionalLights[0].direction + seaV)), 0.0);
-  totalEmissiveRadiance += directionalLights[0].color * (pow(nh, 260.0) * 2.2 + pow(nh, 48.0) * 0.12) * (1.0 - seaFoam);
+  totalEmissiveRadiance += directionalLights[0].color * (pow(nh, uShine.z) * uShine.y + pow(nh, 48.0) * 0.12) * (1.0 - seaFoam);
   #endif
 } else {
   // From below: a dim ceiling, with the bright Snell's window straight overhead
@@ -153,6 +179,7 @@ if (gl_FrontFacing) {
 }`
         );
     };
+    this.material = mat;
     this.mesh = new THREE.Mesh(geo, mat);
     this.mesh.name = 'Water';
     this.mesh.frustumCulled = false;
@@ -160,11 +187,29 @@ if (gl_FrontFacing) {
 
     const bedGeo = new THREE.PlaneGeometry(OCEAN_SIZE, OCEAN_SIZE, 1, 1);
     bedGeo.rotateX(-Math.PI / 2);
-    const bedMat = new THREE.MeshLambertMaterial({ color: 0x8c8466 });
-    bedMat.onBeforeCompile = (shader) => injectCaustics(shader);
+    // Past the map edge the bed continues the terrain's own sea floor seamlessly: the same sand
+    // texture at the same scale, the same under-water darkening, caustics and night lights, at the
+    // same height. Over the island it is cut away (the terrain is there), save a 5 cm overlap that
+    // hides any hairline crack along the edge.
+    const bedMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    bedMat.customProgramCacheKey = () => 'sea-bed';
+    bedMat.onBeforeCompile = (shader) => {
+      injectNightLights(shader);
+      injectCaustics(shader);
+      shader.uniforms.uBedSand = this.bedSand;
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform sampler2D uBedSand;')
+        .replace(
+          '#include <map_fragment>',
+          `if (max(abs(vCauPos.x), abs(vCauPos.z)) < ${(HALF - 0.05).toFixed(2)}) discard;
+diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
+  * mix(1.0, 0.62, smoothstep(uCausticsSea, uCausticsSea - 1.5, vCauPos.y));`
+        );
+    };
     this.seabed = new THREE.Mesh(bedGeo, bedMat);
     this.seabed.name = 'SeaBed';
-    this.seabed.position.y = SEA_BED_TOP;
+    // A hair under the terrain's lowest height, so the overlap strip never z-fights
+    this.seabed.position.y = SEA_FLOOR_Y - 0.01;
     this.seabed.frustumCulled = false;
     scene.add(this.seabed);
   }
@@ -173,12 +218,28 @@ if (gl_FrontFacing) {
   public setTerrain(terrain: TerrainSystem): void {
     this.terrain = terrain;
     this.terrainRevision = -1;
+    this.bedSand.value = terrain.sandLayer;
   }
 
   /** `rain` 0..1 draws rain rings on the sea. */
   public update(dt: number, camera?: THREE.Vector3, rain = 0): void {
     this.uniforms.uTime.value += dt;
     this.uniforms.uRain.value = rain;
+    const ws = waterSettings;
+    const u = this.uniforms;
+    u.uShallow.value.set(ws.shallowColor);
+    u.uDeep.value.set(ws.deepColor);
+    u.uFoamCol.value.set(ws.foamColor);
+    u.uWaveA.value.set(ws.depthFalloff, ws.waveNear, ws.waveFar, ws.waveSpeed);
+    u.uWaveB.value.set(ws.waveScale1, ws.waveScale2, ws.detailStart, Math.max(ws.detailEnd, ws.detailStart + 1));
+    u.uShine.value.set(ws.fresnel, ws.glint, ws.glintSharpness, ws.foamAmount);
+    u.uOpacity.value = ws.opacity;
+    if (this.material.transparent !== ws.transparent) {
+      // The opaque/blended variants are different programs, so the material must be rebuilt
+      this.material.transparent = ws.transparent;
+      this.material.needsUpdate = true;
+    }
+    u.uFoam.value.set(ws.foamLine, ws.rippleFoam ? 1 : 0, ws.rippleSpeed);
     updateWaterDetails(dt);
     this.mesh.position.y = worldSettings.waterLevel;
     if (camera) {

@@ -136,6 +136,8 @@ export class TerrainSystem {
   public onHeightsDirty: ((x0: number, z0: number, x1: number, z1: number) => void) | null = null;
   /** The grass surface texture (3D grass takes its colour from it). */
   public grassLayer!: THREE.Texture;
+  /** The sand surface texture (the open-sea bed continues it past the map edge). */
+  public sandLayer!: THREE.Texture;
 
   constructor(scene: THREE.Scene, private readonly physics: PhysicsWorld) {
     this.group.name = 'Terrain';
@@ -582,6 +584,7 @@ export class TerrainSystem {
       tRock: createRockTexture(),
     };
     this.grassLayer = layers.tGrass;
+    this.sandLayer = layers.tSand;
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader, { perVertex: lite });
       Object.assign(shader.uniforms, this.uniforms, causticsUniforms, {

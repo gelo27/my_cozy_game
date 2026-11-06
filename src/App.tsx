@@ -201,7 +201,7 @@ export default function App() {
               />
             ) : (
               <>
-                <ViewportHUD isWireframe={isWireframe} telemetry={character?.telemetry} />
+                <ViewportHUD isWireframe={isWireframe} telemetry={character?.telemetry} camera={engine?.camera ?? null} />
                 <ControlsOverlay inputManager={engine?.input ?? null} telemetry={character?.telemetry} />
 
                 <GameHUD

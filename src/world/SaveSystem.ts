@@ -57,14 +57,14 @@ export class SaveSystem {
     for (const item of w.inventoryManager.getItems()) items[item.id] = item.count;
     // While riding, the on-foot body is parked under the world: save the player beside the vehicle
     const ride = w.vehicle.isPlayerInside ? w.vehicle : w.moped.isPlayerInside ? w.moped : null;
-    // Underground pockets are rebuilt on demand, so a save made in a cave resumes at its mouth;
+    // A save made in the caves resumes outside the nearest cave mouth;
     // a save made at sea resumes on the pier
     const p = w.boat.isPlayerInside
       ? w.boat.dock.clone().add(new THREE.Vector3(0, 1.2, 0))
       : ride
       ? ride.getPosition().add(new THREE.Vector3(1.5, 1.2, 0))
       : w.exploration.inCave
-        ? w.exploration.surfacePosition(w.character.getPosition()).add(new THREE.Vector3(0, 1.2, 0))
+        ? w.exploration.savePosition(w.character.getPosition()).add(new THREE.Vector3(0, 1.2, 0))
         : w.character.getPosition();
     const vt = w.vehicle.body.translation();
     const vr = w.vehicle.body.rotation();

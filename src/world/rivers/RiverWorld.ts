@@ -63,6 +63,23 @@ class RiverWorld {
 
   // ---------------------------------------------------------------- queries
 
+  /** Still water underground (cave pools): surface at a 3D point, NaN where there is none. */
+  public caveWater: ((x: number, y: number, z: number) => number) | null = null;
+
+  /** Cave pool surface at a 3D point, or NaN (no cave water there). */
+  public caveLevelAt(x: number, y: number, z: number): number {
+    return this.caveWater ? this.caveWater(x, y, z) : NaN;
+  }
+
+  /**
+   * Water surface for something at a 3D point: a cave pool when it is in one, else the sea or a
+   * river. Use this for the player and camera (pools sit above dry tunnels in the same column).
+   */
+  public waterLevelAt3(x: number, y: number, z: number): number {
+    const c = this.caveWater ? this.caveWater(x, y, z) : NaN;
+    return Number.isNaN(c) ? this.waterLevelAt(x, z) : c;
+  }
+
   /** Water surface at a point: the sea, or a river where one holds water. */
   public waterLevelAt(x: number, z: number): number {
     const sea = worldSettings.waterLevel;

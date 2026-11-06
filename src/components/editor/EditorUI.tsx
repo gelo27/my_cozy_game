@@ -16,6 +16,7 @@ import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, Weather
 import { worldSettings } from '../../world/WorldSettings';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
+import { waterSettings, WaterSettings, saveWaterSettings, resetWaterSettings } from '../../world/WaterSettings';
 import { causticsSettings, applyCausticsSettings, resetCausticsSettings, CausticsSettings } from '../../scene/WaterEffects';
 
 const ICONS: Record<string, React.ElementType> = {
@@ -25,7 +26,7 @@ const ICONS: Record<string, React.ElementType> = {
 
 const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції' };
 
-type Tab = 'world' | 'scene' | 'atmo' | 'save' | 'debug';
+type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'save' | 'debug';
 
 interface EditorUIProps {
   engine: GameEngine;
@@ -67,6 +68,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
   const tabs: { id: Tab; icon: React.ElementType; label: string }[] = [
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
     { id: 'atmo', icon: Sun, label: 'Час, погода, вода' },
+    { id: 'water', icon: Waves, label: 'Шейдер води' },
     { id: 'save', icon: Save, label: 'Збереження' },
     { id: 'debug', icon: Activity, label: 'Дебаг' },
   ];
@@ -128,6 +130,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
         {tab === 'world' && <ToolPanel engine={engine} />}
         {tab === 'scene' && <ScenePanel engine={engine} rerender={rerender} />}
         {tab === 'atmo' && <AtmospherePanel engine={engine} rerender={rerender} />}
+        {tab === 'water' && <WaterPanel rerender={rerender} />}
         {tab === 'save' && <SavePanel engine={engine} notify={props.notify} />}
         {tab === 'debug' && <DebugTab {...props} />}
       </div>
@@ -585,6 +588,105 @@ const CausticsTuner: React.FC<{ rerender(): void }> = ({ rerender }) => {
         Скинути
       </button>
     </Section>
+  );
+};
+
+const hexOf = (n: number) => '#' + n.toString(16).padStart(6, '0');
+
+type WaterNum = { [K in keyof WaterSettings]: WaterSettings[K] extends number ? K : never }[keyof WaterSettings];
+interface WaterSlider { k: WaterNum; label: string; min: number; max: number; step: number; fmt?(v: number): string }
+
+const WATER_GROUPS: { title: string; sliders: WaterSlider[] }[] = [
+  {
+    title: 'Глибина',
+    sliders: [{ k: 'depthFalloff', label: 'Швидкість потемніння', min: 0.02, max: 1.5, step: 0.01, fmt: (v) => v.toFixed(2) }],
+  },
+  {
+    title: 'Хвилі',
+    sliders: [
+      { k: 'waveNear', label: 'Нахил поблизу', min: 0, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
+      { k: 'waveFar', label: 'Нахил удалині', min: 0, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
+      { k: 'waveScale1', label: 'Великі хвилі (щільність)', min: 0.005, max: 0.3, step: 0.005, fmt: (v) => `${(1 / v).toFixed(0)} м на повтор` },
+      { k: 'waveScale2', label: 'Дрібні хвилі (щільність)', min: 0.02, max: 0.6, step: 0.005, fmt: (v) => `${(1 / v).toFixed(1)} м на повтор` },
+      { k: 'waveSpeed', label: 'Швидкість', min: 0, max: 8, step: 0.1, fmt: (v) => `×${v.toFixed(1)}` },
+      { k: 'detailStart', label: 'Спокій від', min: 0, max: 300, step: 5, fmt: (v) => `${v} м` },
+      { k: 'detailEnd', label: 'Повний спокій на', min: 10, max: 500, step: 5, fmt: (v) => `${v} м` },
+    ],
+  },
+  {
+    title: 'Відблиски',
+    sliders: [
+      { k: 'fresnel', label: 'Дзеркальність неба', min: 0, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
+      { k: 'glint', label: 'Блик сонця', min: 0, max: 8, step: 0.1, fmt: (v) => v.toFixed(1) },
+      { k: 'glintSharpness', label: 'Гострота блику', min: 8, max: 1000, step: 1, fmt: (v) => v.toFixed(0) },
+    ],
+  },
+  {
+    title: 'Піна',
+    sliders: [
+      { k: 'foamAmount', label: 'Кількість', min: 0, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
+      { k: 'foamLine', label: 'Лінія берега', min: 0.01, max: 0.6, step: 0.01, fmt: (v) => `${v.toFixed(2)} м` },
+      { k: 'rippleSpeed', label: 'Швидкість смуг', min: 0, max: 1.5, step: 0.01, fmt: (v) => v.toFixed(2) },
+    ],
+  },
+];
+
+/** Live look of the sea shader (saved in this browser). */
+const WaterPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const w = waterSettings;
+  const set = <K extends keyof WaterSettings>(k: K, v: WaterSettings[K]) => {
+    w[k] = v;
+    saveWaterSettings();
+    rerender();
+  };
+  const colors = [
+    ['shallowColor', 'Мілко'],
+    ['deepColor', 'Глибоко'],
+    ['foamColor', 'Піна'],
+  ] as const;
+  return (
+    <>
+      <Section title="Прозорість">
+        <label className="flex items-center gap-2 text-zinc-400">
+          <input type="checkbox" checked={w.transparent} onChange={(e) => set('transparent', e.target.checked)} className="accent-sky-500" />
+          Прозора вода (вимк. = суцільна, швидше)
+        </label>
+        <div className={w.transparent ? '' : 'opacity-40 pointer-events-none'}>
+          <Slider label="Непрозорість" value={w.opacity} min={0.05} max={1} step={0.01} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => set('opacity', v)} />
+        </div>
+      </Section>
+      <Section title="Кольори">
+        <div className="grid grid-cols-3 gap-2">
+          {colors.map(([k, label]) => (
+            <label key={k} className="flex flex-col items-center gap-1 text-[10px] text-zinc-400">
+              <input
+                type="color"
+                value={hexOf(w[k])}
+                onChange={(e) => set(k, parseInt(e.target.value.slice(1), 16))}
+                className="w-full h-7 bg-transparent border border-white/10 rounded cursor-pointer"
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </Section>
+      {WATER_GROUPS.map((g) => (
+        <Section key={g.title} title={g.title}>
+          {g.sliders.map((s) => (
+            <Slider key={s.k} label={s.label} value={w[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(v) => set(s.k, v)} />
+          ))}
+          {g.title === 'Піна' && (
+            <label className="flex items-center gap-2 text-zinc-400">
+              <input type="checkbox" checked={w.rippleFoam} onChange={(e) => set('rippleFoam', e.target.checked)} className="accent-sky-500" />
+              Смуги піни, що наближаються до берега
+            </label>
+          )}
+        </Section>
+      ))}
+      <button className={chip(false)} onClick={() => (resetWaterSettings(), rerender())}>
+        Скинути
+      </button>
+    </>
   );
 };
 

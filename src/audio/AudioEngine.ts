@@ -203,6 +203,58 @@ class AudioEngine {
     }
   }
 
+  private reverb: { send: GainNode; conv: ConvolverNode; wet: GainNode; connected: boolean } | null = null;
+
+  /**
+   * Room reverb on the effects and ambience (caves): 0 = dry. The convolver is only fed while the
+   * mix is up, so above ground it costs nothing; its impulse response is built once, on first use.
+   */
+  public setReverb(mix: number): void {
+    const ctx = this.ctx;
+    const sfx = this.channels.sfx, amb = this.channels.ambient;
+    if (!ctx || !this.master || !sfx || !amb) return;
+    if (mix <= 0.001 && !this.reverb?.connected) return;
+    if (!this.reverb) {
+      const send = ctx.createGain();
+      const conv = ctx.createConvolver();
+      conv.buffer = this.makeImpulse(ctx, 2.6);
+      const wet = ctx.createGain();
+      wet.gain.value = 0;
+      send.connect(conv).connect(wet).connect(this.master);
+      this.reverb = { send, conv, wet, connected: false };
+    }
+    const r = this.reverb;
+    if (mix > 0.001 && !r.connected) {
+      sfx.connect(r.send);
+      amb.connect(r.send);
+      r.connected = true;
+    }
+    r.wet.gain.setTargetAtTime(mix, ctx.currentTime, 0.25);
+    if (mix <= 0.001 && r.connected && r.wet.gain.value < 0.002) {
+      sfx.disconnect(r.send);
+      amb.disconnect(r.send);
+      r.connected = false;
+    }
+  }
+
+  /** Stereo decaying noise with a few early reflections, like a rocky hall. */
+  private makeImpulse(ctx: AudioContext, seconds: number): AudioBuffer {
+    const len = Math.floor(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) {
+        const t = i / len;
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 3.2) * 0.5;
+      }
+      for (const [ms, g] of [[11, 0.5], [23, 0.35], [37, 0.3], [58, 0.22], [83, 0.16]]) {
+        const at = Math.floor(((ms + ch * 3) / 1000) * ctx.sampleRate);
+        if (at < len) d[at] += g * (ch ? -1 : 1);
+      }
+    }
+    return buf;
+  }
+
   /** Destination for the sound being built: a world panner after at(), else the flat bus. */
   private output(): AudioNode {
     const pos = this.pendingPos;

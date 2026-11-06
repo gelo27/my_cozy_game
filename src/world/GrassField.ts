@@ -310,12 +310,12 @@ float grWaterY = grRiver.g > 0.5 ? max(uGrSea, grRiver.r) : uGrSea;
 float grBeach = (grRiver.g > 0.5 && grWaterY > uGrSea + 0.3)
   ? smoothstep(grWaterY + 0.32, grWaterY + 0.08, grY) * smoothstep(0.8, 0.97, grRiver.g)
   : smoothstep(grWaterY + 0.55, grWaterY + 0.15, grY);
-float grEdge = 1.0 - smoothstep(GR_SIZE * 0.34, GR_SIZE * 0.48, length(grLocal));
+float grEdge = 1.0 - smoothstep(GR_SIZE * 0.22, GR_SIZE * 0.49, length(grLocal));
 float grDens = grD.r * (1.0 - grBeach);
 // Height: per blade, clumps of taller and shorter grass, thinning out at density borders
 float grClump = grNoise(grRoot * 0.21) * 0.7 + grNoise(grRoot * 0.73 + 5.3) * 0.3;
 float grH = ${LITE ? '0.5' : '0.46'} * mix(0.5, 1.0, aGrRnd.x) * (0.45 + grClump * 1.0)
-  * smoothstep(0.3, 0.75, grDens) * grEdge;
+  * smoothstep(0.02, 0.95, grDens) * grEdge;
 int grVi = gl_VertexID % 3;
 vGrTip = grVi == 2 ? 1.0 : 0.0;
 vec3 transformed = vec3(grRoot.x, grY - 0.03, grRoot.y);

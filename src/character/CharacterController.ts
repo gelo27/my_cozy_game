@@ -547,7 +547,9 @@ export class CharacterController {
 
       // Harvesting (while the hold bar fills and the pick-up plays) and watering root the player:
       // movement, jumping and dashing are ignored until the action's animation has finished
-      const actionLocked = this.model.isActionLocked() || !!this.farmingAbility?.isHarvestHolding;
+      // A knockback (a pest's hit) also takes the controls away for a moment
+      if (this.stunTimer > 0) this.stunTimer = Math.max(0, this.stunTimer - dt);
+      const actionLocked = this.model.isActionLocked() || !!this.farmingAbility?.isHarvestHolding || this.stunTimer > 0;
       const move = actionLocked ? this.lockMovement(input.movement) : input.movement;
 
       const cameraForward = camera.getForwardVector();
@@ -701,6 +703,19 @@ export class CharacterController {
     } catch (err) {
       console.warn('[CharacterController] update error:', err);
     }
+  }
+
+  /** Seconds the player stays knocked back without control. */
+  public stunTimer = 0;
+
+  /** Throws the player away from a hit (horizontal direction `dir`) and stuns them briefly. */
+  public knockback(dir: THREE.Vector3, power: number, stunSeconds = 0.5): void {
+    if (!this.body || !this.physics.isInitialized()) return;
+    const len = Math.hypot(dir.x, dir.z) || 1;
+    this.body.setGravityScale(1.0, true);
+    this.body.setLinvel({ x: (dir.x / len) * power, y: 3.2 + power * 0.25, z: (dir.z / len) * power }, true);
+    this.stunTimer = Math.max(this.stunTimer, stunSeconds);
+    this.model.triggerLandingSquash(-6);
   }
 
   public respawn(customPos?: THREE.Vector3): void {

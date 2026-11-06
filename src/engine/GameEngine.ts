@@ -20,6 +20,7 @@ import { FURNITURE_LIGHTS, FURNITURE_MATERIALS } from '../building/furniture/Fur
 import type { ExtraLight } from '../world/NightLighting';
 import { AmbientAudio } from '../audio/AmbientAudio';
 import { audioEngine } from '../audio/AudioEngine';
+import { caveAudio } from '../audio/CaveAudio';
 import { FootstepAudio, FootSurface } from '../audio/Footsteps';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import type RAPIER from '@dimforge/rapier3d-compat';
@@ -258,6 +259,9 @@ export class GameEngine {
     this.input.dispose();
     this.world?.editor.dispose();
     this.world?.debugRenderer.dispose();
+    // Cave network: GPU buffers, colliders, the generator worker if still running, its sounds
+    this.world?.exploration.dispose();
+    caveAudio.dispose();
     this.physics.dispose();
     this.renderer.dispose();
     this.renderer.domElement.parentElement?.removeChild(this.renderer.domElement);
@@ -486,6 +490,8 @@ export class GameEngine {
         callbacks.onLog('info', 'Відновлено останнє автозбереження.');
       }
       if (!gameplay.pets.pets.length) gameplay.pets.spawnDefaults(SPAWN_POSITION);
+      // Hedgehogs and baby dragons out in the wilds (not saved: each session gets fresh ones)
+      gameplay.pests.populate(character.getPosition());
 
       window.addEventListener('keydown', this.handleKeyDown);
       window.addEventListener('keyup', this.handleKeyUp);
@@ -616,7 +622,7 @@ export class GameEngine {
     // Splash drops, the swimmer's rising air bubbles and the caustics' clock
     character.swimAbility?.waterParticles?.update(dt);
     const camPos = this.camera.camera.position;
-    character.swimAbility?.waterEffects?.update(dt, camPos.y < riverWorld.waterLevelAt(camPos.x, camPos.z));
+    character.swimAbility?.waterEffects?.update(dt, camPos.y < riverWorld.waterLevelAt3(camPos.x, camPos.y, camPos.z));
     character.buildAbility?.buildingManager?.flushPendingRegeneration();
     if (character.buildAbility) {
       inputManager.setBuildMode(character.buildAbility.isBuildModeActive);
@@ -845,9 +851,11 @@ export class GameEngine {
     if (!w) return;
     const camera = this.camera.camera;
     audioEngine.updateListener(camera);
-    audioEngine.setUnderwater(camera.position.y < riverWorld.waterLevelAt(camera.position.x, camera.position.z) || !!w.character.oxygenAbility?.isUnderwater);
+    const cp = camera.position;
+    audioEngine.setUnderwater(cp.y < riverWorld.waterLevelAt3(cp.x, cp.y, cp.z) || !!w.character.oxygenAbility?.isUnderwater);
     this.listenerPos.copy(camera.position);
     if (!audioEngine.context) return;
+    caveAudio.update(dt, !!w.exploration.inCave, this.listenerPos);
 
     // Swimming: entry splash, strokes, lapping, bubbles and the underwater bed
     const tel = w.character.telemetry;
@@ -949,7 +957,7 @@ export class GameEngine {
   /** What the foot landed on: building floor paint, structure/prop tag, wading water or the painted terrain tile. */
   private surfaceUnder(p: THREE.Vector3, collider: RAPIER.Collider | null): FootSurface {
     const w = this.world!;
-    if (riverWorld.waterLevelAt(p.x, p.z) > p.y + 0.04) return 'water';
+    if (riverWorld.waterLevelAt3(p.x, p.y + 0.5, p.z) > p.y + 0.04) return 'water';
     const ud = (collider as unknown as { userData?: { pieceId?: string; pieceType?: string; surface?: FootSurface } } | null)?.userData;
     if (ud?.pieceId) {
       const type = ud.pieceType ?? '';

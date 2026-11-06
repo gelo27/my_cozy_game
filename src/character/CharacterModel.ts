@@ -365,7 +365,11 @@ export class CharacterModel {
     // Footstep moments: the frames where a foot comes down onto the ground (for the step sounds)
     const plants: number[] = [];
     for (let k = 0; k < feet.length; k++) {
-      const low = samples.map((frame) => Math.min(...frame[k].ys) < groundY + 0.012);
+      // Per-foot ground level: a clip whose feet bottom out at slightly different heights would
+      // otherwise never register the higher foot, leaving one step sound per stride instead of two
+      const mins = samples.map((frame) => Math.min(...frame[k].ys));
+      const footGround = Math.min(...mins);
+      const low = mins.map((m) => m < footGround + 0.012);
       for (let i = 0; i < steps; i++) if (low[i] && !low[(i - 1 + steps) % steps]) plants.push(i * dt);
     }
     // The heel-to-toe roll touches down several times per step: keep the first touch of each step
@@ -587,6 +591,7 @@ export class CharacterModel {
       this.activeWeapon = 10;
     } else if (itemId === 'fishing_rod') {
       this.activeWeapon = 13;
+
     } else if (itemId.endsWith('_seed')) {
       this.activeWeapon = 11;
     } else {
@@ -900,7 +905,10 @@ export class CharacterModel {
       this.gaitClip = null;
       return;
     }
-    const t = action.time;
+    // Fire slightly ahead of the visual contact to cover audio output latency and the sound's own
+    // attack, so the step is heard when the foot lands, not after it
+    const d0 = action.getClip().duration;
+    const t = (action.time + 0.06 * action.timeScale + d0) % d0;
     if (this.gaitClip === clip) {
       const prev = this.gaitTime;
       const d = action.getClip().duration;

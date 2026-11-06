@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { PropSystem } from '../world/PropSystem';
@@ -20,7 +19,7 @@ import { audioEngine } from '../audio/AudioEngine';
 import { t, dataName } from '../i18n/i18n';
 import { buildLandmark, LandmarkAnchors } from './Landmarks';
 import { STRUCTURE_MATERIALS } from './StructureBuilder';
-import { CaveInterior } from './CaveInterior';
+import { CaveNetwork, CaveContentsWorld } from './cave/CaveNetwork';
 import { ForageField, ForageNode } from './ForageField';
 import { EXPLORE_GRID } from './MapRenderer';
 
@@ -45,6 +44,7 @@ const LOOT: Record<string, Loot> = {
   ruins: { items: [{ itemId: 'coins', amount: 320 }, { itemId: 'gem_ruby', amount: 1 }, { itemId: 'gold_ore', amount: 4 }] },
   cave1: { items: [{ itemId: 'coins', amount: 160 }, { itemId: 'crystal', amount: 3 }, { itemId: 'gold_ore', amount: 2 }] },
   cave2: { items: [{ itemId: 'coins', amount: 220 }, { itemId: 'gem_ruby', amount: 1 }, { itemId: 'crystal', amount: 2 }] },
+  cave3: { items: [{ itemId: 'coins', amount: 260 }, { itemId: 'gold_ore', amount: 3 }, { itemId: 'crystal', amount: 4 }] },
 };
 
 interface Chest {
@@ -58,9 +58,6 @@ interface Chest {
 interface CaveEntry {
   site: IslandSite;
   index: number;
-  origin: THREE.Vector3;
-  interior: CaveInterior | null;
-  lights: ExtraLight[];
 }
 
 type Action =
@@ -81,8 +78,11 @@ export interface ExplorationSaveData {
 const DISCOVER_RADIUS = 30;
 const REVEAL_RADIUS = 44;
 const CELL = (WORLD_HALF * 2) / EXPLORE_GRID;
-/** Caves live in pockets far out over the open sea, high above it. */
-const CAVE_ORIGINS = [new THREE.Vector3(380, 150, 250), new THREE.Vector3(380, 150, 30)];
+/**
+ * The cave network lives in its own pocket of the world, far beyond the sea and the view distance:
+ * cave-local x/z are island x/z (so the map knows where you are underground), shifted by this.
+ */
+const CAVE_ORIGIN = new THREE.Vector3(1500, 200, 0);
 
 /**
  * Exploration layer of the island: landmarks with chests, caves (entered through a doorway that
@@ -111,11 +111,16 @@ export class ExplorationManager {
   private readonly chests: Chest[] = [];
   private readonly openedChestIds = new Set<string>();
   private readonly caves: CaveEntry[] = [];
+  /** One network under the whole island; every cave mouth leads into it. */
+  private readonly network: CaveNetwork;
+  private readonly caveLights: ExtraLight[] = [];
+  private caveLightKey = NaN;
+  private caveHintShown = false;
   private readonly forage: ForageField;
   private readonly root = new THREE.Group();
   private revealTimer = 0;
   private promptTimer = 0;
-  private transition: { t: number; swapped: boolean; run: () => void } | null = null;
+  private transition: { t: number; swapped: boolean; run: () => void; ready: () => boolean } | null = null;
   private markerSeq = 1;
   private readonly tmp = new THREE.Vector3();
 
@@ -142,11 +147,24 @@ export class ExplorationManager {
       if (anchors.chest && LOOT[site.id]) this.addChest(site.id, anchors.chest.pos, anchors.chest.yaw);
       if (site.kind === 'cave') {
         const index = this.caves.length;
-        this.caves.push({ site, index, origin: CAVE_ORIGINS[index % CAVE_ORIGINS.length], interior: null, lights: [] });
+        this.caves.push({ site, index });
       }
     }
     this.placeMountainOre();
     this.placeBeachForage();
+
+    const coast = new Float32Array(360);
+    for (let d = 0; d < 360; d++) coast[d] = coastRadius(Math.cos((d * Math.PI) / 180) * 100, Math.sin((d * Math.PI) / 180) * 100);
+    this.network = new CaveNetwork(
+      scene,
+      physics,
+      CAVE_ORIGIN,
+      this.caves.map(({ site }) => ({ id: site.id, x: site.x, y: site.y, z: site.z, yaw: site.yaw })),
+      coast,
+      1337
+    );
+    this.network.onReady = (c) => this.populateCave(c);
+    riverWorld.caveWater = (x, y, z) => this.network.waterLevelAt(x, y, z);
   }
 
   // ---------------------------------------------------------------- world dressing
@@ -241,73 +259,45 @@ export class ExplorationManager {
 
   // ---------------------------------------------------------------- caves
 
-  private getCaveById(id: string | null): CaveEntry | undefined {
-    return this.caves.find((c) => c.site.id === id);
-  }
-
-  /** Builds a cave's interior the first time it is needed (~150 ms, hidden behind the fade). */
-  private ensureInterior(cave: CaveEntry): CaveInterior {
-    if (cave.interior) return cave.interior;
-    const interior = new CaveInterior(cave.site.id, cave.origin, 11 + cave.index * 37, this.scene, this.physics);
-    const L = interior.layout;
-    for (const o of L.ores) this.rocks.addRock(o.pos.clone().setY(o.pos.y - 0.1), o.kind, o.kind === 'crystal' ? 0.9 : 0.8);
-    for (const m of L.mushrooms) this.forage.add('mushroom', m);
-    if (LOOT[cave.site.id]) this.addChest(cave.site.id, L.chest.pos, L.chest.yaw);
-    if (this.openedChestIds.has(cave.site.id)) this.markChestOpened(cave.site.id, true);
-
-    // Decorative glowing crystal clusters, merged into one mesh per colour
-    const shards = new Map<string, { color: THREE.Color; geos: THREE.BufferGeometry[] }>();
-    for (const [i, c] of L.crystals.entries()) {
-      const key = c.color.getHexString();
-      if (!shards.has(key)) shards.set(key, { color: c.color, geos: [] });
-      for (let k = 0; k < 4; k++) {
-        const a = i * 2.1 + k * 1.7;
-        const g = new THREE.CylinderGeometry(0, 0.09 + (k % 2) * 0.05, 0.5 + k * 0.18, 5);
-        g.translate(0, (0.5 + k * 0.18) / 2, 0);
-        g.rotateX(Math.sin(a) * 0.5);
-        g.rotateZ(Math.cos(a) * 0.5);
-        g.translate(c.pos.x + Math.cos(a) * 0.18 * k, c.pos.y - 0.05, c.pos.z + Math.sin(a) * 0.18 * k);
-        shards.get(key)!.geos.push(g);
-      }
-      cave.lights.push({ x: c.pos.x, y: c.pos.y + 0.6, z: c.pos.z, range: 6.5, halo: 1.2, intensity: 1.1, color: [c.color.r * 1.4, c.color.g * 1.4, c.color.b * 1.4] });
+  /** The network's chests, ore and mushrooms belong to the shared systems (added once, when built). */
+  private populateCave(c: CaveContentsWorld): void {
+    for (const o of c.ores) this.rocks.addRock(o.pos.clone().setY(o.pos.y - 0.1), o.kind, o.kind === 'crystal' ? 0.9 : 0.8);
+    for (const m of c.mushrooms) this.forage.add('mushroom', m);
+    for (const ch of c.chests) {
+      if (!LOOT[ch.id]) continue;
+      this.addChest(ch.id, ch.pos, ch.yaw);
+      if (this.openedChestIds.has(ch.id)) this.markChestOpened(ch.id, true);
     }
-    for (const { color, geos } of shards.values()) {
-      const mesh = new THREE.Mesh(mergeGeometries(geos)!, new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(0.9) }));
-      geos.forEach((g) => g.dispose());
-      interior.group.add(mesh);
-    }
-    for (const m of L.mushrooms) cave.lights.push({ x: m.x, y: m.y + 0.4, z: m.z, range: 3.2, halo: 0.5, intensity: 0.7, color: [0.35, 0.8, 1.0] });
-    for (const p of L.torches) {
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 1.3, 6), STRUCTURE_MATERIALS.darkWood);
-      pole.position.set(p.x, p.y + 0.65, p.z);
-      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.25, 6), new THREE.MeshBasicMaterial({ color: 0xffb347 }));
-      flame.position.set(p.x, p.y + 1.42, p.z);
-      interior.group.add(pole, flame);
-      cave.lights.push({ x: p.x, y: p.y + 1.5, z: p.z, range: 8, halo: 1.6, intensity: 1.2, flicker: true });
-    }
-    // The way out: a bright opening of daylight behind the spawn point
-    const glow = new THREE.Mesh(new THREE.CircleGeometry(1.6, 18), new THREE.MeshBasicMaterial({ color: 0xdff3ff, fog: false }));
-    glow.position.copy(L.exit).add(new THREE.Vector3(0, 1.5, -0.9));
-    interior.group.add(glow);
-    cave.lights.push({ x: L.exit.x, y: L.exit.y + 1.6, z: L.exit.z + 0.5, range: 7, halo: 0, intensity: 0.8, color: [0.75, 0.85, 1.0] });
-    cave.interior = interior;
-    return interior;
+    this.lightRevision++;
+    this.revision++;
   }
 
   private enterCave(cave: CaveEntry, character: CharacterController, camera: ThirdPersonCamera): void {
-    this.startTransition(() => {
-      const L = this.ensureInterior(cave).layout;
-      character.respawn(L.spawn.clone().setY(L.spawn.y + 0.9));
-      character.model.setFacingAngleInstant(L.spawnYaw);
-      camera.targetYaw = L.spawnYaw + Math.PI;
-      this.inCave = cave.site.id;
-      this.lightRevision++;
-      this.gameplay.anchorOverride = this.landmarks.get(cave.site.id)?.action?.clone() ?? null;
-      this.discover(cave.site);
-      this.revision++;
-    });
+    // The network is generated in a worker from startup; if it is not done yet the fade waits for it
+    this.startTransition(
+      () => {
+        const e = this.network.entrances.find((en) => en.id === cave.site.id);
+        if (!e) return;
+        this.network.finishColliders();
+        character.respawn(e.spawn.clone().setY(e.spawn.y + 0.9));
+        character.model.setFacingAngleInstant(e.yaw);
+        camera.targetYaw = e.yaw + Math.PI;
+        this.inCave = cave.site.id;
+        this.caveLightKey = NaN;
+        this.lightRevision++;
+        this.gameplay.anchorOverride = this.landmarks.get(cave.site.id)?.action?.clone() ?? null;
+        this.discover(cave.site);
+        if (!this.caveHintShown) {
+          this.caveHintShown = true;
+          this.onNotify(t('explore.caveNetwork'), 'info');
+        }
+        this.revision++;
+      },
+      () => this.network.ready
+    );
   }
 
+  /** Out through any mouth of the network, onto that cave's pad on the surface. */
   private exitCave(cave: CaveEntry, character: CharacterController, camera: ThirdPersonCamera): void {
     this.startTransition(() => {
       const out = this.outsideSpot(cave);
@@ -317,6 +307,7 @@ export class ExplorationManager {
       this.inCave = null;
       this.lightRevision++;
       this.gameplay.anchorOverride = null;
+      this.discover(cave.site);
       this.revision++;
     });
   }
@@ -328,15 +319,33 @@ export class ExplorationManager {
     return new THREE.Vector3(x, this.terrain.getHeight(x, z), z);
   }
 
-  /** Where the player stands on the surface (the cave mouth while underground). */
+  /** Where the player is on the island: underground, the spot on the surface right above them. */
   public surfacePosition(playerPos: THREE.Vector3): THREE.Vector3 {
-    const cave = this.getCaveById(this.inCave);
-    return cave ? this.outsideSpot(cave) : playerPos.clone();
+    if (!this.inCave) return playerPos.clone();
+    const x = THREE.MathUtils.clamp(playerPos.x - CAVE_ORIGIN.x, -WORLD_HALF, WORLD_HALF);
+    const z = THREE.MathUtils.clamp(playerPos.z - CAVE_ORIGIN.z, -WORLD_HALF, WORLD_HALF);
+    return new THREE.Vector3(x, this.terrain.getHeight(x, z), z);
   }
 
-  private startTransition(run: () => void): void {
+  /** Where a save made now should resume: underground, outside the nearest cave mouth. */
+  public savePosition(playerPos: THREE.Vector3): THREE.Vector3 {
+    if (!this.inCave) return playerPos.clone();
+    let best: CaveEntry | null = null;
+    let bestD = Infinity;
+    for (const c of this.caves) {
+      const d = Math.hypot(c.site.x - (playerPos.x - CAVE_ORIGIN.x), c.site.z - (playerPos.z - CAVE_ORIGIN.z));
+      if (d < bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    return best ? this.outsideSpot(best) : playerPos.clone();
+  }
+
+  /** `ready`: the swap waits (the screen stays dark) until it returns true. */
+  private startTransition(run: () => void, ready: () => boolean = () => true): void {
     if (this.transition) return;
-    this.transition = { t: 0, swapped: false, run };
+    this.transition = { t: 0, swapped: false, run, ready };
     this.fading = true;
     this.revision++;
     audioEngine.playBuildSelect();
@@ -357,12 +366,27 @@ export class ExplorationManager {
     }
     this.weather.caveFactor = this.inCave ? 1 : 0;
     this.nightLighting.forcedDark = this.inCave ? 1 : 0;
+    this.network.update(dt, playerPos, !!this.inCave);
+    // Cave lights come from the buckets around the player: refresh on crossing into another one
+    if (this.inCave) {
+      const key = this.network.lightKey(playerPos);
+      if (key !== this.caveLightKey) {
+        this.caveLightKey = key;
+        this.caveLights.length = 0;
+        this.network.lightsNear(playerPos, this.caveLights);
+        this.lightRevision++;
+      }
+    }
 
     if (this.transition) {
       const tr = this.transition;
       tr.t += dt;
       // The HUD fade takes ~0.35 s; swap while the screen is black, then fade back in
       if (!tr.swapped && tr.t > 0.4) {
+        if (!tr.ready()) {
+          tr.t = 0.4;
+          return;
+        }
         tr.swapped = true;
         tr.run();
       }
@@ -401,8 +425,13 @@ export class ExplorationManager {
     for (const c of this.chests) {
       if (!c.opened && near(c.pos, 1.9)) return { text: t('explore.openChest'), action: { kind: 'chest', chest: c } };
     }
-    const cave = this.getCaveById(this.inCave);
-    if (cave?.interior && near(cave.interior.layout.exit, 2.2)) return { text: t('explore.exitCave'), action: { kind: 'exitCave', cave } };
+    if (this.inCave) {
+      for (const e of this.network.entrances) {
+        if (!near(e.mouth, 2.2)) continue;
+        const cave = this.caves.find((c) => c.site.id === e.id);
+        if (cave) return { text: t('explore.exitCave'), action: { kind: 'exitCave', cave } };
+      }
+    }
     if (!this.inCave) {
       for (const c of this.caves) {
         const a = this.landmarks.get(c.site.id)?.action;
@@ -540,8 +569,7 @@ export class ExplorationManager {
   public getLights(): ExtraLight[] {
     const out: ExtraLight[] = [];
     if (this.inCave) {
-      const cave = this.getCaveById(this.inCave);
-      if (cave) out.push(...cave.lights);
+      for (const l of this.caveLights) out.push(l);
     } else {
       for (const lm of this.landmarks.values()) out.push(...lm.lights);
     }
@@ -589,6 +617,12 @@ export class ExplorationManager {
     this.lightRevision++;
     this.gameplay.anchorOverride = null;
     this.markerSeq = this.markers.reduce((m, k) => Math.max(m, k.id), 0) + 1;
+    this.caveLightKey = NaN;
     this.revision++;
+  }
+
+  public dispose(): void {
+    this.network.dispose();
+    riverWorld.caveWater = null;
   }
 }

@@ -80,23 +80,27 @@ export class SwimAbility implements IAbility {
     const pos = context.body.translation();
     const vel = context.body.linvel();
 
-    // Local surface: the sea, or a river (only deep enough stretches are swum; shallows are waded)
-    const level = riverWorld.waterLevelAt(pos.x, pos.z);
+    // Local surface: a cave pool, the sea, or a river (only deep enough stretches are swum; shallows are waded)
+    const caveLevel = riverWorld.caveLevelAt(pos.x, pos.y, pos.z);
+    const inCavePool = !Number.isNaN(caveLevel);
+    const level = inCavePool ? caveLevel : riverWorld.waterLevelAt(pos.x, pos.z);
     this.waterMax.y = level;
     riverWorld.flowAt(pos.x, pos.z, this.flow);
     // Shallows are waded, not swum: the player stands up wherever the water is at most about
     // waist / chest deep (hysteresis so walking along the edge does not flicker)
-    const bed = pos.y <= level + 0.45 ? this.waterDepthUnder(context, pos, level) : Infinity;
+    const bed = pos.y <= level + 0.45 ? this.waterDepthUnder(context, pos, level, inCavePool) : Infinity;
     const shallow = bed < (this.isSwimming ? WADE_DEPTH_EXIT : WADE_DEPTH_ENTER);
 
     // 1. Water Bounds Check
     // Capsule height is 1.5m (center at pos.y). Enter water when center drops below water level + 0.45m.
+    // Cave pools lie in their own pocket outside the sea bounds and have their own extent
     const inWaterVolume =
-      pos.x >= this.waterMin.x &&
-      pos.x <= this.waterMax.x &&
-      pos.z >= this.waterMin.z &&
-      pos.z <= this.waterMax.z &&
-      pos.y >= this.waterMin.y &&
+      (inCavePool ||
+        (pos.x >= this.waterMin.x &&
+          pos.x <= this.waterMax.x &&
+          pos.z >= this.waterMin.z &&
+          pos.z <= this.waterMax.z &&
+          pos.y >= this.waterMin.y)) &&
       pos.y <= this.waterMax.y + 0.45 &&
       !shallow;
 
@@ -317,7 +321,7 @@ export class SwimAbility implements IAbility {
    * Water depth (surface to bed) under the player: a ray down to the ground / seabed / dock,
    * falling back to the river bed sample. Deep water past the ray counts as very deep.
    */
-  private waterDepthUnder(context: CharacterContext, pos: { x: number; y: number; z: number }, level: number): number {
+  private waterDepthUnder(context: CharacterContext, pos: { x: number; y: number; z: number }, level: number, cave = false): number {
     if (!this.groundFilter) {
       this.groundFilter = context.physics.packCollisionGroups(
         COLLISION_GROUPS.CHARACTER,
@@ -328,6 +332,7 @@ export class SwimAbility implements IAbility {
     this.rayOrigin.set(pos.x, Math.min(pos.y, level + 0.5), pos.z);
     const hit = context.physics.castRayAndGetNormal(this.rayOrigin, DOWN, 6, context.collider, this.groundFilter);
     if (hit) return level - hit.point.y;
+    if (cave) return Infinity;
     if (level > worldSettings.waterLevel + 0.01) return riverWorld.depthAt(pos.x, pos.z);
     return Infinity;
   }

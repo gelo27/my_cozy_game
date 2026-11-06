@@ -24,7 +24,7 @@ let cache: IslandSite[] | null = null;
 
 /**
  * Deterministic landmark placement on the raw island: a lighthouse on a south-eastern headland,
- * ruins on the highest summit, a hut in quiet hills, and two caves cut into mountain slopes.
+ * ruins on the highest summit, a hut in quiet hills, and three cave mouths cut into mountain slopes.
  * Searches run once on a coarse grid (a few thousand noise samples).
  */
 export function getIslandSites(): IslandSite[] {
@@ -90,29 +90,43 @@ export function getIslandSites(): IslandSite[] {
 
   // Caves: steep mountain flanks facing downhill, high enough to be mountains, spread apart
   {
-    const candidates: { score: number; x: number; z: number; y: number; yaw: number }[] = [];
-    for (let z = -220; z <= 220; z += 4) {
-      for (let x = -220; x <= 220; x += 4) {
-        const r = Math.hypot(x, z);
-        if (r < FARM_CLEAR + 20 || r > coastRadius(x, z) - 35) continue;
-        const y = h(x, z);
-        if (y < 5 || y > 15) continue;
-        const s = slopeAt(x, z);
-        if (s.mag < 0.45 || s.mag > 1.3) continue;
-        // The ground in front (downhill) must be walkable so the player can reach the mouth
-        const fx = -s.gx / s.mag, fz = -s.gz / s.mag;
-        const front = slopeAt(x + fx * 7, z + fz * 7);
-        if (front.mag > 0.5) continue;
-        candidates.push({ score: s.mag - front.mag - r * 0.002, x, z, y, yaw: Math.atan2(fx, fz) });
+    type Cand = { score: number; x: number; z: number; y: number; yaw: number };
+    // Strict pass first (keeps the original two mouths); looser passes only if a mouth is missing
+    const LEVELS = [
+      { yMin: 5, yMax: 15, sMin: 0.45, sMax: 1.3, front: 0.5, spacing: [90, 70, 55] },
+      { yMin: 3, yMax: 20, sMin: 0.3, sMax: 1.6, front: 0.65, spacing: [70, 50, 40] },
+      { yMin: 1.5, yMax: 28, sMin: 0.2, sMax: 2, front: 0.8, spacing: [50, 35] },
+    ];
+    const picked: Cand[] = [];
+    for (const L of LEVELS) {
+      if (picked.length >= 3) break;
+      const candidates: Cand[] = [];
+      for (let z = -220; z <= 220; z += 4) {
+        for (let x = -220; x <= 220; x += 4) {
+          const r = Math.hypot(x, z);
+          if (r < FARM_CLEAR + 20 || r > coastRadius(x, z) - 35) continue;
+          const y = h(x, z);
+          if (y < L.yMin || y > L.yMax) continue;
+          const s = slopeAt(x, z);
+          if (s.mag < L.sMin || s.mag > L.sMax) continue;
+          // The ground in front (downhill) must be walkable so the player can reach the mouth
+          const fx = -s.gx / s.mag, fz = -s.gz / s.mag;
+          const front = slopeAt(x + fx * 7, z + fz * 7);
+          if (front.mag > L.front) continue;
+          candidates.push({ score: s.mag - front.mag - r * 0.002, x, z, y, yaw: Math.atan2(fx, fz) });
+        }
       }
-    }
-    candidates.sort((a, b) => b.score - a.score);
-    const picked: typeof candidates = [];
-    for (const c of candidates) {
-      if (picked.length >= 2) break;
-      if (picked.some((p) => Math.hypot(p.x - c.x, p.z - c.z) < 90)) continue;
-      if (sites.some((s) => Math.hypot(s.x - c.x, s.z - c.z) < 40)) continue;
-      picked.push(c);
+      candidates.sort((a, b) => b.score - a.score);
+      // Three mouths into the one cave network, spread over the island
+      for (const spacing of L.spacing) {
+        for (const c of candidates) {
+          if (picked.length >= 3) break;
+          if (picked.some((p) => Math.hypot(p.x - c.x, p.z - c.z) < spacing)) continue;
+          if (sites.some((s) => Math.hypot(s.x - c.x, s.z - c.z) < 40)) continue;
+          picked.push(c);
+        }
+        if (picked.length >= 3) break;
+      }
     }
     picked.forEach((c, i) => {
       // The pad sits a little in front of the slope so the arch is half buried in the hill

@@ -1,6 +1,6 @@
 import { worldSettings } from '../world/WorldSettings';
 import * as THREE from 'three';
-import { WATER_EFFECTS_CONFIG, WATER_PHYSICS_CONFIG, WATER_FOG_CONFIG } from '../config/constants';
+import { WATER_EFFECTS_CONFIG, WATER_PHYSICS_CONFIG } from '../config/constants';
 
 interface SplashParticle {
   position: THREE.Vector3;
@@ -192,15 +192,7 @@ export class WaterParticleSystem {
    * Spawns a multi-droplet vertical splash fountain & radial crown when hitting water from height
    */
   public emitWaterSplash(position: THREE.Vector3, impactSpeed: number): void {
-    // Check water bounding box
-    if (
-      position.x < WATER_FOG_CONFIG.BOUNDS_MIN_X ||
-      position.x > WATER_FOG_CONFIG.BOUNDS_MAX_X ||
-      position.z < WATER_FOG_CONFIG.BOUNDS_MIN_Z ||
-      position.z > WATER_FOG_CONFIG.BOUNDS_MAX_Z
-    ) {
-      return;
-    }
+    // Callers only splash where there is water (the sea, rivers, cave pools far outside the sea box)
 
     const intensity = Math.min(Math.abs(impactSpeed) / 8.0, 2.5);
     const count = Math.min(36, Math.round(14 * Math.max(0.6, intensity)));
@@ -288,16 +280,8 @@ export class WaterParticleSystem {
     count: number = 2,
     surfaceY: number = worldSettings.waterLevel
   ): void {
-    // Only spawn if inside pool and below water surface
-    if (
-      headPosition.x < WATER_FOG_CONFIG.BOUNDS_MIN_X ||
-      headPosition.x > WATER_FOG_CONFIG.BOUNDS_MAX_X ||
-      headPosition.z < WATER_FOG_CONFIG.BOUNDS_MIN_Z ||
-      headPosition.z > WATER_FOG_CONFIG.BOUNDS_MAX_Z ||
-      headPosition.y > surfaceY - 0.25
-    ) {
-      return;
-    }
+    // Only spawn below the water surface (callers emit only in water: sea, rivers or cave pools)
+    if (headPosition.y > surfaceY - 0.25) return;
 
     for (let i = 0; i < count; i++) {
       let b = this.bubbleSprites.find((item) => !item.active);

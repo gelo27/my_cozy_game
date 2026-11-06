@@ -1,6 +1,7 @@
 import React from 'react';
 import { CharacterTelemetry } from '../character/CharacterController';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
+import { ZeldaOxygenWheel } from './ZeldaOxygenWheel';
 
 interface ViewportHUDProps {
   isWireframe: boolean;
@@ -10,7 +11,7 @@ interface ViewportHUDProps {
 }
 
 /** Minimal centre reticle; brighter while a tool (axe / pickaxe) is in hand. */
-export const ViewportHUD: React.FC<ViewportHUDProps> = ({ telemetry }) => {
+export const ViewportHUD: React.FC<ViewportHUDProps> = ({ telemetry, camera }) => {
   const toolReady = telemetry?.activeWeapon === 6 || telemetry?.activeWeapon === 12;
   return (
     <div id="viewport-tactical-hud" className="absolute inset-0 pointer-events-none select-none z-20 overflow-hidden">
@@ -21,6 +22,7 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({ telemetry }) => {
           }`}
         />
       </div>
+      <ZeldaOxygenWheel telemetry={telemetry} camera={camera} />
     </div>
   );
 };
