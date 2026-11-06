@@ -111,6 +111,21 @@ export class CharacterController {
   /** Set by DebugRenderer: the ray list (5 entries + 10 vectors a frame) is garbage when nobody draws it. */
   public collectGroundRaysDebug = false;
   private readonly probeScratch = new THREE.Vector3();
+  private readonly avgNormalScratch = new THREE.Vector3();
+  private readonly closestScratch = new THREE.Vector3();
+  private readonly rayOut = { hit: null as RAPIER.RayColliderHit | null, normal: new THREE.Vector3(), point: new THREE.Vector3() };
+  private readonly moveDirScratch = new THREE.Vector3();
+
+  /** Updates groundInfo in place (it is read by reference all over, a new object per frame is garbage). */
+  private setGroundInfo(grounded: boolean, distance: number, nx: number, ny: number, nz: number, slope: number, walkable: boolean, px: number, py: number, pz: number): void {
+    const g = this.groundInfo;
+    g.isGrounded = grounded;
+    g.distance = distance;
+    g.normal.set(nx, ny, nz);
+    g.slopeAngleDeg = slope;
+    g.isWalkableSlope = walkable;
+    g.surfaceHitPoint.set(px, py, pz);
+  }
 
   private wasGrounded: boolean = false;
   /** Collider under the feet from the last ground probe (null in the air). */
@@ -369,22 +384,15 @@ export class CharacterController {
 
     let hitsCount = 0;
     let minDistance = Infinity;
-    const avgNormal = new THREE.Vector3(0, 0, 0);
-    const closestPoint = new THREE.Vector3();
+    const avgNormal = this.avgNormalScratch.set(0, 0, 0);
+    const closestPoint = this.closestScratch.set(0, 0, 0);
     let closestCollider: RAPIER.Collider | null = null;
     if (debug || this.groundRaysDebug.length) this.groundRaysDebug = [];
 
     // Only skip ground check if character is actively launching upward in a jump
     if (this.jumpAbility.isJumping && linvel.y > 1.2) {
-      this.groundInfo = {
-        isGrounded: false,
-        distance: Infinity,
-        normal: new THREE.Vector3(0, 1, 0),
-        slopeAngleDeg: 0,
-        isWalkableSlope: true,
-        surfaceHitPoint: new THREE.Vector3(),
-      };
-      
+      this.setGroundInfo(false, Infinity, 0, 1, 0, 0, true, 0, 0, 0);
+
       // Still populate ray debug origins and targets for wireframe rendering
       if (debug) for (const probe of PROBE_OFFSETS) {
         const probeOrigin = new THREE.Vector3(
@@ -420,7 +428,8 @@ export class CharacterController {
         DOWN_DIR,
         rayLength,
         this.collider,
-        filterGroup
+        filterGroup,
+        debug ? undefined : this.rayOut
       );
 
       const isWalkableHit = hitResult && hitResult.normal.y > 0.35;
@@ -472,24 +481,10 @@ export class CharacterController {
 
       const isWalkable = slopeAngleDeg <= this.maxWalkableSlope;
 
-      this.groundInfo = {
-        isGrounded: true,
-        distance: minDistance,
-        normal: avgNormal,
-        slopeAngleDeg,
-        isWalkableSlope: isWalkable,
-        surfaceHitPoint: closestPoint,
-      };
+      this.setGroundInfo(true, minDistance, avgNormal.x, avgNormal.y, avgNormal.z, slopeAngleDeg, isWalkable, closestPoint.x, closestPoint.y, closestPoint.z);
       this.groundCollider = closestCollider;
     } else {
-      this.groundInfo = {
-        isGrounded: false,
-        distance: Infinity,
-        normal: new THREE.Vector3(0, 1, 0),
-        slopeAngleDeg: 0,
-        isWalkableSlope: true,
-        surfaceHitPoint: new THREE.Vector3(),
-      };
+      this.setGroundInfo(false, Infinity, 0, 1, 0, 0, true, 0, 0, 0);
     }
   }
 
@@ -635,7 +630,7 @@ export class CharacterController {
         targetFacingAngle = Math.atan2(cameraForward.x, cameraForward.z);
       } else if (isMovingInput) {
         // Naturally face the movement direction when walking/running (in normal mode, build mode, and paint mode)
-        const moveDir = new THREE.Vector3()
+        const moveDir = this.moveDirScratch.set(0, 0, 0)
           .addScaledVector(cameraForward, move.forward)
           .addScaledVector(cameraRight, move.right);
         targetFacingAngle = Math.atan2(moveDir.x, moveDir.z);

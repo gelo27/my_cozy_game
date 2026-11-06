@@ -21,7 +21,6 @@ import { GatherPrompt } from './character/abilities/GatheringAbility';
 import { GameHUD } from './components/game/GameHUD';
 import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
 import { WorldMap } from './components/game/WorldMap';
-import { Compass } from './components/game/Compass';
 import { SavingBadge } from './components/game/SavingBadge';
 import { PauseMenu } from './components/game/PauseMenu';
 import { EditorUI } from './components/editor/EditorUI';
@@ -270,7 +269,6 @@ export default function App() {
                   onEquipItem={(itemId: string) => character?.model.equipToolOrProp(itemId)}
                 />
 
-                {!isBuildingUI && hud && !hud.inCave && <Compass world={world} heading={engine!.getHeading} />}
                 {!isBuildingUI && hud && !hud.inCave && <SavingBadge />}
                 {isMapOpen && <WorldMap world={world} heading={engine!.getHeading} onClose={() => handleToggleMap(false)} />}
 

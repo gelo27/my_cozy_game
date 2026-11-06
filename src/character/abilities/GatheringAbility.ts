@@ -28,6 +28,7 @@ type Target =
  * The hit lands IMPACT_DELAY after the swing starts so it lines up with the CHOP / MINE clip.
  */
 export class GatheringAbility implements IAbility {
+  private readonly playerPosScratch = new THREE.Vector3();
   public name = 'GatheringAbility';
   public enabled = true;
 
@@ -58,7 +59,7 @@ export class GatheringAbility implements IAbility {
     this.updatePendingHit(dt);
 
     const t = context.body.translation();
-    const playerPos = new THREE.Vector3(t.x, t.y, t.z);
+    const playerPos = this.playerPosScratch.set(t.x, t.y, t.z);
     const target = this.findTarget(playerPos);
     const tool = this.equippedTool();
     this.currentPrompt = target ? this.buildPrompt(target, tool) : null;

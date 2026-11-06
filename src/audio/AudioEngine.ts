@@ -237,6 +237,23 @@ class AudioEngine {
     }
   }
 
+  private readonly noiseCache = new Map<string, AudioBuffer>();
+  /** Noise bursts are rendered once per (length, shape) and reused: filling ~50k samples per hit is garbage and a hitch. */
+  private noiseBuffer(seconds: number, decay = false, gain = 1): AudioBuffer {
+    const ctx = this.ctx!;
+    const key = `${seconds}|${decay}|${gain}|${ctx.sampleRate}`;
+    let buf = this.noiseCache.get(key);
+    if (!buf) {
+      const n = Math.floor(ctx.sampleRate * seconds);
+      buf = ctx.createBuffer(1, n, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * gain * (decay ? 1 - i / n : 1);
+      this.noiseCache.set(key, buf);
+    }
+    return buf;
+  }
+
+
   /** Stereo decaying noise with a few early reflections, like a rocky hall. */
   private makeImpulse(ctx: AudioContext, seconds: number): AudioBuffer {
     const len = Math.floor(ctx.sampleRate * seconds);
@@ -474,12 +491,7 @@ class AudioEngine {
     oscWood.stop(t + 0.23);
 
     // 3. Splinter crack (noise burst)
-    const bufferSize = this.ctx.sampleRate * 0.06;
-    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const output = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      output[i] = Math.random() * 2 - 1;
-    }
+    const noiseBuffer = this.noiseBuffer(0.06);
     const whiteNoise = this.ctx.createBufferSource();
     whiteNoise.buffer = noiseBuffer;
 
@@ -566,12 +578,7 @@ class AudioEngine {
     subOsc.stop(t + 0.5);
 
     // Leaves rustle whoosh
-    const bufferSize = this.ctx.sampleRate * 0.25;
-    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const output = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      output[i] = Math.random() * 2 - 1;
-    }
+    const noiseBuffer = this.noiseBuffer(0.25);
     const noise = this.ctx.createBufferSource();
     noise.buffer = noiseBuffer;
 
@@ -643,12 +650,7 @@ class AudioEngine {
     osc.stop(t + 0.2);
 
     // Wood/Stone clack & texture transient
-    const bufferSize = this.ctx.sampleRate * 0.1;
-    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = Math.random() * 2 - 1;
-    }
+    const noiseBuffer = this.noiseBuffer(0.1);
     const noise = this.ctx.createBufferSource();
     noise.buffer = noiseBuffer;
 
@@ -811,12 +813,7 @@ class AudioEngine {
     osc.stop(t + 0.15);
 
     // Soft roller/brush swoosh noise
-    const bufferSize = Math.floor(this.ctx.sampleRate * 0.12);
-    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
-    }
+    const noiseBuffer = this.noiseBuffer(0.12, true);
     const noise = this.ctx.createBufferSource();
     noise.buffer = noiseBuffer;
 
@@ -874,12 +871,7 @@ class AudioEngine {
     const duration = 0.45;
 
     // Filtered pinkish noise for water droplets
-    const bufferSize = Math.floor(this.ctx.sampleRate * duration);
-    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * 0.7;
-    }
+    const noiseBuffer = this.noiseBuffer(duration, false, 0.7);
     const noise = this.ctx.createBufferSource();
     noise.buffer = noiseBuffer;
 

@@ -4,6 +4,8 @@ import { IAbility, CharacterContext } from './IAbility';
 import { CARRY_CONFIG, COLLISION_GROUPS } from '../../config/constants';
 
 export class CarryAbility implements IAbility {
+  private readonly headOriginScratch = new THREE.Vector3();
+  private readonly upDirConst = new THREE.Vector3(0, 1, 0);
   public name: string = 'Carry';
   public enabled: boolean = true;
   
@@ -60,8 +62,8 @@ export class CarryAbility implements IAbility {
         ) {
           // Check ceiling obstruction above character head to prevent object from penetrating low ceilings/tunnels
           let targetHoldY = charPos.y + CARRY_CONFIG.HOLD_HEIGHT_OFFSET;
-          const headOrigin = new THREE.Vector3(charPos.x, charPos.y + 0.6, charPos.z);
-          const upDir = new THREE.Vector3(0, 1, 0);
+          const headOrigin = this.headOriginScratch.set(charPos.x, charPos.y + 0.6, charPos.z);
+          const upDir = this.upDirConst;
           const maxCheckHeight = CARRY_CONFIG.HOLD_HEIGHT_OFFSET - 0.6 + 0.3; // check up to hold top
 
           const envFilter = context.physics.packCollisionGroups(

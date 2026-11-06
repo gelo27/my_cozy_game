@@ -34,7 +34,6 @@ export interface GameplayHudState {
   panel: GameplayPanel;
   cooking: { recipeId: string; progress: number } | null;
   buff: { label: string; secondsLeft: number } | null;
-  clock: string;
   weather: WeatherType;
   isNight: boolean;
   coins: number;
@@ -414,7 +413,6 @@ export class GameplayManager {
       buff: this.buff
         ? { label: dataName('item', this.buff.dishId, this.inventory.getItem(this.buff.dishId)?.name ?? ''), secondsLeft: Math.ceil(this.buff.remaining) }
         : null,
-      clock: this.weather.getClockLabel(),
       weather: this.weather.weather,
       isNight: this.weather.isNight(),
       coins: this.inventory.getItemCount('coins'),
@@ -426,7 +424,7 @@ export class GameplayManager {
 
   public get hudKey(): string {
     // Cheap change detector for throttled HUD pushes
-    return `${this.revision}|${this.fishing.revision}|${this.explore?.fading}|${this.explore?.inCave}|${this.weather.getClockLabel()}|${this.weather.weather}|${getLang()}`;
+    return `${this.revision}|${this.fishing.revision}|${this.explore?.fading}|${this.explore?.inCave}|${this.weather.weather}|${getLang()}`;
   }
 
   public dispose(): void {

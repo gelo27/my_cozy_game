@@ -19,6 +19,15 @@ const SURFACE_CAPTURE = 0.55;
 const DOWN = new THREE.Vector3(0, -1, 0);
 
 export class SwimAbility implements IAbility {
+  // Per-frame scratch values (this update runs every frame while swimming)
+  private readonly sTarget = new THREE.Vector3();
+  private readonly sMove = new THREE.Vector3();
+  private readonly sLat = new THREE.Vector3();
+  private readonly sLatTarget = new THREE.Vector3();
+  private readonly sHead = new THREE.Vector3();
+  private readonly sBubbleVel = new THREE.Vector3();
+  private readonly sLin = { x: 0, y: 0, z: 0 };
+
   public name = 'Swim';
   public enabled = true;
 
@@ -182,10 +191,10 @@ export class SwimAbility implements IAbility {
         : WATER_PHYSICS_CONFIG.SWIM_WALK_SPEED_RATIO;
       const swimSpeed = WATER_PHYSICS_CONFIG.SWIM_BASE_SPEED * speedMultiplier;
 
-      let targetVel = new THREE.Vector3(0, 0, 0);
+      const targetVel = this.sTarget.set(0, 0, 0);
 
       if (isMoving) {
-        const moveDir = new THREE.Vector3()
+        const moveDir = this.sMove.set(0, 0, 0)
           .addScaledVector(context.cameraForward, context.input.forward)
           .addScaledVector(context.cameraRight, context.input.right)
           .normalize();
@@ -235,9 +244,9 @@ export class SwimAbility implements IAbility {
       }
 
       // Horizontal plane interpolation
-      const currentLat = new THREE.Vector3(vel.x, 0, vel.z);
+      const currentLat = this.sLat.set(vel.x, 0, vel.z);
       if (isMoving) {
-        const targetLat = new THREE.Vector3(targetVel.x, 0, targetVel.z);
+        const targetLat = this.sLatTarget.set(targetVel.x, 0, targetVel.z);
         currentLat.lerp(targetLat, 1 - Math.exp(-WATER_PHYSICS_CONFIG.WATER_DRAG_HORIZONTAL * dt));
       } else {
         currentLat.multiplyScalar(Math.pow(0.1, dt));
@@ -246,7 +255,8 @@ export class SwimAbility implements IAbility {
       currentLat.x += this.flow.x * dt * 2.5;
       currentLat.z += this.flow.z * dt * 2.5;
 
-      context.body.setLinvel({ x: currentLat.x, y: vy, z: currentLat.z }, true);
+      this.sLin.x = currentLat.x; this.sLin.y = vy; this.sLin.z = currentLat.z;
+      context.body.setLinvel(this.sLin, true);
       context.targetVelocity.set(0, 0, 0);
       context.appliedImpulse.set(0, 0, 0);
       context.isJumping = false;
@@ -293,10 +303,10 @@ export class SwimAbility implements IAbility {
             const count = context.isDashing ? (2 + Math.floor(Math.random() * 3)) : (1 + Math.floor(Math.random() * 4));
             
             if (this.waterParticles) {
-              const headPos = new THREE.Vector3(pos.x, pos.y + 0.65, pos.z);
+              const headPos = this.sHead.set(pos.x, pos.y + 0.65, pos.z);
               this.waterParticles.emitUnderwaterBubbles(
                 headPos,
-                new THREE.Vector3(currentLat.x, vy, currentLat.z),
+                this.sBubbleVel.set(currentLat.x, vy, currentLat.z),
                 count,
                 this.waterMax.y
               );

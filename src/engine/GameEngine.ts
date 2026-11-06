@@ -156,6 +156,19 @@ export interface GameWorld {
  * Owns the Three.js renderer, Rapier physics and every gameplay system,
  * and runs the main simulation & render loop outside of React.
  */
+/** Structural equality for small plain HUD objects (no strings built, unlike a JSON.stringify compare). */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a as object);
+  if (ka.length !== Object.keys(b as object).length) return false;
+  for (const k of ka) {
+    if (!deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) return false;
+  }
+  return true;
+}
+
 export class GameEngine {
   public readonly camera: ThirdPersonCamera;
   public readonly input: InputManager;
@@ -197,10 +210,10 @@ export class GameEngine {
   private readonly listenerPos = new THREE.Vector3();
 
   // Adaptive resolution: drops the pixel ratio when frames run long, restores it when there is headroom
-  private lastFarmPromptKey = '';
+  private lastFarmPrompt: unknown = null;
   /** Reused for the field-wheat pushers so the frame loop doesn't allocate. */
   private readonly pushTmp = new THREE.Vector3();
-  private lastGatherPromptKey = '';
+  private lastGatherPrompt: unknown = null;
 
   private maxPixelRatio = 1;
   private minPixelRatio = 0.75;
@@ -547,7 +560,7 @@ export class GameEngine {
   private autosaveTimer = 60;
   private hudTimer = 0;
   private lastHudKey = '';
-  private lastHudJson = '';
+  private lastHudState: unknown = null;
   private lastBuildingTelemetry: BuildingTelemetry | null = null;
   private lastEditorRevision = -1;
   private frameMsAccum = 0;
@@ -683,15 +696,15 @@ export class GameEngine {
     if (this.frameCount % 4 === 0 && character.farmingAbility) {
       const farm = character.farmingAbility.currentPrompt;
       const gather = character.gatheringAbility.currentPrompt;
-      const farmKey = farm ? JSON.stringify(farm) : '';
-      const gatherKey = gather ? JSON.stringify(gather) : '';
-      if (farmKey !== this.lastFarmPromptKey) {
-        this.lastFarmPromptKey = farmKey;
-        callbacks.onFarmingPrompt(farm ? { ...farm } : null);
+      if (!deepEqual(farm, this.lastFarmPrompt)) {
+        const copy = farm ? { ...farm } : null;
+        this.lastFarmPrompt = copy;
+        callbacks.onFarmingPrompt(copy);
       }
-      if (gatherKey !== this.lastGatherPromptKey) {
-        this.lastGatherPromptKey = gatherKey;
-        callbacks.onGatherPrompt(gather ? { ...gather } : null);
+      if (!deepEqual(gather, this.lastGatherPrompt)) {
+        const copy = gather ? { ...gather } : null;
+        this.lastGatherPrompt = copy;
+        callbacks.onGatherPrompt(copy);
       }
     }
 
@@ -710,9 +723,8 @@ export class GameEngine {
       // Each push re-renders the whole React tree (hundreds of KB of garbage on a phone): the
       // periodic refresh (buff / cooking timers, pet affection) only goes out when something changed
       const state = w.gameplay.getHudState();
-      const json = JSON.stringify(state);
-      if (hudKey !== this.lastHudKey || json !== this.lastHudJson) {
-        this.lastHudJson = json;
+      if (hudKey !== this.lastHudKey || !deepEqual(state, this.lastHudState)) {
+        this.lastHudState = state;
         callbacks.onGameplayHud(state);
       }
       this.lastHudKey = hudKey;

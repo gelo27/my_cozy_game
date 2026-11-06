@@ -304,7 +304,8 @@ export class PhysicsWorld {
     direction: THREE.Vector3,
     maxToi: number,
     excludeCollider?: RAPIER.Collider,
-    filterGroups?: number
+    filterGroups?: number,
+    out?: { hit: RAPIER.RayColliderHit | null; normal: THREE.Vector3; point: THREE.Vector3 }
   ): { hit: RAPIER.RayColliderHit; normal: THREE.Vector3; point: THREE.Vector3 } | null {
     if (!this.world || !this.initialized) return null;
 
@@ -342,19 +343,24 @@ export class PhysicsWorld {
       if (!hit || !hit.normal) return null;
       if (!Number.isFinite(hit.normal.x) || !Number.isFinite(hit.normal.y) || !Number.isFinite(hit.normal.z)) return null;
 
-      const point = new THREE.Vector3(
+      // With `out` the point / normal vectors are the caller's scratch ones (valid until its next cast)
+      const point = (out ? out.point : new THREE.Vector3()).set(
         origin.x + direction.x * hit.timeOfImpact,
         origin.y + direction.y * hit.timeOfImpact,
         origin.z + direction.z * hit.timeOfImpact
       );
 
-      const normal = new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
+      const normal = (out ? out.normal : new THREE.Vector3()).set(hit.normal.x, hit.normal.y, hit.normal.z);
       if (normal.lengthSq() > 0.000001) {
         normal.normalize();
       } else {
         normal.set(0, 1, 0);
       }
 
+      if (out) {
+        out.hit = hit;
+        return out as { hit: RAPIER.RayColliderHit; normal: THREE.Vector3; point: THREE.Vector3 };
+      }
       return { hit, normal, point };
     } catch {
       return null;

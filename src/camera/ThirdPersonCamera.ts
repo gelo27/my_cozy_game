@@ -17,6 +17,14 @@ export class ThirdPersonCamera {
   public currentDistance: number = CAMERA_CONFIG.DEFAULT_DISTANCE;
 
   // Smoothing targets & vectors
+  // Scratch results of the getters below and of the per-frame collision probes (no garbage per frame)
+  private readonly _worldDir = new THREE.Vector3();
+  private readonly _posOut = new THREE.Vector3();
+  private readonly _fwdOut = new THREE.Vector3();
+  private readonly _rightOut = new THREE.Vector3();
+  private readonly _orbit = new THREE.Vector3();
+  private readonly _probe = new THREE.Vector3();
+  private readonly _right2 = new THREE.Vector3();
   public targetFocusPoint = new THREE.Vector3();
   public currentFocusPoint = new THREE.Vector3();
   public currentCameraPos = new THREE.Vector3();
@@ -221,7 +229,7 @@ export class ThirdPersonCamera {
     const cosYaw = Math.cos(effectiveYaw);
     const sinYaw = Math.sin(effectiveYaw);
 
-    const orbitOffset = new THREE.Vector3(
+    const orbitOffset = this._orbit.set(
       sinYaw * cosPitch,
       sinPitch,
       cosYaw * cosPitch
@@ -239,7 +247,7 @@ export class ThirdPersonCamera {
     let maxAllowedDistance = targetDistBase;
 
     if (physics.isInitialized()) {
-      const rayOrigin = this.currentFocusPoint.clone();
+      const rayOrigin = this.currentFocusPoint;
       const rayDir = orbitOffset;
       const queryDistance = targetDistBase;
 
@@ -256,21 +264,18 @@ export class ThirdPersonCamera {
 
       // Multi-probe raycast bundle (center ray + 4 surrounding frustum boundary rays)
       // This catches walls, low ceilings, and tight corners even when standing right against geometry
-      const upVec = new THREE.Vector3(0, 1, 0);
-      const rightVec = this.getRightVector();
+      const rightVec = this._right2.copy(this.getRightVector());
       const frustumOffset = 0.22; //Frustum near-plane extent (meters)
+      const probe = this._probe;
 
-      const probePoints = [
-        rayOrigin,
-        rayOrigin.clone().addScaledVector(upVec, frustumOffset),
-        rayOrigin.clone().addScaledVector(upVec, -frustumOffset),
-        rayOrigin.clone().addScaledVector(rightVec, frustumOffset),
-        rayOrigin.clone().addScaledVector(rightVec, -frustumOffset),
-      ];
-
-      for (const originPoint of probePoints) {
+      for (let pi = 0; pi < 5; pi++) {
+        probe.copy(rayOrigin);
+        if (pi === 1) probe.y += frustumOffset;
+        else if (pi === 2) probe.y -= frustumOffset;
+        else if (pi === 3) probe.addScaledVector(rightVec, frustumOffset);
+        else if (pi === 4) probe.addScaledVector(rightVec, -frustumOffset);
         const hit = physics.castRay(
-          originPoint,
+          probe,
           rayDir,
           queryDistance,
           true,
@@ -316,21 +321,22 @@ export class ThirdPersonCamera {
    * Returns full 3D direction vector that the camera is pointing at (includes pitch & yaw)
    */
   public getWorldDirection(): THREE.Vector3 {
-    return this.camera.getWorldDirection(new THREE.Vector3()).normalize();
+    // Shared scratch vector: valid until the next call (callers copy / clone to keep it)
+    return this.camera.getWorldDirection(this._worldDir).normalize();
   }
 
   /**
    * Returns world position of the camera
    */
   public getPosition(): THREE.Vector3 {
-    return this.camera.position.clone();
+    return this._posOut.copy(this.camera.position);
   }
 
   /**
    * Returns forward horizontal vector of the camera (useful for character movement direction)
    */
   public getForwardVector(): THREE.Vector3 {
-    const forward = new THREE.Vector3(-Math.sin(this.currentYaw), 0, -Math.cos(this.currentYaw));
+    const forward = this._fwdOut.set(-Math.sin(this.currentYaw), 0, -Math.cos(this.currentYaw));
     if (forward.lengthSq() > 0.0001) {
       forward.normalize();
     } else {
@@ -343,7 +349,7 @@ export class ThirdPersonCamera {
    * Returns right horizontal vector of the camera
    */
   public getRightVector(): THREE.Vector3 {
-    const right = new THREE.Vector3(Math.cos(this.currentYaw), 0, -Math.sin(this.currentYaw));
+    const right = this._rightOut.set(Math.cos(this.currentYaw), 0, -Math.sin(this.currentYaw));
     if (right.lengthSq() > 0.0001) {
       right.normalize();
     } else {

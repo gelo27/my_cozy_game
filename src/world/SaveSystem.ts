@@ -143,9 +143,33 @@ export class SaveSystem {
 
   // ---------------------------------------------------------------- slots
 
+  /**
+   * Terrain and props are by far the biggest parts and rarely change (their captures are cached by
+   * identity): keep their JSON text too instead of re-stringifying hundreds of KB every minute.
+   */
+  private jsonCache = new Map<string, { data: unknown; json: string }>();
+
+  private serializeCapture(): string {
+    const data = this.capture() as unknown as Record<string, unknown>;
+    const heavy: [string, string][] = [];
+    for (const key of ['terrain', 'props']) {
+      const value = data[key];
+      let entry = this.jsonCache.get(key);
+      if (!entry || entry.data !== value) {
+        entry = { data: value, json: JSON.stringify(value) };
+        this.jsonCache.set(key, entry);
+      }
+      heavy.push([key, entry.json]);
+      data[key] = null;
+    }
+    let out = JSON.stringify(data);
+    for (const [key, json] of heavy) out = out.replace(`"${key}":null`, () => `"${key}":${json}`);
+    return out;
+  }
+
   public save(slot: string): boolean {
     try {
-      localStorage.setItem(KEY_PREFIX + slot, JSON.stringify(this.capture()));
+      localStorage.setItem(KEY_PREFIX + slot, this.serializeCapture());
       return true;
     } catch (err) {
       console.warn('[SaveSystem] save failed', err);

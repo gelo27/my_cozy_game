@@ -7,6 +7,7 @@ import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji, InventoryItem } from '../../inventory/types/InventoryTypes';
 import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
 import { t, dataName } from '../../i18n/i18n';
+import { worldSettings } from '../../world/WorldSettings';
 import { ItemIcon } from '../ItemIcon';
 
 const WEATHER_ICON: Record<WeatherType, React.ElementType> = {
@@ -33,6 +34,24 @@ interface GameHUDProps {
   onPause(): void;
   onAction(action: GameplayPrompt['action'] | 'treat'): void;
 }
+
+/**
+ * The in-game clock ticks every real second (a game hour is 60 s). It reads the time itself instead of
+ * riding on the HUD state, so the minute change no longer re-renders the whole HUD tree each second.
+ */
+const clockText = (): string => {
+  const h = Math.floor(worldSettings.timeOfDay);
+  const m = Math.floor((worldSettings.timeOfDay - h) * 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+};
+const ClockLabel: React.FC = () => {
+  const [text, setText] = useState(clockText);
+  useEffect(() => {
+    const id = window.setInterval(() => setText(clockText()), 500);
+    return () => window.clearInterval(id);
+  }, []);
+  return <span className="text-sm font-bold tabular-nums">{text}</span>;
+};
 
 /** Hotbar shows what the player can hold; 1-8 keys or a tap equips. */
 function useHotbar(inventory: InventoryManager): { items: InventoryItem[]; equipped: string | null } {
@@ -68,7 +87,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       <div className="absolute top-3 left-3 flex flex-wrap items-center gap-2 touch:top-2 touch:left-2 touch:gap-1.5">
         <div className={`${panel} rounded-2xl px-3 py-1.5 touch:px-2.5 touch:py-1 flex items-center gap-2`}>
           <WeatherIcon className="w-4 h-4 text-amber-600" />
-          <span className="text-sm font-bold tabular-nums">{hud.clock}</span>
+          <ClockLabel />
           <span className="text-xs text-[#8a7556] hidden sm:inline">{dataName('weather', hud.weather, WEATHER_LABELS[hud.weather])}</span>
         </div>
         <div className={`${panel} rounded-2xl px-3 py-1.5 touch:px-2.5 touch:py-1 flex items-center gap-1.5`}>

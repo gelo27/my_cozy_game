@@ -451,8 +451,10 @@ export class AmbientAudio {
 
     const setF = (hz: number, at: number, ramp?: number) => {
       for (const { o, m } of oscs) {
-        if (ramp === undefined) o.frequency.setValueAtTime(hz * m, at);
-        else o.frequency.exponentialRampToValueAtTime(hz * m, at + ramp);
+        // Harmonics of the highest calls overshoot the oscillator's range (24 kHz): the browser warns on each
+        const f = Math.min(hz * m, 23900);
+        if (ramp === undefined) o.frequency.setValueAtTime(f, at);
+        else o.frequency.exponentialRampToValueAtTime(f, at + ramp);
       }
     };
     /** shape: 0 straight glide, 1 arch (up then down), 2 hook (down then up) */

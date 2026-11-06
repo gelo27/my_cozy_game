@@ -129,6 +129,8 @@ export interface ExtraLight {
   flicker?: boolean;
 }
 
+const byDistance = (a: { d: number }, b: { d: number }): number => a.d - b.d;
+
 interface LightSource {
   pos: THREE.Vector3;
   range: number;
@@ -157,7 +159,9 @@ export class NightLighting {
   private readonly glowShades: THREE.MeshLambertMaterial[] = [];
   private selectTimer = 0;
   /** Wanted sources (nearest that can reach the view), refreshed a few times per second. */
-  private wanted: LightSource[] = [];
+  private readonly wanted: LightSource[] = [];
+  private readonly cand: { s: LightSource; d: number }[] = [];
+  private candPool: { s: LightSource; d: number }[] = [];
   /** Sources holding a uniform slot, with their fade weight (0..1). */
   private readonly slots: { s: LightSource; w: number }[] = [];
   private readonly frustum = new THREE.Frustum();
@@ -299,14 +303,23 @@ export class NightLighting {
       this.selectTimer = 0.25;
       this.projScreen.multiplyMatrices(camera.projectionMatrix, view);
       this.frustum.setFromProjectionMatrix(this.projScreen);
-      const cand: { s: LightSource; d: number }[] = [];
+      // Candidate records are pooled: this runs 4x a second all night
+      const cand = this.cand;
+      let n = 0;
       for (const src of this.sources) {
         this.sphere.center.copy(src.pos);
         this.sphere.radius = src.range;
-        if (this.frustum.intersectsSphere(this.sphere)) cand.push({ s: src, d: src.pos.distanceToSquared(cameraPos) });
+        if (this.frustum.intersectsSphere(this.sphere)) {
+          const rec = this.candPool[n] ?? (this.candPool[n] = { s: src, d: 0 });
+          rec.s = src;
+          rec.d = src.pos.distanceToSquared(cameraPos);
+          cand[n++] = rec;
+        }
       }
-      cand.sort((a, b) => a.d - b.d);
-      this.wanted = cand.slice(0, maxFromProps).map((c) => c.s);
+      cand.length = n;
+      cand.sort(byDistance);
+      this.wanted.length = 0;
+      for (let i = 0; i < n && i < maxFromProps; i++) this.wanted.push(cand[i].s);
     }
 
     // Slots fade in / out instead of popping: a source that is no longer wanted fades out, and a
@@ -319,7 +332,9 @@ export class NightLighting {
     }
     for (const src of this.wanted) {
       if (this.slots.length >= maxFromProps) break;
-      if (!this.slots.some((sl) => sl.s === src)) this.slots.push({ s: src, w: 0 });
+      let has = false;
+      for (let i = 0; i < this.slots.length; i++) if (this.slots[i].s === src) { has = true; break; }
+      if (!has) this.slots.push({ s: src, w: 0 });
     }
 
     let n = 0;

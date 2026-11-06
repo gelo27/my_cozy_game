@@ -8,6 +8,14 @@ export class MovementAbility implements IAbility {
 
   private tempDir = new THREE.Vector3();
   private tempTangent = new THREE.Vector3();
+  // Scratch values: this runs every frame, so nothing here may allocate
+  private readonly vCur = new THREE.Vector3();
+  private readonly vH = new THREE.Vector3();
+  private readonly vDelta = new THREE.Vector3();
+  private readonly hCur = new THREE.Vector2();
+  private readonly hTarget = new THREE.Vector2();
+  private readonly hDelta = new THREE.Vector2();
+  private readonly imp = { x: 0, y: 0, z: 0 };
 
   public update(dt: number, context: CharacterContext): void {
     if (!this.enabled || context.isClimbing || context.isSwimming) return;
@@ -60,8 +68,8 @@ export class MovementAbility implements IAbility {
         context.targetVelocity.copy(this.tempTangent).multiplyScalar(targetSpeed);
 
         // Smooth acceleration curve from standstill (acceleration) & turning skid response
-        const currentVel = new THREE.Vector3(currentVelocity.x, currentVelocity.y, currentVelocity.z);
-        const currentHVel = new THREE.Vector3(currentVelocity.x, 0, currentVelocity.z);
+        const currentVel = this.vCur.set(currentVelocity.x, currentVelocity.y, currentVelocity.z);
+        const currentHVel = this.vH.set(currentVelocity.x, 0, currentVelocity.z);
         const currentHSpeed = currentHVel.length();
 
         let accelRate: number = CHARACTER_CONFIG.GROUND_ACCELERATION;
@@ -72,7 +80,7 @@ export class MovementAbility implements IAbility {
           // Check if turning sharply / reversing direction
           const hLen = currentHVel.length();
           if (hLen > 0.0001) {
-            const normHVel = currentHVel.clone().multiplyScalar(1 / hLen);
+            const normHVel = currentHVel.multiplyScalar(1 / hLen);
             const dirDot = normHVel.dot(this.tempTangent);
             if (dirDot < -0.2) {
               // Reversing direction - apply strong turning/skid acceleration rate
@@ -81,7 +89,7 @@ export class MovementAbility implements IAbility {
           }
         }
 
-        const deltaVel = new THREE.Vector3().subVectors(context.targetVelocity, currentVel);
+        const deltaVel = this.vDelta.subVectors(context.targetVelocity, currentVel);
         // Limit max velocity change per frame
         const maxDelta = accelRate * dt;
         const dLen = deltaVel.length();
@@ -95,12 +103,13 @@ export class MovementAbility implements IAbility {
         const mass = body.mass();
         const impulse = deltaVel.multiplyScalar(mass);
         if (Number.isFinite(impulse.x) && Number.isFinite(impulse.y) && Number.isFinite(impulse.z)) {
-          body.applyImpulse({ x: impulse.x, y: impulse.y, z: impulse.z }, true);
+          this.imp.x = impulse.x; this.imp.y = impulse.y; this.imp.z = impulse.z;
+          body.applyImpulse(this.imp as any, true);
           context.appliedImpulse.add(impulse);
         }
       } else {
         // --- NO INPUT: BRAKING & SLOPE ANTI-SLIDE ---
-        const currentVel = new THREE.Vector3(currentVelocity.x, currentVelocity.y, currentVelocity.z);
+        const currentVel = this.vCur.set(currentVelocity.x, currentVelocity.y, currentVelocity.z);
         const currentSpeed = currentVel.length();
 
         // Immediately disable gravity drift on walkable slopes so gravity cannot pull the character downhill
@@ -108,12 +117,13 @@ export class MovementAbility implements IAbility {
 
         if (currentSpeed > CHARACTER_CONFIG.SLOPE_MIN_VELOCITY_THRESHOLD) {
           const decel = Math.min(currentSpeed, CHARACTER_CONFIG.GROUND_DECELERATION * 1.5 * dt);
-          const deltaV = currentVel.clone().multiplyScalar(-decel / currentSpeed);
+          const deltaV = this.vDelta.copy(currentVel).multiplyScalar(-decel / currentSpeed);
 
           const mass = body.mass();
-          const brakeImpulse = new THREE.Vector3(deltaV.x * mass, deltaV.y * mass, deltaV.z * mass);
+          const brakeImpulse = deltaV.multiplyScalar(mass);
           if (Number.isFinite(brakeImpulse.x) && Number.isFinite(brakeImpulse.y) && Number.isFinite(brakeImpulse.z)) {
-            body.applyImpulse({ x: brakeImpulse.x, y: brakeImpulse.y, z: brakeImpulse.z }, true);
+            this.imp.x = brakeImpulse.x; this.imp.y = brakeImpulse.y; this.imp.z = brakeImpulse.z;
+            body.applyImpulse(this.imp, true);
           }
 
           // If remaining speed after this frame will be minimal, instantly lock to zero
@@ -134,9 +144,10 @@ export class MovementAbility implements IAbility {
       body.setGravityScale(1.0, true);
       if (hasInput) {
         const mass = body.mass();
-        const airPush = this.tempDir.clone().multiplyScalar(CHARACTER_CONFIG.AIR_ACCELERATION * 0.4 * dt * mass);
+        const airPush = this.vDelta.copy(this.tempDir).multiplyScalar(CHARACTER_CONFIG.AIR_ACCELERATION * 0.4 * dt * mass);
         if (Number.isFinite(airPush.x) && Number.isFinite(airPush.z)) {
-          body.applyImpulse({ x: airPush.x, y: 0, z: airPush.z }, true);
+          this.imp.x = airPush.x; this.imp.y = 0; this.imp.z = airPush.z;
+          body.applyImpulse(this.imp, true);
         }
       }
     } else {
@@ -144,10 +155,10 @@ export class MovementAbility implements IAbility {
       body.setGravityScale(1.0, true);
       if (hasInput) {
         // Air control: steer horizontal velocity towards target direction
-        const currentHVel = new THREE.Vector2(currentVelocity.x, currentVelocity.z);
-        const targetHVel = new THREE.Vector2(this.tempDir.x * targetSpeed, this.tempDir.z * targetSpeed);
+        const currentHVel = this.hCur.set(currentVelocity.x, currentVelocity.z);
+        const targetHVel = this.hTarget.set(this.tempDir.x * targetSpeed, this.tempDir.z * targetSpeed);
 
-        const deltaH = new THREE.Vector2().subVectors(targetHVel, currentHVel);
+        const deltaH = this.hDelta.subVectors(targetHVel, currentHVel);
         const maxAirDelta = CHARACTER_CONFIG.AIR_ACCELERATION * context.airControl * dt;
 
         const dhLen = deltaH.length();
@@ -158,20 +169,22 @@ export class MovementAbility implements IAbility {
         }
 
         const mass = body.mass();
-        const airImpulse = new THREE.Vector3(deltaH.x * mass, 0, deltaH.y * mass);
-        if (Number.isFinite(airImpulse.x) && Number.isFinite(airImpulse.z)) {
-          body.applyImpulse({ x: airImpulse.x, y: 0, z: airImpulse.z }, true);
+        const ax = deltaH.x * mass, az = deltaH.y * mass;
+        if (Number.isFinite(ax) && Number.isFinite(az)) {
+          this.imp.x = ax; this.imp.y = 0; this.imp.z = az;
+          body.applyImpulse(this.imp, true);
         }
       } else {
         // Gentle horizontal air drag only
-        const currentHVel = new THREE.Vector2(currentVelocity.x, currentVelocity.z);
+        const currentHVel = this.hCur.set(currentVelocity.x, currentVelocity.z);
         const chLen = currentHVel.length();
         if (chLen > 0.1) {
           const airDecel = Math.min(chLen, CHARACTER_CONFIG.AIR_DECELERATION * dt);
           currentHVel.multiplyScalar(-airDecel / chLen);
           const mass = body.mass();
           if (Number.isFinite(currentHVel.x) && Number.isFinite(currentHVel.y)) {
-            body.applyImpulse({ x: currentHVel.x * mass, y: 0, z: currentHVel.y * mass }, true);
+            this.imp.x = currentHVel.x * mass; this.imp.y = 0; this.imp.z = currentHVel.y * mass;
+            body.applyImpulse(this.imp, true);
           }
         }
       }
