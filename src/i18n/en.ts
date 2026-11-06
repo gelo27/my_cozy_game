@@ -296,6 +296,7 @@ export const en = {
   'pause.fullscreen': 'Full screen',
   'pause.exitFullscreen': 'Exit full screen',
   'pause.saved': 'Game saved',
+  'hud.saving': 'Saving game…',
   'pause.sound': 'Sound',
   'pause.master': 'Volume',
   'pause.sfx': 'Sounds',

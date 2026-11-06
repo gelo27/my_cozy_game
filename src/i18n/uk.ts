@@ -283,6 +283,7 @@ export const uk: Record<TKey, string> = {
   'pause.fullscreen': 'На весь екран',
   'pause.exitFullscreen': 'Вийти з повного екрана',
   'pause.saved': 'Гру збережено',
+  'hud.saving': 'Збереження гри…',
   'pause.sound': 'Звук',
   'pause.master': 'Гучність',
   'pause.sfx': 'Звуки',

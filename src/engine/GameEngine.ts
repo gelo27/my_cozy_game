@@ -742,9 +742,12 @@ export class GameEngine {
   private scheduleAutosave(): void {
     if (this.autosavePending) return;
     this.autosavePending = true;
+    // The HUD badge ("Saving game") listens for this event
+    window.dispatchEvent(new Event('autosave-start'));
     const run = () => {
       this.autosavePending = false;
       if (!this.isDisposed && this.world && this.mode === 'play') this.world.saves.save(AUTOSAVE_SLOT);
+      window.dispatchEvent(new Event('autosave-end'));
     };
     if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(run, { timeout: 5000 });
     else window.setTimeout(run, 0);
