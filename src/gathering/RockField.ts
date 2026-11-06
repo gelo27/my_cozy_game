@@ -17,8 +17,10 @@ export interface RockNode {
   health: number;
   /** Transform holder (not in the scene): its matrix is copied into the batch. */
   group: THREE.Object3D;
-  /** This rock's instance in the shared batch. */
+  /** This rock's instance and geometry in the shared batch (and its vertex count). */
   instanceId: number;
+  geometryId: number;
+  vertices: number;
   baseScale: number;
   body: RAPIER.RigidBody | null;
   isDepleted: boolean;
@@ -53,6 +55,7 @@ export class RockField {
   public onMined: ((drops: { itemId: string; amount: number }[], at: THREE.Vector3) => void) | null = null;
 
   private rocks: RockNode[] = [];
+  private nextId = 0;
   private batch: THREE.BatchedMesh;
   private vertexCapacity = 0;
   private verticesUsed = 0;
@@ -94,7 +97,7 @@ export class RockField {
     this.batch.frustumCulled = false;
     this.group.add(this.batch);
 
-    spots.forEach((spot, i) => this.createRock(i, spot.position, spot.kind, spot.scale));
+    spots.forEach((spot) => this.createRock(this.nextId++, spot.position, spot.kind, spot.scale));
   }
 
   /** Intact rocks (for baked ground shadows). */
@@ -175,7 +178,23 @@ export class RockField {
 
   /** Adds a rock at a world position (y = ground height), e.g. ore veins in the mountains and caves. */
   public addRock(position: THREE.Vector3, kind: RockKind, scale = 1): void {
-    this.createRock(this.rocks.length, position, kind, scale);
+    this.createRock(this.nextId++, position, kind, scale);
+  }
+
+  /** Removes every rock the test matches (the cave editor rebuilds the cave ore). */
+  public removeRocksWhere(test: (pos: THREE.Vector3) => boolean): void {
+    let removed = 0;
+    this.rocks = this.rocks.filter((rock) => {
+      if (!test(rock.position)) return true;
+      if (rock.body) this.physics.removeRigidBody(rock.body);
+      rock.body = null;
+      this.batch.deleteInstance(rock.instanceId);
+      this.batch.deleteGeometry(rock.geometryId);
+      this.verticesUsed -= rock.vertices;
+      removed++;
+      return false;
+    });
+    if (removed) this.batch.optimize();
   }
 
   private createRock(id: number, position: THREE.Vector3, kind: RockKind, scale: number): void {
@@ -206,6 +225,8 @@ export class RockField {
       health: ROCK_TYPES[kind].hits,
       group,
       instanceId,
+      geometryId,
+      vertices: verts,
       baseScale: scale,
       body: null,
       isDepleted: false,

@@ -272,7 +272,7 @@ export const en = {
   'explore.chestOpened': "The chest is open",
   'explore.discovered': "Discovered: {name}",
   'explore.inCave': "In a cave",
-  'explore.caveNetwork': "The caves run under the whole island: go in at one mouth, come out at another. Crouch (C) through low crawlways, dive through flooded passages.",
+  'explore.caveNetwork': "The caves run under the whole island: go in at one mouth, come out at another. Swim across the flooded caverns, dive through drowned passages; one way in starts on the sea bed.",
   'site.lighthouse': "Lighthouse",
   'site.ruins': "Mountain Ruins",
   'site.hut': "Abandoned Hut",

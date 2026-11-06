@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { injectNightLights } from '../../world/NightLighting';
+import { WET_ABOVE, WET_RANGE } from './CaveGen';
+import { CAUSTICS_GLSL, CAUSTICS_TINT, causticsUniforms } from '../../scene/WaterEffects';
 
 /** Shared clock for the cave shaders (ember cracks pulse, water shimmers). */
 export const caveUniforms = { uCaveTime: { value: 0 } };
@@ -32,20 +34,29 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
   mat.onBeforeCompile = (shader) => {
     injectNightLights(shader);
-    Object.assign(shader.uniforms, caveUniforms);
+    Object.assign(shader.uniforms, caveUniforms, causticsUniforms);
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
         `#include <common>
         attribute vec4 caveData;
+        attribute float caveWet;
         varying vec4 vCave;
+        varying float vWet;
         varying vec3 vCavePos;
+        varying vec3 vCaveWorld;
         varying vec3 vCaveNrm;`
+      )
+      .replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>
+        vCaveWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
         vCave = caveData;
+        vWet = caveWet;
         vCavePos = position;
         vCaveNrm = normal;`
       );
@@ -55,9 +66,12 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
         `#include <common>
         uniform float uCaveTime;
         varying vec4 vCave;
+        varying float vWet;
         varying vec3 vCavePos;
+        varying vec3 vCaveWorld;
         varying vec3 vCaveNrm;
-        ${NOISE_GLSL}`
+        ${NOISE_GLSL}
+        ${CAUSTICS_GLSL}`
       )
       .replace(
         '#include <color_fragment>',
@@ -109,6 +123,23 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
           albedo *= 1.0 - smoothstep(0.93, 0.99, ridge) * gate * 0.6 * bw.z; // scorched rim
           glow += vec3(0.9, 0.28, 0.05) * crack * pulse * 0.9 * bw.z;
         }
+        // Near and under the water (see CaveGen WET_*): a dark wet band at the shore, then a blue-green
+        // tint deepening with depth and moving caustics on what faces up
+        if (vWet > 0.002) {
+          float depth = (vWet * 255.0 - 1.0) / 254.0 * ${WET_RANGE.toFixed(1)} - ${WET_ABOVE.toFixed(2)};
+          float shore = 1.0 - smoothstep(0.0, ${WET_ABOVE.toFixed(2)}, -depth);
+          albedo *= 1.0 - 0.35 * shore;
+          if (depth > 0.0) {
+            float deep = smoothstep(0.0, 6.0, depth);
+            vec3 tint = mix(vec3(0.45, 0.7, 0.75), vec3(0.12, 0.3, 0.45) + vec3(0.0, 0.06, 0.12) * bw.y, deep);
+            albedo *= tint;
+            // The same caustics as the sea and rivers (WaterEffects), always on down here; the
+            // cave has no sun, so they glow faintly in the lake's colour instead of focusing it
+            vec3 caustic = causticsPattern(vCaveWorld, depth, up);
+            glow += caustic * ${CAUSTICS_TINT} * mix(vec3(0.05, 0.12, 0.12), vec3(0.05, 0.13, 0.24), bw.y);
+            glow += vec3(0.002, 0.012, 0.03) * bw.y * (1.0 - deep * 0.5);
+          }
+        }
         diffuseColor.rgb = albedo * vCave.a;`
       )
       .replace(
@@ -117,35 +148,63 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
         totalEmissiveRadiance += glow;`
       );
   };
-  mat.customProgramCacheKey = () => 'cave-rock-v3';
+  mat.customProgramCacheKey = () => 'cave-rock-v6';
   return mat;
 }
 
-/** Still cave water: dark, a little see-through, lit by the fake lights, with a slow shimmer. */
+/**
+ * Still cave water: dark, a little see-through, lit by the fake lights, with a slow shimmer. Its
+ * colour follows the biome: green in the moss grotto, glowing blue in the flooded crystal caverns,
+ * murky amber-brown in the ember depths. Fresnel: looking straight down it is clearer.
+ */
 export function createCaveWaterMaterial(): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({
-    color: 0x1c4a58,
+    color: 0xffffff,
     transparent: true,
-    opacity: 0.82,
+    opacity: 0.84,
     depthWrite: false,
     side: THREE.DoubleSide,
-    emissive: 0x03141a,
   });
   mat.onBeforeCompile = (shader) => {
     injectNightLights(shader);
     Object.assign(shader.uniforms, caveUniforms);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vWPos;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWPos = position;');
+      .replace('#include <common>', `#include <common>
+attribute vec3 waterBiome;
+varying vec3 vWPos;
+varying vec3 vWWorld;
+varying vec3 vWBio;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+vWPos = position;
+vWWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+vWBio = waterBiome;`);
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\nuniform float uCaveTime;\nvarying vec3 vWPos;\n${NOISE_GLSL}`)
+      .replace('#include <common>', `#include <common>
+uniform float uCaveTime;
+varying vec3 vWPos;
+varying vec3 vWWorld;
+varying vec3 vWBio;
+${NOISE_GLSL}`)
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
+        vec3 wb = vWBio / max(vWBio.r + vWBio.g + vWBio.b, 0.001);
+        vec3 wcol = vec3(0.012, 0.055, 0.04) * wb.x + vec3(0.012, 0.07, 0.16) * wb.y + vec3(0.045, 0.022, 0.008) * wb.z;
         float sh = cNoise(vec3(vWPos.x * 1.4, uCaveTime * 0.35, vWPos.z * 1.4)) * 0.6 + cNoise(vec3(vWPos.x * 3.7 + uCaveTime * 0.2, 0.0, vWPos.z * 3.7)) * 0.4;
-        diffuseColor.rgb *= 0.75 + sh * 0.55;`
+        diffuseColor.rgb = wcol * (0.75 + sh * 0.55);
+        // Fresnel: clearer looking straight down, a mirror-dark sheet at a glancing angle
+        vec3 vdir = normalize(cameraPosition - vWWorld);
+        diffuseColor.a = mix(0.95, 0.66, smoothstep(0.15, 0.85, abs(vdir.y)));
+        // The flooded caverns glow from below (crystals under the surface)
+        float sparkle = smoothstep(0.62, 0.8, cNoise(vec3(vWPos.x * 0.35, uCaveTime * 0.12, vWPos.z * 0.35)));
+        vec3 wglow = vec3(0.004, 0.022, 0.05) * wb.y * (0.5 + sparkle * 1.2) + vec3(0.001, 0.005, 0.003) * wb.x + vec3(0.008, 0.003, 0.0) * wb.z;`
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        totalEmissiveRadiance += wglow;`
       );
   };
-  mat.customProgramCacheKey = () => 'cave-water-v1';
+  mat.customProgramCacheKey = () => 'cave-water-v3';
   return mat;
 }

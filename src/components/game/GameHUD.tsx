@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Coins, Zap, Settings2, Heart, Pause,
+  Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Coins, Zap, Settings2, Pause,
 } from 'lucide-react';
 import { GameplayHudState, GameplayPrompt } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
@@ -85,16 +85,6 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
       {/* Top-right: the few menus a player needs */}
       <div className="absolute top-3 right-3 flex items-center gap-2 pointer-events-auto touch:top-2 touch:right-2 touch:gap-1.5 max-sm:flex-col max-sm:items-end">
-        {hud.pets.length > 0 && (
-          <div className={`${panel} rounded-2xl px-3 py-1.5 hidden md:flex items-center gap-2`}>
-            {hud.pets.map((p) => (
-              <span key={p.name} className="flex items-center gap-1 text-xs font-semibold">
-                {p.kind === 'cat' ? '🐱' : '🐶'} <Heart className="w-3 h-3 text-rose-500 fill-rose-400" />
-                {p.affection}
-              </span>
-            ))}
-          </div>
-        )}
         <HudButton label={t('hud.map')} hotkey="M" onClick={onOpenMap}>
           <MapIcon className="w-5 h-5" />
         </HudButton>

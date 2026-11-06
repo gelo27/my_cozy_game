@@ -29,6 +29,9 @@ export const ZeldaOxygenWheel: React.FC<ZeldaOxygenWheelProps> = ({ telemetry, c
     const dir = new THREE.Vector3();
     const right = new THREE.Vector3();
     let shownUntil = 0;
+    // Smoothed screen position: the swimming body bobs every frame, the gauge should glide
+    let sx = NaN, sy = NaN;
+    let last = performance.now();
 
     const tick = () => {
       id = requestAnimationFrame(tick);
@@ -37,6 +40,8 @@ export const ZeldaOxygenWheel: React.FC<ZeldaOxygenWheelProps> = ({ telemetry, c
 
       const ratio = Math.max(0, Math.min(1, (telemetry.oxygen ?? 100) / (telemetry.maxOxygen || 100)));
       const now = performance.now();
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
       if (telemetry.isUnderwater || ratio < 0.999 || telemetry.justRefilled) shownUntil = now + 600;
       let visible = now < shownUntil;
 
@@ -57,9 +62,19 @@ export const ZeldaOxygenWheel: React.FC<ZeldaOxygenWheelProps> = ({ telemetry, c
         if (visible) {
           const x = (world.x * 0.5 + 0.5) * window.innerWidth;
           const y = (-world.y * 0.5 + 0.5) * window.innerHeight;
-          box.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+          // Snap when it first shows or jumps far (camera cut), otherwise ease toward the head
+          if (Number.isNaN(sx) || Math.hypot(x - sx, y - sy) > 160) {
+            sx = x;
+            sy = y;
+          } else {
+            const k = 1 - Math.exp(-dt * 7);
+            sx += (x - sx) * k;
+            sy += (y - sy) * k;
+          }
+          box.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -50%)`;
         }
       }
+      if (!visible) sx = sy = NaN;
       box.style.opacity = visible ? '1' : '0';
 
       const critical = ratio <= OXYGEN_CONFIG.CRITICAL_THRESHOLD / 100;
@@ -72,7 +87,8 @@ export const ZeldaOxygenWheel: React.FC<ZeldaOxygenWheelProps> = ({ telemetry, c
         : low
         ? OXYGEN_CONFIG.WARNING_COLOR
         : '#4cc2ff';
-      box.style.scale = critical ? (1 + 0.08 * Math.sin(now / 90)).toFixed(3) : '1';
+      // A slow, small pulse when air is almost out (no fast shaking)
+      box.style.scale = critical ? (1 + 0.04 * Math.sin(now / 220)).toFixed(3) : '1';
     };
     tick();
     return () => cancelAnimationFrame(id);

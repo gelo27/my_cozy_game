@@ -15,7 +15,7 @@ class CaveAudio {
   private rumble: { src: AudioBufferSourceNode; filter: BiquadFilterNode; gain: GainNode; lfo: OscillatorNode; lfoGain: GainNode } | null = null;
   private eventTimer = 18;
   private farDripTimer = 1;
-  private dripBudget = 4;
+  private dripBudget = 2;
   private readonly tmp = new THREE.Vector3();
 
   /** Call every frame. `listener` is the camera position. */
@@ -25,7 +25,8 @@ class CaveAudio {
     this.mix += ((inCave ? 1 : 0) - this.mix) * (1 - Math.exp(-dt * 1.6));
     if (!inCave && this.mix < 0.004) this.mix = 0;
     audioEngine.setReverb(this.mix * (audioEngine.isUnderwater ? 0.25 : 0.6));
-    this.dripBudget = Math.min(4, this.dripBudget + dt * 3);
+    // At most ~one close plink a second, so the drips stay a background detail
+    this.dripBudget = Math.min(2, this.dripBudget + dt * 0.8);
 
     if (this.mix > 0.01 && !this.rumble) this.startRumble(ctx);
     if (this.rumble) {
@@ -41,10 +42,10 @@ class CaveAudio {
     }
     this.farDripTimer -= dt;
     if (this.farDripTimer <= 0) {
-      this.farDripTimer = 0.6 + Math.random() * 2.4;
+      this.farDripTimer = 4 + Math.random() * 7;
       const a = Math.random() * Math.PI * 2, d = 9 + Math.random() * 16;
       this.tmp.set(listener.x + Math.cos(a) * d, listener.y + 2 + Math.random() * 4, listener.z + Math.sin(a) * d);
-      this.plink(ctx, this.tmp, Math.random() < 0.3, 0.35);
+      this.plink(ctx, this.tmp, Math.random() < 0.3, 0.25);
     }
   }
 
@@ -69,7 +70,7 @@ class CaveAudio {
     osc.frequency.exponentialRampToValueAtTime(f0 * (water ? 2.3 : 1.6), t + (water ? 0.07 : 0.035));
     const decay = water ? 0.2 : 0.09;
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.32 * level, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.2 * level, t + 0.004);
     g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
     osc.connect(g).connect(panner);
     osc.start(t);

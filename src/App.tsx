@@ -269,7 +269,7 @@ export default function App() {
                   onEquipItem={(itemId: string) => character?.model.equipToolOrProp(itemId)}
                 />
 
-                {!isBuildingUI && hud && <Compass world={world} heading={engine!.getHeading} inCave={!!hud.inCave} />}
+                {!isBuildingUI && hud && !hud.inCave && <Compass world={world} heading={engine!.getHeading} />}
                 {isMapOpen && <WorldMap world={world} heading={engine!.getHeading} onClose={() => handleToggleMap(false)} />}
 
                 {isPaused && (

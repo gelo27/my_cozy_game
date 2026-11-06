@@ -4,9 +4,10 @@ import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
-  PawPrint, User, Globe2, Terminal, Bug, Spline,
+  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell,
 } from 'lucide-react';
 import { RiverPanel } from './RiverPanel';
+import { CavePanel } from './CavePanel';
 import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool } from '../../editor/EditorController';
@@ -64,6 +65,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'sculpt', icon: Mountain, label: 'Рельєф (3)' },
     { id: 'paint', icon: Brush, label: 'Покриття (4)' },
     { id: 'river', icon: Spline, label: 'Річки та водоспади (5)' },
+    { id: 'cave', icon: Shell, label: 'Печери (6)' },
   ];
   const tabs: { id: Tab; icon: React.ElementType; label: string }[] = [
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
@@ -209,6 +211,7 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
   }
 
   if (s.tool === 'river') return <RiverPanel engine={engine} />;
+  if (s.tool === 'cave') return <CavePanel engine={engine} />;
 
   if (s.tool === 'sculpt') {
     const kinds = [

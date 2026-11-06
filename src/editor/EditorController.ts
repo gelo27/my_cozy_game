@@ -8,8 +8,11 @@ import { RiverEditTool } from './RiverEditTool';
 import type { RiverSystem } from '../world/rivers/RiverSystem';
 import { riverWorld, stringifyRivers } from '../world/rivers/RiverWorld';
 import type { RiverDef } from '../world/rivers/RiverTypes';
+import { CaveEditTool } from './CaveEditTool';
+import type { CaveNetwork } from '../explore/cave/CaveNetwork';
+import type { PhysicsWorld } from '../physics/PhysicsWorld';
 
-export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river';
+export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave';
 
 export interface EditorState {
   tool: EditorTool;
@@ -33,6 +36,8 @@ interface Snapshot {
   tiles: Uint8Array;
   props: ReturnType<PropSystem['serialize']>;
   rivers: string;
+  /** Cave layout JSON ('' before the network has built). */
+  caves: string;
 }
 
 /**
@@ -82,6 +87,8 @@ export class EditorController {
 
   /** River / stream / waterfall authoring (tool 5). */
   public readonly rivers: RiverEditTool;
+  /** Cave network authoring (tool 6). */
+  public readonly caves: CaveEditTool;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -90,8 +97,14 @@ export class EditorController {
     private readonly input: InputManager,
     private readonly terrain: TerrainSystem,
     private readonly props: PropSystem,
-    riverSystem: RiverSystem
+    riverSystem: RiverSystem,
+    caveNetwork: CaveNetwork,
+    physics: PhysicsWorld
   ) {
+    this.caves = new CaveEditTool(scene, camera, dom, caveNetwork, physics, {
+      pushUndo: () => this.pushUndo(),
+      touch: () => this.touch(),
+    });
     this.rivers = new RiverEditTool(scene, camera, dom, riverSystem, terrain, {
       pushUndo: () => this.pushUndo(),
       touch: () => this.touch(),
@@ -133,6 +146,7 @@ export class EditorController {
 
   public dispose(): void {
     this.rivers.dispose();
+    this.caves.dispose();
     this.dom.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('pointermove', this.onPointerMove);
@@ -161,6 +175,7 @@ export class EditorController {
       this.looking = false;
     }
     this.rivers.setVisible(active && this.state.tool === 'river');
+    this.caves.setVisible(this.state.tool === 'cave', active);
     this.touch();
   }
 
@@ -168,7 +183,10 @@ export class EditorController {
     this.state[key] = value;
     if (key === 'tool' && value !== 'select') this.select(null);
     if (key === 'gizmoMode') this.gizmo.setMode(value as 'translate' | 'rotate');
-    if (key === 'tool') this.rivers.setVisible(this.active && value === 'river');
+    if (key === 'tool') {
+      this.rivers.setVisible(this.active && value === 'river');
+      this.caves.setVisible(value === 'cave', this.active);
+    }
     this.touch();
   }
 
@@ -222,6 +240,13 @@ export class EditorController {
     this.touch();
   }
 
+  /** Puts the fly camera at a point looking down (pitch) toward the given yaw. */
+  public flyTo(position: THREE.Vector3, pitch = -0.75, yaw = 0): void {
+    this.camera.position.copy(position);
+    this.pitch = pitch;
+    this.yaw = yaw;
+  }
+
   public focusOn(position: THREE.Vector3): void {
     const back = new THREE.Vector3(Math.sin(this.yaw), 0, Math.cos(this.yaw)).multiplyScalar(10);
     this.camera.position.copy(position).add(back).add(new THREE.Vector3(0, 7, 0));
@@ -248,6 +273,7 @@ export class EditorController {
       tiles: this.terrain.tiles.slice(),
       props: this.props.serialize(),
       rivers: stringifyRivers(riverWorld.defs),
+      caves: this.caves.work ? JSON.stringify(this.caves.work) : '',
     };
   }
 
@@ -259,6 +285,7 @@ export class EditorController {
       if (!riverWorld.defs.some((d) => d.id === this.rivers.selectedRiver)) this.rivers.select(null);
       else this.rivers.select(this.rivers.selectedRiver, -1);
     }
+    if (s.caves && s.caves !== (this.caves.work ? JSON.stringify(this.caves.work) : '')) this.caves.setLayout(JSON.parse(s.caves));
     this.terrain.heights.set(s.heights);
     this.terrain.tiles.set(s.tiles);
     this.terrain.invalidateSaveCache();
@@ -301,7 +328,10 @@ export class EditorController {
     }
     if (e.button !== 0 || this.gizmo.dragging || (this.gizmo.axis && this.state.tool === 'select')) return;
     const { tool } = this.state;
-    if (tool === 'river') {
+    if (tool === 'cave') {
+      this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
+      this.caves.pointerDown(this.raycaster, this.input.mouseNDC);
+    } else if (tool === 'river') {
       if (this.rivers.busy) return;
       this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
       const hit = this.terrain.raycast(this.raycaster.ray, 300, new THREE.Vector3());
@@ -350,16 +380,26 @@ export class EditorController {
       this.redo();
     } else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyD') {
       e.preventDefault();
-      this.duplicateSelected();
+      if (this.state.tool === 'cave') this.caves.duplicateSelected();
+      else this.duplicateSelected();
     } else if (this.state.tool === 'river' && !e.ctrlKey && this.rivers.keyDown(e)) {
       // handled by the river tool
+    } else if (this.state.tool === 'cave' && (e.code === 'Delete' || e.code === 'Backspace')) {
+      this.caves.deleteSelected();
+    } else if (this.state.tool === 'cave' && e.code === 'Escape') {
+      this.caves.addMode = 'none';
+      this.caves.select(null);
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
       this.deleteSelected();
     } else if (!e.ctrlKey && !this.looking) {
-      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river' };
+      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave' };
       if (tools[e.code]) this.set('tool', tools[e.code]);
       if (e.code === 'KeyG') this.set('gizmoMode', 'translate');
       if (e.code === 'KeyR' && this.state.tool === 'select') this.set('gizmoMode', 'rotate');
+      if (e.code === 'KeyF' && this.state.tool === 'cave') {
+        const p = this.caves.selectedWorldPos();
+        if (p) this.focusOn(p);
+      }
       if (e.code === 'BracketLeft') this.set('brushRadius', Math.max(1, this.state.brushRadius - 1));
       if (e.code === 'BracketRight') this.set('brushRadius', Math.min(20, this.state.brushRadius + 1));
     }
@@ -375,6 +415,7 @@ export class EditorController {
     if (!this.active) return;
     this.updateFlyCamera(dt);
     this.rivers.update(dt);
+    this.caves.update(dt);
 
     this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
     this.hasHit = !!this.terrain.raycast(this.raycaster.ray, 300, this.hit);
@@ -419,8 +460,11 @@ export class EditorController {
       if (k.has('KeyQ')) move.y -= 1;
     }
     if (move.lengthSq() > 0) this.camera.position.addScaledVector(move.normalize(), speed);
-    const ground = this.terrain.getHeight(this.camera.position.x, this.camera.position.z);
-    this.camera.position.y = Math.max(this.camera.position.y, ground + 0.5);
+    // Over the island the camera stays above the ground; the cave pocket lies far beyond it
+    if (Math.abs(this.camera.position.x) < 400) {
+      const ground = this.terrain.getHeight(this.camera.position.x, this.camera.position.z);
+      this.camera.position.y = Math.max(this.camera.position.y, ground + 0.5);
+    }
     this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
     this.camera.updateMatrixWorld();
   }

@@ -96,14 +96,14 @@ float causticsWaterY(vec2 xz) {
   vec2 river = texture2D(uCausticsRiver, (xz + ${(WORLD_SIZE * 0.5 + 0.5).toFixed(1)}) / ${(WORLD_SIZE + 1).toFixed(1)}).rg;
   return river.g > 0.5 ? max(uCausticsSea, river.r) : uCausticsSea;
 }
-/** Extra direct light (per colour channel, 0 = none) at world point wp whose normal has world up-component upY. */
-vec3 causticsLight(vec3 wp, float waterY, float upY) {
-  // Camera above water: one uniform test for the whole frame (coherent, no derivative issues)
-  if (uCausticsOn < 0.5) return vec3(0.0);
+/**
+ * The caustics pattern at world point wp, depth metres under the surface, normal up-component upY
+ * (0 = none). Shared by the sea / rivers (causticsLight) and the cave lakes (CaveMaterial).
+ */
+vec3 causticsPattern(vec3 wp, float depth, float upY) {
   vec2 uv = wp.xz * uCausticsParams.y;
   // Gradients taken before the per-pixel branch, so the fetches below may be skipped
   vec2 gx = dFdx(uv), gy = dFdy(uv);
-  float depth = waterY - wp.y;
   if (depth <= 0.02 || upY <= 0.05) return vec3(0.0);
   float fade = smoothstep(0.02, 0.4, depth) * exp(-depth * uCausticsFade.x) * smoothstep(0.05, 0.6, upY)
     * (1.0 - smoothstep(uCausticsFade.y, uCausticsFade.z, distance(wp, cameraPosition)));
@@ -114,6 +114,12 @@ vec3 causticsLight(vec3 wp, float waterY, float upY) {
   vec3 a = textureGrad(uCausticsMap, uv + wob + vec2(t * 0.022, t * 0.014), gx, gy).rgb;
   vec3 b = textureGrad(uCausticsMap, uv * 1.31 - wob + vec2(-t * 0.017, t * 0.025) + 0.37, gx * 1.31, gy * 1.31).rgb;
   return pow(min(a, b), vec3(uCausticsParams.w)) * (2.0 * fade * uCausticsParams.x);
+}
+/** Extra direct light (per colour channel, 0 = none) at world point wp whose normal has world up-component upY. */
+vec3 causticsLight(vec3 wp, float waterY, float upY) {
+  // Camera above water: one uniform test for the whole frame (coherent, no derivative issues)
+  if (uCausticsOn < 0.5) return vec3(0.0);
+  return causticsPattern(wp, waterY - wp.y, upY);
 }
 `;
 

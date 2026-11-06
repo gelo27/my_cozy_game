@@ -5,44 +5,59 @@ import path from 'path';
 import {defineConfig, type Plugin} from 'vite';
 
 /**
- * Dev-only endpoint for the in-game editor: POST /__dev/rivers writes src/world/rivers/rivers.json.
- * Only loopback clients may write (the dev server listens on the LAN), the body must be a JSON
- * array, and the write does not trigger a page reload (the editor already shows the new state).
+ * Dev-only endpoints for the in-game editor: POST /__dev/rivers writes src/world/rivers/rivers.json,
+ * POST /__dev/caves writes src/explore/cave/caves.json. Only loopback clients may write (the dev
+ * server listens on the LAN), the body must be the expected JSON shape, and the write does not
+ * trigger a page reload (the editor already shows the new state).
  */
 function devWorldDataPlugin(): Plugin {
-  const riversFile = path.resolve(__dirname, 'src/world/rivers/rivers.json');
-  let lastWrite = 0;
+  const files = new Map<string, { file: string; limit: number; check: (v: unknown) => boolean; what: string }>([
+    ['/__dev/rivers', { file: path.resolve(__dirname, 'src/world/rivers/rivers.json'), limit: 2_000_000, check: Array.isArray, what: 'an array of rivers' }],
+    [
+      '/__dev/caves',
+      {
+        file: path.resolve(__dirname, 'src/explore/cave/caves.json'),
+        limit: 12_000_000,
+        check: (v) => !!v && typeof v === 'object' && (v as { version?: number }).version === 1 && Array.isArray((v as { hubs?: unknown }).hubs),
+        what: 'a cave layout',
+      },
+    ],
+  ]);
+  const lastWrite = new Map<string, number>();
   return {
     name: 'dev-world-data',
     apply: 'serve',
     configureServer(server) {
-      server.middlewares.use('/__dev/rivers', (req, res) => {
-        const ip = req.socket.remoteAddress ?? '';
-        if (req.method !== 'POST' || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
-          res.statusCode = 403;
-          res.end();
-          return;
-        }
-        let body = '';
-        req.on('data', (chunk) => {
-          body += chunk;
-          if (body.length > 2_000_000) req.destroy();
-        });
-        req.on('end', () => {
-          try {
-            if (!Array.isArray(JSON.parse(body))) throw new Error('Expected an array of rivers');
-            lastWrite = Date.now();
-            fs.writeFileSync(riversFile, body);
-            res.end('ok');
-          } catch (err) {
-            res.statusCode = 400;
-            res.end(String(err));
+      for (const [route, target] of files) {
+        server.middlewares.use(route, (req, res) => {
+          const ip = req.socket.remoteAddress ?? '';
+          if (req.method !== 'POST' || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
+            res.statusCode = 403;
+            res.end();
+            return;
           }
+          let body = '';
+          req.on('data', (chunk) => {
+            body += chunk;
+            if (body.length > target.limit) req.destroy();
+          });
+          req.on('end', () => {
+            try {
+              if (!target.check(JSON.parse(body))) throw new Error(`Expected ${target.what}`);
+              lastWrite.set(target.file, Date.now());
+              fs.writeFileSync(target.file, body);
+              res.end('ok');
+            } catch (err) {
+              res.statusCode = 400;
+              res.end(String(err));
+            }
+          });
         });
-      });
+      }
     },
     handleHotUpdate(ctx) {
-      if (path.resolve(ctx.file) === riversFile &&Date.now() - lastWrite < 3000) return [];
+      const file = path.resolve(ctx.file);
+      if (Date.now() - (lastWrite.get(file) ?? 0) < 3000) return [];
     },
   };
 }

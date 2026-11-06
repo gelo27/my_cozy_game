@@ -78,6 +78,20 @@ export class ForageField {
     this.writeMatrix(node, 1);
   }
 
+  /** Removes every node the test matches and repacks the instances (the cave editor rebuilds). */
+  public removeWhere(test: (n: ForageNode) => boolean): void {
+    const keep = this.nodes.filter((n) => !test(n));
+    if (keep.length === this.nodes.length) return;
+    this.nodes.length = 0;
+    this.counts.shell = this.counts.sand = this.counts.mushroom = 0;
+    for (const n of keep) {
+      n.index = this.counts[n.kind]++;
+      this.nodes.push(n);
+      this.writeMatrix(n, n.taken ? 0 : 1);
+    }
+    for (const k of ['shell', 'sand', 'mushroom'] as const) this.meshes[k].count = this.counts[k];
+  }
+
   public findNearest(pos: THREE.Vector3, reach = 1.7): ForageNode | null {
     let best: ForageNode | null = null;
     let bestD = reach * reach;

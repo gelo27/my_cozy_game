@@ -448,7 +448,7 @@ export class GameEngine {
         }
         return false;
       };
-      const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers);
+      const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers, exploration.caveNetwork, physics);
       const debugRenderer = new DebugRenderer(physics, scene);
 
       this.world = {

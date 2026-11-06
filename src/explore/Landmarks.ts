@@ -187,6 +187,7 @@ function buildHut(site: IslandSite, origin: THREE.Vector3, scene: THREE.Scene, p
 // ---------------------------------------------------------------- cave mouth
 
 function buildCaveMouth(site: IslandSite, origin: THREE.Vector3, scene: THREE.Scene, physics: PhysicsWorld): LandmarkAnchors {
+  if (site.underwater) return buildSeaCaveMouth(site, origin, scene, physics);
   const b = new StructureBuilder();
   const seed = SEED(site.id);
   // Boulders stacked into a horseshoe arch around a dark opening, set back against the slope
@@ -221,6 +222,50 @@ function buildCaveMouth(site: IslandSite, origin: THREE.Vector3, scene: THREE.Sc
   return {
     action: siteToWorld(origin, site.yaw, 0, 0, back + 0.4),
     lights: [torch(-1.9), torch(1.9)],
+  };
+}
+
+/**
+ * The sea-bed way in: a low reef of mossy boulders around a dark hole, with glowing crystals on top
+ * so it can be spotted from the surface (no torches under water).
+ */
+function buildSeaCaveMouth(site: IslandSite, origin: THREE.Vector3, scene: THREE.Scene, physics: PhysicsWorld): LandmarkAnchors {
+  const b = new StructureBuilder();
+  const seed = SEED(site.id);
+  const back = -1.6;
+  for (let i = 0; i <= 8; i++) {
+    const a = (i / 8) * Math.PI;
+    const s = 1.1 + ((seed + i) % 3) * 0.2;
+    b.rock(i % 2 ? 'moss' : 'darkStone', s, s * 0.9, s * 1.1, Math.cos(a) * 3, Math.sin(a) * 3.2 + 0.2, back, seed + i);
+  }
+  b.rock('darkStone', 2.6, 2.2, 3, -4.6, 0.8, back - 1, seed + 20);
+  b.rock('moss', 2.6, 2.0, 3, 4.6, 0.8, back - 1, seed + 21);
+  b.rock('darkStone', 4.2, 2.2, 3.4, 0, 4.2, back - 1.6, seed + 22);
+  b.rock('moss', 3.4, 1.4, 3.6, 0, 0.3, back - 3.4, seed + 23);
+  b.colliderBox(2.6, 5, 3.4, -4, 2.2, back - 0.8).colliderBox(2.6, 5, 3.4, 4, 2.2, back - 0.8);
+  b.colliderBox(9.4, 2.4, 4, 0, 5, back - 1.2);
+  const mouth = new THREE.CircleGeometry(1, 20, 0, Math.PI);
+  mouth.scale(2.6, 3.0, 1);
+  mouth.translate(0, 0.15, back - 0.7);
+  b.add('void', mouth);
+  b.add('void', new THREE.PlaneGeometry(5.2, 0.4).translate(0, 0.0, back - 0.7));
+  b.colliderBox(5.4, 4, 1, 0, 2, back - 1.4);
+  // Crystal beacons on the arch and the shoulders
+  const spikes: [number, number, number, number][] = [[-1.2, 5.6, back - 1, 0.9], [0.4, 5.9, back - 1.4, 1.2], [1.5, 5.4, back - 0.8, 0.7], [-4.8, 2.9, back - 1, 0.8], [4.6, 2.7, back - 1.2, 1]];
+  spikes.forEach(([x, y, z, s], i) => {
+    for (let k = 0; k < 3; k++) {
+      const h = s * (0.9 + k * 0.35);
+      const g = new THREE.CylinderGeometry(0, 0.16 * s, h, 5).translate(0, h / 2, 0);
+      g.rotateX(Math.sin(i + k * 2.1) * 0.5);
+      g.rotateZ(Math.cos(i * 1.7 + k) * 0.5);
+      b.add('crystal', g.translate(x + (k - 1) * 0.25 * s, y - 0.2, z));
+    }
+  });
+  b.build(scene, physics, origin, site.yaw, 'SeaCaveMouth');
+  const glow = (x: number, y: number) => ({ ...siteToWorld(origin, site.yaw, x, y, back - 1), range: 9, halo: 1.6, intensity: 1, color: [0.35, 0.8, 1.1] as [number, number, number] });
+  return {
+    action: siteToWorld(origin, site.yaw, 0, 0.6, back + 0.4),
+    lights: [glow(0, 6), glow(-4.6, 3.2), glow(4.6, 3.2)],
   };
 }
 

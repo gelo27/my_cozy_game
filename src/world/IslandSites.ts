@@ -15,6 +15,8 @@ export interface IslandSite {
   /** Levelled pad radius; the terrain blends back over `padBlend` metres. */
   pad: number;
   padBlend: number;
+  /** A cave mouth on the sea bed (swim down to it). */
+  underwater?: boolean;
 }
 
 /** Old saves only cover the 128 m farm; landmarks stay well outside it. */
@@ -24,7 +26,8 @@ let cache: IslandSite[] | null = null;
 
 /**
  * Deterministic landmark placement on the raw island: a lighthouse on a south-eastern headland,
- * ruins on the highest summit, a hut in quiet hills, and three cave mouths cut into mountain slopes.
+ * ruins on the highest summit, a hut in quiet hills, two cave mouths cut into mountain slopes and a
+ * third on the sea bed on the far side of the island (the three make a triangle around the network).
  * Searches run once on a coarse grid (a few thousand noise samples).
  */
 export function getIslandSites(): IslandSite[] {
@@ -91,15 +94,15 @@ export function getIslandSites(): IslandSite[] {
   // Caves: steep mountain flanks facing downhill, high enough to be mountains, spread apart
   {
     type Cand = { score: number; x: number; z: number; y: number; yaw: number };
-    // Strict pass first (keeps the original two mouths); looser passes only if a mouth is missing
+    // Strict pass first; looser passes only if a mouth is missing
     const LEVELS = [
-      { yMin: 5, yMax: 15, sMin: 0.45, sMax: 1.3, front: 0.5, spacing: [90, 70, 55] },
-      { yMin: 3, yMax: 20, sMin: 0.3, sMax: 1.6, front: 0.65, spacing: [70, 50, 40] },
+      { yMin: 5, yMax: 15, sMin: 0.45, sMax: 1.3, front: 0.5, spacing: [90, 70] },
+      { yMin: 3, yMax: 20, sMin: 0.3, sMax: 1.6, front: 0.65, spacing: [70, 50] },
       { yMin: 1.5, yMax: 28, sMin: 0.2, sMax: 2, front: 0.8, spacing: [50, 35] },
     ];
     const picked: Cand[] = [];
     for (const L of LEVELS) {
-      if (picked.length >= 3) break;
+      if (picked.length >= 2) break;
       const candidates: Cand[] = [];
       for (let z = -220; z <= 220; z += 4) {
         for (let x = -220; x <= 220; x += 4) {
@@ -117,15 +120,14 @@ export function getIslandSites(): IslandSite[] {
         }
       }
       candidates.sort((a, b) => b.score - a.score);
-      // Three mouths into the one cave network, spread over the island
       for (const spacing of L.spacing) {
         for (const c of candidates) {
-          if (picked.length >= 3) break;
+          if (picked.length >= 2) break;
           if (picked.some((p) => Math.hypot(p.x - c.x, p.z - c.z) < spacing)) continue;
           if (sites.some((s) => Math.hypot(s.x - c.x, s.z - c.z) < 40)) continue;
           picked.push(c);
         }
-        if (picked.length >= 3) break;
+        if (picked.length >= 2) break;
       }
     }
     picked.forEach((c, i) => {
@@ -134,6 +136,30 @@ export function getIslandSites(): IslandSite[] {
       const pz = c.z + Math.cos(c.yaw) * 2.5;
       sites.push({ id: `cave${i + 1}`, kind: 'cave', x: px, z: pz, y: h(px, pz) - 0.2, yaw: c.yaw, pad: 3.2, padBlend: 4 });
     });
+
+    // The third mouth: on the sea bed at full depth just off the shore, on the side of the island
+    // facing away from the other two, opening out to sea
+    const mx = picked.reduce((a, c) => a + c.x, 0), mz = picked.reduce((a, c) => a + c.z, 0);
+    const away = picked.length ? Math.atan2(-mz, -mx) : Math.PI / 2;
+    let best: { score: number; x: number; z: number; y: number } | null = null;
+    for (let dd = -40; dd <= 40; dd += 2) {
+      const a = away + (dd * Math.PI) / 180;
+      const cx = Math.cos(a), cz = Math.sin(a);
+      for (let r = 150; r < 330; r += 1) {
+        const x = cx * r, z = cz * r;
+        if (Math.abs(x) > 234 || Math.abs(z) > 234) break;
+        const y = h(x, z);
+        if (y > -10.3) continue;
+        // Flat sea bed around it, nothing else nearby
+        const flat = slopeAt(x, z).mag + slopeAt(x + cx * 4, z + cz * 4).mag;
+        const score = -Math.abs(dd) * 0.05 - r * 0.02 - flat * 5;
+        if (!best || score > best.score) best = { score, x, z, y };
+        break;
+      }
+    }
+    if (best) {
+      sites.push({ id: 'cave3', kind: 'cave', x: best.x, z: best.z, y: best.y - 0.1, yaw: Math.atan2(best.x, best.z), pad: 3.2, padBlend: 4, underwater: true });
+    }
   }
 
   cache = sites;

@@ -4,7 +4,7 @@ import { caveAudio } from '../../audio/CaveAudio';
 const MAX_DROPS = 32;
 const MAX_RINGS = 24;
 const ACTIVE_RADIUS = 26;
-const SOUND_RADIUS = 20;
+const SOUND_RADIUS = 14;
 const CELL = 16;
 
 interface Drop {
@@ -51,7 +51,7 @@ export class CaveDrips {
     const n = data.length / 5;
     this.timers = new Float32Array(n);
     for (let i = 0; i < n; i++) {
-      this.timers[i] = Math.random() * 5;
+      this.timers[i] = Math.random() * 12;
       const key = this.key(data[i * 5], data[i * 5 + 2]);
       let l = this.grid.get(key);
       if (!l) this.grid.set(key, (l = []));
@@ -105,7 +105,7 @@ export class CaveDrips {
     for (const k of this.active) {
       this.timers[k] -= dt;
       if (this.timers[k] > 0) continue;
-      this.timers[k] = 1.6 + Math.random() * 4.5;
+      this.timers[k] = 5 + Math.random() * 9;
       const drop = this.freeDrops.pop();
       if (!drop) continue;
       drop.drip = k;

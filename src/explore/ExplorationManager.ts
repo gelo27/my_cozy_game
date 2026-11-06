@@ -19,7 +19,10 @@ import { audioEngine } from '../audio/AudioEngine';
 import { t, dataName } from '../i18n/i18n';
 import { buildLandmark, LandmarkAnchors } from './Landmarks';
 import { STRUCTURE_MATERIALS } from './StructureBuilder';
+import RAPIER from '@dimforge/rapier3d-compat';
 import { CaveNetwork, CaveContentsWorld } from './cave/CaveNetwork';
+import { isCaveLayout } from './cave/CaveGen';
+import cavesJson from './cave/caves.json';
 import { ForageField, ForageNode } from './ForageField';
 import { EXPLORE_GRID } from './MapRenderer';
 
@@ -50,6 +53,10 @@ const LOOT: Record<string, Loot> = {
 interface Chest {
   id: string;
   pos: THREE.Vector3;
+  group: THREE.Group;
+  body: RAPIER.RigidBody | null;
+  /** Placed by the cave network (replaced whenever it is rebuilt). */
+  cave: boolean;
   lid: THREE.Object3D;
   opened: boolean;
   open: number; // lid animation 0..1
@@ -108,7 +115,7 @@ export class ExplorationManager {
   public onItems: (items: { itemId: string; amount: number }[]) => void = () => {};
 
   private readonly landmarks = new Map<string, LandmarkAnchors>();
-  private readonly chests: Chest[] = [];
+  private chests: Chest[] = [];
   private readonly openedChestIds = new Set<string>();
   private readonly caves: CaveEntry[] = [];
   /** One network under the whole island; every cave mouth leads into it. */
@@ -159,11 +166,13 @@ export class ExplorationManager {
       scene,
       physics,
       CAVE_ORIGIN,
-      this.caves.map(({ site }) => ({ id: site.id, x: site.x, y: site.y, z: site.z, yaw: site.yaw })),
+      this.caves.map(({ site }) => ({ id: site.id, x: site.x, y: site.y, z: site.z, yaw: site.yaw, underwater: site.underwater })),
       coast,
-      1337
+      1337,
+      // The authored layout (saved from the cave editor), or a procedural one when there is none
+      isCaveLayout(cavesJson) ? cavesJson : null
     );
-    this.network.onReady = (c) => this.populateCave(c);
+    this.network.onContents = (c) => this.populateCave(c);
     riverWorld.caveWater = (x, y, z) => this.network.waterLevelAt(x, y, z);
   }
 
@@ -229,7 +238,7 @@ export class ExplorationManager {
     }
   }
 
-  private addChest(id: string, pos: THREE.Vector3, yaw: number): void {
+  private addChest(id: string, pos: THREE.Vector3, yaw: number, cave = false): void {
     const group = new THREE.Group();
     group.position.copy(pos);
     group.rotation.y = yaw;
@@ -253,23 +262,42 @@ export class ExplorationManager {
     lid.add(lidMesh, lock);
     group.add(base, trim, foot, lid);
     this.root.add(group);
-    this.physics.createStaticBox(pos.clone().setY(pos.y + 0.3), new THREE.Vector3(0.9, 0.6, 0.6), new THREE.Euler(0, yaw, 0));
-    this.chests.push({ id, pos: pos.clone(), lid, opened: false, open: 0 });
+    const { body } = this.physics.createStaticBox(pos.clone().setY(pos.y + 0.3), new THREE.Vector3(0.9, 0.6, 0.6), new THREE.Euler(0, yaw, 0));
+    this.chests.push({ id, pos: pos.clone(), group, body, cave, lid, opened: false, open: 0 });
   }
 
   // ---------------------------------------------------------------- caves
 
-  /** The network's chests, ore and mushrooms belong to the shared systems (added once, when built). */
+  /**
+   * The network's chests, ore and mushrooms belong to the shared systems: added when it is built,
+   * and replaced when the cave editor rebuilds it.
+   */
   private populateCave(c: CaveContentsWorld): void {
+    const inCave = (p: THREE.Vector3) => this.network.contains(p);
+    this.rocks.removeRocksWhere(inCave);
+    this.forage.removeWhere((n) => inCave(n.position));
+    this.chests = this.chests.filter((ch) => {
+      if (!ch.cave) return true;
+      if (ch.body) this.physics.removeRigidBody(ch.body);
+      ch.group.removeFromParent();
+      ch.group.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+      return false;
+    });
     for (const o of c.ores) this.rocks.addRock(o.pos.clone().setY(o.pos.y - 0.1), o.kind, o.kind === 'crystal' ? 0.9 : 0.8);
     for (const m of c.mushrooms) this.forage.add('mushroom', m);
     for (const ch of c.chests) {
       if (!LOOT[ch.id]) continue;
-      this.addChest(ch.id, ch.pos, ch.yaw);
+      this.addChest(ch.id, ch.pos, ch.yaw, true);
       if (this.openedChestIds.has(ch.id)) this.markChestOpened(ch.id, true);
     }
+    this.caveLightKey = NaN;
     this.lightRevision++;
     this.revision++;
+  }
+
+  /** The cave network (the developer editor edits and rebuilds it). */
+  public get caveNetwork(): CaveNetwork {
+    return this.network;
   }
 
   private enterCave(cave: CaveEntry, character: CharacterController, camera: ThirdPersonCamera): void {

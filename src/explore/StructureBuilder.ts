@@ -17,6 +17,7 @@ export const STRUCTURE_MATERIALS = {
   gold: new THREE.MeshLambertMaterial({ color: 0xe8b84a, emissive: 0x2a1c00 }),
   glass: new THREE.MeshLambertMaterial({ color: 0xfff1b8, emissive: 0x5a4a10 }),
   void: new THREE.MeshBasicMaterial({ color: 0x050608, fog: false }),
+  crystal: new THREE.MeshBasicMaterial({ color: 0x6fd8ff }),
 } as const;
 
 export type StructureMaterial = keyof typeof STRUCTURE_MATERIALS;
