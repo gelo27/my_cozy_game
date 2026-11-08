@@ -32,8 +32,8 @@ const PAD = 2;
 /** Props no grass grows through (radius multiplier of the caster disc). */
 const GRASS_BLOCKERS: Record<string, number> = { well: 1.1, hay: 1.1, rock_big: 0.9 };
 const PROP_CASTERS: Record<string, { r: number; k: number }> = {
-  tree_pine: { r: 1.5, k: 0.55 },
-  tree_round: { r: 1.8, k: 0.6 },
+  tree_pine: { r: 1.8, k: 0.55 },
+  tree_round: { r: 2.9, k: 0.6 },
   bush: { r: 0.8, k: 0.4 },
   rock_big: { r: 1.2, k: 0.45 },
   well: { r: 1.0, k: 0.4 },

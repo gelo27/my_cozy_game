@@ -8,7 +8,6 @@ import {
   isWindowPiece,
   isWindowOrDoorPiece,
   isSolidWallPiece,
-  isFarmPlotPiece,
   getWallHalfWidth,
   getWallHalfHeight,
   BuildingSceneExportData
@@ -23,7 +22,6 @@ import { ContinuousWallSystem } from './ContinuousWallSystem';
 import { WallPaintingSystem, WallCellHitInfo } from './WallPaintingSystem';
 import { isFurniturePiece } from './furniture/FurnitureCatalog';
 import { exportBuildingScene, importBuildingScene, downloadBuildingSceneAsJson } from './BuildingSerialization';
-import { FarmingManager } from '../farming/FarmingManager';
 
 /**
  * High-performance 3D spatial partitioning grid for fast O(1) proximity lookups of building pieces.
@@ -105,7 +103,6 @@ export class BuildingManager {
   public group: THREE.Group;
   public continuousWallSystem: ContinuousWallSystem;
   public wallPaintingSystem: WallPaintingSystem;
-  public farmingManager: FarmingManager | null = null;
   private nextPieceId: number = 1;
   private spatialGrid: SpatialPieceGrid = new SpatialPieceGrid(4.0);
   private cachedPiecesArray: BuiltPiece[] | null = null;
@@ -130,16 +127,6 @@ export class BuildingManager {
     this.scene.add(this.group);
     this.wallPaintingSystem = new WallPaintingSystem(this.group, BUILDING_MATERIALS.wallChecker);
     this.continuousWallSystem = new ContinuousWallSystem(this.group, this.wallPaintingSystem);
-  }
-
-  public setFarmingManager(manager: FarmingManager): void {
-    this.farmingManager = manager;
-    for (const piece of this.pieces.values()) {
-      if (isFarmPlotPiece(piece.type)) {
-        const soilMesh = piece.meshGroup.getObjectByName('SoilBedMesh') as THREE.Mesh | null;
-        this.farmingManager.registerPlot(piece.id, piece.position, piece.meshGroup, soilMesh);
-      }
-    }
   }
 
   /**
@@ -354,12 +341,6 @@ export class BuildingManager {
     // If an opening piece (window/door/doorway) was placed, regenerate wall mesh to cut out the hole
     if (this.continuousWallSystem.isOpeningPiece(type)) {
       this.dirtyWalls = true;
-    }
-
-    // Register with FarmingManager if it's a farm plot piece
-    if (isFarmPlotPiece(type) && this.farmingManager) {
-      const soilMesh = builtPiece.meshGroup.getObjectByName('SoilBedMesh') as THREE.Mesh | null;
-      this.farmingManager.registerPlot(builtPiece.id, builtPiece.position, builtPiece.meshGroup, soilMesh);
     }
 
     // Audio and particles
@@ -1112,11 +1093,6 @@ export class BuildingManager {
     this.cachedPiecesArray = null;
     this.revision++;
 
-    // Unregister from FarmingManager if demolished
-    if (isFarmPlotPiece(piece.type) && this.farmingManager) {
-      this.farmingManager.unregisterPlot(id);
-    }
-
     // 4. Sound & Particles
     const isWood = piece.type !== BuildingPieceType.STONE_FOUNDATION_2X2;
     audioEngine.at(piece.position, 4).playBuildDemolish();
@@ -1508,25 +1484,6 @@ export class BuildingManager {
         break;
       }
 
-      case BuildingPieceType.FARM_PLOT_1X1: {
-        // 1x1m farm plot bed: height 0.22m (half-height 0.11m), centered at y = 0.11m
-        colliderDesc = this.physics.rapier.ColliderDesc.cuboid(0.5, 0.11, 0.5)
-          .setTranslation(0, 0.11, 0)
-          .setFriction(0.6)
-          .setRestitution(0.0)
-          .setCollisionGroups(colGroup);
-        break;
-      }
-
-      case BuildingPieceType.FARM_PLOT_2X2: {
-        // 2x2m farm plot bed: height 0.22m (half-height 0.11m), centered at y = 0.11m
-        colliderDesc = this.physics.rapier.ColliderDesc.cuboid(HALF_SIZE, 0.11, HALF_SIZE)
-          .setTranslation(0, 0.11, 0)
-          .setFriction(0.6)
-          .setRestitution(0.0)
-          .setCollisionGroups(colGroup);
-        break;
-      }
 
       default: {
         colliderDesc = this.physics.rapier.ColliderDesc.cuboid(HALF_SIZE, HALF_SIZE, HALF_SIZE)

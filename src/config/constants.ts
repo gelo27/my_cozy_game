@@ -18,6 +18,8 @@ export const COLLISION_GROUPS = {
   TRIGGERS: 0x0008,
   // Group 4: Camera Occlusion Query (exclude character)
   CAMERA_RAY: 0x0010,
+  // Group 5: The terrain heightfield (also ENVIRONMENT), for bodies that touch only the ground
+  TERRAIN: 0x0020,
 } as const;
 
 export const PHYSICS_CONFIG = {

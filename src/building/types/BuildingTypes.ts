@@ -42,8 +42,6 @@ export enum BuildingPieceType {
   WOOD_RAILING_1M = 'WOOD_RAILING_1M',
   WOOD_STAIR_RAILING_2X2 = 'WOOD_STAIR_RAILING_2X2',
   WHITE_DECORATIVE_FENCE_1M = 'WHITE_DECORATIVE_FENCE_1M',
-  FARM_PLOT_1X1 = 'FARM_PLOT_1X1',
-  FARM_PLOT_2X2 = 'FARM_PLOT_2X2',
   FURN_DINING_TABLE = 'FURN_DINING_TABLE',
   FURN_COFFEE_TABLE = 'FURN_COFFEE_TABLE',
   FURN_WOOD_CHAIR = 'FURN_WOOD_CHAIR',
@@ -68,7 +66,6 @@ export enum PieceCategory {
   ROOFS = 'ROOFS',
   PILLARS = 'PILLARS',
   RAILINGS = 'RAILINGS',
-  GARDENING = 'GARDENING',
   WOOD_STRUCTURE = 'WOOD_STRUCTURE',
   ROOFING = 'ROOFING',
   FOUNDATION = 'FOUNDATION',
@@ -161,10 +158,6 @@ export function isWindowPiece(type: BuildingPieceType): boolean {
 
 export function isWindowOrDoorPiece(type: BuildingPieceType): boolean {
   return isWindowPiece(type) || isDoorPiece(type) || isDoorwayPiece(type);
-}
-
-export function isFarmPlotPiece(type: BuildingPieceType): boolean {
-  return type === BuildingPieceType.FARM_PLOT_1X1 || type === BuildingPieceType.FARM_PLOT_2X2;
 }
 
 export function isSolidWallPiece(type: BuildingPieceType): boolean {

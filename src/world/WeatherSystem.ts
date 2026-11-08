@@ -1,9 +1,10 @@
 import * as THREE from 'three';
-import { FOG_SCALE, worldSettings } from './WorldSettings';
+import { FOG_SCALE, isMobileDevice, worldSettings } from './WorldSettings';
 import { PrecipitationOcclusion } from './PrecipitationOcclusion';
 import { Precipitation, PRECIP_BOX } from './Precipitation';
 import { SkyDome, SkyParams } from './SkyDome';
 import { riverWorld } from './rivers/RiverWorld';
+import { WeatherDirector } from './WeatherDirector';
 
 export type WeatherType = 'clear' | 'cloudy' | 'rain' | 'storm' | 'fog' | 'snow';
 
@@ -154,7 +155,10 @@ const SKY_KEYS: [number, number][] = [
 export class WeatherSystem {
   /** Side of the precipitation box that follows the camera (m). */
   public static readonly PRECIP_BOX = PRECIP_BOX;
+  private static readonly MOBILE = isMobileDevice();
   public weather: WeatherType = 'clear';
+  /** Automatic weather (Markov chain + forecast). `director.auto = false` keeps the weather fixed. */
+  public readonly director = new WeatherDirector((type) => this.applyAuto(type), 'clear');
   /** Smoothed 0..1, readable by gameplay (e.g. rain waters crops). */
   public rainIntensity = 0;
 
@@ -201,6 +205,12 @@ export class WeatherSystem {
     night: 0,
     flash: 0,
   };
+  /** The current change is an automatic one (slow, phased) rather than set by hand. */
+  private smooth = false;
+  /** 0..1 eased storm share (wind on the drops). */
+  private stormMix = 0;
+  /** Dry-weather roof-map refresh throttle (s): the night ambience only needs the cell overhead. */
+  private occTimer = 0;
   private lightningTimer = 4;
   private flash = 0;
   private static readonly _c = new THREE.Color();
@@ -243,8 +253,20 @@ export class WeatherSystem {
     return this.snowMix * this.current.amount;
   }
 
+  /**
+   * Weather set by hand (editor, console, save load): ~3 s transition, and the automatic chain
+   * carries on from this state with a fresh duration.
+   */
   public setWeather(type: WeatherType): void {
     this.weather = type;
+    this.smooth = false;
+    this.director.override(type);
+  }
+
+  /** Automatic change from the director: the sky eases over about a minute, clouds gather before the rain. */
+  private applyAuto(type: WeatherType): void {
+    this.weather = type;
+    this.smooth = true;
   }
 
   /** Readable clock string "HH:MM". */
@@ -264,19 +286,40 @@ export class WeatherSystem {
       worldSettings.timeOfDay = (worldSettings.timeOfDay + dt / worldSettings.secondsPerHour) % 24;
     }
     const t = worldSettings.timeOfDay;
+    this.director.update(dt);
 
-    // Ease weather parameters toward the target profile (~3 s transition)
+    // Ease weather parameters toward the target profile: ~3 s by hand, ~1 min for automatic changes,
+    // with each group on its own pace (clouds first, fog slowest)
     const p = PROFILES[this.weather];
-    const k = 1 - Math.exp(-dt * 0.8);
     const cur = this.current;
-    cur.light += (p.light - cur.light) * k;
-    cur.fog += (p.fog - cur.fog) * k;
-    cur.amount += (p.amount - cur.amount) * k;
-    cur.tint.lerp(p.tint, k);
-    cur.haze.lerp(p.haze, k);
-    cur.hazeMix += (p.hazeMix - cur.hazeMix) * k;
-    for (const key of WEATHER_SOUND_KEYS) this.sound[key] += (p.sound[key] - this.sound[key]) * k;
-    this.rainIntensity = p.precipitation === 'rain' ? cur.amount : cur.amount * 0.2;
+    const s = this.smooth;
+    const kSky = 1 - Math.exp(-dt * (s ? 0.07 : 0.8));
+    const kFog = 1 - Math.exp(-dt * (s ? 0.04 : 0.8));
+    const kRain = 1 - Math.exp(-dt * (s ? 0.06 : 0.8));
+    const kCloud = 1 - Math.exp(-dt * (s ? 0.09 : 0.8));
+    // Phases: precipitation waits until the clouds have gathered (gate), and while it is still
+    // falling the clouds can't thin out below a rain sky
+    const gate = p.amount > 0 ? THREE.MathUtils.clamp((cur.cover - p.cover * 0.6) / (p.cover * 0.3 + 1e-3), 0, 1) : 1;
+    const wet = Math.min(1, cur.amount * 4);
+    const coverTarget = Math.max(p.cover, wet * 0.88);
+    const darkTarget = Math.max(p.dark, wet * 0.6);
+    cur.cover += (coverTarget - cur.cover) * kCloud;
+    cur.dark += (darkTarget - cur.dark) * kCloud;
+    cur.light += (Math.min(p.light, 1 - wet * 0.5) - cur.light) * kSky;
+    cur.fog += (p.fog - cur.fog) * kFog;
+    cur.amount += (p.amount * gate - cur.amount) * kRain;
+    cur.tint.lerp(p.tint, kSky);
+    cur.haze.lerp(p.haze, kSky);
+    cur.hazeMix += (p.hazeMix - cur.hazeMix) * kSky;
+    const sounds = this.sound;
+    for (let i = 0; i < WEATHER_SOUND_KEYS.length; i++) {
+      const key = WEATHER_SOUND_KEYS[i];
+      sounds[key] += (p.sound[key] - sounds[key]) * kSky;
+    }
+    // Rain turns to snow (and back) gradually instead of in one frame
+    if (p.precipitation !== 'none') this.snowMix += ((p.precipitation === 'snow' ? 1 : 0) - this.snowMix) * (1 - Math.exp(-dt * (s ? 0.15 : 2)));
+    this.stormMix += ((this.weather === 'storm' ? 1 : 0) - this.stormMix) * kCloud;
+    this.rainIntensity = cur.amount * (1 - this.snowMix * 0.8);
 
     // Sun path: rises in the east at 6, sets in the west at 19:30; the night half is the remaining
     // 10.5 h, so phase runs 0..PI over the day and PI..2PI over the night. The moon sits opposite.
@@ -292,10 +335,12 @@ export class WeatherSystem {
     const warm = 1 - THREE.MathUtils.smoothstep(elevation, 0.1, 0.5);
 
     // Lightning flashes during storms
-    if (this.weather === 'storm') {
+    // (only once the storm clouds have built up, so an automatic storm doesn't flash out of a blue sky)
+    if (this.weather === 'storm' && cur.dark > 0.8) {
       this.lightningTimer -= dt;
       if (this.lightningTimer <= 0) {
-        this.lightningTimer = 5 + Math.random() * 9;
+        // Long, uneven gaps; now and then a second strike follows close behind the first
+        this.lightningTimer = Math.random() < 0.15 ? 1.5 + Math.random() * 3 : 10 + Math.random() * Math.random() * 40;
         if (!(Math.random() < 0.35 && this.onGroundStrike?.())) {
           this.flash = 1;
           this.onLightning?.();
@@ -331,8 +376,6 @@ export class WeatherSystem {
     this.fog.density = cur.fog * FOG_SCALE;
 
     // Sky dome
-    cur.cover += (p.cover - cur.cover) * k;
-    cur.dark += (p.dark - cur.dark) * k;
     const sp = this.skyParams;
     sp.horizon.copy(this.sky);
     this.sampleKeys(ZENITH_KEYS, t, sp.zenith).multiply(cur.tint);
@@ -351,9 +394,7 @@ export class WeatherSystem {
     this.skyDome.update(dt, cameraPos, sp);
 
     // Precipitation
-    if (p.precipitation !== 'none') this.snowMix = p.precipitation === 'snow' ? 1 : 0;
     const bright = (0.3 + daylight * 0.7) * (0.55 + cur.light * 0.45) + this.flash;
-    const storm = this.weather === 'storm' ? 1 : 0;
     this.caveMix += (this.caveFactor - this.caveMix) * (1 - Math.exp(-dt * 4));
     if (this.caveMix > 0.001) this.applyCave(this.caveMix);
     // Under water: a dense blue-green fog (darker deeper down and at night), and the sky behind
@@ -364,9 +405,21 @@ export class WeatherSystem {
     this.underwater += ((below > 0.02 ? 1 : 0) - this.underwater) * (1 - Math.exp(-dt * 25));
     if (this.underwater > 0.001) this.applyUnderwater(this.underwater, daylight);
     this.skyDome.mesh.visible = this.underwater < 0.5;
-    this.precipitation.update(dt, cameraPos, cur.amount * (1 - this.caveMix), this.snowMix, bright, storm, Math.min(window.devicePixelRatio || 1, 1.5), worldSettings.waterLevel);
-    // Also at night: the night ambience needs to know when a roof is overhead
-    if (this.precipitation.active || this.nightFactor > 0.05) this.occlusion?.update(cameraPos);
+    // Phones: heavy rain is mostly overdraw of transparent drops, so the densest share is capped
+    const amount = cur.amount * (1 - this.caveMix) * (WeatherSystem.MOBILE ? 0.75 : 1);
+    this.precipitation.update(dt, cameraPos, amount, this.snowMix, bright, this.stormMix, Math.min(window.devicePixelRatio || 1, 1.5), worldSettings.waterLevel);
+    // Roof map: every frame while something falls; in dry nights the ambience only needs the
+    // cell overhead, so it refreshes twice a second
+    if (this.precipitation.active) {
+      this.occlusion?.update(cameraPos);
+      this.occTimer = 0;
+    } else if (this.nightFactor > 0.05) {
+      this.occTimer -= dt;
+      if (this.occTimer <= 0) {
+        this.occTimer = 0.5;
+        this.occlusion?.update(cameraPos);
+      }
+    }
   }
 
   private applyUnderwater(k: number, daylight: number): void {

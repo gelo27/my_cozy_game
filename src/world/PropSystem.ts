@@ -7,6 +7,10 @@ import { WORLD_HALF, isMobileDevice, worldSettings } from './WorldSettings';
 import { riverWorld } from './rivers/RiverWorld';
 import { coastRadius, fbm } from './IslandGenerator';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
+import { BUSH_MATERIAL, TREE_MATERIAL, TreeLods, foliageMaterialOf, getTreeLods, loadTreeModels, rebuildTreeLeaves, stepTreeWind } from './TreeModels';
+import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
+import { acquireDither, acquireInstancedDither } from './LodDither';
+import { LodInstances } from './LodInstances';
 
 /**
  * Props are batched per type AND per square cell, so whole cells get culled. Far-seen types (trees,
@@ -27,14 +31,41 @@ const VIEW_DIST: Record<string, number> = {
   mushrooms: 60,
 };
 /**
- * Beyond this distance (from the cell's nearest edge) a tree cell swaps to a low-poly version.
- * LOD types use small cells so the swap follows the camera closely; a few metres of hysteresis
- * keep a cell from flickering between the two at the boundary.
+ * Distances (from the camera, per tree) where a tree steps down to its next LOD (the trees pack
+ * has 3); a few metres of hysteresis keep a tree from flickering between two levels at a boundary.
  */
-const LOD_DIST = (isMobileDevice() ? 50 : 70);
-const LOD_HYSTERESIS = 8;
-/** Bump when the generated forests change, so older saves get the new trees once. */
-export const FOREST_VERSION = 1;
+const LOD_DISTS = isMobileDevice() ? [30, 75] : [40, 100];
+/**
+ * Types whose near LOD differs a lot from the next one (oak leaves, pine needles, bush leaves)
+ * keep it farther; these, the hysteresis and the crossfade time come live from the vegetation
+ * panel (VegetationSettings).
+ */
+const lodDists = (type: string, out: number[]): number[] => {
+  if (type === 'tree_round') out[0] = veg.oakNearDist;
+  else if (type === 'tree_pine') out[0] = veg.pineNearDist;
+  else if (type === 'bush') out[0] = veg.bushNearDist;
+  else return LOD_DISTS;
+  out[1] = Math.max(out[0] + 1, veg.treeFarDist);
+  return out;
+};
+const DISTS_SCRATCH = [0, 0];
+/** How often (s) trees re-pick their LOD, and how far (m) the camera must move for it. */
+const LOD_PASS_SECONDS = 0.15;
+const LOD_PASS_MOVE = 0.5;
+/** Rebuild leaves this long after the leaf sliders stop moving (ms). */
+const LEAF_REBUILD_DELAY = 300;
+/**
+ * Bump when the generated forests change, so older saves get the change once: 1 denser forests,
+ * 2 trees thinned where they stood too close together.
+ */
+export const FOREST_VERSION = 2;
+/**
+ * Room (m, at scale 1) generated props keep around them: about the crown radius for trees. Two
+ * props stand at least ROOM_SHARE of their summed rooms apart (crowns may touch, not merge).
+ */
+const ROOM: Record<string, number> = { tree_pine: 1.9, tree_round: 2.1, bush: 0.7, rock_big: 1.3, rock_small: 0.5 };
+const ROOM_SHARE = 0.8;
+const ROOM_MAX = 2.1 * 1.35;
 
 export type PropCategory = 'nature' | 'decor' | 'farm' | 'stations';
 
@@ -166,7 +197,7 @@ export class PropBuilder {
 export const PROP_DEFS: PropDef[] = [
   {
     id: 'tree_pine', name: 'Ялина', icon: 'TreePine', category: 'nature',
-    collider: { kind: 'cyl', r: 0.35, h: 3 },
+    collider: { kind: 'cyl', r: 0.5, h: 3 },
     build: (b) => {
       b.cyl(M.bark, 0.18, 0.28, 1.6, 0, 0.8, 0, 6);
       b.cone(M.pine, 1.6, 2.2, 0, 2.2, 0);
@@ -176,7 +207,7 @@ export const PROP_DEFS: PropDef[] = [
   },
   {
     id: 'tree_round', name: 'Дуб', icon: 'TreeDeciduous', category: 'nature',
-    collider: { kind: 'cyl', r: 0.35, h: 3 },
+    collider: { kind: 'cyl', r: 0.78, h: 3 },
     build: (b) => {
       b.cyl(M.bark, 0.22, 0.32, 2.2, 0, 1.1, 0, 6);
       b.ball(M.leaf, 1.5, 0, 3.1, 0);
@@ -187,9 +218,8 @@ export const PROP_DEFS: PropDef[] = [
   {
     id: 'bush', name: 'Кущ', icon: 'Sprout', category: 'nature',
     build: (b) => {
-      b.ball(M.bush, 0.6, 0, 0.45, 0);
-      b.ball(M.bush, 0.45, 0.5, 0.35, 0.2);
-      b.ball(M.bush, 0.4, -0.45, 0.3, -0.2);
+      // One sphere; the leaf scales (TreeModels) give it its outline once the models are ready
+      b.ball(M.bush, 0.62, 0, 0.48, 0);
     },
   },
   {
@@ -359,9 +389,16 @@ interface PropBatch {
   cz: number;
   size: number;
   viewDist: number;
-  /** Shared high/low geometries for LOD types; `far` says which one the mesh draws now. */
-  lod: { near: THREE.BufferGeometry; far: THREE.BufferGeometry } | null;
-  far: boolean;
+  /** Shared geometries for LOD types, nearest first. */
+  lod: THREE.BufferGeometry[] | null;
+  /**
+   * LOD types: what is drawn, each tree at its own level (`mesh` then only keeps the instances
+   * for picking and is never drawn).
+   */
+  lods: LodInstances | null;
+  /** Camera spot of the last per-tree LOD pass. */
+  passX: number;
+  passZ: number;
 }
 
 /**
@@ -395,6 +432,43 @@ export class PropSystem {
   constructor(scene: THREE.Scene, private readonly physics: PhysicsWorld, private readonly terrain: TerrainSystem) {
     this.group.name = 'Props';
     scene.add(this.group);
+    // Oak and pine come from the trees pack; until it loads (or if it fails) the procedural trees stand in
+    void loadTreeModels().then((lods) => lods && this.applyTreeModels(lods));
+  }
+
+  /** Swaps the trees' geometries (all LODs) to the loaded models, including cells already built. */
+  private applyTreeModels(lods: TreeLods): void {
+    for (const [type, list] of Object.entries(lods)) {
+      this.geometries.set(type, { geometry: list[0], materials: [foliageMaterialOf(type)] });
+    }
+    for (const b of this.batches.values()) {
+      const list = lods[b.def.id];
+      if (!list) continue;
+      b.lod = list;
+      b.mesh.geometry = list[0];
+      b.mesh.material = [foliageMaterialOf(b.def.id)];
+      // New lists (the materials and the number of levels may have changed with the models)
+      b.lods?.dispose();
+      b.lods = this.makeLods(b);
+      b.passX = Infinity;
+    }
+    // Hidden, so the load-time shader prewarm compiles the LOD crossfade program too
+    if (this.group.getObjectByName('LodDitherPrewarm')) return;
+    const warm = new THREE.Mesh(lods.tree_pine?.[2] ?? new THREE.BufferGeometry(), [acquireInstancedDither(TREE_MATERIAL), acquireInstancedDither(BUSH_MATERIAL)]);
+    warm.geometry = warm.geometry.clone();
+    warm.geometry.clearGroups();
+    warm.geometry.setAttribute('aLodFade', new THREE.BufferAttribute(new Float32Array(warm.geometry.getAttribute('position')?.count ?? 0), 1));
+    // The falling tree's uniform dither too
+    const warm2 = new THREE.Mesh(warm.geometry, acquireDither(TREE_MATERIAL, true));
+    warm2.visible = false;
+    warm2.name = 'LodDitherPrewarm2';
+    this.group.add(warm2);
+    const half = warm.geometry.index ? warm.geometry.index.count : warm.geometry.getAttribute('position')?.count ?? 0;
+    warm.geometry.addGroup(0, Math.floor(half / 6) * 3, 0);
+    warm.geometry.addGroup(Math.floor(half / 6) * 3, half - Math.floor(half / 6) * 3, 1);
+    warm.visible = false;
+    warm.name = 'LodDitherPrewarm';
+    this.group.add(warm);
   }
 
   private readonly geometries = new Map<string, { geometry: THREE.BufferGeometry; materials: THREE.Material[] }>();
@@ -410,6 +484,8 @@ export class PropSystem {
   }
 
   private getLod(type: string, near: THREE.BufferGeometry): PropBatch['lod'] {
+    const models = getTreeLods()?.[type];
+    if (models) return models;
     const build = LOD_BUILDS[type];
     if (!build) return null;
     let far = this.lodGeometries.get(type);
@@ -420,7 +496,7 @@ export class PropSystem {
       far = built.geometry;
       this.lodGeometries.set(type, far);
     }
-    return { near, far };
+    return [near, far];
   }
 
   private getBatch(type: string, x: number, z: number): PropBatch | null {
@@ -433,6 +509,10 @@ export class PropSystem {
     const def = PROP_DEF_MAP.get(type);
     if (!def) return null;
     let shared = this.geometries.get(type);
+    if (!shared) {
+      const models = getTreeLods()?.[type];
+      if (models) shared = { geometry: models[0], materials: [foliageMaterialOf(type)] };
+    }
     if (!shared) {
       const b = new PropBuilder();
       def.build(b);
@@ -448,11 +528,50 @@ export class PropSystem {
       def, mesh, ids: [], cx, cz, size,
       viewDist: (VIEW_DIST[type] ?? 160) * VIEW_SCALE,
       lod: this.getLod(type, shared.geometry),
-      far: false,
+      lods: null,
+      passX: Infinity,
+      passZ: Infinity,
     };
+    batch.lods = this.makeLods(batch);
     this.batches.set(key, batch);
     return batch;
   }
+
+  /** Per-tree LOD lists for a cell of a LOD type (instances re-added from its master mesh). */
+  private makeLods(b: PropBatch): LodInstances | null {
+    if (!b.lod) return null;
+    const materials = this.geometries.get(b.def.id)?.materials ?? (b.mesh.material as THREE.Material[]);
+    const lods = new LodInstances(this.group, b.lod, materials, b.mesh.boundingSphere!, b.mesh.name);
+    for (const id of b.ids) lods.add(id, this.matrixOf(id, PropSystem._m2), this.levelFor(b, this.props.get(id)!, -1));
+    // The master mesh keeps the instances (picking, chop poses) but the lists draw them
+    b.mesh.visible = false;
+    return lods;
+  }
+
+  /** The LOD a prop wants from the last camera spot (`current` adds the hysteresis, -1 none). */
+  private levelFor(b: PropBatch, p: PropInstance, current: number): number {
+    const dx = p.position.x - this.camX;
+    const dz = p.position.z - this.camZ;
+    const d2 = dx * dx + dz * dz;
+    const dists = lodDists(b.def.id, DISTS_SCRATCH);
+    let level = 0;
+    for (let i = 0; i < dists.length; i++) {
+      const edge = current > i ? dists[i] - veg.lodHysteresis : dists[i];
+      if (d2 <= edge * edge) break;
+      level = i + 1;
+    }
+    return Math.min(level, (b.lod?.length ?? 1) - 1);
+  }
+
+  /** A prop's current instance matrix (from its cell's master mesh). */
+  private readonly matrixOf = (id: number, out: THREE.Matrix4): THREE.Matrix4 => {
+    this.batchOf.get(id)!.mesh.getMatrixAt(this.slotOf.get(id)!, out);
+    return out;
+  };
+  /** Camera spot (XZ) for picking LODs; the spawn until the first frame. */
+  private camX = 0;
+  private camZ = 0;
+  private static readonly _m2 = new THREE.Matrix4();
 
   /** Fixed bounding sphere of the cell (also covers props placed on roofs), used for culling and picking. */
   private setCellBounds(mesh: THREE.InstancedMesh, cx: number, cz: number, size: number): void {
@@ -485,11 +604,13 @@ export class PropSystem {
     this.batchOf.set(prop.id, batch);
     this.slotOf.set(prop.id, batch.ids.length - 1);
     this.writeMatrix(batch, batch.ids.length - 1, prop);
+    batch.lods?.add(prop.id, this.matrixOf(prop.id, PropSystem._m2), this.levelFor(batch, prop, -1));
   }
 
   private detach(id: number): void {
     const batch = this.batchOf.get(id);
     if (!batch) return;
+    batch.lods?.remove(id);
     const slot = this.slotOf.get(id)!;
     const last = batch.ids.length - 1;
     if (slot !== last) {
@@ -508,23 +629,87 @@ export class PropSystem {
 
   /** Shows only the cells within each type's draw distance of the camera (call once per frame). */
   public updateVisibility(camera: THREE.Vector3): void {
+    const now = performance.now();
+    const dt = this.lastVisibilityAt ? Math.min(0.1, (now - this.lastVisibilityAt) / 1000) : 0;
+    this.lastVisibilityAt = now;
+    stepTreeWind(dt);
+    // Leaf / needle sliders: rebuild once they rest, then swap every cell to the new geometry
+    if (vegetationRevision.leaves !== this.leafRevision) {
+      this.leafRevision = vegetationRevision.leaves;
+      this.leafRebuildAt = now + LEAF_REBUILD_DELAY;
+    }
+    if (this.leafRebuildAt && now >= this.leafRebuildAt) {
+      this.leafRebuildAt = 0;
+      const lods = rebuildTreeLeaves();
+      if (lods) this.applyTreeModels(lods);
+    }
+    const treeView = veg.treeViewDist * VIEW_SCALE;
+    this.camX = camera.x;
+    this.camZ = camera.z;
+    this.lodPassIn -= dt;
+    const lodPass = this.lodPassIn <= 0;
+    if (lodPass) this.lodPassIn = LOD_PASS_SECONDS;
     for (const b of this.batches.values()) {
       const x0 = b.cx * b.size;
       const z0 = b.cz * b.size;
       const dx = Math.max(x0 - camera.x, 0, camera.x - x0 - b.size);
       const dz = Math.max(z0 - camera.z, 0, camera.z - z0 - b.size);
       const d2 = dx * dx + dz * dz;
-      b.mesh.visible = b.ids.length > 0 && d2 < b.viewDist * b.viewDist;
-      if (b.lod && b.mesh.visible) {
-        const edge = b.far ? LOD_DIST - LOD_HYSTERESIS : LOD_DIST;
-        const far = d2 > edge * edge;
-        if (far !== b.far) {
-          b.far = far;
-          b.mesh.geometry = far ? b.lod.far : b.lod.near;
-        }
+      const view = b.def.id === 'tree_pine' || b.def.id === 'tree_round' ? treeView : b.viewDist;
+      const visible = b.ids.length > 0 && d2 < view * view;
+      if (!b.lods) {
+        b.mesh.visible = visible;
+        continue;
       }
+      b.lods.setVisible(visible);
+      if (!visible) continue;
+      b.lods.step(dt, veg.lodFade, this.matrixOf);
+      if (lodPass) this.passLods(b, camera, Math.sqrt(d2));
     }
   }
+
+  /**
+   * Re-picks each tree's LOD in a cell from its own distance. Skipped when the camera hasn't moved
+   * since the cell's last pass, and when the whole cell lies inside one LOD band (every tree there
+   * wants the same level and already has it).
+   */
+  private passLods(b: PropBatch, camera: THREE.Vector3, near: number): void {
+    const lods = b.lods!;
+    const moved = Math.abs(camera.x - b.passX) + Math.abs(camera.z - b.passZ) > LOD_PASS_MOVE;
+    if (!moved && lods.uniform >= 0) return;
+    // Farthest the cell reaches from the camera
+    const fx = Math.max(Math.abs(camera.x - b.cx * b.size), Math.abs(camera.x - (b.cx + 1) * b.size));
+    const fz = Math.max(Math.abs(camera.z - b.cz * b.size), Math.abs(camera.z - (b.cz + 1) * b.size));
+    const far = Math.hypot(fx, fz);
+    const dists = lodDists(b.def.id, DISTS_SCRATCH);
+    const h = veg.lodHysteresis;
+    let band = 0;
+    let split = false;
+    for (let i = 0; i < dists.length; i++) {
+      if (near > dists[i] + h) band = i + 1;
+      else if (far >= dists[i] - h) split = true;
+    }
+    band = Math.min(band, lods.levels - 1);
+    if (!split && lods.uniform === band) {
+      b.passX = camera.x;
+      b.passZ = camera.z;
+      return;
+    }
+    b.passX = camera.x;
+    b.passZ = camera.z;
+    let all = -2;
+    lods.forEach((id, level) => {
+      const want = this.levelFor(b, this.props.get(id)!, level);
+      if (want !== level) lods.setLevel(id, want, this.matrixOf(id, PropSystem._m2), veg.lodFade);
+      all = all === -2 || all === want ? want : -1;
+    });
+    if (all >= 0 && !lods.busy) lods.markUniform(all);
+  }
+
+  private lastVisibilityAt = 0;
+  private lodPassIn = 0;
+  private leafRevision = vegetationRevision.leaves;
+  private leafRebuildAt = 0;
 
   /** Calls `fn` for every prop whose cell overlaps the circle (then filter by exact distance). */
   public forEachNear(x: number, z: number, radius: number, fn: (p: PropInstance) => void, type?: string): void {
@@ -672,7 +857,11 @@ export class PropSystem {
 
   /** Re-snap grounded props after terrain sculpting (cheap, only when the terrain changed). */
   public update(): void {
-    if (this.densifyIn >= 0 && this.densifyIn-- === 0) this.densifyForests(true);
+    if (this.densifyIn >= 0 && this.densifyIn-- === 0) {
+      if (this.upgradeFrom < 1) this.densifyForests(true);
+      if (this.upgradeFrom < 2) this.thinForests();
+      this.forestVersion = FOREST_VERSION;
+    }
     if (this.terrainRevision === this.terrain.revision) return;
     const first = this.terrainRevision === -1;
     this.terrainRevision = this.terrain.revision;
@@ -702,6 +891,7 @@ export class PropSystem {
     PropSystem._m.compose(prop.position, PropSystem._q, PropSystem._s);
     batch.mesh.setMatrixAt(slot, PropSystem._m);
     batch.mesh.instanceMatrix.needsUpdate = true;
+    batch.lods?.setMatrix(prop.id, PropSystem._m);
   }
 
   private createBody(prop: PropInstance, def: PropDef): void {
@@ -752,14 +942,86 @@ export class PropSystem {
     this.add(type, x, z, rotationY, 1);
   }
 
+  /** True when a generated `type` at x, z (scale) keeps its room from the props around it. */
+  private hasRoom(type: string, x: number, z: number, scale: number): boolean {
+    const r = (ROOM[type] ?? 0) * scale;
+    if (!r) return true;
+    const reach = (r + ROOM_MAX) * ROOM_SHARE;
+    for (const other of Object.keys(ROOM)) {
+      const size = PropSystem.cellSize(other);
+      for (let cz = Math.floor((z - reach) / size); cz <= Math.floor((z + reach) / size); cz++) {
+        for (let cx = Math.floor((x - reach) / size); cx <= Math.floor((x + reach) / size); cx++) {
+          const b = this.batches.get(`${other}|${cx}|${cz}`);
+          if (!b) continue;
+          for (const id of b.ids) {
+            const p = this.props.get(id)!;
+            const need = (r + ROOM[other] * p.scale) * ROOM_SHARE;
+            const dx = p.position.x - x;
+            const dz = p.position.z - z;
+            if (dx * dx + dz * dz < need * need) return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  /** `add` for generated props: skipped when it would crowd the props already there. */
+  private addSpaced(type: string, x: number, z: number, rotationY: number, scale: number): number | null {
+    return this.hasRoom(type, x, z, scale) ? this.add(type, x, z, rotationY, scale) : null;
+  }
+
+  /**
+   * Older saves: removes generated trees standing too close to others (the earlier tree stays).
+   * The farm's middle is left alone (trees the player placed there).
+   */
+  private thinForests(): void {
+    const trees = [...this.props.values()]
+      .filter((p) => (p.type === 'tree_pine' || p.type === 'tree_round') && Math.hypot(p.position.x, p.position.z) > 30 && !this.transient.has(p.id))
+      .sort((a, b) => a.id - b.id);
+    const CELL = 8;
+    const kept = new Map<string, PropInstance[]>();
+    const key = (cx: number, cz: number) => `${cx}|${cz}`;
+    let removed = 0;
+    for (const t of trees) {
+      const rt = ROOM[t.type] * t.scale;
+      const cx = Math.floor(t.position.x / CELL);
+      const cz = Math.floor(t.position.z / CELL);
+      let crowded = false;
+      for (let dz = -1; dz <= 1 && !crowded; dz++) {
+        for (let dx = -1; dx <= 1 && !crowded; dx++) {
+          for (const o of kept.get(key(cx + dx, cz + dz)) ?? []) {
+            const need = (rt + ROOM[o.type] * o.scale) * ROOM_SHARE;
+            if (t.position.distanceToSquared(o.position) < need * need) {
+              crowded = true;
+              break;
+            }
+          }
+        }
+      }
+      if (crowded) {
+        this.remove(t.id);
+        removed++;
+        continue;
+      }
+      const k = key(cx, cz);
+      if (!kept.has(k)) kept.set(k, []);
+      kept.get(k)!.push(t);
+    }
+    if (removed) console.info(`[Props] thinned ${removed} crowded trees`);
+  }
+
   public populateDefault(): void {
     const ring = (type: string, cx: number, cz: number, n: number, r0: number, r1: number, seed: number) => {
       let s = seed;
       const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
       for (let i = 0; i < n; i++) {
-        const a = rnd() * Math.PI * 2;
-        const r = r0 + rnd() * (r1 - r0);
-        this.add(type, cx + Math.cos(a) * r, cz + Math.sin(a) * r, rnd() * Math.PI * 2, 0.8 + rnd() * 0.5);
+        // A few tries for a spot with room
+        for (let tries = 0; tries < 4; tries++) {
+          const a = rnd() * Math.PI * 2;
+          const r = r0 + rnd() * (r1 - r0);
+          if (this.addSpaced(type, cx + Math.cos(a) * r, cz + Math.sin(a) * r, rnd() * Math.PI * 2, 0.8 + rnd() * 0.5) !== null) break;
+        }
       }
     };
     ring('tree_pine', 0, 0, 34, 46, 60, 7);
@@ -786,8 +1048,10 @@ export class PropSystem {
    * the physics broadphase knows the loaded buildings (so no tree grows through a house).
    */
   public queueForestUpgrade(): void {
+    this.upgradeFrom = this.forestVersion;
     this.densifyIn = 2;
   }
+  private upgradeFrom = FOREST_VERSION;
 
   /**
    * Second pass of forest trees between the first pass ones (roughly doubles forests; meadows,
@@ -801,15 +1065,8 @@ export class PropSystem {
     const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
     const STEP = 6.5;
     const water = worldSettings.waterLevel;
-    const MIN_GAP = 2.6;
     const rot0 = new RAPIER.Quaternion(0, 0, 0, 1);
     const probe = checkColliders ? new RAPIER.Cylinder(1.5, 0.7) : null;
-    let tooClose = false;
-    const near = (p: PropInstance, x: number, z: number) => {
-      const dx = p.position.x - x;
-      const dz = p.position.z - z;
-      if (dx * dx + dz * dz < MIN_GAP * MIN_GAP) tooClose = true;
-    };
     for (let gz = -WORLD_HALF + STEP / 2; gz < WORLD_HALF; gz += STEP) {
       for (let gx = -WORLD_HALF + STEP / 2; gx < WORLD_HALF; gx += STEP) {
         const x = gx + rnd() * STEP;
@@ -827,9 +1084,8 @@ export class PropSystem {
         const slope = Math.abs(this.terrain.getHeight(x + 1, z) - y) + Math.abs(this.terrain.getHeight(x, z + 1) - y);
         if (slope > 1.1) continue;
         if (this.terrain.getTile(Math.floor(x), Math.floor(z)) !== TerrainTileType.GRASS) continue;
-        tooClose = false;
-        this.forEachNear(x, z, MIN_GAP, (p) => near(p, x, z));
-        if (tooClose) continue;
+        const type = pineRoll < (y > 6 || forest > 0.3 ? 0.75 : 0.35) ? 'tree_pine' : 'tree_round';
+        if (!this.hasRoom(type, x, z, scale)) continue;
         if (probe) {
           const hit = this.physics.world.intersectionWithShape(
             { x, y: y + 1.7, z }, rot0, probe,
@@ -839,8 +1095,7 @@ export class PropSystem {
           );
           if (hit) continue;
         }
-        const pine = y > 6 || forest > 0.3 ? 0.75 : 0.35;
-        this.add(pineRoll < pine ? 'tree_pine' : 'tree_round', x, z, rot, scale);
+        this.add(type, x, z, rot, scale);
       }
     }
   }
@@ -868,18 +1123,18 @@ export class PropSystem {
         const rot = rnd() * Math.PI * 2;
         const scale = 0.8 + rnd() * 0.55;
         if (slope > 1.1) {
-          if (pick < 0.12) this.add('rock_big', x, z, rot, scale);
-          else if (pick < 0.3) this.add('rock_small', x, z, rot, scale);
+          if (pick < 0.12) this.addSpaced('rock_big', x, z, rot, scale);
+          else if (pick < 0.3) this.addSpaced('rock_small', x, z, rot, scale);
         } else if (forest > -0.02) {
           // Forest: pines up high, round trees in the lowlands
           const pine = y > 6 || forest > 0.3 ? 0.75 : 0.35;
-          if (pick < 0.7) this.add(rnd() < pine ? 'tree_pine' : 'tree_round', x, z, rot, scale);
-          else if (pick < 0.78) this.add('bush', x, z, rot, scale);
+          if (pick < 0.7) this.addSpaced(rnd() < pine ? 'tree_pine' : 'tree_round', x, z, rot, scale);
+          else if (pick < 0.78) this.addSpaced('bush', x, z, rot, scale);
           else if (pick < 0.82) this.add('mushrooms', x, z, rot, scale);
         } else {
           // Meadows: scattered trees, bushes, flowers and stones
-          if (pick < 0.05) this.add(rnd() < 0.5 ? 'tree_round' : 'tree_pine', x, z, rot, scale);
-          else if (pick < 0.13) this.add('bush', x, z, rot, scale);
+          if (pick < 0.05) this.addSpaced(rnd() < 0.5 ? 'tree_round' : 'tree_pine', x, z, rot, scale);
+          else if (pick < 0.13) this.addSpaced('bush', x, z, rot, scale);
           else if (pick < 0.25) this.add('flowers', x, z, rot, scale);
           else if (pick < 0.29) this.add('rock_small', x, z, rot, scale);
           else if (pick < 0.3) this.add('rock_big', x, z, rot, scale);

@@ -119,6 +119,7 @@ export class CarryAbility implements IAbility {
 
     if (!targetBody || !targetBody.isValid()) return false;
     if ((targetBody as any).isVehicle || (targetBody.userData as any)?.isVehicle) return false;
+    if ((targetBody.userData as { noCarry?: boolean } | undefined)?.noCarry) return false;
 
     try {
       // Calculate current facing quaternion for character

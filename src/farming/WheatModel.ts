@@ -9,44 +9,53 @@ const WHEAT_URL = `${import.meta.env.BASE_URL}models/wheat.glb`;
 export const fieldCropTime = { value: 0 };
 
 /**
- * One vertex-coloured material for every field plant. Stalks sway with the square of their height,
- * phase-shifted by the instance position, so the whole field ripples without any per-frame CPU work;
- * the per-instance `aBend` adds the proximity push (players, pets, moped) on top.
+ * Vertex-coloured material for the instanced field crops. Plants sway with the square of their height,
+ * phase-shifted by their position, so a whole field ripples without any per-frame CPU work; on
+ * instanced fields the per-instance `aBend` adds the proximity push (players, pets, moped) on top.
+ *
+ * `sway` scales the wind bend (1 = wheat) and `height` is the model-space height the push reaches
+ * full strength at. Every crop gets its own material with these as uniforms, but all of them share
+ * one shader program (same cache key): adding crops adds no shader compiles.
  */
-export const FIELD_CROP_MATERIAL = (() => {
+export function createFieldCropMaterial(sway: number, height: number): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  const uCrop = { value: new THREE.Vector2(sway, 1 / height) };
   mat.onBeforeCompile = (shader) => {
     injectNightLights(shader);
     shader.uniforms.uTime = fieldCropTime;
+    shader.uniforms.uCrop = uCrop;
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nuniform float uTime;\nattribute vec2 aBend;')
+      .replace('#include <common>', '#include <common>\nuniform float uTime;\nuniform vec2 uCrop;\nattribute vec2 aBend;')
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
 #ifdef USE_INSTANCING
 {
-  vec3 ip = instanceMatrix[3].xyz;
   float h = max(position.y, 0.0);
-  float bend = h * h;
+  float bend = h * h * uCrop.x;
+  vec3 ip = instanceMatrix[3].xyz;
   float gust = sin(uTime * 0.6 + ip.x * 0.11 + ip.z * 0.07) * 0.5 + 0.5;
   transformed.x += sin(uTime * 1.9 + ip.x * 0.8 + ip.z * 0.5) * (0.05 + gust * 0.07) * bend;
   transformed.z += cos(uTime * 1.5 + ip.z * 0.9 - ip.x * 0.3) * 0.04 * bend;
 
-  // Proximity push: aBend is the tip's world XZ offset from the CPU springs. The instance matrix is
-  // yaw * uniform scale, so its inverse is transpose / scale^2 (no inverse() needed).
+  // Proximity push: aBend is the tip's world XZ offset from the CPU springs (zero for crops without
+  // springs). The instance matrix is yaw * uniform scale, so its inverse is transpose / scale^2.
   mat3 im = mat3(instanceMatrix);
   vec3 localBend = (transpose(im) * vec3(aBend.x, 0.0, aBend.y)) / dot(im[0], im[0]);
-  float hn = h / 0.8;
+  float hn = h * uCrop.y;
   float k = hn * hn;
   transformed.xz += localBend.xz * k;
-  transformed.y -= dot(localBend.xz, localBend.xz) * 0.6 * k; // keep stalk length as it leans
+  transformed.y -= dot(localBend.xz, localBend.xz) * 0.5 * uCrop.y * k; // keep stem length as it leans
 }
 #endif`
       );
   };
   mat.customProgramCacheKey = () => 'field-crop-sway';
   return mat;
-})();
+}
+
+/** The field wheat's material (instanced, springy). */
+export const FIELD_CROP_MATERIAL = createFieldCropMaterial(1, 0.8);
 
 /** Stage colour pairs [stem/ear (dark), leaves/grains (light)] in linear RGB. */
 const STAGE_COLORS: Record<CropStage, [THREE.Color, THREE.Color]> = {
@@ -80,7 +89,7 @@ export function loadWheatModel(): Promise<void> {
         3: buildStage(source, 3),
       };
     })
-    .catch((err) => console.warn('[Wheat] model failed to load, fields use procedural wheat', err));
+    .catch((err) => console.warn('[Wheat] model failed to load, wheat fields stay empty', err));
   return loading;
 }
 

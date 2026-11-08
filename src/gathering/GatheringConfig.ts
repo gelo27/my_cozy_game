@@ -65,17 +65,8 @@ export const ROCK_TYPES: Record<RockKind, { name: string; hits: number; drops: R
   },
 };
 
-/** Small grove west of the spawn, spaced so felled trunks do not land on neighbours. */
-export const TREE_SPOTS: { position: THREE.Vector3; scale: number }[] = [
-  [-14, -6, 0.78],
-  [-21, -2, 0.85],
-  [-17, -13, 0.72],
-  [-25, -10, 0.9],
-  [-13, -21, 0.8],
-  [-22, -19, 0.75],
-  [-29, -3, 0.82],
-  [-30, -17, 0.88],
-].map(([x, z, scale]) => ({ position: new THREE.Vector3(x, 0, z), scale }));
+/** The old cone-tree grove is gone (the pack's pines and oaks are the choppable trees now). */
+export const TREE_SPOTS: { position: THREE.Vector3; scale: number }[] = [];
 
 /** Quarry east of the spawn. */
 export const ROCK_SPOTS: { position: THREE.Vector3; kind: RockKind; scale: number }[] = [

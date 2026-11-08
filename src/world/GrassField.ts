@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 import { injectNightLights } from './NightLighting';
-import { WORLD_HALF, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
+import { WORLD_HALF, WORLD_SIZE, worldSettings } from './WorldSettings';
 import { riverWorld } from './rivers/RiverWorld';
 import { TERRAIN_CHUNK, TERRAIN_CHUNKS, type TerrainSystem } from './TerrainSystem';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
+import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
 
 const N = WORLD_SIZE;
 const V = N + 1;
@@ -29,10 +30,7 @@ function grow(r: Rect, x0: number, z0: number, x1: number, z1: number): void {
   r.z1 = Math.min(V - 1, Math.max(r.z1, Math.ceil(z1)));
 }
 
-const LITE = isMobileDevice();
-/** Side of the square patch that follows the camera (m) and blades per side of it. */
-const PATCH = LITE ? 36 : 56;
-const BLADES = LITE ? 150 : 270;
+/** Patch size, blade count, height, width, wind and shading come live from VegetationSettings. */
 
 /**
  * 3D grass: one draw call of single-triangle blades on every grass tile near the camera.
@@ -70,7 +68,16 @@ export class GrassField {
     uGrData: { value: null as THREE.Texture | null },
     uGrRiver: { value: riverWorld.texture as THREE.Texture },
     uGrColor: { value: null as THREE.Texture | null },
+    uGrSize: { value: veg.grassPatch },
+    uGrHeightK: { value: veg.grassHeight },
+    uGrWidth: { value: veg.grassWidth },
+    uGrWindK: { value: veg.grassWind },
+    uGrShadeA: { value: veg.grassBaseShade },
+    uGrShadeB: { value: veg.grassTipShade },
   };
+  /** Blades rebuilt this long after the patch / density sliders stop moving (s). */
+  private grassRevision = vegetationRevision.grass;
+  private rebuildIn = -1;
 
   /** Vertices whose height / density must be redone (only the changed area, never the island). */
   private readonly heightRect = emptyRect();
@@ -115,9 +122,25 @@ export class GrassField {
 
   /** `wind` 0..1 (calm .. storm). */
   public update(dt: number, camera: THREE.Camera, wind: number): void {
-    this.mesh.visible = this.enabled;
-    if (!this.enabled) return;
+    this.mesh.visible = this.enabled && veg.grassEnabled;
+    if (!this.mesh.visible) return;
     const u = this.uniforms;
+    if (vegetationRevision.grass !== this.grassRevision) {
+      this.grassRevision = vegetationRevision.grass;
+      this.rebuildIn = 0.3;
+    }
+    if (this.rebuildIn >= 0 && (this.rebuildIn -= dt) < 0) {
+      const old = this.mesh.geometry;
+      this.mesh.geometry = this.buildGeometry();
+      old.dispose();
+      u.uGrSize.value = veg.grassPatch;
+    }
+    const PATCH = u.uGrSize.value;
+    u.uGrHeightK.value = veg.grassHeight;
+    u.uGrWidth.value = veg.grassWidth;
+    u.uGrWindK.value = veg.grassWind;
+    u.uGrShadeA.value = veg.grassBaseShade;
+    u.uGrShadeB.value = veg.grassTipShade;
     u.uGrTime.value += dt;
     u.uGrSea.value = worldSettings.waterLevel;
     u.uGrWind.value += (0.25 + wind * 0.75 - u.uGrWind.value) * (1 - Math.exp(-dt * 0.5));
@@ -236,8 +259,9 @@ export class GrassField {
   // ---------------------------------------------------------------- mesh
 
   private buildGeometry(): THREE.BufferGeometry {
+    const BLADES = Math.max(10, Math.round(veg.grassBlades));
     const count = BLADES * BLADES;
-    const cell = PATCH / BLADES;
+    const cell = veg.grassPatch / BLADES;
     const pos = new Float32Array(count * 9);
     const rnd = new Float32Array(count * 9);
     let b = 0;
@@ -283,6 +307,10 @@ uniform sampler2D uGrHeight;
 uniform sampler2D uGrData;
 uniform sampler2D uGrRiver;
 uniform sampler2D uGrColor;
+uniform float uGrSize;
+uniform float uGrHeightK;
+uniform float uGrWidth;
+uniform float uGrWindK;
 varying vec3 vGrCol;
 varying float vGrTip;
 varying float vGrShade;
@@ -297,7 +325,7 @@ float grNoise(vec2 p) {
         .replace(
           '#include <begin_vertex>',
           `// Wrap the blade's fixed root into the square around the patch centre
-const float GR_SIZE = ${PATCH.toFixed(1)};
+float GR_SIZE = uGrSize;
 vec2 grLocal = mod(position.xz - uGrCenter + GR_SIZE * 0.5, GR_SIZE) - GR_SIZE * 0.5;
 vec2 grRoot = uGrCenter + grLocal;
 vec2 grUv = (grRoot + ${half}) / ${size};
@@ -314,7 +342,7 @@ float grEdge = 1.0 - smoothstep(GR_SIZE * 0.22, GR_SIZE * 0.49, length(grLocal))
 float grDens = grD.r * (1.0 - grBeach);
 // Height: per blade, clumps of taller and shorter grass, thinning out at density borders
 float grClump = grNoise(grRoot * 0.21) * 0.7 + grNoise(grRoot * 0.73 + 5.3) * 0.3;
-float grH = ${LITE ? '0.5' : '0.46'} * mix(0.5, 1.0, aGrRnd.x) * (0.45 + grClump * 1.0)
+float grH = uGrHeightK * mix(0.5, 1.0, aGrRnd.x) * (0.45 + grClump * 1.0)
   * smoothstep(0.02, 0.95, grDens) * grEdge;
 int grVi = gl_VertexID % 3;
 vGrTip = grVi == 2 ? 1.0 : 0.0;
@@ -325,16 +353,16 @@ if (grH > 0.03) {
   float grA = (aGrRnd.y - 0.5) * 0.9;
   vec2 grSide = vec2(-grDir.y, grDir.x);
   grSide = vec2(grSide.x * cos(grA) - grSide.y * sin(grA), grSide.x * sin(grA) + grSide.y * cos(grA));
-  float grW = 0.05 * mix(0.7, 1.3, aGrRnd.z) * min(1.0, grH * 4.0);
+  float grW = uGrWidth * mix(0.7, 1.3, aGrRnd.z) * min(1.0, grH * 4.0);
   if (grVi == 0) transformed.xz -= grSide * grW;
   else if (grVi == 1) transformed.xz += grSide * grW;
   else {
     // Tip: a resting lean and the wind (two noise octaves drifting along it)
     vec2 grWindDir = vec2(0.8, 0.6);
     float grGust = grNoise(grRoot * 0.09 - grWindDir * uGrTime * 0.9) * 0.75 + grNoise(grRoot * 0.37 - grWindDir * uGrTime * 2.1) * 0.25;
-    vec2 grBend = grWindDir * (grGust - 0.25) * uGrWind * 1.3;
+    vec2 grBend = grWindDir * (grGust - 0.25) * uGrWind * uGrWindK * 1.3;
     grBend += grDir * (aGrRnd.y - 0.5) * 0.5 + grSide * (aGrRnd.z - 0.5) * 0.4;
-    grBend += grWindDir * sin(uGrTime * (2.5 + aGrRnd.x * 2.0) + aGrRnd.y * 6.28) * 0.06 * uGrWind;
+    grBend += grWindDir * sin(uGrTime * (2.5 + aGrRnd.x * 2.0) + aGrRnd.y * 6.28) * 0.06 * uGrWind * uGrWindK;
     float grB = length(grBend);
     if (grB > 1.4) grBend *= 1.4 / grB;
     // Keep the blade's length: the more it bends, the lower the tip
@@ -353,12 +381,14 @@ vGrCol = grCol * mix(0.9, 1.1, aGrRnd.z);`
           `#include <common>
 varying vec3 vGrCol;
 varying float vGrTip;
-varying float vGrShade;`
+varying float vGrShade;
+uniform float uGrShadeA;
+uniform float uGrShadeB;`
         )
         // Darker at the base (dense blades shade each other), sunlit and a touch warmer at the tip
         .replace(
           '#include <map_fragment>',
-          'diffuseColor.rgb *= vGrCol * mix(0.64, 1.18, vGrTip) * mix(vec3(1.0), vec3(1.06, 1.05, 0.9), vGrTip);'
+          'diffuseColor.rgb *= vGrCol * mix(uGrShadeA, uGrShadeB, vGrTip) * mix(vec3(1.0), vec3(1.06, 1.05, 0.9), vGrTip);'
         )
         // Lit like the ground under it (normal straight up), on both faces
         .replace(

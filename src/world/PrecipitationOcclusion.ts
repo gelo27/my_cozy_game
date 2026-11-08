@@ -31,6 +31,9 @@ export class PrecipitationOcclusion {
   private readonly castBudget: number;
   private readonly refreshBudget: number;
   private refreshCursor = 0;
+  /** Camera cell of the last ring scan that filled the whole window (NaN = must scan). */
+  private filledX = NaN;
+  private filledZ = NaN;
   private readonly ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
   private readonly shelterCache = new Map<number, boolean>();
   private readonly isShelter = (c: RAPIER.Collider): boolean => {
@@ -76,8 +79,10 @@ export class PrecipitationOcclusion {
     let budget = this.castBudget;
     let dirty = false;
 
-    // Cells that entered the window: nearest rings first, so the area around the player fills instantly
-    for (let r = 0; r <= half && budget > 0; r++) {
+    // Cells that entered the window: nearest rings first, so the area around the player fills instantly.
+    // Skipped while the camera stays in a cell whose window is already full (~1000 checks a frame saved).
+    const scan = ccx !== this.filledX || ccz !== this.filledZ;
+    for (let r = 0; scan && r <= half && budget > 0; r++) {
       for (let dz = -r; dz <= r && budget > 0; dz++) {
         const edge = dz === -r || dz === r;
         for (let dx = -r; dx <= r && budget > 0; dx += edge ? 1 : 2 * r || 1) {
@@ -90,6 +95,16 @@ export class PrecipitationOcclusion {
           budget--;
           dirty = true;
         }
+      }
+    }
+
+    if (scan) {
+      // A scan that ended with budget to spare covered every cell of the window
+      if (budget > 0) {
+        this.filledX = ccx;
+        this.filledZ = ccz;
+      } else {
+        this.filledX = NaN;
       }
     }
 

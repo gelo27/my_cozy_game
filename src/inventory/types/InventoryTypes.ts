@@ -1,3 +1,5 @@
+import type { CropType } from '../../farming/types/FarmingTypes';
+
 export type InventoryCategory = 'tools' | 'seeds' | 'crops' | 'food' | 'materials' | 'all';
 
 export interface InventoryItem {
@@ -14,7 +16,7 @@ export interface InventoryItem {
   color: string;
   description: string;
   isEquippable: boolean;
-  cropType?: 'wheat' | 'carrot' | 'tomato';
+  cropType?: CropType;
 }
 
 export interface InventoryState {
@@ -33,7 +35,7 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     maxStack: 1,
     iconName: 'Droplets',
     color: '#38bdf8',
-    description: 'Мила лійка в стилі Heartopia. Дозволяє поливати сухі грядки, щоб паростки росли.',
+    description: 'Мила лійка в стилі Heartopia. Дозволяє поливати сухі поля, щоб паростки росли.',
     isEquippable: true,
   },
   {
@@ -78,7 +80,7 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     maxStack: 99,
     iconName: 'Sprout',
     color: '#eab308',
-    description: 'Добірне насіння золотистої пшениці. Посадіть у пусту грядку.',
+    description: 'Добірне насіння золотистої пшениці. Посійте на викопане поле.',
     isEquippable: true,
     buyPrice: 4,
     cropType: 'wheat',
@@ -109,6 +111,71 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     buyPrice: 8,
     cropType: 'tomato',
   },
+  {
+    id: 'strawberry_seed',
+    name: 'Насіння полуниці',
+    category: 'seeds',
+    count: 10,
+    maxStack: 99,
+    iconName: 'Cherry',
+    color: '#e11d48',
+    description: 'Насіння солодкої полуниці. Низькі кущики з ягодами.',
+    isEquippable: true,
+    buyPrice: 9,
+    cropType: 'strawberry',
+  },
+  {
+    id: 'cabbage_seed',
+    name: 'Насіння капусти',
+    category: 'seeds',
+    count: 10,
+    maxStack: 99,
+    iconName: 'Leaf',
+    color: '#4ade80',
+    description: 'Насіння капусти. Виростають тугі хрусткі качани.',
+    isEquippable: true,
+    buyPrice: 7,
+    cropType: 'cabbage',
+  },
+  {
+    id: 'corn_seed',
+    name: 'Насіння кукурудзи',
+    category: 'seeds',
+    count: 10,
+    maxStack: 99,
+    iconName: 'Wheat',
+    color: '#facc15',
+    description: 'Насіння кукурудзи. Високі стебла із золотими качанами.',
+    isEquippable: true,
+    buyPrice: 10,
+    cropType: 'corn',
+  },
+  {
+    id: 'eggplant_seed',
+    name: 'Насіння баклажанів',
+    category: 'seeds',
+    count: 10,
+    maxStack: 99,
+    iconName: 'Sprout',
+    color: '#7c3aed',
+    description: 'Насіння баклажанів. Розлогий кущ із фіолетовими плодами.',
+    isEquippable: true,
+    buyPrice: 11,
+    cropType: 'eggplant',
+  },
+  {
+    id: 'pumpkin_seed',
+    name: 'Насіння гарбуза',
+    category: 'seeds',
+    count: 10,
+    maxStack: 99,
+    iconName: 'Sprout',
+    color: '#f97316',
+    description: 'Насіння гарбуза. Росте довго, зате врожай найдорожчий.',
+    isEquippable: true,
+    buyPrice: 12,
+    cropType: 'pumpkin',
+  },
   // Harvest Crates
   {
     id: 'crate_wheat',
@@ -118,7 +185,7 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     maxStack: 99,
     iconName: 'Package',
     color: '#ca8a04',
-    description: 'Дерев’яний ящик, повний добірної стиглої пшениці. Зібрано з грядки.',
+    description: 'Дерев’яний ящик, повний добірної стиглої пшениці. Зібрано з поля.',
     isEquippable: false,
     sellPrice: 18,
   },
@@ -130,7 +197,7 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     maxStack: 99,
     iconName: 'Package',
     color: '#ea580c',
-    description: 'Ящик свіжої хрусткої моркви, щойно з грядки.',
+    description: 'Ящик свіжої хрусткої моркви, щойно з поля.',
     isEquippable: false,
     sellPrice: 26,
   },
@@ -146,6 +213,66 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     isEquippable: false,
     sellPrice: 34,
   },
+  {
+    id: 'crate_strawberry',
+    name: 'Ящик полуниці',
+    category: 'crops',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Package',
+    color: '#be123c',
+    description: 'Ящик стиглої запашної полуниці.',
+    isEquippable: false,
+    sellPrice: 38,
+  },
+  {
+    id: 'crate_cabbage',
+    name: 'Ящик капусти',
+    category: 'crops',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Package',
+    color: '#16a34a',
+    description: 'Ящик хрустких капустяних качанів.',
+    isEquippable: false,
+    sellPrice: 30,
+  },
+  {
+    id: 'crate_corn',
+    name: 'Ящик кукурудзи',
+    category: 'crops',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Package',
+    color: '#ca8a04',
+    description: 'Ящик солодких золотих качанів кукурудзи.',
+    isEquippable: false,
+    sellPrice: 42,
+  },
+  {
+    id: 'crate_eggplant',
+    name: 'Ящик баклажанів',
+    category: 'crops',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Package',
+    color: '#6d28d9',
+    description: 'Ящик глянцевих фіолетових баклажанів.',
+    isEquippable: false,
+    sellPrice: 46,
+  },
+  {
+    id: 'crate_pumpkin',
+    name: 'Ящик гарбузів',
+    category: 'crops',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Package',
+    color: '#ea580c',
+    description: 'Ящик великих помаранчевих гарбузів.',
+    isEquippable: false,
+    sellPrice: 52,
+  },
   // Materials for building
   {
     id: 'wood',
@@ -155,7 +282,7 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     maxStack: 999,
     iconName: 'Trees',
     color: '#b45309',
-    description: 'Будівельна деревина для зведення огорож, стін, терас та грядок.',
+    description: 'Будівельна деревина для зведення огорож, стін і терас.',
     isEquippable: false,
     sellPrice: 1,
   },
@@ -301,6 +428,12 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'wheat_seed') return '🌾';
   if (item.id === 'carrot_seed') return '🥕';
   if (item.id === 'tomato_seed') return '🍅';
+  if (item.id === 'strawberry_seed') return '🍓';
+  if (item.id === 'cabbage_seed') return '🥬';
+  if (item.id === 'corn_seed') return '🌽';
+  if (item.id === 'eggplant_seed') return '🍆';
+  if (item.id === 'pumpkin_seed') return '🎃';
+  if (item.id.startsWith('crate_')) return '📦';
   if (item.id === 'crate_wheat') return '📦';
   if (item.id === 'crate_carrot') return '📦';
   if (item.id === 'crate_tomato') return '📦';

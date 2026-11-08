@@ -4,9 +4,9 @@ import { TerrainSaveData } from './TerrainSystem';
 import { PropSaveData, MILLSTONE_SPOT, FOREST_VERSION } from './PropSystem';
 import { PetSaveData } from '../gameplay/PetSystem';
 import { WeatherType } from './WeatherSystem';
+import type { WeatherDirectorSave } from './WeatherDirector';
 import { worldSettings } from './WorldSettings';
 import type { GameWorld } from '../engine/GameEngine';
-import type { CropState } from '../farming/types/FarmingTypes';
 import type { FieldSaveData } from '../farming/FieldManager';
 import type { ExplorationSaveData } from '../explore/ExplorationManager';
 
@@ -21,11 +21,14 @@ export interface WorldSaveData {
   waterLevel: number;
   timeOfDay: number;
   weather: WeatherType;
+  /** Automatic weather chain (missing in older saves: rolled fresh). */
+  weatherDirector?: WeatherDirectorSave;
   props: PropSaveData[];
   /** Forest generation the props came from (missing = before the denser forests). */
   forest?: number;
   buildings: BuildingSceneExportData | null;
-  crops: { x: number; z: number; crop: CropState }[];
+  /** Garden-bed crops of old saves (beds were removed): ignored. */
+  crops?: unknown;
   /** Shovel-dug fields (their soil tiles are part of the terrain save). */
   fields?: FieldSaveData[];
   inventory: { items: Record<string, number>; equipped: string | null };
@@ -76,10 +79,10 @@ export class SaveSystem {
       waterLevel: worldSettings.waterLevel,
       timeOfDay: worldSettings.timeOfDay,
       weather: w.weather.weather,
+      weatherDirector: w.weather.director.serialize(),
       props: w.props.serialize(),
       forest: w.props.forestVersion,
       buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
-      crops: w.farmingManager.serializeCrops(),
       fields: w.farmingManager.serializeFields(),
       inventory: { items, equipped: w.inventoryManager.getEquippedItemId() },
       player: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
@@ -96,6 +99,7 @@ export class SaveSystem {
     worldSettings.waterLevel = data.waterLevel;
     worldSettings.timeOfDay = data.timeOfDay;
     w.weather.setWeather(data.weather);
+    w.weather.director.deserialize(data.weather, data.weatherDirector);
     w.terrain.deserialize(data.terrain);
     w.props.deserialize(data.props);
     // Saves from before the millstone existed get one at its usual spot
@@ -117,7 +121,6 @@ export class SaveSystem {
       if (data.buildings) bm.importScene(data.buildings);
       bm.flushPendingRegeneration();
     }
-    w.farmingManager.deserializeCrops(data.crops ?? []);
     w.farmingManager.deserializeFields(data.fields ?? []);
 
     const inv = w.inventoryManager;

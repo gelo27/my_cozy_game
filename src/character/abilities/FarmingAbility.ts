@@ -328,7 +328,7 @@ export class FarmingAbility implements IAbility {
     };
     if (target.kind === 'dig') {
       if (target.reason) {
-        return { ...base, shovel: 'blocked', canDig: false, actionText: t('field.cantDig'), hintText: t(`field.reason.${target.reason}`) };
+        return { ...base, shovel: 'blocked', canDig: false, actionText: t(`field.reason.${target.reason}`), hintText: t(`field.reason.${target.reason}`) };
       }
       return { ...base, shovel: 'dig', canDig: true, actionText: t('field.dig'), hintText: t('field.digHint') };
     }

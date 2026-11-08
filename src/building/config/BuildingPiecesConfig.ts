@@ -4,7 +4,6 @@ import { FURNITURE_PIECE_DEFS, buildFurnitureTemplate, isFurniturePiece } from '
 import { BuildingPieceDef, BuildingPieceType, BuiltPiece, PieceCategory, SocketType } from '../types/BuildingTypes';
 import { PROCEDURAL_ROOF_MATERIALS, ProceduralRoofSystem, ProceduralRoofGenerator } from '../ProceduralRoofSystem';
 import { BUILDING_CONFIG } from '../../config/constants';
-import { FarmingMeshGenerator, FARMING_MATERIALS } from '../../farming/FarmingMeshGenerator';
 
 // Procedural texture generator for stylized Norse wood and stone
 function createNorseWoodTexture(): THREE.CanvasTexture {
@@ -2443,99 +2442,6 @@ export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
     ],
   },
 
-  [BuildingPieceType.FARM_PLOT_1X1]: {
-    type: BuildingPieceType.FARM_PLOT_1X1,
-    name: 'Farm Plot 1x1m',
-    ukrainianName: 'Грядка для рослин 1х1м',
-    category: PieceCategory.GARDENING,
-    dimensions: new THREE.Vector3(1.0, 0.22, 1.0),
-    woodCost: 2,
-    stoneCost: 0,
-    maxHealth: 100,
-    iconName: 'Sprout',
-    description: 'Акуратна садова грядка 1х1м з пухким чорноземом. Можна саджати пшеницю, моркву або томати та поливати лійкою [Q].',
-    sockets: [
-      {
-        id: 'edge_front',
-        type: SocketType.FLOOR_EDGE,
-        localPosition: new THREE.Vector3(0, 0, 0.5),
-        localNormal: new THREE.Vector3(0, 0, 1),
-        localUp: new THREE.Vector3(0, 1, 0),
-        compatibleWith: [SocketType.FLOOR_EDGE],
-      },
-      {
-        id: 'edge_back',
-        type: SocketType.FLOOR_EDGE,
-        localPosition: new THREE.Vector3(0, 0, -0.5),
-        localNormal: new THREE.Vector3(0, 0, -1),
-        localUp: new THREE.Vector3(0, 1, 0),
-        compatibleWith: [SocketType.FLOOR_EDGE],
-      },
-      {
-        id: 'edge_left',
-        type: SocketType.FLOOR_EDGE,
-        localPosition: new THREE.Vector3(-0.5, 0, 0),
-        localNormal: new THREE.Vector3(-1, 0, 0),
-        localUp: new THREE.Vector3(0, 1, 0),
-        compatibleWith: [SocketType.FLOOR_EDGE],
-      },
-      {
-        id: 'edge_right',
-        type: SocketType.FLOOR_EDGE,
-        localPosition: new THREE.Vector3(0.5, 0, 0),
-        localNormal: new THREE.Vector3(1, 0, 0),
-        localUp: new THREE.Vector3(0, 1, 0),
-        compatibleWith: [SocketType.FLOOR_EDGE],
-      },
-    ],
-  },
-
-  [BuildingPieceType.FARM_PLOT_2X2]: {
-    type: BuildingPieceType.FARM_PLOT_2X2,
-    name: 'Farm Plot 2x2m',
-    ukrainianName: 'Грядка для рослин 2х2м',
-    category: PieceCategory.GARDENING,
-    dimensions: new THREE.Vector3(MODULE_SIZE, 0.22, MODULE_SIZE),
-    woodCost: 4,
-    stoneCost: 0,
-    maxHealth: 150,
-    iconName: 'Sprout',
-    description: 'Садова грядка 2х2м з 4 секціями для вирощування одного типу рослин. Урожай збирається як 1 ящик.',
-    sockets: [
-      {
-        id: 'edge_front',
-        type: SocketType.FLOOR_EDGE,
-        localPosition: new THREE.Vector3(0, 0, 1.0),
-        localNormal: new THREE.Vector3(0, 0, 1),
-        localUp: new THREE.Vector3(0, 1, 0),
-        compatibleWith: [SocketType.FLOOR_EDGE],
-      },
-      {
-        id: 'edge_back',
-        type: SocketType.FLOOR_EDGE,
-        localPosition: new THREE.Vector3(0, 0, -1.0),
-        localNormal: new THREE.Vector3(0, 0, -1),
-        localUp: new THREE.Vector3(0, 1, 0),
-        compatibleWith: [SocketType.FLOOR_EDGE],
-      },
-      {
-        id: 'edge_left',
-        type: SocketType.FLOOR_EDGE,
-        localPosition: new THREE.Vector3(-1.0, 0, 0),
-        localNormal: new THREE.Vector3(-1, 0, 0),
-        localUp: new THREE.Vector3(0, 1, 0),
-        compatibleWith: [SocketType.FLOOR_EDGE],
-      },
-      {
-        id: 'edge_right',
-        type: SocketType.FLOOR_EDGE,
-        localPosition: new THREE.Vector3(1.0, 0, 0),
-        localNormal: new THREE.Vector3(1, 0, 0),
-        localUp: new THREE.Vector3(0, 1, 0),
-        compatibleWith: [SocketType.FLOOR_EDGE],
-      },
-    ],
-  },
 };
 
 export interface PieceMeshTemplate {
@@ -4309,29 +4215,7 @@ function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
     case BuildingPieceType.WHITE_DECORATIVE_FENCE_1M: {
       return buildWhiteDecorativeFenceGeometry();
     }
-
-    case BuildingPieceType.FARM_PLOT_1X1: {
-      return buildFarmPlotBedTemplate(1.0);
-    }
-
-    case BuildingPieceType.FARM_PLOT_2X2: {
-      return buildFarmPlotBedTemplate(MODULE_SIZE);
-    }
   }
-}
-
-/**
- * Builds farm plot bed mesh template with wooden border and rich tilled soil.
- */
-function buildFarmPlotBedTemplate(size: number): PieceMeshTemplate {
-  const { group, soilMesh } = FarmingMeshGenerator.createFarmPlotBed(size);
-  const borderMesh = group.children.find((c) => c !== soilMesh) as THREE.Mesh;
-  const merged = mergeGeometries([borderMesh.geometry, soilMesh.geometry], true)!;
-  return {
-    geometry: merged,
-    materials: [FARMING_MATERIALS.woodBorder, FARMING_MATERIALS.drySoil],
-    boundingBox: new THREE.Box3(),
-  };
 }
 
 /**
@@ -4821,15 +4705,6 @@ export function createPieceMeshGroup(
 
     pivotGroup.add(leafMesh);
     group.add(pivotGroup);
-    return group;
-  }
-
-  if (!isGhost && (type === BuildingPieceType.FARM_PLOT_1X1 || type === BuildingPieceType.FARM_PLOT_2X2)) {
-    const size = type === BuildingPieceType.FARM_PLOT_1X1 ? 1.0 : MODULE_SIZE;
-    const { group: bedGroup } = FarmingMeshGenerator.createFarmPlotBed(size);
-    while (bedGroup.children.length > 0) {
-      group.add(bedGroup.children[0]);
-    }
     return group;
   }
 

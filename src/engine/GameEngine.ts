@@ -3,6 +3,8 @@ import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { CharacterController } from '../character/CharacterController';
 import { CharacterModel } from '../character/CharacterModel';
 import { loadWheatModel } from '../farming/WheatModel';
+import { loadCropModels } from '../farming/CropModels';
+import { loadTreeModels, setFoliageWeatherWind } from '../world/TreeModels';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { DebugRenderer } from '../physics/DebugRenderer';
 import { InputManager } from '../input/InputManager';
@@ -47,6 +49,8 @@ import { GridNavigator } from '../navigation/GridNavigator';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { t } from '../i18n/i18n';
 import { PropTreeField } from '../gathering/PropTreeField';
+import { BushSway } from '../world/BushSway';
+import { FallingLeaves } from '../particles/FallingLeaves';
 import { RockField } from '../gathering/RockField';
 import { GATHERING_CONFIG, ROCK_SPOTS, TREE_SPOTS } from '../gathering/GatheringConfig';
 import { GatherPrompt } from '../character/abilities/GatheringAbility';
@@ -137,6 +141,8 @@ export interface GameWorld {
   farmingManager: FarmingManager;
   forest: ForestZone;
   propTrees: PropTreeField;
+  bushSway: BushSway;
+  fallingLeaves: FallingLeaves;
   rocks: RockField;
   particleManager: ParticleManager;
   vehicle: VehicleController;
@@ -349,7 +355,6 @@ export class GameEngine {
       const inventoryManager = new InventoryManager();
       const farmingManager = new FarmingManager(scene, particleManager);
       farmingManager.setWorld(terrain, physics);
-      buildingManager.setFarmingManager(farmingManager);
       // Lamp furniture inside buildings and the landmarks' torches feed the night lighting
       let exploration: ExplorationManager | null = null;
       nightLighting.setExtraLights(
@@ -383,7 +388,12 @@ export class GameEngine {
       });
       const rocks = new RockField(physics, scene, particleManager, ROCK_SPOTS);
       rocks.onMined = (drops) => giveResources(drops);
-      const propTrees = new PropTreeField(props, particleManager);
+      const propTrees = new PropTreeField(props, particleManager, physics);
+      propTrees.getCollector = () => character.getPosition();
+      const bushSway = new BushSway(props);
+      propTrees.bushSway = bushSway;
+      const fallingLeaves = new FallingLeaves(scene, (x, z) => terrain.getHeight(x, z));
+      propTrees.leaves = fallingLeaves;
       propTrees.onWood = (amount) => giveResources([{ itemId: 'wood', amount }]);
       character.setGatheringSystems(forest, rocks, inventoryManager, propTrees);
 
@@ -478,6 +488,8 @@ export class GameEngine {
         farmingManager,
         forest,
         propTrees,
+        bushSway,
+        fallingLeaves,
         rocks,
         particleManager,
         vehicle,
@@ -539,7 +551,7 @@ export class GameEngine {
     try {
       // The player / NPC model and the wheat load asynchronously: wait for them (capped) so their
       // shaders are compiled here too instead of hitching the first frames of play
-      const assets = Promise.allSettled([CharacterModel.preload(), loadWheatModel()]);
+      const assets = Promise.allSettled([CharacterModel.preload(), loadWheatModel(), loadCropModels(), loadTreeModels()]);
       await Promise.race([assets, new Promise((r) => setTimeout(r, 6000))]);
       // Let the models' own load callbacks attach their meshes to the scene first
       await new Promise((r) => setTimeout(r, 0));
@@ -666,22 +678,33 @@ export class GameEngine {
 
     // Bodies that part the field wheat (springs run only for stalks they touch)
     const fields = farmingManager.fields;
+    const bushes = w.bushSway;
     fields.clearPushers();
+    bushes.clearPushers();
     if (!editing) {
       if (character.body) {
         const cp = character.body.translation();
         fields.addPusher(cp.x, cp.y - 0.9, cp.z, 0.8);
+        bushes.addPusher(cp.x, cp.y - 0.9, cp.z, 0.4);
       }
       moped.getPosition(this.pushTmp);
       fields.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 1.0);
+      bushes.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.7);
       const pets = w.gameplay.pets.pets;
       for (let i = 0; i < pets.length; i++) {
         const pp = pets[i].group.position;
         fields.addPusher(pp.x, pp.y, pp.z, 0.55);
+        bushes.addPusher(pp.x, pp.y, pp.z, 0.35);
       }
     }
+    bushes.update(dt);
+    w.fallingLeaves.update(dt);
     const grass = w.grass;
     grass.enabled = !w.exploration.inCave;
+    w.propTrees.ambientLeaves = !w.exploration.inCave && !editing;
+    const wt = w.weather.weather;
+    w.propTrees.gustsAllowed = wt !== 'rain' && wt !== 'storm' && wt !== 'snow' && w.weather.rainIntensity < 0.05;
+    setFoliageWeatherWind(w.exploration.inCave ? 0 : w.weather.sound.wind);
     grass.update(dt, tpCamera.camera, w.weather.sound.wind);
     farmingManager.update(dt);
     forest.update(dt);
@@ -1081,6 +1104,9 @@ export class GameEngine {
         w.character.respawn(new THREE.Vector3(x, (y ?? w.terrain.getHeight(x, z)) + 1.5, z)),
       time: (hour: number) => (worldSettings.timeOfDay = ((hour % 24) + 24) % 24),
       weather: (type: Parameters<WeatherSystem['setWeather']>[0]) => w.weather.setWeather(type),
+      /** Automatic weather on/off, and the upcoming states. */
+      weatherAuto: (on = true) => (w.weather.director.auto = on),
+      forecast: () => w.weather.director.forecast().map((f) => ({ ...f })),
       water: (level: number) => (worldSettings.waterLevel = level),
       give: (itemId: string, n = 1) => w.inventoryManager.addItem(itemId, n),
       spawn: (type: string, x: number, z: number, rot = 0, scale = 1) => w.props.add(type, x, z, rot, scale),

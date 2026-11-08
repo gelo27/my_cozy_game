@@ -5,8 +5,8 @@ import type { PhysicsWorld } from '../physics/PhysicsWorld';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { waterLevelAt } from '../world/rivers/RiverWorld';
 import { CropStage, CropState, CropType } from './types/FarmingTypes';
-import { FarmingMeshGenerator } from './FarmingMeshGenerator';
 import { FIELD_CROP_MATERIAL, getWheatStageGeometries, loadWheatModel } from './WheatModel';
+import { getCropModel, loadCropModels } from './CropModels';
 
 /** Field side in terrain cells (1 m each). */
 export const FIELD_CELLS = 4;
@@ -19,6 +19,7 @@ const WHEAT_SPACING = 0.68;
 /** Max height difference (m) across the field's 5 x 5 corner grid: 2 m over 4 m is ~27°. */
 const MAX_SLOPE = 2.0;
 const HALF = FIELD_CELLS / 2;
+const WHEAT_LAYOUT = { rows: WHEAT_ROWS, spacing: WHEAT_SPACING, scale: 1.2 };
 
 export interface FarmField {
   id: string;
@@ -55,23 +56,32 @@ interface CropPart {
   geometry: THREE.BufferGeometry;
   material: THREE.Material;
   matrix: THREE.Matrix4;
+  /** Tip offset (m) at full push when this part's plants spring away from bodies; 0 = rigid. */
+  maxBend: number;
 }
 
-/** Instanced crop parts per (crop, stage); `single` = one plant per placement, else a 2x2 m bed template. */
+/** Field layout of single plants: rows x rows, `spacing` m apart, base scale. */
+interface SingleLayout {
+  rows: number;
+  spacing: number;
+  scale: number;
+}
+
+/** Instanced crop parts per (crop, stage), one plant per placement (no parts until the model loads). */
 interface CropVisual {
   parts: CropPart[];
-  single: boolean;
+  single: SingleLayout;
 }
 
 interface Batch {
   mesh: THREE.InstancedMesh;
   capacity: number;
-  /** Per-plant springs (single-plant wheat batches only). */
+  /** Per-plant springs (single-plant springy batches only). */
   springs: SpringSet | null;
 }
 
 /**
- * Bend springs for one wheat batch. `bend` is uploaded as the per-instance `aBend` attribute: the
+ * Bend springs for one springy batch (wheat, corn, tomato, eggplant, strawberry). `bend` is uploaded as the per-instance `aBend` attribute: the
  * world-space XZ offset of a stalk's tip. Only plants a pusher touched are simulated, and only the
  * changed index range is re-uploaded; once everything settles nothing runs at all.
  */
@@ -84,10 +94,12 @@ interface SpringSet {
   base: Float32Array;
   isActive: Uint8Array;
   active: number[];
+  /** Tip offset (m) at full push for this crop. */
+  maxBend: number;
 }
 
 /** Tip offset (m) at full push, spring stiffness and damping (underdamped: a couple of wobbles). */
-const MAX_BEND = 0.42;
+const WHEAT_MAX_BEND = 0.42;
 const SPRING_K = 70;
 const SPRING_DAMP = 5.5;
 const MAX_PUSHERS = 16;
@@ -122,8 +134,6 @@ export class FieldManager {
   /** Set by FarmingManager while it rains: all fields look soaked, crops or not. */
   public rainWet = false;
   private physics: PhysicsWorld | null = null;
-  /** Extra placement check for things without static colliders (garden beds). */
-  public isAreaReserved: ((minX: number, minZ: number, maxX: number, maxZ: number) => boolean) | null = null;
 
   private readonly ghost: THREE.Mesh;
   private readonly ghostMaterial: THREE.MeshBasicMaterial;
@@ -171,18 +181,19 @@ export class FieldManager {
 
     this.addShaderWarmers();
 
-    void loadWheatModel().then(() => {
-      // Fields planted before the model arrived switch from the procedural fallback
+    // Fields planted before a model arrived switch from the procedural fallback
+    const refresh = () => {
       this.visuals.clear();
       this.dirty = true;
-    });
+    };
+    void loadWheatModel().then(refresh);
+    void loadCropModels().then(refresh);
   }
 
   /**
-   * Hidden one-instance meshes carrying every material the fields draw with instancing (the swaying
-   * wheat, and the instanced variants of the bed crops' materials, which differ from the plain
-   * ones the garden beds use). The engine's load-time shader prewarm compiles hidden objects too,
-   * so the first field on screen doesn't stall on a shader compile. They never render.
+   * Hidden meshes carrying the field shaders. Every crop material shares the instanced crop
+   * program, so this covers crops whose models load later too. The engine's load-time shader prewarm compiles hidden
+   * objects, so the first field on screen doesn't stall on a shader compile. They never render.
    */
   private addShaderWarmers(): void {
     // Same attribute layout as the wheat stage geometries (position, normal, RGB colour)
@@ -209,17 +220,6 @@ export class FieldManager {
     dampProbe.visible = false;
     dampProbe.frustumCulled = false;
     this.group.add(dampProbe);
-
-    const seen = new Set<THREE.Material>();
-    for (const type of ['carrot', 'tomato'] as CropType[]) {
-      for (const stage of [1, 2, 3] as CropStage[]) {
-        for (const part of this.getVisual(type, stage).parts) {
-          if (seen.has(part.material)) continue;
-          seen.add(part.material);
-          warm(part.geometry, part.material);
-        }
-      }
-    }
   }
 
   public setWorld(terrain: TerrainSystem, physics: PhysicsWorld): void {
@@ -317,7 +317,6 @@ export class FieldManager {
     }
     if (maxH - minH > MAX_SLOPE) return 'slope';
 
-    if (this.isAreaReserved?.(gx - 0.3, gz - 0.3, gx + FIELD_CELLS + 0.3, gz + FIELD_CELLS + 0.3)) return 'blocked';
     if (this.hasStaticObstacle(gx, gz, minH, maxH)) return 'blocked';
     return null;
   }
@@ -634,7 +633,7 @@ export class FieldManager {
           if (d2 >= r * r) continue;
           const d = Math.sqrt(d2);
           const f = 1 - d / r;
-          const push = MAX_BEND * f * (2 - f); // eased: firm near the body, soft at the edge
+          const push = s.maxBend * f * (2 - f); // eased: firm near the body, soft at the edge
           if (d > 1e-3) {
             s.target[i * 2] += (dx / d) * push;
             s.target[i * 2 + 1] += (dz / d) * push;
@@ -661,9 +660,9 @@ export class FieldManager {
         let tx = s.target[ix];
         let tz = s.target[ix + 1];
         const tl = Math.hypot(tx, tz);
-        if (tl > MAX_BEND) {
-          tx *= MAX_BEND / tl;
-          tz *= MAX_BEND / tl;
+        if (tl > s.maxBend) {
+          tx *= s.maxBend / tl;
+          tz *= s.maxBend / tl;
         }
         // Semi-implicit Euler: stable at these stiffnesses with the 1/30 s step cap
         s.vel[ix] += (SPRING_K * (tx - s.bend[ix]) - SPRING_DAMP * s.vel[ix]) * h;
@@ -696,7 +695,7 @@ export class FieldManager {
    * disposing it frees its GPU buffers, including the previous smaller aBend: no orphaned buffers.
    * The old set is dropped from the list, leaving its typed arrays to the GC.
    */
-  private createSprings(geometry: THREE.BufferGeometry, capacity: number, previous: SpringSet | null): SpringSet {
+  private createSprings(geometry: THREE.BufferGeometry, capacity: number, previous: SpringSet | null, maxBend: number): SpringSet {
     if (previous) this.springSets = this.springSets.filter((s) => s !== previous);
     const bend = new Float32Array(capacity * 2);
     const attr = new THREE.InstancedBufferAttribute(bend, 2);
@@ -711,6 +710,7 @@ export class FieldManager {
       base: new Float32Array(capacity * 2),
       isActive: new Uint8Array(capacity),
       active: [],
+      maxBend,
     };
     this.springSets.push(s);
     return s;
@@ -735,24 +735,23 @@ export class FieldManager {
     if (visual) return visual;
 
     const wheat = type === 'wheat' ? getWheatStageGeometries() : null;
+    const model = getCropModel(type);
     if (wheat) {
-      visual = { single: true, parts: [{ geometry: wheat[stage], material: FIELD_CROP_MATERIAL, matrix: new THREE.Matrix4() }] };
+      visual = {
+        single: WHEAT_LAYOUT,
+        parts: [{ geometry: wheat[stage], material: FIELD_CROP_MATERIAL, matrix: new THREE.Matrix4(), maxBend: WHEAT_MAX_BEND }],
+      };
+    } else if (model) {
+      // Plant pack: one instance per plant. A springy crop's batch owns its aBend attribute, so it
+      // gets its own copy of the stage geometry; rigid crops share the model's
+      const geometry = model.push ? model.stages[stage].clone() : model.stages[stage];
+      visual = {
+        single: model.field,
+        parts: [{ geometry, material: model.material, matrix: new THREE.Matrix4(), maxBend: model.push?.maxBend ?? 0 }],
+      };
     } else {
-      // Procedural 2 x 2 m bed crops (4 plants each) from the garden-bed generator, lowered onto bare soil
-      const template = FarmingMeshGenerator.createCropMesh(type, stage);
-      template.updateMatrixWorld(true);
-      const lower = new THREE.Matrix4().makeTranslation(0, -0.16, 0);
-      const parts: CropPart[] = [];
-      template.traverse((o) => {
-        const mesh = o as THREE.Mesh;
-        if (!mesh.isMesh) return;
-        parts.push({
-          geometry: mesh.geometry,
-          material: mesh.material as THREE.Material,
-          matrix: lower.clone().multiply(mesh.matrixWorld),
-        });
-      });
-      visual = { single: false, parts };
+      // Model still loading: nothing to draw yet (the load clears this cache)
+      visual = { single: WHEAT_LAYOUT, parts: [] };
     }
     this.visuals.set(key, visual);
     return visual;
@@ -769,7 +768,7 @@ export class FieldManager {
       const visual = this.getVisual(cropType, stage);
       const placements = this.placementsFor(field, visual.single, terrain);
       visual.parts.forEach((part, pi) => {
-        const key = `${cropType}:${stage}:${visual.single ? 's' : 't'}:${pi}`;
+        const key = `${cropType}:${stage}:${pi}`;
         let entry = lists.get(key);
         if (!entry) lists.set(key, (entry = { part, matrices: [], owners: [] }));
         entry.owners.push({ field, start: entry.matrices.length, count: placements.length });
@@ -787,7 +786,7 @@ export class FieldManager {
     }
 
     for (const [key, { part, matrices, owners }] of lists) {
-      const springy = part.material === FIELD_CROP_MATERIAL;
+      const springy = part.maxBend > 0;
       let batch = this.batches.get(key);
       if (!batch || batch.capacity < matrices.length) {
         const previousSprings = batch?.springs ?? null;
@@ -800,7 +799,7 @@ export class FieldManager {
         mesh.name = `FieldCrops_${key}`;
         mesh.matrixAutoUpdate = false;
         this.group.add(mesh);
-        const springs = springy ? this.createSprings(part.geometry, capacity, previousSprings) : null;
+        const springs = springy ? this.createSprings(part.geometry, capacity, previousSprings, part.maxBend) : null;
         batch = { mesh, capacity, springs };
         this.batches.set(key, batch);
       }
@@ -822,8 +821,8 @@ export class FieldManager {
     }
   }
 
-  /** Plant transforms on the terrain: a jittered 5 x 5 grid of clumps, or a 2 x 2 grid of bed templates. */
-  private placementsFor(field: FarmField, single: boolean, terrain: TerrainSystem): THREE.Matrix4[] {
+  /** Plant transforms on the terrain: a jittered rows x rows grid. */
+  private placementsFor(field: FarmField, layout: SingleLayout, terrain: TerrainSystem): THREE.Matrix4[] {
     const rand = rng(field.gx * 73856093 ^ field.gz * 19349663);
     const out: THREE.Matrix4[] = [];
     const cx = field.gx + HALF;
@@ -834,18 +833,14 @@ export class FieldManager {
       this.tmpScale.setScalar(scale);
       out.push(new THREE.Matrix4().compose(this.tmpPos, this.tmpQuat, this.tmpScale));
     };
-    if (single) {
-      const start = -((WHEAT_ROWS - 1) * WHEAT_SPACING) / 2;
-      for (let r = 0; r < WHEAT_ROWS; r++) {
-        for (let q = 0; q < WHEAT_ROWS; q++) {
-          const x = cx + start + q * WHEAT_SPACING + (rand() - 0.5) * 0.22;
-          const z = cz + start + r * WHEAT_SPACING + (rand() - 0.5) * 0.22;
-          put(x, z, rand() * Math.PI * 2, 1.05 + rand() * 0.3, 0.03);
-        }
-      }
-    } else {
-      for (const [ox, oz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
-        put(cx + ox, cz + oz, Math.floor(rand() * 4) * (Math.PI / 2), 1, 0);
+    const { rows, spacing, scale } = layout;
+    const start = -((rows - 1) * spacing) / 2;
+    const jitter = spacing * 0.32;
+    for (let r = 0; r < rows; r++) {
+      for (let q = 0; q < rows; q++) {
+        const x = cx + start + q * spacing + (rand() - 0.5) * jitter;
+        const z = cz + start + r * spacing + (rand() - 0.5) * jitter;
+        put(x, z, rand() * Math.PI * 2, scale * (0.88 + rand() * 0.25), 0.03);
       }
     }
     return out;

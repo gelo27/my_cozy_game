@@ -625,6 +625,9 @@ export class CharacterController {
         if (wallNorm.lengthSq() > 0.001) {
           targetFacingAngle = Math.atan2(-wallNorm.x, -wallNorm.z);
         }
+      } else if (this.gatheringAbility?.swingFacing != null && !isMovingInput) {
+        // Chopping / mining: keep facing the tree or rock being struck (like the pickaxe always did)
+        targetFacingAngle = this.gatheringAbility.swingFacing;
       } else if (this.model.activeWeapon === 6 && this.model.axeSwingProgress > 0) {
         // Face where the camera looks while swinging the axe
         targetFacingAngle = Math.atan2(cameraForward.x, cameraForward.z);

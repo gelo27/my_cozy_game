@@ -4,7 +4,7 @@ import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
-  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell,
+  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf,
 } from 'lucide-react';
 import { RiverPanel } from './RiverPanel';
 import { CavePanel } from './CavePanel';
@@ -18,6 +18,7 @@ import { worldSettings } from '../../world/WorldSettings';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
 import { waterSettings, WaterSettings, saveWaterSettings, resetWaterSettings } from '../../world/WaterSettings';
+import { vegetationSettings, VegetationSettings, setVegetation, resetVegetationSettings } from '../../world/VegetationSettings';
 import { causticsSettings, applyCausticsSettings, resetCausticsSettings, CausticsSettings } from '../../scene/WaterEffects';
 
 const ICONS: Record<string, React.ElementType> = {
@@ -27,7 +28,7 @@ const ICONS: Record<string, React.ElementType> = {
 
 const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції' };
 
-type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'save' | 'debug';
+type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'veg' | 'save' | 'debug';
 
 interface EditorUIProps {
   engine: GameEngine;
@@ -71,6 +72,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
     { id: 'atmo', icon: Sun, label: 'Час, погода, вода' },
     { id: 'water', icon: Waves, label: 'Шейдер води' },
+    { id: 'veg', icon: Leaf, label: 'Рослинність' },
     { id: 'save', icon: Save, label: 'Збереження' },
     { id: 'debug', icon: Activity, label: 'Дебаг' },
   ];
@@ -133,6 +135,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
         {tab === 'scene' && <ScenePanel engine={engine} rerender={rerender} />}
         {tab === 'atmo' && <AtmospherePanel engine={engine} rerender={rerender} />}
         {tab === 'water' && <WaterPanel rerender={rerender} />}
+        {tab === 'veg' && <VegetationPanel rerender={rerender} />}
         {tab === 'save' && <SavePanel engine={engine} notify={props.notify} />}
         {tab === 'debug' && <DebugTab {...props} />}
       </div>
@@ -542,6 +545,26 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
             </button>
           ))}
         </div>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            className={chip(w.weather.director.auto)}
+            onClick={() => set(() => (w.weather.director.auto = !w.weather.director.auto))}
+          >
+            Авто: {w.weather.director.auto ? 'увімк.' : 'вимк.'}
+          </button>
+          <span className="text-xs opacity-70">
+            зміна через {w.weather.director.hoursUntilChange.toFixed(1)} год
+          </span>
+        </div>
+        {w.weather.director.auto && (
+          <div className="mt-1 text-xs opacity-80">
+            Прогноз:{' '}
+            {w.weather.director
+              .forecast()
+              .map((f) => `${String(Math.floor(f.atHour)).padStart(2, '0')}:${String(Math.floor((f.atHour % 1) * 60)).padStart(2, '0')} ${WEATHER_LABELS[f.type]}`)
+              .join(' → ')}
+          </div>
+        )}
       </Section>
       <WeatherTuner type={w.weather.weather} rerender={rerender} />
       <BirdVoices engine={engine} rerender={rerender} />
@@ -688,6 +711,127 @@ const WaterPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
       ))}
       <button className={chip(false)} onClick={() => (resetWaterSettings(), rerender())}>
         Скинути
+      </button>
+    </>
+  );
+};
+
+type VegNum = { [K in keyof VegetationSettings]: VegetationSettings[K] extends number ? K : never }[keyof VegetationSettings];
+type VegBool = { [K in keyof VegetationSettings]: VegetationSettings[K] extends boolean ? K : never }[keyof VegetationSettings];
+interface VegSlider { k: VegNum; label: string; min: number; max: number; step: number; fmt?(v: number): string }
+const fm = (v: number) => `${v.toFixed(v < 1 ? 2 : 0)} м`;
+const f2 = (v: number) => v.toFixed(2);
+const f0 = (v: number) => v.toFixed(0);
+const REBUILD_NOTE = 'Перебудова через мить після зміни';
+
+const VEG_GROUPS: { title: string; toggle?: [VegBool, string]; note?: string; sliders: VegSlider[] }[] = [
+  {
+    title: 'Трава',
+    toggle: ['grassEnabled', 'Показувати траву'],
+    sliders: [
+      { k: 'grassPatch', label: 'Розмір ділянки навколо камери', min: 16, max: 120, step: 1, fmt: fm },
+      { k: 'grassBlades', label: 'Травинок на сторону (щільність)', min: 40, max: 400, step: 5, fmt: (v) => `${v} (${Math.round((v * v) / 1000)} тис.)` },
+      { k: 'grassHeight', label: 'Висота', min: 0.1, max: 1.5, step: 0.01, fmt: fm },
+      { k: 'grassWidth', label: 'Ширина', min: 0.01, max: 0.2, step: 0.005, fmt: (v) => `${v.toFixed(3)} м` },
+      { k: 'grassWind', label: 'Вітер', min: 0, max: 3, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
+      { k: 'grassBaseShade', label: 'Яскравість біля коріння', min: 0.2, max: 1.5, step: 0.01, fmt: f2 },
+      { k: 'grassTipShade', label: 'Яскравість кінчиків', min: 0.4, max: 2, step: 0.01, fmt: f2 },
+    ],
+  },
+  {
+    title: 'Відстані дерев і кущів',
+    sliders: [
+      { k: 'treeViewDist', label: 'Дерева видно до', min: 60, max: 500, step: 5, fmt: fm },
+      { k: 'oakNearDist', label: 'Дуб: листя (LOD 1) до', min: 10, max: 200, step: 1, fmt: fm },
+      { k: 'pineNearDist', label: 'Ялина: лапи (LOD 1) до', min: 10, max: 200, step: 1, fmt: fm },
+      { k: 'bushNearDist', label: 'Кущ: листя (LOD 1) до', min: 5, max: 130, step: 1, fmt: fm },
+      { k: 'treeFarDist', label: 'Дерева: LOD 2 до', min: 30, max: 300, step: 1, fmt: fm },
+      { k: 'lodHysteresis', label: 'Запас від мерехтіння LOD', min: 0, max: 30, step: 1, fmt: fm },
+      { k: 'lodFade', label: 'Плавність переходу LOD', min: 0.05, max: 2, step: 0.05, fmt: (v) => `${v.toFixed(2)} с` },
+    ],
+  },
+  {
+    title: 'Вітер у листі',
+    sliders: [
+      { k: 'leafWind', label: 'Сила', min: 0, max: 0.15, step: 0.005, fmt: (v) => v.toFixed(3) },
+      { k: 'leafWindSpeed', label: 'Швидкість', min: 0, max: 4, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
+    ],
+  },
+  {
+    title: 'Дуб — листя',
+    toggle: ['oakLeaves', 'Листя на ближньому LOD'],
+    note: REBUILD_NOTE,
+    sliders: [
+      { k: 'oakCount', label: 'Максимум листків', min: 100, max: 3000, step: 50, fmt: f0 },
+      { k: 'oakSpacing', label: 'Відстань між листками', min: 0.1, max: 1, step: 0.01, fmt: fm },
+      { k: 'oakSize', label: 'Розмір листка', min: 0.2, max: 1.5, step: 0.01, fmt: fm },
+      { k: 'oakOffset', label: 'Відступ від крони', min: 0, max: 0.3, step: 0.005, fmt: fm },
+      { k: 'oakInnerShade', label: 'Тінь усередині крони', min: 0.2, max: 1.2, step: 0.01, fmt: f2 },
+    ],
+  },
+  {
+    title: 'Ялина — лапи',
+    toggle: ['pineNeedles', 'Лапи на ближньому LOD'],
+    note: REBUILD_NOTE,
+    sliders: [
+      { k: 'pineCount', label: 'Лап у ряду', min: 3, max: 12, step: 1, fmt: (v: number) => String(v) },
+      { k: 'pineSpacing', label: 'Крок між рядами лап', min: 0.2, max: 1.2, step: 0.01, fmt: fm },
+      { k: 'pineLength', label: 'Провисання лап', min: 0.3, max: 2, step: 0.01, fmt: f2 },
+      { k: 'pineWidth', label: 'Ширина лапи (від довжини)', min: 0.2, max: 1.2, step: 0.01, fmt: f2 },
+      { k: 'pineOffset', label: 'Виступ за крону', min: -0.5, max: 1, step: 0.01, fmt: fm },
+      { k: 'pineInnerShade', label: 'Тінь усередині крони', min: 0.2, max: 1.2, step: 0.01, fmt: f2 },
+      { k: 'pineCrownShade', label: 'Тон крони (всі LOD)', min: 0.2, max: 1.2, step: 0.01, fmt: f2 },
+    ],
+  },
+  {
+    title: 'Ялина — крона з моделі',
+    toggle: ['pineModelCrown', 'Крона з pine_crown.gltf (зроблена в Blender)'],
+    note: 'Вимкнено: лапи генеруються за повзунками «Ялина — лапи»',
+    sliders: [],
+  },
+  {
+    title: 'Ялина — крона',
+    toggle: ['pineKeepCrown', 'Залишити крону моделі під лапами'],
+    note: 'Вимкнено: тільки стовбур і ряди лап',
+    sliders: [],
+  },
+  {
+    title: 'Кущ — листя',
+    toggle: ['bushLeaves', 'Листя на ближньому LOD'],
+    note: REBUILD_NOTE,
+    sliders: [
+      { k: 'bushCount', label: 'Максимум листків', min: 20, max: 800, step: 10, fmt: f0 },
+      { k: 'bushSpacing', label: 'Відстань між листками', min: 0.05, max: 0.6, step: 0.01, fmt: fm },
+      { k: 'bushSize', label: 'Розмір листка', min: 0.1, max: 1, step: 0.01, fmt: fm },
+      { k: 'bushOffset', label: 'Відступ від кулі', min: 0, max: 0.2, step: 0.005, fmt: fm },
+      { k: 'bushInnerShade', label: 'Тінь усередині', min: 0.2, max: 1.2, step: 0.01, fmt: f2 },
+    ],
+  },
+];
+
+/** Live vegetation parameters for the whole map (saved in this browser, per device class). */
+const VegetationPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const v = vegetationSettings;
+  return (
+    <>
+      {VEG_GROUPS.map((g) => (
+        <Section key={g.title} title={g.title}>
+          {g.toggle && (
+            <label className="flex items-center gap-2 text-zinc-400">
+              <input type="checkbox" checked={v[g.toggle[0]]} onChange={(e) => (setVegetation(g.toggle![0], e.target.checked), rerender())} className="accent-sky-500" />
+              {g.toggle[1]}
+            </label>
+          )}
+          {g.note && <p className="text-[10px] text-zinc-500">{g.note}</p>}
+          <div className={`flex flex-col gap-1.5 ${g.toggle && !v[g.toggle[0]] ? 'opacity-40 pointer-events-none' : ''}`}>
+            {g.sliders.map((s) => (
+              <Slider key={s.k} label={s.label} value={v[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(x) => (setVegetation(s.k, x), rerender())} />
+            ))}
+          </div>
+        </Section>
+      ))}
+      <button className={chip(false)} onClick={() => (resetVegetationSettings(), rerender())}>
+        Скинути до типових
       </button>
     </>
   );

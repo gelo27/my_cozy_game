@@ -40,6 +40,8 @@ export class GatheringAbility implements IAbility {
   private inventory: InventoryManager | null = null;
 
   private cooldown = 0;
+  /** Yaw towards the tree / rock being struck, held while the swing lasts (null otherwise). */
+  public swingFacing: number | null = null;
   private pendingHit: { target: Target; direction: THREE.Vector3; delay: number } | null = null;
 
   public setSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager, propTrees: PropTreeField | null = null): void {
@@ -57,6 +59,7 @@ export class GatheringAbility implements IAbility {
 
     this.cooldown = Math.max(0, this.cooldown - dt);
     this.updatePendingHit(dt);
+    if (this.cooldown === 0 && !this.pendingHit) this.swingFacing = null;
 
     const t = context.body.translation();
     const playerPos = this.playerPosScratch.set(t.x, t.y, t.z);
@@ -74,7 +77,8 @@ export class GatheringAbility implements IAbility {
     const direction = new THREE.Vector3(targetPos.x - playerPos.x, 0, targetPos.z - playerPos.z);
     if (direction.lengthSq() < 1e-4) direction.set(0, 0, 1);
     direction.normalize();
-    context.model?.setFacingAngleInstant(Math.atan2(direction.x, direction.z));
+    this.swingFacing = Math.atan2(direction.x, direction.z);
+    context.model?.setFacingAngleInstant(this.swingFacing);
 
     if (tool === 'axe') {
       context.model?.triggerAxeSwing();
@@ -157,6 +161,18 @@ export class GatheringAbility implements IAbility {
           actionText: hasTool ? t('gather.split') : t('gather.needAxe'),
           hintText: t('gather.splitHint', { n: GATHERING_CONFIG.TREE_WOOD_YIELD }),
           progress: 0,
+          canAct: hasTool,
+        };
+      }
+      if (target.type === 'propTree' && target.node.bush) {
+        return {
+          kind: 'tree',
+          title: t('gather.bush'),
+          actionText: hasTool ? t('gather.clearBush', { done: maxHealth - health, max: maxHealth }) : t('gather.needAxe'),
+          hintText: hasTool
+            ? t('gather.clearBushHint', { n: health, hits: plural(health, t('gather.hit1'), t('gather.hit2'), t('gather.hit5')) })
+            : t('gather.takeAxe'),
+          progress,
           canAct: hasTool,
         };
       }

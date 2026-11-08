@@ -700,7 +700,7 @@ vec3 terrainColor() {
     if (!this.body) this.body = world.createRigidBody(rapier.RigidBodyDesc.fixed());
     const S = CHUNK + 1;
     const data = new Float32Array(S * S);
-    const groups = this.physics.packCollisionGroups(COLLISION_GROUPS.ENVIRONMENT, 0xffff);
+    const groups = this.physics.packCollisionGroups(COLLISION_GROUPS.ENVIRONMENT | COLLISION_GROUPS.TERRAIN, 0xffff);
     for (const c of this.physicsDirtyChunks) {
       const cx = c % CHUNKS;
       const cz = (c - cx) / CHUNKS;

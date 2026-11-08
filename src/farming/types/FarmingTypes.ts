@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 
-export type CropType = 'wheat' | 'carrot' | 'tomato';
+export type CropType = 'wheat' | 'carrot' | 'tomato' | 'strawberry' | 'cabbage' | 'corn' | 'eggplant' | 'pumpkin';
+
+/** Every crop, in shop / inventory order. */
+export const CROP_TYPES: CropType[] = ['wheat', 'carrot', 'tomato', 'strawberry', 'cabbage', 'corn', 'eggplant', 'pumpkin'];
 
 export type CropStage = 1 | 2 | 3;
 
@@ -50,6 +53,61 @@ export const CROP_DEFINITIONS: Record<CropType, CropDefinition> = {
     stageSeconds: 12,
     description: 'Соковиті червоні томати на підв’язаному кущі. Потребує 2 поливи.',
   },
+  strawberry: {
+    type: 'strawberry',
+    nameUk: 'Полуниця',
+    seedNameUk: 'Насіння полуниці',
+    crateNameUk: 'Ящик полуниці',
+    seedItemId: 'strawberry_seed',
+    crateItemId: 'crate_strawberry',
+    color: '#e11d48',
+    stageSeconds: 12,
+    description: 'Низькі кущики з солодкими ягодами. Потребує 2 поливи.',
+  },
+  cabbage: {
+    type: 'cabbage',
+    nameUk: 'Капуста',
+    seedNameUk: 'Насіння капусти',
+    crateNameUk: 'Ящик капусти',
+    seedItemId: 'cabbage_seed',
+    crateItemId: 'crate_cabbage',
+    color: '#4ade80',
+    stageSeconds: 11,
+    description: 'Тугі хрусткі качани. Потребує 2 поливи.',
+  },
+  corn: {
+    type: 'corn',
+    nameUk: 'Кукурудза',
+    seedNameUk: 'Насіння кукурудзи',
+    crateNameUk: 'Ящик кукурудзи',
+    seedItemId: 'corn_seed',
+    crateItemId: 'crate_corn',
+    color: '#facc15',
+    stageSeconds: 14,
+    description: 'Високі стебла із золотими качанами. Потребує 2 поливи.',
+  },
+  eggplant: {
+    type: 'eggplant',
+    nameUk: 'Баклажани',
+    seedNameUk: 'Насіння баклажанів',
+    crateNameUk: 'Ящик баклажанів',
+    seedItemId: 'eggplant_seed',
+    crateItemId: 'crate_eggplant',
+    color: '#7c3aed',
+    stageSeconds: 14,
+    description: 'Розлогий кущ із глянцевими фіолетовими плодами. Потребує 2 поливи.',
+  },
+  pumpkin: {
+    type: 'pumpkin',
+    nameUk: 'Гарбуз',
+    seedNameUk: 'Насіння гарбуза',
+    crateNameUk: 'Ящик гарбузів',
+    seedItemId: 'pumpkin_seed',
+    crateItemId: 'crate_pumpkin',
+    color: '#f97316',
+    stageSeconds: 16,
+    description: 'Великі помаранчеві гарбузи. Ростуть довго, зате дорогі. Потребує 2 поливи.',
+  },
 };
 
 export interface CropState {
@@ -59,17 +117,6 @@ export interface CropState {
   isWatered: boolean; // currently moist
   growthTimer: number; // progress in seconds towards next stage
   stageDuration: number;
-}
-
-export interface FarmPlot {
-  id: string;
-  pieceId: string;
-  position: THREE.Vector3;
-  meshGroup: THREE.Group;
-  soilMesh: THREE.Mesh | null;
-  crop: CropState | null;
-  cropMeshGroup: THREE.Group;
-  waterIndicator?: THREE.Sprite;
 }
 
 export interface FarmInteractionPrompt {
@@ -82,7 +129,7 @@ export interface FarmInteractionPrompt {
   canPlant: boolean;
   canHarvest: boolean;
   growthProgress: number; // 0 to 1
-  /** Target is a big shovel-dug field rather than a garden bed. */
+  /** Always true: crops grow only on shovel-dug fields. */
   isField?: boolean;
   /** Set while the shovel is in hand: dig a new field, fill an empty one back in, or blocked. */
   shovel?: 'dig' | 'fill' | 'blocked';

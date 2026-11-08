@@ -36,6 +36,8 @@ export class Precipitation {
   private readonly dropMat: THREE.ShaderMaterial;
   private readonly splashes: THREE.Points;
   private readonly splashMat: THREE.ShaderMaterial;
+  private readonly dropCount: number;
+  private readonly splashCount: number;
 
   constructor(scene: THREE.Scene) {
     const mobile = isMobileDevice();
@@ -58,11 +60,14 @@ export class Precipitation {
       offset[i * 3] = Math.random() * PRECIP_BOX;
       offset[i * 3 + 1] = Math.random() * BOX_HEIGHT;
       offset[i * 3 + 2] = Math.random() * PRECIP_BOX;
-      seed[i] = Math.random();
+      // Ascending (stratified) seeds: the shader hides drops with seed > amount, so the visible ones
+      // are always the first instances and the draw call can skip the rest (instanceCount below)
+      seed[i] = (i + Math.random()) / count;
     }
     geo.setAttribute('offset', new THREE.InstancedBufferAttribute(offset, 3));
     geo.setAttribute('seed', new THREE.InstancedBufferAttribute(seed, 1));
     geo.instanceCount = count;
+    this.dropCount = count;
 
     this.dropMat = new THREE.ShaderMaterial({
       transparent: true,
@@ -157,7 +162,8 @@ export class Precipitation {
     const sgeo = new THREE.BufferGeometry();
     sgeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(splashCount * 3), 3));
     const sseed = new Float32Array(splashCount);
-    for (let i = 0; i < splashCount; i++) sseed[i] = Math.random();
+    this.splashCount = splashCount;
+    for (let i = 0; i < splashCount; i++) sseed[i] = (i + Math.random()) / splashCount;
     sgeo.setAttribute('seed', new THREE.BufferAttribute(sseed, 1));
     this.splashMat = new THREE.ShaderMaterial({
       transparent: true,
@@ -244,6 +250,9 @@ export class Precipitation {
     this.drops.visible = visible;
     this.splashes.visible = visible && snow < 0.5;
     if (!visible) return;
+    // Only the instances that can be visible at this amount are drawn (seeds ascend with the index)
+    (this.drops.geometry as THREE.InstancedBufferGeometry).instanceCount = Math.min(this.dropCount, Math.ceil(this.dropCount * amount) + 1);
+    this.splashes.geometry.setDrawRange(0, Math.min(this.splashCount, Math.ceil(this.splashCount * amount) + 1));
     const u = this.dropMat.uniforms;
     u.uTime.value += dt;
     u.uCenter.value.copy(cameraPos);

@@ -972,6 +972,79 @@ class AudioEngine {
   }
 
   /**
+   * Leafy swish of a bush something pushes through: two band-passed noise bursts (a soft body
+   * and a crisp leaf rattle). `intensity` 0..1 sets the loudness and length. Cached noise
+   * buffers, five nodes, nothing kept alive afterwards.
+   */
+  public playBushRustle(intensity = 1) {
+    if (!this.ctx) this.init();
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    const out = this.output();
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    const k = Math.min(1, Math.max(0.15, intensity));
+    const len = 0.18 + 0.2 * k;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer(0.4);
+    src.playbackRate.value = 0.85 + Math.random() * 0.3;
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.setValueAtTime(2600 + Math.random() * 900, t);
+    band.frequency.linearRampToValueAtTime(1500, t + len);
+    band.Q.value = 0.9;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.16 * k, t + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.001, t + len);
+    src.connect(band);
+    band.connect(g);
+    g.connect(out);
+    src.start(t, Math.random() * 0.1);
+    src.stop(t + len + 0.02);
+  }
+
+  /** Axe into a bush: a dull twiggy snap plus a burst of leaves (louder when it goes down). */
+  public playBushChop(isFatal = false) {
+    if (!this.ctx) this.init();
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    const out = this.output();
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    const snap = ctx.createBufferSource();
+    snap.buffer = this.noiseBuffer(0.05);
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'bandpass';
+    hp.frequency.value = isFatal ? 1300 : 1700;
+    hp.Q.value = 2.5;
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(isFatal ? 0.4 : 0.28, t);
+    sg.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    snap.connect(hp);
+    hp.connect(sg);
+    sg.connect(out);
+    snap.start(t);
+    const leaves = ctx.createBufferSource();
+    leaves.buffer = this.noiseBuffer(0.4);
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.setValueAtTime(3200, t);
+    band.frequency.linearRampToValueAtTime(1800, t + 0.35);
+    band.Q.value = 0.8;
+    const lg = ctx.createGain();
+    const len = isFatal ? 0.45 : 0.28;
+    lg.gain.setValueAtTime(0.0001, t);
+    lg.gain.linearRampToValueAtTime(isFatal ? 0.26 : 0.18, t + 0.02);
+    lg.gain.exponentialRampToValueAtTime(0.001, t + len);
+    leaves.connect(band);
+    band.connect(lg);
+    lg.connect(out);
+    leaves.start(t);
+    leaves.stop(t + len + 0.02);
+  }
+
+  /**
    * Joyful ascending celebration chime for harvesting Heartopia crops
    */
   public playHarvest() {

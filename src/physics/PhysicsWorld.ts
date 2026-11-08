@@ -213,6 +213,8 @@ export class PhysicsWorld {
         try {
           if (!body || !body.isValid() || !body.isDynamic()) return;
           if ((body as any).isVehicle || (body.userData as any)?.isVehicle) return;
+          // Bodies that must not be picked up (a felled tree's falling top, ...)
+          if ((body.userData as { noCarry?: boolean } | undefined)?.noCarry) return;
           if (excludeHandle !== -1 && body.handle === excludeHandle) {
             return;
           }
