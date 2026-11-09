@@ -1,3 +1,4 @@
+import { TreeSoundBank, type TreeSoundKind } from './TreeSounds';
 import * as THREE from 'three';
 import { isMobileDevice } from '../world/WorldSettings';
 import { userSettings, onUserSettingsChange } from '../config/userSettings';
@@ -79,6 +80,8 @@ class AudioEngine {
       }
       this.applyVolumes(true);
       onUserSettingsChange(() => this.applyVolumes());
+      // Woodcutting sounds are pre-rendered in small idle slices, well before the first chop
+      setTimeout(() => this.warmTreeSounds(), 2000);
     }
   }
 
@@ -424,214 +427,71 @@ class AudioEngine {
     osc.stop(t + 0.28);
   }
 
-  /**
-   * Zelda BotW Woodcutter's Axe whoosh swing sound
-   */
+  /** The axe cutting the air (pre-rendered whoosh). */
   public playAxeSwing() {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
-    const out = this.output();
-
-    const t = this.ctx.currentTime;
-    
-    // Filtered noise swoosh + rapid pitch sweep
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    const filter = this.ctx.createBiquadFilter();
-
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(140, t);
-    osc.frequency.exponentialRampToValueAtTime(45, t + 0.16);
-
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(600, t);
-    filter.frequency.exponentialRampToValueAtTime(180, t + 0.16);
-
-    gain.gain.setValueAtTime(0.01, t);
-    gain.gain.linearRampToValueAtTime(0.22, t + 0.03);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
-
-    osc.connect(filter);
-    filter.connect(gain);
-    gain.connect(out);
-
-    osc.start(t);
-    osc.stop(t + 0.2);
+    this.playTree('swing', 0.32, 0.1);
   }
 
-  /**
-   * Juicy Zelda BotW woodcutting chop impact (axe biting into tree trunk)
-   */
+  /** The axe biting into a trunk; the felling blow ends in a splintering crack. */
   public playWoodChopHit(isFatal: boolean = false) {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
-    const out = this.output();
-
-    const t = this.ctx.currentTime;
-
-    // 1. Sharp metallic axe bite "CLANK-THWACK"
-    const oscBite = this.ctx.createOscillator();
-    const gainBite = this.ctx.createGain();
-    oscBite.type = 'triangle';
-    oscBite.frequency.setValueAtTime(isFatal ? 380 : 320, t);
-    oscBite.frequency.exponentialRampToValueAtTime(80, t + 0.08);
-
-    gainBite.gain.setValueAtTime(0.4, t);
-    gainBite.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-
-    oscBite.connect(gainBite);
-    gainBite.connect(out);
-    oscBite.start(t);
-    oscBite.stop(t + 0.13);
-
-    // 2. Heavy wooden body resonance "THUD"
-    const oscWood = this.ctx.createOscillator();
-    const gainWood = this.ctx.createGain();
-    oscWood.type = 'sine';
-    oscWood.frequency.setValueAtTime(isFatal ? 110 : 135, t);
-    oscWood.frequency.exponentialRampToValueAtTime(40, t + 0.2);
-
-    gainWood.gain.setValueAtTime(0.55, t);
-    gainWood.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
-
-    oscWood.connect(gainWood);
-    gainWood.connect(out);
-    oscWood.start(t);
-    oscWood.stop(t + 0.23);
-
-    // 3. Splinter crack (noise burst)
-    const noiseBuffer = this.noiseBuffer(0.06);
-    const whiteNoise = this.ctx.createBufferSource();
-    whiteNoise.buffer = noiseBuffer;
-
-    const noiseFilter = this.ctx.createBiquadFilter();
-    noiseFilter.type = 'bandpass';
-    noiseFilter.frequency.value = isFatal ? 2200 : 1800;
-    noiseFilter.Q.value = 3.0;
-
-    const noiseGain = this.ctx.createGain();
-    noiseGain.gain.setValueAtTime(0.35, t);
-    noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
-
-    whiteNoise.connect(noiseFilter);
-    noiseFilter.connect(noiseGain);
-    noiseGain.connect(out);
-    whiteNoise.start(t);
+    this.playTree(isFatal ? 'chopFatal' : 'chop', isFatal ? 0.7 : 0.6, 0.08);
   }
 
-  /**
-   * Wooden trunk creaking / cracking as the tree starts to topple
-   */
+  /** The tree going over: hinge crack, a wooden groan with popping fibres, the crown's rush. */
   public playTreeFallCreak() {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
-    const out = this.output();
-
-    const t = this.ctx.currentTime;
-
-    // Dual FM modulated groaning creaks
-    const carrier = this.ctx.createOscillator();
-    const modulator = this.ctx.createOscillator();
-    const modGain = this.ctx.createGain();
-    const outGain = this.ctx.createGain();
-
-    carrier.type = 'sawtooth';
-    carrier.frequency.setValueAtTime(85, t);
-    carrier.frequency.linearRampToValueAtTime(60, t + 0.6);
-
-    modulator.type = 'sine';
-    modulator.frequency.setValueAtTime(14, t);
-    modulator.frequency.linearRampToValueAtTime(8, t + 0.6);
-    modGain.gain.setValueAtTime(45, t);
-
-    modulator.connect(carrier.frequency);
-
-    outGain.gain.setValueAtTime(0.01, t);
-    outGain.gain.linearRampToValueAtTime(0.3, t + 0.1);
-    outGain.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
-
-    carrier.connect(outGain);
-    outGain.connect(out);
-
-    modulator.start(t);
-    carrier.start(t);
-    modulator.stop(t + 0.75);
-    carrier.stop(t + 0.75);
+    this.playTree('fall', 0.55, 0.06);
   }
 
-  /**
-   * Heavy thud + ground shake impact when fallen tree hits ground
-   */
+  /** The trunk and crown landing: a deep ground thump, a bounce, branches snapping, leaves. */
   public playTreeImpact() {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
-    const out = this.output();
-
-    const t = this.ctx.currentTime;
-
-    // Sub bass impact
-    const subOsc = this.ctx.createOscillator();
-    const subGain = this.ctx.createGain();
-    subOsc.type = 'sine';
-    subOsc.frequency.setValueAtTime(90, t);
-    subOsc.frequency.exponentialRampToValueAtTime(25, t + 0.4);
-
-    subGain.gain.setValueAtTime(0.7, t);
-    subGain.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
-
-    subOsc.connect(subGain);
-    subGain.connect(out);
-    subOsc.start(t);
-    subOsc.stop(t + 0.5);
-
-    // Leaves rustle whoosh
-    const noiseBuffer = this.noiseBuffer(0.25);
-    const noise = this.ctx.createBufferSource();
-    noise.buffer = noiseBuffer;
-
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(800, t);
-    filter.frequency.exponentialRampToValueAtTime(250, t + 0.25);
-
-    const noiseGain = this.ctx.createGain();
-    noiseGain.gain.setValueAtTime(0.25, t);
-    noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
-
-    noise.connect(filter);
-    filter.connect(noiseGain);
-    noiseGain.connect(out);
-    noise.start(t);
+    this.playTree('impact', 0.9, 0.08);
   }
 
-  /**
-   * Splitting a fallen trunk into wood logs (crisp pop & crack)
-   */
+  /** Splitting a fallen trunk into logs: a dry crack and a hollow knock. */
   public playLogSplit() {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
-    const out = this.output();
+    this.playTree('split', 0.6, 0.08);
+  }
 
-    const t = this.ctx.currentTime;
+  /** A pick striking rock (crystal rings glassy). */
+  public playMineHit(crystal = false) {
+    this.playTree(crystal ? 'mineCrystal' : 'mine', 0.6, 0.07);
+  }
 
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(280, t);
-    osc.frequency.exponentialRampToValueAtTime(90, t + 0.1);
+  /** A rock breaking apart into rubble. */
+  public playRockBreak() {
+    this.playTree('rockBreak', 0.85, 0.08);
+  }
 
-    gain.gain.setValueAtTime(0.45, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+  private treeBank: TreeSoundBank | null = null;
+  private treeWarm = false;
 
-    osc.connect(gain);
-    gain.connect(out);
-    osc.start(t);
-    osc.stop(t + 0.16);
+  /** Renders the woodcutting sounds one variant per idle slice once audio is running. */
+  private warmTreeSounds(): void {
+    if (this.treeWarm || !this.ctx) return;
+    this.treeWarm = true;
+    if (!this.treeBank) this.treeBank = new TreeSoundBank(this.ctx);
+    const idle: (cb: () => void) => void =
+      typeof requestIdleCallback === 'function' ? (cb) => requestIdleCallback(cb, { timeout: 1500 }) : (cb) => setTimeout(cb, 120);
+    const step = () => {
+      if (this.treeBank?.warmStep()) setTimeout(() => idle(step), 150);
+    };
+    idle(step);
+  }
+
+  /** One pre-rendered woodcutting sound: a single buffer source and gain (cheap on phones). */
+  private playTree(kind: TreeSoundKind, gain: number, pitchJitter: number): void {
+    const s = this.begin();
+    if (!s) return;
+    const { ctx, out, t } = s;
+    if (!this.treeBank) this.treeBank = new TreeSoundBank(ctx);
+    this.warmTreeSounds();
+    const src = ctx.createBufferSource();
+    src.buffer = this.treeBank.get(kind);
+    src.playbackRate.value = 1 + (Math.random() * 2 - 1) * pitchJitter;
+    const g = ctx.createGain();
+    g.gain.value = gain * (0.85 + Math.random() * 0.15);
+    src.connect(g).connect(out);
+    src.start(t);
   }
 
   /**
@@ -1055,9 +915,145 @@ class AudioEngine {
     leaves.stop(t + len + 0.02);
   }
 
+  /** Starts a sound: the context (resumed if needed), its destination and the time, or null. */
+  private begin(): { ctx: AudioContext; out: AudioNode; t: number } | null {
+    if (!this.ctx) this.init();
+    if (!this.ctx) {
+      this.pendingPos = null;
+      return null;
+    }
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
+    return { ctx: this.ctx, out: this.output(), t: this.ctx.currentTime };
+  }
+
+  /**
+   * A silk thread snapping: a dry broadband tick, the thread's short high "ting" ringing off it,
+   * and the freed end whipping back through the air. Two cached noise buffers, a handful of nodes.
+   */
+  public playWebSnap(intensity = 1) {
+    const s = this.begin();
+    if (!s) return;
+    const { ctx, out, t } = s;
+    const k = Math.max(0.2, Math.min(1, intensity));
+    const r = Math.random;
+    // Tick + ting from one short decaying burst
+    const click = ctx.createBufferSource();
+    click.buffer = this.noiseBuffer(0.012, true);
+    click.playbackRate.value = 0.8 + r() * 0.5;
+    const tickBand = ctx.createBiquadFilter();
+    tickBand.type = 'bandpass';
+    tickBand.frequency.value = 3200 + r() * 2800;
+    tickBand.Q.value = 0.9;
+    const tickGain = ctx.createGain();
+    tickGain.gain.value = 0.26 * k;
+    click.connect(tickBand);
+    tickBand.connect(tickGain);
+    tickGain.connect(out);
+    const ring = ctx.createBiquadFilter();
+    ring.type = 'bandpass';
+    ring.frequency.value = 2300 + r() * 1700;
+    ring.Q.value = 28;
+    const ringGain = ctx.createGain();
+    ringGain.gain.value = 0.9 * k;
+    click.connect(ring);
+    ring.connect(ringGain);
+    ringGain.connect(out);
+    click.start(t);
+    // The loose end whipping back: a quick falling swish
+    const whip = ctx.createBufferSource();
+    whip.buffer = this.noiseBuffer(0.09);
+    const sweep = ctx.createBiquadFilter();
+    sweep.type = 'bandpass';
+    sweep.Q.value = 3.5;
+    const top = 6000 + r() * 2500;
+    const len = 0.045 + r() * 0.035;
+    const t0 = t + 0.004;
+    sweep.frequency.setValueAtTime(top, t0);
+    sweep.frequency.exponentialRampToValueAtTime(top * 0.28, t0 + len);
+    const wg = ctx.createGain();
+    wg.gain.setValueAtTime(0.0001, t0);
+    wg.gain.exponentialRampToValueAtTime(0.075 * k, t0 + 0.005);
+    wg.gain.exponentialRampToValueAtTime(0.001, t0 + len);
+    whip.connect(sweep);
+    sweep.connect(wg);
+    wg.connect(out);
+    whip.start(t0);
+    whip.stop(t0 + len + 0.01);
+  }
+
+  /** The axe through a web: a swishy, papery tear (more threads cut, louder and longer). */
+  public playWebCut(amount = 0.5) {
+    const s = this.begin();
+    if (!s) return;
+    const { ctx, out, t } = s;
+    const k = Math.max(0.25, Math.min(1, amount));
+    const len = 0.14 + 0.16 * k;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer(0.35);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.4;
+    bp.frequency.setValueAtTime(5200, t);
+    bp.frequency.exponentialRampToValueAtTime(2200, t + len);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.2 * k, t + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.001, t + len);
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(out);
+    src.start(t);
+    src.stop(t + len + 0.02);
+  }
+
   /**
    * Joyful ascending celebration chime for harvesting Heartopia crops
    */
+  /** An apple hitting the ground: a soft, short, low thump (louder for a harder landing). */
+  public playAppleThud(intensity = 1) {
+    if (!this.ctx) this.init();
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
+    const out = this.output();
+    const t = this.ctx.currentTime;
+    const k = Math.max(0.15, Math.min(1, intensity));
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    const f = 150 + Math.random() * 60;
+    osc.frequency.setValueAtTime(f, t);
+    osc.frequency.exponentialRampToValueAtTime(f * 0.45, t + 0.09);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.32 * k, t + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    osc.connect(gain);
+    gain.connect(out);
+    osc.start(t);
+    osc.stop(t + 0.14);
+  }
+
+  /** An apple picked up: a quick bright pop. */
+  public playApplePickup() {
+    if (!this.ctx) this.init();
+    if (!this.ctx) return;
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
+    const out = this.output();
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    const f = 620 + Math.random() * 120;
+    osc.frequency.setValueAtTime(f, t);
+    osc.frequency.exponentialRampToValueAtTime(f * 1.9, t + 0.07);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.16, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+    osc.connect(gain);
+    gain.connect(out);
+    osc.start(t);
+    osc.stop(t + 0.15);
+  }
+
   public playHarvest() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;

@@ -27,6 +27,13 @@ function trunkRadius(type: string): number {
   return c && c.kind === 'cyl' ? c.r : 0.35;
 }
 const FALL_SECONDS = 1.1;
+/**
+ * A partly chopped tree farther than this from the player (m) goes back to its instance (normal
+ * LODs and the distance fade; the notch can't be made out from there anyway); it gets its carved
+ * copy back once the player is within FAR_SWAP - FAR_SWAP_HYST again.
+ */
+const FAR_SWAP = 32;
+const FAR_SWAP_HYST = 4;
 /** The cut-off top lies on the ground this long after the last hit, then shrinks away (s). */
 const LIE_SECONDS = 2;
 /** ...and at least this long after it hits the ground (tall pines take longer to fall). */
@@ -78,12 +85,35 @@ const AMBIENT_LEAF_RADIUS = 22;
 const GUST_GAP = 50;
 
 /** Colour of the leaves a tree sheds. */
-const LEAF_COLOR: Record<string, number> = { tree_round: 0x4a8a2e, tree_pine: 0x2f6a55, bush: 0x3f8a3a };
+const LEAF_COLOR: Record<string, number> = { tree_round: 0x4a8a2e, tree_pine: 0x2f6a55, bush: 0x3f8a3a, apple_tree: 0x4a8a2e };
 /**
  * Hits to fell a prop tree: one fewer than the forest's, so the tree goes over on the hit that
  * shows the deep "X" (it no longer stands on a hair-thin core waiting for one more swing).
  */
-const PROP_TREE_HITS = GATHERING_CONFIG.TREE_HITS - 1;
+export const PROP_TREE_HITS = GATHERING_CONFIG.TREE_HITS - 1;
+
+/**
+ * A tree drawn and kept by another system (the orchard's apple trees) that is felled exactly like
+ * the prop trees: notched trunk, the top falling on its hinge, wood logs. It never regrows: its
+ * stump goes together with the fallen top, and the owner forgets it (`onGone`).
+ */
+export interface ExternalTree {
+  /** Stand-in prop (never added to the PropSystem); its id is set on registration (negative). */
+  prop: PropInstance;
+  /** The tree's geometry at scale 1 (the notched copy is carved from it). */
+  source: THREE.BufferGeometry;
+  /** Trunk radius at scale 1 (m). */
+  trunkRadius: number;
+  crown: { y: number; r: number; h: number };
+  wood: number;
+  leafColor: number;
+  /** First hit: the owner stops drawing the tree (the notched copy takes over). */
+  onHide: () => void;
+  /** Last hit: the owner drops the trunk collider. */
+  onFell: () => void;
+  /** Top and stump gone: the tree is gone for good. */
+  onGone: () => void;
+}
 
 export interface PropTreeNode {
   propId: number;
@@ -115,6 +145,8 @@ interface TreeState {
     phi: number;
     /** After the last hit: the top falling about the break (null once it is gone). */
     top: THREE.Group | null;
+    /** Far from the player: the copy is hidden and the instance draws the tree (see FAR_SWAP). */
+    far: boolean;
   } | null;
 }
 
@@ -155,6 +187,8 @@ export class PropTreeField {
   private readonly dyingBushes = new Map<number, number>();
   /** Hits left per bush being chopped. */
   private readonly bushHealth = new Map<number, number>();
+  private readonly external = new Map<number, ExternalTree>();
+  private nextExternal = -1;
   private static readonly _v = new THREE.Vector3();
   private static readonly _q = new THREE.Quaternion();
   private static readonly _up = new THREE.Vector3(0, 1, 0);
@@ -165,6 +199,51 @@ export class PropTreeField {
     private readonly particles: ParticleManager | null,
     private readonly physics: PhysicsWorld | null = null,
   ) {}
+
+  /** Starts tracking an outside tree (felled like the props); returns its id (negative). */
+  public registerExternal(tree: ExternalTree): number {
+    const id = this.nextExternal--;
+    tree.prop.id = id;
+    this.external.set(id, tree);
+    return id;
+  }
+
+  /** The owner removed the tree: anything left of its felling (copy, stump, falling top) goes too. */
+  public unregisterExternal(id: number): void {
+    this.external.delete(id);
+  }
+
+  /** Hits left on an outside tree, and the hits that fell it. */
+  public externalHealth(id: number): { health: number; max: number } {
+    const st = this.states.get(id);
+    return { health: st ? st.health : PROP_TREE_HITS, max: PROP_TREE_HITS };
+  }
+
+  /** One axe hit on an outside tree (see `hit`). */
+  public hitExternal(id: number, direction: THREE.Vector3): boolean {
+    const ext = this.external.get(id);
+    if (!ext) return false;
+    const p = ext.prop;
+    return this.hit({ propId: id, position: p.position, radius: ext.trunkRadius * p.scale, health: 0, maxHealth: PROP_TREE_HITS }, direction);
+  }
+
+  private getProp(id: number): PropInstance | undefined {
+    return id < 0 ? this.external.get(id)?.prop : this.props.get(id);
+  }
+
+  private setPose(id: number, pose: Pose | null): void {
+    if (id >= 0) this.props.setPose(id, pose);
+    else if (pose && pose.scale === 0) this.external.get(id)?.onHide();
+  }
+
+  private setSolid(id: number, solid: boolean): void {
+    if (id >= 0) this.props.setSolid(id, solid);
+    else if (!solid) this.external.get(id)?.onFell();
+  }
+
+  private trunkOf(prop: PropInstance): number {
+    return prop.id < 0 ? this.external.get(prop.id)?.trunkRadius ?? 0.35 : trunkRadius(prop.type);
+  }
 
   /** Nearest standing prop tree whose trunk surface is within `reach` of `point`. */
   public findNearest(point: THREE.Vector3, reach: number): PropTreeNode | null {
@@ -210,7 +289,7 @@ export class PropTreeField {
 
   /** One axe hit. Returns true when the tree fell. */
   public hit(node: PropTreeNode, direction: THREE.Vector3): boolean {
-    const prop = this.props.get(node.propId);
+    const prop = this.getProp(node.propId);
     if (!prop) return false;
     if (prop.type === 'bush') return this.hitBush(prop, direction);
     let st = this.states.get(node.propId);
@@ -227,9 +306,8 @@ export class PropTreeField {
     this.showCut(node.propId, prop, st, direction);
 
     const surface = PropTreeField._v.copy(prop.position).addScaledVector(direction, -node.radius).setY(prop.position.y + 1);
-    this.particles?.emitWoodSplinters(surface.clone(), direction.clone().negate(), 10);
     // Every hit shakes leaves out of the crown
-    const crown = this.crownOf(prop.type);
+    const crown = this.crownOfProp(prop);
     this.shedLeaves(prop.type, prop.position.clone().setY(prop.position.y + crown.y * prop.scale), crown.r * 0.8 * prop.scale, crown.h * 0.5 * prop.scale, 14);
 
     if (st.health > 0) {
@@ -238,7 +316,7 @@ export class PropTreeField {
     }
 
     st.fall = 0;
-    this.props.setSolid(node.propId, false);
+    this.setSolid(node.propId, false);
     this.splitVisual(prop, st);
     if (st.visual?.top) {
       // The tree's own stump stays; a stump prop under it gives the collider
@@ -256,7 +334,6 @@ export class PropTreeField {
     const centre = prop.position.clone().setY(prop.position.y + 0.5 * prop.scale);
     // A hard jolt, a shiver and a burst of leaves thrown outwards
     this.leaves?.emit(centre, 0.55 * prop.scale, 0.45 * prop.scale, left > 0 ? 22 : 44, LEAF_COLOR.bush, left > 0 ? 1.8 : 2.8);
-    this.particles?.emitTreeFoliageLeaves(centre, left > 0 ? 6 : 14);
     audioEngine.at(centre, 4).playBushChop(left <= 0);
     if (left > 0) {
       this.bushHealth.set(prop.id, left);
@@ -282,7 +359,6 @@ export class PropTreeField {
       const prop = this.props.get(id);
       if (!prop) continue;
       const centre = PropTreeField._v.copy(prop.position).setY(prop.position.y + 0.45 * prop.scale);
-      this.particles?.emitBuildPuff(centre, true, 18);
       this.leaves?.emit(centre, 0.5 * prop.scale, 0.4 * prop.scale, 20, LEAF_COLOR.bush, 2.2);
       this.props.remove(id);
     }
@@ -347,10 +423,11 @@ export class PropTreeField {
     this.updateAmbientLeaves(dt);
     if (this.states.size === 0) return;
     const now = performance.now();
+    const collector = this.getCollector?.() ?? null;
     for (const [id, st] of this.states) {
-      const prop = this.props.get(id);
+      const prop = this.getProp(id);
       if (!prop) {
-        // Deleted in the editor
+        // Deleted in the editor (or the orchard dropped its tree)
         this.dropBody(st);
         this.dropVisual(st);
         if (st.stumpId !== null) this.props.remove(st.stumpId);
@@ -374,6 +451,11 @@ export class PropTreeField {
           const pop = 1 + 2.2 * Math.pow(t - 1, 3) + 1.2 * Math.pow(t - 1, 2);
           this.props.setPose(id, t < 1 ? { axis: st.fallAxis, angle: 0, scale: Math.max(0.01, pop) } : null);
           if (t >= 1) this.states.delete(id);
+        } else if (st.visual && id >= 0 && collector) {
+          // Left partly chopped: far away the instance (with its LODs) stands in for the copy
+          const d2 = (prop.position.x - collector.x) ** 2 + (prop.position.z - collector.z) ** 2;
+          const r = st.visual.far ? FAR_SWAP - FAR_SWAP_HYST : FAR_SWAP;
+          if ((d2 > r * r) !== st.visual.far) this.setFar(id, st, !st.visual.far);
         }
         continue;
       }
@@ -397,8 +479,6 @@ export class PropTreeField {
           this.plantStump(prop, st, ownStump);
           const tip = prop.position.clone().add(new THREE.Vector3().crossVectors(st.fallAxis, PropTreeField._up).multiplyScalar(2.5 * prop.scale));
           tip.y = prop.position.y + 0.6;
-          this.particles?.emitTreeFoliageLeaves(tip, 22);
-          this.particles?.emitBuildPuff(tip, true, 16);
           this.finishFall(id, prop, st, now, [tip]);
         }
         continue;
@@ -422,9 +502,10 @@ export class PropTreeField {
    * hit), then re-carves it for the stage the hits so far reach. The notch faces the player.
    */
   private showCut(id: number, prop: PropInstance, st: TreeState, direction: THREE.Vector3): void {
-    const source = getTreeLods()?.[prop.type]?.[0];
+    const source = id < 0 ? this.external.get(id)?.source : getTreeLods()?.[prop.type]?.[0];
     if (!source) return;
     const stage = cutStage(PROP_TREE_HITS - st.health);
+    if (st.visual?.far) this.setFar(id, st, false);
     if (st.visual && st.visual.stage === stage) return;
     if (!st.visual) {
       // Strike side in the tree's local frame (against the swing, towards the player)
@@ -434,8 +515,8 @@ export class PropTreeField {
       group.name = `ChoppedTree_${id}`;
       group.add(mesh);
       this.props.group.add(group);
-      st.visual = { group, mesh, stage, phi, top: null };
-      this.props.setPose(id, PropTreeField.HIDDEN);
+      st.visual = { group, mesh, stage, phi, top: null, far: false };
+      this.setPose(id, PropTreeField.HIDDEN);
       this.placeVisual(prop, st, null);
       return;
     }
@@ -467,7 +548,7 @@ export class PropTreeField {
   /** Poses the chopped copy when there is one (the instance stays hidden), else the instance. */
   private pose(id: number, prop: PropInstance, st: TreeState, pose: Pose | null): void {
     if (st.visual) this.placeVisual(prop, st, pose);
-    else this.props.setPose(id, pose);
+    else this.setPose(id, pose);
   }
 
   private placeVisual(prop: PropInstance, st: TreeState, pose: Pose | null): void {
@@ -489,6 +570,15 @@ export class PropTreeField {
     g.quaternion.setFromAxisAngle(PropTreeField._up, prop.rotationY);
     if (pose) g.quaternion.premultiply(PropTreeField._q.setFromAxisAngle(pose.axis, pose.angle));
     g.scale.setScalar(prop.scale * (pose ? Math.max(pose.scale, 1e-4) : 1));
+  }
+
+  /** Swaps a partly chopped prop tree between its carved copy (near) and its instance (far). */
+  private setFar(id: number, st: TreeState, far: boolean): void {
+    const v = st.visual;
+    if (!v || v.far === far) return;
+    v.far = far;
+    v.group.visible = !far;
+    this.props.setPose(id, far ? null : PropTreeField.HIDDEN);
   }
 
   private dropVisual(st: TreeState): void {
@@ -542,7 +632,7 @@ export class PropTreeField {
       const y = P.getY(i);
       if (!green(i) && y > CUT_APEX && y < CUT_APEX + 0.5) rCut = Math.max(rCut, Math.hypot(P.getX(i), P.getZ(i)));
     }
-    if (rCut <= 0) rCut = trunkRadius(prop.type);
+    if (rCut <= 0) rCut = this.trunkOf(prop);
     // Trunk height: the highest bark near the axis (branches reaching out don't count)
     let trunkTop = CUT_APEX + 1;
     let rHigh = rCut;
@@ -616,7 +706,6 @@ export class PropTreeField {
       const crown = top.position.clone().addScaledVector(up, f.crownMid);
       audioEngine.at(crown, 5).playTreeImpact();
       this.shedLeaves(prop.type, crown, Math.max(1, f.crownR), 1.2, 40);
-      this.particles?.emitBuildPuff(crown.setY(Math.max(crown.y - 0.8, prop.position.y)), true, 16);
     }
     top.scale.setScalar(prop.scale);
     if (st.fall > f.vanishAt) {
@@ -630,6 +719,10 @@ export class PropTreeField {
   /** Leaves fluttering out of a crown, in that tree's colour. */
   private shedLeaves(type: string, centre: THREE.Vector3, radius: number, height: number, count: number): void {
     this.leaves?.emit(centre, radius, height, count, LEAF_COLOR[type] ?? 0x4f8f35);
+  }
+
+  private crownOfProp(prop: PropInstance): { y: number; r: number; h: number } {
+    return prop.id < 0 ? this.external.get(prop.id)?.crown ?? { y: 3, r: 1.5, h: 2 } : this.crownOf(prop.type);
   }
 
   /** Where a standing tree's crown is (from its far LOD, cached per type). */
@@ -684,11 +777,23 @@ export class PropTreeField {
     this.dropTop(st);
     st.felledAt = now;
     st.fall = FALL_SECONDS;
-    this.props.setPose(id, { axis: st.fallAxis, angle: 0, scale: 0 });
-    this.spawnLogs(starts.length ? starts : [prop.position.clone().setY(prop.position.y + 1)], GATHERING_CONFIG.TREE_WOOD_YIELD, prop.position);
+    this.setPose(id, { axis: st.fallAxis, angle: 0, scale: 0 });
+    const wood = id < 0 ? this.external.get(id)?.wood ?? GATHERING_CONFIG.TREE_WOOD_YIELD : GATHERING_CONFIG.TREE_WOOD_YIELD;
+    this.spawnLogs(starts.length ? starts : [prop.position.clone().setY(prop.position.y + 1)], wood, prop.position);
+    const ext = this.external.get(id);
+    if (ext) {
+      // An outside tree doesn't regrow: its stump goes together with the top, and the owner forgets it
+      if (st.stumpId !== null) this.props.remove(st.stumpId);
+      st.stumpId = null;
+      this.dropVisual(st);
+      this.states.delete(id);
+      this.external.delete(id);
+      ext.onGone();
+    }
   }
 
-  private spawnLogs(starts: THREE.Vector3[], wood: number, at: THREE.Vector3): void {
+  /** Wood logs fly from `starts` to the player; the wood is given as they arrive (also used by the orchard). */
+  public spawnLogs(starts: THREE.Vector3[], wood: number, at: THREE.Vector3): void {
     if (!this.getCollector) {
       this.onWood?.(wood, at.clone());
       return;

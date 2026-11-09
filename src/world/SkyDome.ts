@@ -16,6 +16,8 @@ export interface SkyParams {
   flash: number;
   /** 0..1 how much moonlight reaches the clouds (low under thick overcast, rain and storms). */
   moonCloud: number;
+  /** 0..1 strength of the rainbow opposite the sun (after a daytime rain), 0 skips it entirely. */
+  rainbow: number;
 }
 
 /**
@@ -48,11 +50,14 @@ export class SkyDome {
         uNight: { value: 0 },
         uFlash: { value: 0 },
         uMoonCloud: { value: 1 },
+        uRainbow: { value: 0 },
         uMeteorA: { value: new THREE.Vector3(0, 1, 0) },
         uMeteorB: { value: new THREE.Vector3(0, 1, 0) },
         uMeteorT: { value: 0 },
         uMeteorAmp: { value: 0 },
         uTime: { value: 0 },
+        uFlatColor: { value: new THREE.Color() },
+        uFlat: { value: 0 },
       },
       vertexShader: `
         varying vec3 vDir;
@@ -63,10 +68,13 @@ export class SkyDome {
       fragmentShader: `
         #define CLOUD_OCTAVES ${octaves}
         uniform vec3 uZenith, uHorizon, uSunDir, uMoonDir, uSunColor, uCloudLit, uCloudShade;
-        uniform float uCover, uDay, uNight, uFlash, uMoonCloud, uTime;
+        uniform float uCover, uDay, uNight, uFlash, uMoonCloud, uTime, uRainbow;
         // Shooting star: path from uMeteorA to uMeteorB (unit dirs), uMeteorT = 0..1 progress
         uniform vec3 uMeteorA, uMeteorB;
         uniform float uMeteorT, uMeteorAmp;
+        // Underground / under water: the whole sky turns this colour (the fog's), no sun or clouds
+        uniform vec3 uFlatColor;
+        uniform float uFlat;
         varying vec3 vDir;
 
         float hash12(vec2 p) {
@@ -95,7 +103,20 @@ export class SkyDome {
           return v;
         }
 
+        // t: 0 = violet (inner edge), 1 = red (outer edge)
+        vec3 spectrum(float t) {
+          float hue = (1.0 - t) * 0.78;
+          return clamp(abs(mod(hue * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+        }
+
         void main() {
+          if (uFlat > 0.999) {
+            // Fully underground: just the fog colour (skips the clouds and stars), converted the way
+            // three's fog lands on the walls: output colour space, no tone mapping
+            gl_FragColor = vec4(uFlatColor, 1.0);
+            #include <colorspace_fragment>
+            return;
+          }
           vec3 d = normalize(vDir);
           float h = d.y;
 
@@ -177,12 +198,34 @@ export class SkyDome {
             col = mix(col, cc, clamp(dens * 1.6, 0.0, 1.0));
           }
 
+          // Rainbow: one wide, soft-edged arc around the antisolar point (~39.5-44 deg), violet inside,
+          // red outside, with a faint glow inside it. A high sun pushes the arc below the horizon by
+          // itself. Skipped while uRainbow is 0.
+          if (uRainbow > 0.001 && h > -0.02) {
+            float ang = acos(clamp(-dot(d, uSunDir), -1.0, 1.0));
+            float t1 = (ang - 0.69) / 0.08;
+            // Soft bell across the band instead of hard edges
+            float b1 = smoothstep(0.0, 0.4, t1) * smoothstep(1.0, 0.6, t1);
+            // Saturate: pull the colours away from their grey so the bands stay distinct
+            vec3 sc = spectrum(clamp((t1 - 0.15) / 0.62, 0.0, 1.0));
+            sc = clamp(mix(vec3(dot(sc, vec3(0.299, 0.587, 0.114))), sc, 1.9), 0.0, 1.0);
+            float inside = smoothstep(0.7, 0.45, ang) * 0.035;
+            // Uneven brightness along the arc (seamless: noise over the horizontal direction)
+            float broken = 0.6 + 0.4 * vnoise(normalize(d.xz + 1e-4) * 2.2 + vec2(uTime * 0.015, 3.7));
+            float fade = smoothstep(-0.02, 0.12, h) * uRainbow;
+            // Dim the sky under the band a little, then add the colour: pure adding washes out on a
+            // bright blue sky, this keeps red, green and violet readable
+            float k = b1 * broken * fade;
+            col = col * (1.0 - k * 0.3) + sc * k * 0.5 + vec3(inside) * fade;
+          }
+
           col += vec3(0.75, 0.8, 1.0) * uFlash * 0.55;
           // Below the horizon: plain horizon colour (matches the fog)
           col = mix(uHorizon, col, smoothstep(-0.04, 0.02, h));
           gl_FragColor = vec4(col, 1.0);
           #include <tonemapping_fragment>
           #include <colorspace_fragment>
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, linearToOutputTexel(vec4(uFlatColor, 1.0)).rgb, uFlat);
         }`,
     });
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(100, 32, 16), this.material);
@@ -209,7 +252,18 @@ export class SkyDome {
     u.uNight.value = p.night;
     u.uFlash.value = p.flash;
     u.uMoonCloud.value = p.moonCloud;
+    u.uRainbow.value = p.rainbow;
     this.updateMeteor(dt, p);
+  }
+
+  /**
+   * Blends the whole sky toward one colour (k 0..1): in a cave the far end of a long tunnel shows
+   * the fog colour instead of a bright sky with clouds.
+   */
+  public setFlat(color: THREE.Color, k: number): void {
+    const u = this.material.uniforms;
+    (u.uFlatColor.value as THREE.Color).copy(color);
+    u.uFlat.value = THREE.MathUtils.clamp(k, 0, 1);
   }
 
   // Shooting stars: only on clear, dark nights; one at a time, every 6..25 s

@@ -637,6 +637,11 @@ export class CaveNetwork {
     return NaN;
   }
 
+  /** Built and every chunk's collider made (rays against the cave walls can be trusted). */
+  public get collidersReady(): boolean {
+    return this.ready && this.colliderQueue.length === 0;
+  }
+
   /** Whether a world point lies in the cave pocket (rough box). */
   public contains(p: THREE.Vector3): boolean {
     return Math.abs(p.x - this.origin.x) < 300 && Math.abs(p.z - this.origin.z) < 300 && Math.abs(p.y - this.origin.y) < 120;

@@ -173,6 +173,8 @@ export class ExplorationManager {
       isCaveLayout(cavesJson) ? cavesJson : null
     );
     this.network.onContents = (c) => this.populateCave(c);
+    // A camera down in the network sees fog, not sky, at the far end of a tunnel
+    this.weather.isCaveAt = (p) => this.network.contains(p);
     riverWorld.caveWater = (x, y, z) => this.network.waterLevelAt(x, y, z);
   }
 

@@ -9,6 +9,7 @@ import { worldSettings } from './WorldSettings';
 import type { GameWorld } from '../engine/GameEngine';
 import type { FieldSaveData } from '../farming/FieldManager';
 import type { ExplorationSaveData } from '../explore/ExplorationManager';
+import type { OrchardSaveData } from '../gathering/AppleOrchard';
 
 export const SAVE_VERSION = 2;
 const KEY_PREFIX = 'cozyfarm.save.';
@@ -31,6 +32,8 @@ export interface WorldSaveData {
   crops?: unknown;
   /** Shovel-dug fields (their soil tiles are part of the terrain save). */
   fields?: FieldSaveData[];
+  /** Player-planted apple trees and apples lying around (missing in older saves). */
+  orchard?: OrchardSaveData;
   inventory: { items: Record<string, number>; equipped: string | null; hotbar?: (string | null)[]; capacity?: number };
   player: [number, number, number];
   vehicle: { p: [number, number, number]; yaw: number } | null;
@@ -88,6 +91,7 @@ export class SaveSystem {
       forest: w.props.forestVersion,
       buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
       fields: w.farmingManager.serializeFields(),
+      orchard: w.orchard.serialize(),
       inventory: {
         items,
         equipped: w.inventoryManager.getEquippedItemId(),
@@ -139,6 +143,7 @@ export class SaveSystem {
       bm.flushPendingRegeneration();
     }
     w.farmingManager.deserializeFields(data.fields ?? []);
+    w.orchard.deserialize(data.orchard);
 
     const inv = w.inventoryManager;
     for (const item of inv.getItems()) {

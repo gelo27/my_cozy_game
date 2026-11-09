@@ -186,6 +186,9 @@ export class WeatherSystem {
   /** Target 0..1 for being underground: sunlight, sky light and precipitation fade out, fog turns black. */
   public caveFactor = 0;
   private caveMix = 0;
+  /** Whether a point lies in the cave network (wired by the exploration); the sky there is fog. */
+  public isCaveAt: ((p: THREE.Vector3) => boolean) | null = null;
+  private skyFlat = 0;
   /** 0..1, how far the camera is under the sea, a river or a lake (fog and sky turn to water). */
   public underwater = 0;
   /** Depth of the water above the camera (m), 0 above water. */
@@ -206,7 +209,13 @@ export class WeatherSystem {
     night: 0,
     flash: 0,
     moonCloud: 1,
+    rainbow: 0,
   };
+  /** 1 right after a real rain, fading to 0 over about a game hour: a rainbow can show while it lasts. */
+  private rainMemory = 0;
+  /** Whether this rain gets a rainbow at all (rolled once per rain, so it isn't after every shower). */
+  private rainbowRoll = false;
+  private rainbow = 0;
   /** The current change is an automatic one (slow, phased) rather than set by hand. */
   private smooth = false;
   /** 0..1 eased storm share (wind on the drops). */
@@ -259,6 +268,13 @@ export class WeatherSystem {
    * Weather set by hand (editor, console, save load): ~3 s transition, and the automatic chain
    * carries on from this state with a fresh duration.
    */
+  /** Dev: acts as if a rain just ended and rolled a rainbow (shows once the sky clears by day). */
+  public devRainbow(): void {
+    this.rainMemory = 1;
+    this.rainbowRoll = true;
+    this.setWeather('clear');
+  }
+
   public setWeather(type: WeatherType): void {
     this.weather = type;
     this.smooth = false;
@@ -409,6 +425,25 @@ export class WeatherSystem {
     // A thick overcast hides the moon: full moonlit edges on clear nights, about half when cloudy,
     // a faint hint in rain and almost nothing in a storm
     sp.moonCloud = (1 - THREE.MathUtils.smoothstep(cur.cover, 0.3, 1) * 0.85) * (1 - this.stormMix * 0.5);
+    // Rainbow: the rain has (almost) stopped, the sun shines through thinning clouds, no fog or snow
+    const rainNow = cur.amount * (1 - this.snowMix);
+    if (rainNow > 0.25) {
+      if (this.rainMemory < 0.5) this.rainbowRoll = Math.random() < 0.6;
+      this.rainMemory = 1;
+    } else if (this.rainMemory > 0) {
+      const hourSec = worldSettings.secondsPerHour > 0 ? worldSettings.secondsPerHour : 60;
+      this.rainMemory = Math.max(0, this.rainMemory - dt / hourSec);
+    }
+    const rainbowTarget = this.rainbowRoll
+      ? Math.min(1, this.rainMemory * 1.5) *
+        (1 - THREE.MathUtils.smoothstep(rainNow, 0.03, 0.2)) *
+        (1 - THREE.MathUtils.smoothstep(cur.cover, 0.6, 0.85)) *
+        (1 - THREE.MathUtils.smoothstep(cur.fog, 0.035, 0.06)) *
+        THREE.MathUtils.smoothstep(daylight, 0.3, 0.7) *
+        (1 - this.stormMix) * (1 - this.caveMix)
+      : 0;
+    this.rainbow += (rainbowTarget - this.rainbow) * (1 - Math.exp(-dt * 0.3));
+    sp.rainbow = this.rainbow > 0.002 ? this.rainbow : 0;
     this.skyDome.update(dt, cameraPos, sp);
 
     // Precipitation
@@ -423,6 +458,12 @@ export class WeatherSystem {
     this.underwater += ((below > 0.02 ? 1 : 0) - this.underwater) * (1 - Math.exp(-dt * 25));
     if (this.underwater > 0.001) this.applyUnderwater(this.underwater, daylight);
     this.skyDome.mesh.visible = this.underwater < 0.5;
+    // In a cave the sky seen down a long tunnel is just the fog: no sky gradient, sun or clouds
+    // (also when only the camera is down there: the editor's fly camera, the doorway fade)
+    const camInCave = this.isCaveAt?.(cameraPos) ? 1 : 0;
+    this.skyFlat += (Math.max(camInCave, this.caveFactor) - this.skyFlat) * (1 - Math.exp(-dt * 4));
+    const flat = Math.max(camInCave, Math.min(1, this.skyFlat * 1.25));
+    this.skyDome.setFlat(this.fog.color, flat > 0.001 ? flat : 0);
     // Phones: heavy rain is mostly overdraw of transparent drops, so the densest share is capped
     const amount = cur.amount * (1 - this.caveMix) * (WeatherSystem.MOBILE ? 0.75 : 1);
     this.precipitation.update(dt, cameraPos, amount, this.snowMix, bright, this.stormMix, Math.min(window.devicePixelRatio || 1, 1.5), worldSettings.waterLevel);

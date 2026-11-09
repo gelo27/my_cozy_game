@@ -27,6 +27,7 @@ import { AmbientAudio } from '../audio/AmbientAudio';
 import { audioEngine } from '../audio/AudioEngine';
 import { caveAudio } from '../audio/CaveAudio';
 import { FootstepAudio, FootSurface } from '../audio/Footsteps';
+import { WheatRustle } from '../audio/WheatRustle';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import type RAPIER from '@dimforge/rapier3d-compat';
 
@@ -52,6 +53,8 @@ import { GridNavigator } from '../navigation/GridNavigator';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { t } from '../i18n/i18n';
 import { PropTreeField } from '../gathering/PropTreeField';
+import { AppleOrchard } from '../gathering/AppleOrchard';
+import { loadAppleModels } from '../world/AppleTreeModel';
 import { BushSway, FLOWER_SWAY_OPTIONS } from '../world/BushSway';
 import { FallingLeaves } from '../particles/FallingLeaves';
 import { RockField } from '../gathering/RockField';
@@ -75,6 +78,7 @@ import { PropSystem, PropInstance, PROP_GLOW_MATERIALS } from '../world/PropSyst
 import { NightLighting, installGlobalNightLights } from '../world/NightLighting';
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
 import { setAlgaeDaylight } from '../world/AlgaeChains';
+import { setWebLight } from '../world/SpiderWebs';
 import { VIEW_DISTANCE, isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState, GameplayPrompt } from '../gameplay/GameplayManager';
 import { EditorController } from '../editor/EditorController';
@@ -146,6 +150,7 @@ export interface GameWorld {
   farmingManager: FarmingManager;
   forest: ForestZone;
   propTrees: PropTreeField;
+  orchard: AppleOrchard;
   bushSway: BushSway;
   flowerSway: BushSway;
   fallingLeaves: FallingLeaves;
@@ -199,6 +204,7 @@ export class GameEngine {
   private readonly coast = new CoastAudio();
   private coastState: CoastState | null = null;
   private readonly footsteps = new FootstepAudio();
+  private readonly wheatRustle = new WheatRustle();
   private prevSwimming = false;
   private prevVelY = 0;
   private campfireTimer = 0;
@@ -209,6 +215,9 @@ export class GameEngine {
   private pausedRedraw = false;
   /** 1 on land, fading to 0 when the player is far out at sea (no crickets there). */
   private landNear = 1;
+  private portalId = '';
+  private readonly portalPerches: THREE.Vector3[] = [];
+  private readonly portalPoint = new THREE.Vector3();
   private perchTimer = 0;
   /** Tree tops around the listener that birds sing from (rebuilt once a second). */
   private readonly birdPerches: THREE.Vector3[] = [];
@@ -303,6 +312,7 @@ export class GameEngine {
     // Cave network: GPU buffers, colliders, the generator worker if still running, its sounds
     this.world?.exploration.dispose();
     caveAudio.dispose();
+    this.wheatRustle.dispose();
     this.physics.dispose();
     this.renderer.dispose();
     this.renderer.domElement.parentElement?.removeChild(this.renderer.domElement);
@@ -452,6 +462,14 @@ export class GameEngine {
       propTrees.leaves = fallingLeaves;
       propTrees.onWood = (amount) => giveResources([{ itemId: 'wood', amount }]);
       character.setGatheringSystems(forest, rocks, inventoryManager, propTrees);
+      // Player-planted apple trees: not on fields, not in the caves
+      const orchard = new AppleOrchard(scene, physics, terrain, particleManager);
+      orchard.leaves = fallingLeaves;
+      orchard.props = props;
+      orchard.feller = propTrees;
+      orchard.onItems = (items) => giveResources(items);
+      orchard.isBlocked = (x, z) => !!exploration?.inCave || !!farmingManager.fields.nearest(x, z, 0.9);
+      character.gatheringAbility.orchard = orchard;
 
       const vehicle = new VehicleController(physics, scene, new THREE.Vector3(7, 1.2, 2), -Math.PI / 2);
       const mopedSpawn = new THREE.Vector3(2.4, 0, -1.6);
@@ -464,10 +482,21 @@ export class GameEngine {
       gameplay.aim = (out) => this.camera.camera.getWorldDirection(out);
       gameplay.eye = (out) => this.camera.camera.getWorldPosition(out);
       character.gatheringAbility.pests = gameplay.pests;
+      // Spider webs: the axe cuts them, their pull holds the player back
+      character.gatheringAbility.webs = props.webs;
+      character.restraint = (vel) => props.webs.restrain(vel);
+      // Threads stick to the arms, legs, head and body (posed only when a web is touching the player)
+      props.webs.setBody({
+        parts: () => character.model.bodyParts(),
+        pose: () => character.model.group.updateMatrixWorld(true),
+      });
+      // Frameless webs anchor to the cave walls only once those colliders exist (after a load they build over a few frames)
+      props.webs.collidersReady = () => !!exploration?.caveNetwork.collidersReady;
       // Sleeping skips eight hours: crops grow and the weather chain moves on; the morning is autosaved
       gameplay.onTimeSkip = (seconds) => {
         weather.director.update(seconds);
         farmingManager.fastForward(seconds);
+        orchard.fastForward(seconds);
       };
       gameplay.onWake = () => this.world?.saves.save(AUTOSAVE_SLOT);
       // Stations, the NPC, finds and a faced pet take E from the shovel
@@ -513,6 +542,7 @@ export class GameEngine {
       boat.dock.copy(pier.end).lerp(pier.start, 0.25);
       const wildlife = new WildlifeSystem(scene, terrain, props, weather);
       const shadows = new StaticShadows(terrain, props, forest, rocks, propTrees, buildingManager);
+      shadows.orchard = orchard;
       const grass = new GrassField(scene, terrain);
       shadows.grass = grass;
       // Storm bolts that land near the player: a warning, then the strike, flash and thunder
@@ -555,6 +585,7 @@ export class GameEngine {
         farmingManager,
         forest,
         propTrees,
+        orchard,
         bushSway,
         flowerSway,
         fallingLeaves,
@@ -619,7 +650,7 @@ export class GameEngine {
     try {
       // The player / NPC model and the wheat load asynchronously: wait for them (capped) so their
       // shaders are compiled here too instead of hitching the first frames of play
-      const assets = Promise.allSettled([CharacterModel.preload(), loadWheatModel(), loadCropModels(), loadTreeModels()]);
+      const assets = Promise.allSettled([CharacterModel.preload(), loadWheatModel(), loadCropModels(), loadTreeModels(), loadAppleModels()]);
       await Promise.race([assets, new Promise((r) => setTimeout(r, 6000))]);
       // Let the models' own load callbacks attach their meshes to the scene first
       await new Promise((r) => setTimeout(r, 0));
@@ -756,6 +787,9 @@ export class GameEngine {
     const bushes = w.bushSway;
     const flowers = w.flowerSway;
     fields.clearPushers();
+    // The rustle is gathered around the player (or the ride), where the listener cares about it
+    const earPos = ride ? ride.getPosition() : character.getPosition();
+    fields.setRustleEar(earPos.x, earPos.z, !editing);
     bushes.clearPushers();
     flowers.clearPushers();
     const algae = w.props.algae;
@@ -787,6 +821,12 @@ export class GameEngine {
     // Sunlight on the algae: full by day, none at night or in caves, dimmed by rain
     setAlgaeDaylight(w.exploration.inCave ? 0 : (1 - w.weather.nightFactor) * (1 - w.weather.rainIntensity * 0.6));
     algae.update(dt, this.camera.camera.position);
+    // Spider webs: the player on foot sticks to them (not while editing, driving or asleep)
+    const webs = w.props.webs;
+    webs.setPlayer(!editing && !isDriving && !w.gameplay.sleeping && character.body ? character.body.translation() : null);
+    webs.setViewportHeight(this.renderer.domElement.height);
+    setWebLight(w.exploration.inCave ? 0.35 : 1 - w.weather.nightFactor * 0.8);
+    webs.update(dt, this.camera.camera);
     bushes.update(dt);
     flowers.update(dt);
     w.fallingLeaves.update(dt);
@@ -803,7 +843,8 @@ export class GameEngine {
     hitchLog.mark(6);
     forest.update(dt);
     w.propTrees.update(dt);
-    rocks.update(dt);
+    w.orchard.update(dt, character.getPosition(), tpCamera.camera.position);
+    rocks.update(dt, tpCamera.camera.position);
     w.exploration.update(dt, ride ? ride.getPosition() : character.getPosition(), !editing && !isDriving);
     w.wildlife.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), tpCamera.camera, !!w.exploration.inCave);
     w.shadows.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
@@ -1014,6 +1055,12 @@ export class GameEngine {
     this.prevVelY = tel.velocity.y;
     this.footsteps.updateSwim(dt, swimming, swimming && !!w.character.oxygenAbility?.isUnderwater, tel.speed);
 
+    // Wheat parting around the player: driven by how fast the nearby stalks actually move (last frame's springs)
+    const fields = w.farmingManager.fields;
+    const rustle = fields.rustle;
+    this.wheatRustle.setPosition(playerPos.x, playerPos.y - 0.5, playerPos.z);
+    this.wheatRustle.update(dt, rustle.energy, rustle.hits, rustle.dry, Math.max(w.weather.rainIntensity, fields.rainWet ? 0.6 : 0));
+
     this.campfireTimer -= dt;
     if (this.campfireTimer <= 0) {
       this.campfireTimer = 0.5;
@@ -1058,7 +1105,9 @@ export class GameEngine {
     }
     const weather = w.weather;
     const snd = weather.sound;
-    const outdoors = w.exploration.inCave ? 0 : 1;
+    // Underground the outside is still heard, through the nearest mouth (AmbientAudio muffles it)
+    const portal = w.exploration.inCave ? this.cavePortal(w.exploration.caveNetwork.entrances, this.listenerPos) : null;
+    const outdoors = !w.exploration.inCave || portal ? 1 : 0;
     // Rivers: the nearest point on a centre line, looked up 10x a second through a spatial hash,
     // and the panner glides after it every frame (no hops between sample points). Waterfalls are
     // fixed sources, only the two loudest within earshot play.
@@ -1081,7 +1130,7 @@ export class GameEngine {
     } else {
       this.riverSound = null;
     }
-    const underRoof = !outdoors || weather.isSheltered(playerPos);
+    const underRoof = !outdoors || (!portal && weather.isSheltered(playerPos));
     // One state object reused every frame (no per-frame garbage)
     const cs = (this.coastState ??= {
       listener: this.listenerPos,
@@ -1103,18 +1152,49 @@ export class GameEngine {
       // Every level below is scaled by the weather's sound profile (developer panel → weather)
       rain: weather.rainIntensity * (1 - weather.snowAmount) * outdoors * snd.rain,
       wind: snd.wind * outdoors,
-      birds: snd.birds * (1 - weather.nightFactor) * outdoors * (0.35 + 0.65 * this.forestNear),
+      birds: snd.birds * (1 - weather.nightFactor) * outdoors * (portal ? 0.8 : 0.35 + 0.65 * this.forestNear),
       birdRate: snd.birdRate,
-      birdPerches: outdoors ? this.birdPerches : [],
+      birdPerches: portal ? this.portalPerches : outdoors ? this.birdPerches : [],
       breeze: snd.breeze * outdoors * (1 - weather.nightFactor * 0.4),
       fog: snd.fog * outdoors,
-      night: snd.insects * weather.nightFactor * outdoors * this.landNear,
+      night: snd.insects * weather.nightFactor * outdoors * (portal ? 1 : this.landNear),
       underRoof,
+      portal,
       campfire: this.nearestCampfire,
       engine: ride
         ? { position: ride.getPosition(), speedKmh: ride.speedKmh, kind: ride === w.moped ? 'scooter' : ride === w.boat ? 'boat' : 'truck' }
         : null,
     });
+  }
+
+  /**
+   * The way-out end of the cave mouth nearest the listener (flooded mouths lead under the sea and
+   * let nothing through), and a few perches just outside it where the birds are heard singing.
+   */
+  private cavePortal(entrances: readonly { id: string; mouth: THREE.Vector3; yaw: number; underwater: boolean }[], listener: THREE.Vector3): THREE.Vector3 | null {
+    let best: (typeof entrances)[number] | null = null;
+    let bestD = Infinity;
+    for (const e of entrances) {
+      if (e.underwater) continue;
+      const d = e.mouth.distanceToSquared(listener);
+      if (d < bestD) {
+        bestD = d;
+        best = e;
+      }
+    }
+    if (!best) return null;
+    if (this.portalId !== best.id) {
+      this.portalId = best.id;
+      // Outside the mouth: back along the way in, spread a little sideways and up into the trees
+      const ix = Math.sin(best.yaw), iz = Math.cos(best.yaw);
+      this.portalPerches.length = 0;
+      for (let i = 0; i < 10; i++) {
+        const back = 5 + Math.random() * 10, side = (Math.random() - 0.5) * 12;
+        this.portalPerches.push(new THREE.Vector3(best.mouth.x - ix * back - iz * side, best.mouth.y + 2.5 + Math.random() * 4, best.mouth.z - iz * back + ix * side));
+      }
+    }
+    // The daylight end of the tunnel, about head high
+    return this.portalPoint.set(best.mouth.x, best.mouth.y + 1.5, best.mouth.z);
   }
 
   /** What the foot landed on: building floor paint, structure/prop tag, wading water or the painted terrain tile. */
@@ -1226,10 +1306,14 @@ export class GameEngine {
         const sx = x ?? p.x + 6, sz = z ?? p.z;
         w.lightning.schedule(sx, Math.max(w.terrain.getHeight(sx, sz), riverWorld.waterLevelAt(sx, sz)), sz);
       },
+      /** Every apple tree grown and at `phase` (rest | bloom | fruit | ripe; default ripe). */
+      apples: (phase?: 'rest' | 'bloom' | 'fruit' | 'ripe') => w.orchard.devGrow(phase),
       tp: (x: number, z: number, y?: number) =>
         w.character.respawn(new THREE.Vector3(x, (y ?? w.terrain.getHeight(x, z)) + 1.5, z)),
       time: (hour: number) => (worldSettings.timeOfDay = ((hour % 24) + 24) % 24),
       weather: (type: Parameters<WeatherSystem['setWeather']>[0]) => w.weather.setWeather(type),
+      /** Rainbow as after a rain (needs daytime; try time(8) or time(17)). */
+      rainbow: () => w.weather.devRainbow(),
       /** Automatic weather on/off, and the upcoming states. */
       weatherAuto: (on = true) => (w.weather.director.auto = on),
       forecast: () => w.weather.director.forecast().map((f) => ({ ...f })),

@@ -596,10 +596,10 @@ export class TerrainSystem {
       for (const [k, v] of Object.entries(layers)) shader.uniforms[k] = { value: v };
 
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;\nvarying float vTerrUpY;\nattribute float aShade;\nvarying float vShade;')
+        .replace('#include <common>', '#include <common>\nvarying vec3 vTerrWorld;\nvarying float vTerrUpY;\nvarying vec3 vTerrN;\nattribute float aShade;\nvarying float vShade;')
         .replace(
           '#include <begin_vertex>',
-          '#include <begin_vertex>\nvTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvTerrUpY = normalize(mat3(modelMatrix) * objectNormal).y;\nvShade = aShade;'
+          '#include <begin_vertex>\nvTerrWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\nvTerrN = normalize(mat3(modelMatrix) * objectNormal);\nvTerrUpY = vTerrN.y;\nvShade = aShade;'
         );
       shader.fragmentShader = shader.fragmentShader
         .replace(
@@ -607,12 +607,26 @@ export class TerrainSystem {
           `#include <common>
 varying vec3 vTerrWorld;
 varying float vTerrUpY;
+varying vec3 vTerrN;
 varying float vShade;
 uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tSnow, tRock, tSplatA, tSplatB, tRiver;
 uniform float uWorldSize;
 uniform float uWaterLevel;
 float terrWaterY;
 ${CAUSTICS_GLSL}
+// Rock on steep slopes: triplanar, so it never smears down a cliff the way a top-down (XZ)
+// projection does. Side projections only fetch where they actually show.
+vec3 rockTriplanar(float scale) {
+  vec3 w = abs(normalize(vTerrN));
+  w = w * w * w * w;
+  w /= w.x + w.y + w.z;
+  vec3 p = vTerrWorld * scale;
+  vec3 c = vec3(0.0);
+  if (w.y > 0.01) c += texture2D(tRock, p.xz).rgb * w.y;
+  if (w.x > 0.01) c += texture2D(tRock, p.zy + 0.37).rgb * w.x;
+  if (w.z > 0.01) c += texture2D(tRock, p.xy + 0.71).rgb * w.z;
+  return c;
+}
 vec3 terrainColor() {
   vec2 suv = (vTerrWorld.xz + uWorldSize * 0.5) / uWorldSize;
   vec2 uv = vTerrWorld.xz * 0.5;
@@ -643,12 +657,12 @@ vec3 terrainColor() {
   float sandW = max(wa.a, beach);
   if (sandW > 0.001) c = mix(c, texture2D(tSand, uv).rgb, sandW);
   float rock = smoothstep(0.8, 0.62, vTerrUpY);
-  if (rock > 0.001) c = mix(c, texture2D(tRock, uv).rgb, rock);
-  // Snow: settles last, over everything incl. rock, but thins out on steep slopes and melts
+  if (rock > 0.001) c = mix(c, rockTriplanar(0.5), rock);
+  // Snow: settles last, but never on rocky slopes (weight fades with the rock mask) and melts
   // into slush at the waterline. Drifts (macro noise) are bright, hollows take a cold blue tint,
   // and sparse view-dependent glints twinkle as the camera moves.
   if (wb.r > 0.001) {
-    float sw = wb.r * (1.0 - smoothstep(0.55, 0.35, vTerrUpY) * 0.7) * smoothstep(waterY + 0.05, waterY + 0.35, vTerrWorld.y);
+    float sw = wb.r * (1.0 - rock) * smoothstep(waterY + 0.05, waterY + 0.35, vTerrWorld.y);
     float drift = clamp(n * 2.2 + 0.5, 0.0, 1.0);
 #ifdef TERRAIN_LITE
     vec3 snow = mix(vec3(0.76, 0.84, 0.94), vec3(1.0, 1.0, 1.02), drift);
@@ -675,7 +689,7 @@ vec3 terrainColor() {
 #ifdef TERRAIN_LITE
   c = mix(c, vec3(0.42, 0.38, 0.32), underRiver * 0.6);
 #else
-  if (underRiver > 0.001) c = mix(c, texture2D(tRock, uv * 1.7).rgb * vec3(0.95, 0.9, 0.8), underRiver * 0.75);
+  if (underRiver > 0.001) c = mix(c, rockTriplanar(0.85) * vec3(0.95, 0.9, 0.8), underRiver * 0.75);
 #endif
   c *= mix(1.0, 0.62, smoothstep(waterY, waterY - 1.5, vTerrWorld.y));
   return c;

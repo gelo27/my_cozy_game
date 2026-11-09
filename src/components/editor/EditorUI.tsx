@@ -12,6 +12,7 @@ import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool } from '../../editor/EditorController';
 import { PROP_DEFS, PROP_DEF_MAP, PropCategory } from '../../world/PropSystem';
+import { WEB_LIMITS, WebParams, webSettings, setWebSetting, resetWebSettings } from '../../world/SpiderWebs';
 import { ALGAE_MAX_LINKS, ALGAE_MIN_LINKS, algaeHeight, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
 import { TerrainTileType, TILE_DEFINITIONS } from '../../terrain/types/TerrainTypes';
 import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, WeatherSound } from '../../world/WeatherSystem';
@@ -24,10 +25,10 @@ import { causticsSettings, applyCausticsSettings, resetCausticsSettings, Caustic
 
 const ICONS: Record<string, React.ElementType> = {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
-  Flame, Mailbox, Waves,
+  Flame, Mailbox, Waves, Bug,
 };
 
-const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції' };
+const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції', objects: 'Об’єкти' };
 
 type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'veg' | 'save' | 'debug';
 
@@ -219,6 +220,17 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         {PROP_DEF_MAP.get(s.placeType)?.chain && (
           <AlgaeColorFields colors={s.placeAlgaeColors} onChange={(c) => editor.set('placeAlgaeColors', c)} />
         )}
+        {PROP_DEF_MAP.get(s.placeType)?.web && (
+          <>
+            <WebFields params={s.placeWeb} onChange={(patch) => editor.set('placeWeb', { ...s.placeWeb, ...patch })} />
+            <label className="flex items-center gap-2 text-zinc-300">
+              <input type="checkbox" checked={s.placeWebAutoOrient} onChange={(e) => editor.set('placeWebAutoOrient', e.target.checked)} className="accent-sky-500" />
+              Поперек проходу (авто-поворот)
+            </label>
+            <p className="text-[10px] text-zinc-500">Жовті лінії — куди зачепляться нитки.</p>
+            <WebLookPanel />
+          </>
+        )}
         <label className="flex items-center gap-2 text-zinc-300">
           <input type="checkbox" checked={s.placeRandomize} onChange={(e) => editor.set('placeRandomize', e.target.checked)} className="accent-sky-500" />
           Випадковий поворот і розмір
@@ -302,13 +314,19 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
   const prop = id !== null ? props.get(id) : undefined;
   if (!prop) return <p className="text-zinc-500">Нічого не вибрано.</p>;
   const def = PROP_DEFS.find((d) => d.id === prop.type);
-  const update = (patch: { x?: number; y?: number; z?: number; rot?: number; scale?: number }) => {
+  const update = (patch: { x?: number; y?: number; z?: number; rot?: number; scale?: number; tx?: number; tz?: number }) => {
     const p = prop.position.clone();
     if (patch.x !== undefined) p.x = patch.x;
     if (patch.y !== undefined) p.y = patch.y;
     if (patch.z !== undefined) p.z = patch.z;
     if (patch.y !== undefined) prop.grounded = false;
-    editor.setSelectedTransform(p, patch.rot !== undefined ? THREE.MathUtils.degToRad(patch.rot) : prop.rotationY, patch.scale ?? prop.scale);
+    const tilt: [number, number] | undefined = def?.web
+      ? [
+          patch.tx !== undefined ? THREE.MathUtils.degToRad(patch.tx) : prop.tilt?.[0] ?? 0,
+          patch.tz !== undefined ? THREE.MathUtils.degToRad(patch.tz) : prop.tilt?.[1] ?? 0,
+        ]
+      : undefined;
+    editor.setSelectedTransform(p, patch.rot !== undefined ? THREE.MathUtils.degToRad(patch.rot) : prop.rotationY, patch.scale ?? prop.scale, tilt);
   };
   return (
     <Section title={`Інспектор · ${def?.name ?? prop.type} #${prop.id}`}>
@@ -321,6 +339,12 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         <NumberField label="Поворот°" value={THREE.MathUtils.radToDeg(prop.rotationY)} onCommit={(v) => update({ rot: v })} />
         <NumberField label="Масштаб" value={prop.scale} onCommit={(v) => update({ scale: Math.max(0.05, v) })} />
       </div>
+      {def?.web && (
+        <div className="grid grid-cols-2 gap-1">
+          <NumberField label="Нахил X°" value={THREE.MathUtils.radToDeg(prop.tilt?.[0] ?? 0)} onCommit={(v) => update({ tx: v })} />
+          <NumberField label="Нахил Z°" value={THREE.MathUtils.radToDeg(prop.tilt?.[1] ?? 0)} onCommit={(v) => update({ tz: v })} />
+        </div>
+      )}
       <label className="flex items-center gap-2 text-zinc-300">
         <input
           type="checkbox"
@@ -346,6 +370,13 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           fmt={(v) => `${v} ланок · ${(algaeHeight(v) * prop.scale).toFixed(2)} м`}
         />
       )}
+      {def?.web && prop.web && (
+        <>
+          <WebFields params={prop.web} onStart={() => editor.pushUndo()} onChange={(patch) => editor.setSelectedWeb(patch)} />
+          <p className="text-[10px] text-zinc-500">Зміна параметрів перебудовує павутину (розрізи заростають).</p>
+        </>
+      )}
+      {def?.web && <WebLookPanel />}
       {def?.chain && (
         <AlgaeColorFields
           colors={prop.colors ?? null}
@@ -904,6 +935,44 @@ const AlgaeColorFields: React.FC<{ colors: [number, number] | null; onChange(c: 
     )}
   </div>
 );
+
+/** One web's shape: size, threads, strength. */
+const WebFields: React.FC<{ params: WebParams; onChange(patch: Partial<WebParams>): void; onStart?(): void }> = ({ params, onChange, onStart }) => {
+  const L = WEB_LIMITS;
+  return (
+    <Section title="Павутина">
+      <Slider label="Ширина" value={params.w} min={L.w[0]} max={L.w[1]} step={0.1} onStart={onStart} fmt={(v) => `${v.toFixed(1)} м`} onChange={(v) => onChange({ w: v })} />
+      <Slider label="Висота" value={params.h} min={L.h[0]} max={L.h[1]} step={0.1} onStart={onStart} fmt={(v) => `${v.toFixed(1)} м`} onChange={(v) => onChange({ h: v })} />
+      <Slider label="Радіальні нитки" value={params.radials} min={L.radials[0]} max={L.radials[1]} step={1} onStart={onStart} fmt={(v) => `${v}`} onChange={(v) => onChange({ radials: v })} />
+      <Slider label="Витки спіралі" value={params.rings} min={L.rings[0]} max={L.rings[1]} step={1} onStart={onStart} fmt={(v) => `${v}`} onChange={(v) => onChange({ rings: v })} />
+      <Slider label="Міцність" value={params.strength} min={L.strength[0]} max={L.strength[1]} step={0.05} onStart={onStart} fmt={(v) => `${v.toFixed(2)}×`} onChange={(v) => onChange({ strength: v })} />
+      <p className="text-[10px] text-zinc-500">Нитки чіпляються за найближчі стіни в площині павутини (де стін нема — за край прямокутника).</p>
+    </Section>
+  );
+};
+
+/** All webs' look and feel (live, kept in this browser). */
+const WebLookPanel: React.FC = () => {
+  const [, setTick] = useState(0);
+  const rerender = () => setTick((t) => t + 1);
+  const ws = webSettings;
+  return (
+    <Section title="Усі павутини">
+      <ColorRow label="Колір ниток" value={new THREE.Color(ws.color)} onChange={(hex) => (setWebSetting('color', hex), rerender())} />
+      <Slider label="Непрозорість" value={ws.opacity} min={0.1} max={1} step={0.05} fmt={(v) => v.toFixed(2)} onChange={(v) => (setWebSetting('opacity', v), rerender())} />
+      <Slider label="Товщина нитки" value={ws.thickness} min={1} max={20} step={0.5} fmt={(v) => `${v.toFixed(1)} мм`} onChange={(v) => (setWebSetting('thickness', v), rerender())} />
+      <Slider label="Утримання гравця" value={ws.hold} min={0.05} max={3} step={0.05} fmt={(v) => v.toFixed(2)} onChange={(v) => (setWebSetting('hold', v), rerender())} />
+      <Slider label="Розрив спіралі (розтяг)" value={ws.breakStretch} min={1.1} max={4} step={0.05} fmt={(v) => `${v.toFixed(2)}×`} onChange={(v) => (setWebSetting('breakStretch', v), rerender())} />
+      <Slider label="Провисання (гравітація)" value={ws.gravity} min={0} max={9.8} step={0.1} fmt={(v) => `${v.toFixed(1)} м/с²`} onChange={(v) => (setWebSetting('gravity', v), rerender())} />
+      <Slider label="Дальність видимості" value={ws.viewDistance} min={10} max={150} step={5} fmt={(v) => `${v} м`} onChange={(v) => (setWebSetting('viewDistance', v), rerender())} />
+      <p className="text-[10px] text-zinc-500">Далі за цю відстань нитки не малюються (стовпи рамки — удвічі далі). Майже повністю розірвана павутина зникає через 10 с.</p>
+      <p className="text-[10px] text-zinc-500">Менше «утримання» — гравець застрягає раніше. Сокира розрізає нитки, шматки без кріплення падають.</p>
+      <button className={chip(false)} onClick={() => (resetWebSettings(), rerender())}>
+        Скинути павутини
+      </button>
+    </Section>
+  );
+};
 
 /** Algae look: root-to-top colours and the daylight shimmer (live, kept in this browser). */
 const AlgaePanel: React.FC<{ rerender(): void }> = ({ rerender }) => {

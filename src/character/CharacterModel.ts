@@ -121,6 +121,43 @@ export class CharacterModel {
   /** Seated on a scooter: thighs forward, hands on the handlebar (layered over IDLE). */
   public isRiding = false;
   private rig: THREE.Object3D | null = null;
+  private bodyPartCache: { bone: THREE.Object3D; min: THREE.Vector3; max: THREE.Vector3 }[] | null = null;
+
+  /**
+   * The rig's rigid parts (body, head, arms, legs): each bone with the box (in its own space) of
+   * the meshes it carries, held tools left out. Null until the model has loaded.
+   */
+  public bodyParts(): { bone: THREE.Object3D; min: THREE.Vector3; max: THREE.Vector3 }[] | null {
+    if (!this.rig) return null;
+    if (this.bodyPartCache) return this.bodyPartCache;
+    this.rig.updateMatrixWorld(true);
+    const parts: { bone: THREE.Object3D; min: THREE.Vector3; max: THREE.Vector3 }[] = [];
+    const toBone = new THREE.Matrix4();
+    const box = new THREE.Box3();
+    const piece = new THREE.Box3();
+    for (const name of ['body', 'head_1', 'arm_1_right', 'arm_1_left', 'leg_1_right', 'leg_1_left']) {
+      const bone = this.rig.getObjectByName(name);
+      if (!bone) continue;
+      const inv = bone.matrixWorld.clone().invert();
+      box.makeEmpty();
+      const visit = (o: THREE.Object3D) => {
+        for (const child of o.children) {
+          // Other parts and the tool in hand are not this part
+          if ((child as THREE.Bone).isBone || child === this.weaponPivot) continue;
+          const mesh = child as THREE.Mesh;
+          if (mesh.isMesh) {
+            if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+            box.union(piece.copy(mesh.geometry.boundingBox!).applyMatrix4(toBone.multiplyMatrices(inv, mesh.matrixWorld)));
+          }
+          visit(child);
+        }
+      };
+      visit(bone);
+      if (!box.isEmpty()) parts.push({ bone, min: box.min.clone(), max: box.max.clone() });
+    }
+    this.bodyPartCache = parts;
+    return parts;
+  }
 
   // Squash & Stretch Spring Physics (Feet-anchored, Mario Odyssey style)
   public currentSquashY: number = 1.0;
@@ -268,6 +305,7 @@ export class CharacterModel {
     }
     this.customModelGroup.add(cloned);
     this.rig = cloned;
+    this.bodyPartCache = null;
 
     // Re-equip current weapon / prop if one was already set
     if (this.activeWeapon > 0) {

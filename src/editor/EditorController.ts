@@ -4,6 +4,7 @@ import { InputManager } from '../input/InputManager';
 import { TerrainSystem, TerrainBrushKind } from '../world/TerrainSystem';
 import { PropSystem, PROP_DEF_MAP } from '../world/PropSystem';
 import { ALGAE_DEFAULT_LINKS } from '../world/AlgaeChains';
+import { WEB_DEFAULTS, WebParams, clampWeb } from '../world/SpiderWebs';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { RiverEditTool } from './RiverEditTool';
 import type { RiverSystem } from '../world/rivers/RiverSystem';
@@ -26,6 +27,10 @@ export interface EditorState {
   placeChainLength: number;
   /** Algae: root and top colours given to placed stalks (sRGB hex); null = the panel's colours. */
   placeAlgaeColors: [number, number] | null;
+  /** Spider web shape given to placed webs. */
+  placeWeb: WebParams;
+  /** Placed webs turn to span the passage under the cursor (its narrowest way across). */
+  placeWebAutoOrient: boolean;
   placeRandomize: boolean;
   brushRadius: number;
   brushStrength: number;
@@ -60,6 +65,8 @@ export class EditorController {
     placeScale: 1,
     placeChainLength: ALGAE_DEFAULT_LINKS,
     placeAlgaeColors: null,
+    placeWeb: { ...WEB_DEFAULTS },
+    placeWebAutoOrient: true,
     placeRandomize: true,
     brushRadius: 4,
     brushStrength: 2,
@@ -78,10 +85,21 @@ export class EditorController {
   private readonly ghostMaterial = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide });
   private ghostType = '';
   private ghostGeometry: THREE.BufferGeometry | null = null;
+  /** Placement ghost of a frameless web: lines from its hub to where each radial would anchor. */
+  private readonly anchorLines = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.9, depthTest: false })
+  );
+  /** Where the web ghost was last oriented / its anchors cast (recomputed once the cursor moves). */
+  private readonly ghostWebAt = new THREE.Vector3(Infinity, 0, 0);
+  private ghostWebKey = '';
   private readonly gizmo: TransformControls;
   private readonly gizmoTarget = new THREE.Object3D();
   private readonly hit = new THREE.Vector3();
   private hasHit = false;
+  /** The cursor is on the island's terrain (props placed there stay glued to it); false in the caves. */
+  private hitOnTerrain = true;
+  private readonly rayDir = new THREE.Vector3();
   private stroking = false;
   private flattenHeight = 0;
   private lastPlaceAt = new THREE.Vector3(Infinity, 0, 0);
@@ -107,8 +125,8 @@ export class EditorController {
     private readonly terrain: TerrainSystem,
     private readonly props: PropSystem,
     riverSystem: RiverSystem,
-    caveNetwork: CaveNetwork,
-    physics: PhysicsWorld
+    private readonly caveNetwork: CaveNetwork,
+    private readonly physics: PhysicsWorld
   ) {
     this.caves = new CaveEditTool(scene, camera, dom, caveNetwork, physics, {
       pushUndo: () => this.pushUndo(),
@@ -130,6 +148,10 @@ export class EditorController {
 
     this.ghost.visible = false;
     scene.add(this.ghost);
+    this.anchorLines.visible = false;
+    this.anchorLines.renderOrder = 10;
+    this.anchorLines.frustumCulled = false;
+    scene.add(this.anchorLines);
 
     this.gizmo = new TransformControls(camera, dom);
     this.gizmo.setSize(0.8);
@@ -191,7 +213,10 @@ export class EditorController {
   public set<K extends keyof EditorState>(key: K, value: EditorState[K]): void {
     this.state[key] = value;
     if (key === 'tool' && value !== 'select') this.select(null);
-    if (key === 'gizmoMode') this.gizmo.setMode(value as 'translate' | 'rotate');
+    if (key === 'gizmoMode') {
+      this.gizmo.setMode(value as 'translate' | 'rotate');
+      this.updateGizmoAxes();
+    }
     if (key === 'tool') {
       this.rivers.setVisible(this.active && value === 'river');
       this.caves.setVisible(value === 'cave', this.active);
@@ -210,18 +235,29 @@ export class EditorController {
     const prop = id !== null ? this.props.get(id) : undefined;
     if (prop) {
       this.gizmoTarget.position.copy(prop.position);
-      this.gizmoTarget.rotation.set(0, prop.rotationY, 0);
+      this.gizmoTarget.rotation.set(prop.tilt?.[0] ?? 0, prop.rotationY, prop.tilt?.[1] ?? 0, 'YXZ');
       this.gizmo.attach(this.gizmoTarget);
       this.gizmo.enabled = true;
       this.gizmo.getHelper().visible = true;
-      this.gizmo.showX = this.gizmo.showZ = true;
-      this.gizmo.showY = true;
+      this.updateGizmoAxes();
     } else {
       this.gizmo.detach();
       this.gizmo.enabled = false;
       this.gizmo.getHelper().visible = false;
     }
     this.touch();
+  }
+
+  /** Webs turn on all three axes; other props only about Y (moving still works on all three). */
+  private updateGizmoAxes(): void {
+    const id = this.state.selectedPropId;
+    const prop = id !== null ? this.props.get(id) : undefined;
+    const web = !!prop && !!PROP_DEF_MAP.get(prop.type)?.web;
+    const rotate = this.state.gizmoMode === 'rotate';
+    this.gizmo.showX = this.gizmo.showZ = !rotate || web;
+    this.gizmo.showY = true;
+    // Webs rotate about their own axes (the tilt is in the web's frame)
+    this.gizmo.setSpace(web && rotate ? 'local' : 'world');
   }
 
   public deleteSelected(): void {
@@ -236,7 +272,7 @@ export class EditorController {
     const prop = this.state.selectedPropId !== null ? this.props.get(this.state.selectedPropId) : undefined;
     if (!prop) return;
     this.pushUndo();
-    const id = this.props.add(prop.type, prop.position.x + 1.5, prop.position.z, prop.rotationY, prop.scale, undefined, true, prop.length, prop.colors);
+    const id = this.props.add(prop.type, prop.position.x + 1.5, prop.position.z, prop.rotationY, prop.scale, prop.grounded ? undefined : prop.position.y, prop.grounded, prop.length, prop.colors, prop.web, null, prop.tilt);
     this.select(id);
   }
 
@@ -248,6 +284,14 @@ export class EditorController {
     this.touch();
   }
 
+  /** Spider web: changes the selected web's shape / strength (push the undo step on drag start). */
+  public setSelectedWeb(patch: Partial<WebParams>): void {
+    const id = this.state.selectedPropId;
+    if (id === null) return;
+    this.props.setWebParams(id, patch);
+    this.touch();
+  }
+
   /** Chain props: changes the selected stalk's link count (push the undo step on drag start). */
   public setSelectedChainLength(length: number): void {
     const id = this.state.selectedPropId;
@@ -256,12 +300,13 @@ export class EditorController {
     this.touch();
   }
 
-  public setSelectedTransform(position: THREE.Vector3, rotationY: number, scale: number): void {
+  public setSelectedTransform(position: THREE.Vector3, rotationY: number, scale: number, tilt?: [number, number]): void {
     const id = this.state.selectedPropId;
     if (id === null) return;
-    this.props.setTransform(id, position, rotationY, scale);
+    this.props.setTransform(id, position, rotationY, scale, tilt);
+    const t = this.props.get(id)?.tilt;
     this.gizmoTarget.position.copy(position);
-    this.gizmoTarget.rotation.set(0, rotationY, 0);
+    this.gizmoTarget.rotation.set(t?.[0] ?? 0, rotationY, t?.[1] ?? 0, 'YXZ');
     this.touch();
   }
 
@@ -286,7 +331,11 @@ export class EditorController {
     // Translating keeps grounded props on the terrain unless the user drags Y explicitly
     prop.grounded = Math.abs(p.y - this.terrain.getHeight(p.x, p.z)) < 0.05 || prop.grounded && this.gizmo.axis !== 'Y';
     if (prop.grounded) p.y = this.terrain.getHeight(p.x, p.z);
-    this.props.setTransform(prop.id, p, this.gizmoTarget.rotation.y, prop.scale);
+    const r = this.gizmoTarget.rotation;
+    if (PROP_DEF_MAP.get(prop.type)?.web) {
+      r.reorder('YXZ');
+      this.props.setTransform(prop.id, p, r.y, prop.scale, [r.x, r.z]);
+    } else this.props.setTransform(prop.id, p, r.y, prop.scale);
     this.touch();
   }
 
@@ -444,7 +493,10 @@ export class EditorController {
 
     this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
     this.hasHit = !!this.terrain.raycast(this.raycaster.ray, 300, this.hit);
+    this.hitOnTerrain = true;
     const { tool } = this.state;
+    // Placing in the caves: the terrain ray misses the cave pocket, its colliders take the hit
+    if (tool === 'place') this.castIntoCaves();
     const brushTool = tool === 'sculpt' || tool === 'paint';
 
     this.updateCursor(brushTool && this.hasHit);
@@ -460,14 +512,30 @@ export class EditorController {
       // Click places one; dragging scatters with spacing proportional to the prop size
       const spacing = Math.max(1.2, this.state.placeScale * 2);
       if (this.hit.distanceTo(this.lastPlaceAt) >= spacing) {
-        const rnd = this.state.placeRandomize;
+        // Webs keep the ghost's turn (across the passage) and size
+        const rnd = this.state.placeRandomize && !PROP_DEF_MAP.get(this.state.placeType)?.web;
         const rot = rnd ? Math.random() * Math.PI * 2 : this.ghost.rotation.y;
         const scale = this.state.placeScale * (rnd ? 0.85 + Math.random() * 0.3 : 1);
-        this.props.add(this.state.placeType, this.hit.x, this.hit.z, rot, scale, undefined, true, this.state.placeChainLength, this.state.placeAlgaeColors);
+        const y = this.hitOnTerrain ? undefined : this.hit.y;
+        this.props.add(this.state.placeType, this.hit.x, this.hit.z, rot, scale, y, this.hitOnTerrain, this.state.placeChainLength, this.state.placeAlgaeColors, this.state.placeWeb);
         this.lastPlaceAt.copy(this.hit);
         this.touch();
       }
     }
+  }
+
+  /** A cave surface under the cursor nearer than the terrain hit (if any) becomes the hit. */
+  private castIntoCaves(): void {
+    const ray = this.raycaster.ray;
+    const hit = this.physics.castRay(ray.origin, this.rayDir.copy(ray.direction), 300);
+    if (!hit) return;
+    const toi = hit.timeOfImpact;
+    if (this.hasHit && ray.origin.distanceTo(this.hit) <= toi) return;
+    const point = ray.at(toi, new THREE.Vector3());
+    if (!this.caveNetwork.contains(point)) return;
+    this.hit.copy(point);
+    this.hasHit = true;
+    this.hitOnTerrain = false;
   }
 
   private updateFlyCamera(dt: number): void {
@@ -515,11 +583,63 @@ export class EditorController {
     );
   }
 
+  /**
+   * The way across the passage at `at`: of 12 horizontal lines through the web's middle, the
+   * one whose walls on both sides are nearest. Returns the web's yaw, or null in the open.
+   */
+  private passageYaw(at: THREE.Vector3, height: number): number | null {
+    if (!this.physics.isInitialized()) return null;
+    const o = new THREE.Vector3(at.x, at.y + Math.min(height * 0.5, 1.6), at.z);
+    const d = new THREE.Vector3();
+    const MAX = 12;
+    let best = Infinity;
+    let yaw: number | null = null;
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI;
+      d.set(Math.cos(a), 0, Math.sin(a));
+      const fwd = this.physics.castRay(o, d, MAX);
+      const back = this.physics.castRay(o, d.negate(), MAX);
+      if (!fwd || !back) continue;
+      const span = fwd.timeOfImpact + back.timeOfImpact;
+      if (span < best) {
+        best = span;
+        // The web's right axis (cos y, 0, -sin y) along this line
+        yaw = Math.atan2(-Math.sin(a), Math.cos(a));
+      }
+    }
+    return yaw;
+  }
+
+  /** Web ghost: turned across the passage, and (frameless) lines to where its threads would anchor. */
+  private updateWebGhost(): void {
+    const params = clampWeb(this.state.placeWeb);
+    const scale = this.state.placeScale;
+    const key = `${JSON.stringify(params)}|${scale}|${this.state.placeWebAutoOrient}`;
+    if (this.ghostWebKey === key && this.ghostWebAt.distanceToSquared(this.hit) < 0.0025) return;
+    this.ghostWebKey = key;
+    this.ghostWebAt.copy(this.hit);
+    if (this.state.placeWebAutoOrient) {
+      const yaw = this.passageYaw(this.hit, params.h * scale);
+      if (yaw !== null) this.ghost.rotation.y = yaw;
+    }
+    const pts = this.props.webs.previewAnchors(this.hit, this.ghost.rotation.y, undefined, params, scale);
+    const geo = this.anchorLines.geometry;
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    geo.computeBoundingSphere();
+    this.anchorLines.visible = pts.length > 0;
+  }
+
   private updateGhost(visible: boolean): void {
     this.ghost.visible = visible;
+    const web = visible && !!PROP_DEF_MAP.get(this.state.placeType)?.web;
+    if (!web) {
+      this.anchorLines.visible = false;
+      if (this.ghostWebKey) this.ghost.rotation.y = 0;
+      this.ghostWebKey = '';
+    }
     if (!visible) return;
     // The type's shared geometry (algae: the stalk of the chosen length), rendered translucent
-    const geometry = this.props.previewGeometry(this.state.placeType, this.state.placeChainLength);
+    const geometry = this.props.previewGeometry(this.state.placeType, this.state.placeChainLength, this.state.placeWeb);
     if (this.ghostType !== this.state.placeType || this.ghostGeometry !== geometry) {
       this.ghostType = this.state.placeType;
       this.ghostGeometry = geometry;
@@ -531,5 +651,6 @@ export class EditorController {
     }
     this.ghost.position.copy(this.hit);
     this.ghost.scale.setScalar(this.state.placeScale);
+    if (web) this.updateWebGhost();
   }
 }

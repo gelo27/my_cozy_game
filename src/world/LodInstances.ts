@@ -11,6 +11,8 @@ class InstanceList {
   private readonly slots = new Map<number, number>();
   private fade: THREE.InstancedBufferAttribute | null = null;
   private source: THREE.BufferGeometry;
+  /** Materials worn instead of the shared ones (the distance dither at the view's edge). */
+  private override: THREE.Material[] | null = null;
   private static readonly _m = new THREE.Matrix4();
 
   constructor(
@@ -78,6 +80,12 @@ class InstanceList {
     this.mesh.visible = v;
   }
 
+  /** Steady lists only: wear `materials` (null = the shared ones again). */
+  public setMaterials(materials: THREE.Material[] | null): void {
+    this.override = materials;
+    this.mesh.material = materials ?? this.materials;
+  }
+
   public dispose(): void {
     this.mesh.removeFromParent();
     if (this.fading) this.mesh.geometry.dispose();
@@ -91,7 +99,7 @@ class InstanceList {
 
   private make(capacity: number): THREE.InstancedMesh {
     let geometry = this.source;
-    let materials = this.materials;
+    let materials = this.override ?? this.materials;
     if (this.fading) {
       this.fade = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
       this.fade.setUsage(THREE.DynamicDrawUsage);
@@ -242,6 +250,14 @@ export class LodInstances {
       this.fading[tr.from].setFade(id, -Math.max(1e-4, tr.t));
       this.fading[tr.to].setFade(id, Math.max(1e-4, tr.t));
     }
+  }
+
+  /**
+   * The farthest level's plain list wears `materials` (the edge-of-view distance dither) while its
+   * cell reaches into the fade band; null puts the solid ones back.
+   */
+  public setFarMaterials(materials: THREE.Material[] | null): void {
+    this.steady[this.steady.length - 1].setMaterials(materials);
   }
 
   public setVisible(v: boolean): void {

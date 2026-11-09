@@ -921,11 +921,6 @@ export class ForestZone {
           }
 
           audioEngine.at(hitPoint).playWoodChopHit(false);
-          this.particleManager?.emitWoodSplinters(hitPoint, normal, isAxe ? (15 + hitsDone * 6) : 12);
-          this.particleManager?.emitTreeFoliageLeaves(
-            new THREE.Vector3(tree.position.x, tree.trunkHeight * 0.7, tree.position.z),
-            6 + hitsDone * 4
-          );
           return { hit: true, isFatal: false, hitPoint, normal };
         }
       }
@@ -948,7 +943,6 @@ export class ForestZone {
           return { hit: true, isFatal: true, hitPoint, normal, isLogSplit: true };
         } else {
           audioEngine.at(hitPoint).playWoodChopHit(false);
-          this.particleManager?.emitWoodSplinters(hitPoint, normal, 18);
           return { hit: true, isFatal: false, hitPoint, normal };
         }
       }
@@ -1001,14 +995,6 @@ export class ForestZone {
     audioEngine.at(tree.position).playWoodChopHit(true);
     audioEngine.at(tree.position, 5).playTreeFallCreak();
 
-    // 5. Particles: massive wood splinter burst + fluttering foliage
-    const chopPoint = new THREE.Vector3(tree.position.x, 0.8, tree.position.z);
-    const chopNormal = chopDirection.clone().normalize();
-    this.particleManager?.emitWoodSplinters(chopPoint, chopNormal, 36);
-    this.particleManager?.emitTreeFoliageLeaves(
-      new THREE.Vector3(tree.position.x, tree.trunkHeight * 0.7, tree.position.z),
-      40
-    );
 
     // 6. Create Dynamic Falling Tree Entity (bare trunk without green foliage canopies)
     const dynamicGroup = new THREE.Group();
@@ -1105,8 +1091,6 @@ export class ForestZone {
 
     // 3. Audio & particle feedback
     audioEngine.at(splitPoint).playLogSplit();
-    this.particleManager?.emitWoodSplinters(splitPoint, new THREE.Vector3(0, 1, 0), 28);
-    this.particleManager?.emitTreeFoliageLeaves(splitPoint, 20);
 
     // 4. Farm mode: firewood goes straight to the backpack instead of spawning log props
     if (this.options.onWoodHarvested) {
@@ -1233,9 +1217,6 @@ export class ForestZone {
           fallen.hasHitGround = true;
           audioEngine.at(t, 8).playTreeImpact();
 
-          // Ground dust burst and leaf flutter
-          this.particleManager?.emitLandDust(new THREE.Vector3(t.x, 0.1, t.z), 6.5);
-          this.particleManager?.emitTreeFoliageLeaves(new THREE.Vector3(t.x, 0.8, t.z), 26);
         }
       }
     }

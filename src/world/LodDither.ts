@@ -110,6 +110,10 @@ export interface FadeRange {
   value: THREE.Vector2;
 }
 
+/** Edge-of-view dissolve of the trees (pines, oaks, apple trees) and of the bushes; PropSystem keeps them current. */
+export const TREE_FADE_RANGE: FadeRange = { value: new THREE.Vector2(200, 240) };
+export const BUSH_FADE_RANGE: FadeRange = { value: new THREE.Vector2(112, 130) };
+
 const distanceTwins = new Map<THREE.Material, THREE.Material>();
 
 /**

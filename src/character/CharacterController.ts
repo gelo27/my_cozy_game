@@ -203,6 +203,9 @@ export class CharacterController {
   public buildAbility!: BuildAbility;
   public farmingAbility!: FarmingAbility;
   public gatheringAbility!: GatheringAbility;
+  /** Holds the player back (spider webs): may change the velocity, returns true if it did. */
+  public restraint: ((vel: THREE.Vector3, dt: number) => boolean) | null = null;
+  private readonly restraintVel = new THREE.Vector3();
 
   constructor(
     private physics: PhysicsWorld,
@@ -599,6 +602,12 @@ export class CharacterController {
 
       for (const ability of this.abilities) {
         ability.update(dt, context);
+      }
+      // Something holding the player back (a spider web): it gets the last word on the velocity
+      if (this.restraint) {
+        const lv = this.body.linvel();
+        this.restraintVel.set(lv.x, lv.y, lv.z);
+        if (this.restraint(this.restraintVel, dt)) this.body.setLinvel(this.restraintVel, true);
       }
       // Aiming the slingshot: RMB held with it in hand, on foot (not swimming, climbing, carrying or building)
       context.isAiming = !!move.aim && this.model.activeWeapon === 15 && !context.isSwimming && !context.isClimbing

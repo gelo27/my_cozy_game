@@ -7,6 +7,7 @@ import type { RockField } from '../gathering/RockField';
 import type { PropTreeField } from '../gathering/PropTreeField';
 import type { BuildingManager } from '../building/BuildingManager';
 import type { GrassField } from './GrassField';
+import type { AppleOrchard } from '../gathering/AppleOrchard';
 
 /** A round caster (canopy, bush, boulder) of radius `r`; its shadow lies straight below it. */
 interface Disc {
@@ -58,6 +59,8 @@ export class StaticShadows {
   private readonly buckets: { discs: Disc[]; boxes: Box[]; blocks: Box[] }[] = Array.from({ length: NCHUNKS }, () => ({ discs: [], boxes: [], blocks: [] }));
   /** Receives each baked chunk's shade and grass blockers. */
   public grass: GrassField | null = null;
+  /** Player-planted apple trees (their canopies shade the ground like the oaks'). */
+  public orchard: AppleOrchard | null = null;
   private readonly blockBuf = new Uint8Array(S * S);
   /** Per-chunk fingerprint of its casters at the last bake (NaN = never baked). */
   private readonly baked = new Float64Array(NCHUNKS).fill(NaN);
@@ -108,7 +111,7 @@ export class StaticShadows {
     this.forest.forEachStandingTree(() => trees++);
     let rocks = 0;
     this.rocks.forEachIntact(() => rocks++);
-    return `${this.props.revision}|${trees}|${rocks}|${this.buildings.revision}`;
+    return `${this.props.revision}|${trees}|${rocks}|${this.buildings.revision}|${this.orchard?.revision ?? 0}`;
   }
 
   /** Order-independent fingerprint of a chunk's casters. */
@@ -168,6 +171,12 @@ export class StaticShadows {
       }
     }
     this.forest.forEachStandingTree((pos) => addDisc({ x: pos.x, z: pos.z, r: 3.4, k: 0.6 }));
+    this.orchard?.forEachCanopy((x, z, r) => {
+      addDisc({ x, z, r, k: 0.55 });
+      // Keep the 3D grass out of the trunk
+      const b = r * 0.14;
+      addBlock({ x0: x - b, z0: z - b, x1: x + b, z1: z + b, k: 1 });
+    });
     this.rocks.forEachIntact((pos, radius) => addDisc({ x: pos.x, z: pos.z, r: radius * 1.1, k: 0.45 }));
     for (const piece of this.buildings.getAllPieces()) {
       const bb = piece.worldBoundingBox;

@@ -9,10 +9,12 @@ import { coastRadius, fbm } from './IslandGenerator';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { BUSH_MATERIAL, TREE_MATERIAL, TreeLods, foliageMaterialOf, getTreeLods, loadTreeModels, rebuildTreeLeaves, stepTreeWind } from './TreeModels';
 import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
-import { FadeRange, acquireDistanceDither, acquireDither, acquireInstancedDither } from './LodDither';
+import { BUSH_FADE_RANGE, FadeRange, TREE_FADE_RANGE, acquireDistanceDither, acquireDither, acquireInstancedDither } from './LodDither';
 import { LodInstances } from './LodInstances';
+import { buildDecorRockLods } from './RockModels';
 import { FLOWER_MATERIAL, loadFlowerModels } from './FlowerModels';
 import { AlgaeField, algaeGeometry, clampLinks } from './AlgaeChains';
+import { WebField, WebParams, clampWeb, webPreviewGeometry } from './SpiderWebs';
 
 /**
  * Props are batched per type AND per square cell, so whole cells get culled. Far-seen types (trees,
@@ -39,6 +41,12 @@ const VIEW_DIST: Record<string, number> = {
  */
 const FADE_BAND: Record<string, number> = { flowers: 16 };
 /**
+ * Trees and bushes (LOD types) dissolve over the last this-many metres of their draw distance: the
+ * farthest LOD's list of a cell wears the distance dither while the cell reaches into the band.
+ */
+const LOD_FADE_BAND: Record<string, number> = { tree_pine: 40, tree_round: 40, bush: 18 };
+const lodFadeRange = (type: string): FadeRange => (type === 'bush' ? BUSH_FADE_RANGE : TREE_FADE_RANGE);
+/**
  * Distances (from the camera, per tree) where a tree steps down to its next LOD (the trees pack
  * has 3); a few metres of hysteresis keep a tree from flickering between two levels at a boundary.
  */
@@ -49,6 +57,8 @@ const LOD_DISTS = isMobileDevice() ? [30, 75] : [40, 100];
  * panel (VegetationSettings).
  */
 const lodDists = (type: string, out: number[]): number[] => {
+  const rock = ROCK_LOD_DISTS[type];
+  if (rock) return rock;
   if (type === 'tree_round') out[0] = veg.oakNearDist;
   else if (type === 'tree_pine') out[0] = veg.pineNearDist;
   else if (type === 'bush') out[0] = veg.bushNearDist;
@@ -57,6 +67,16 @@ const lodDists = (type: string, out: number[]): number[] => {
   return out;
 };
 const DISTS_SCRATCH = [0, 0];
+/** Decorative rocks (procedural, RockModels): where they step down to LOD1 and LOD2 (m). */
+const MOBILE = isMobileDevice();
+/**
+ * Phones: pebbles keep only their two coarse LODs (two lists per cell, not three), rocks sit in big
+ * cells and switch LOD at once (no crossfade: no dither program, no extra fading lists).
+ */
+const ROCK_LOD_DISTS: Record<string, number[]> = MOBILE
+  ? { rock_small: [24], rock_big: [22, 56] }
+  : { rock_small: [14, 35], rock_big: [28, 75] };
+const isDecorRock = (type: string): boolean => type === 'rock_small' || type === 'rock_big';
 /** How often (s) trees re-pick their LOD, and how far (m) the camera must move for it. */
 const LOD_PASS_SECONDS = 0.15;
 const LOD_PASS_MOVE = 0.5;
@@ -75,7 +95,7 @@ const ROOM: Record<string, number> = { tree_pine: 1.9, tree_round: 2.1, bush: 0.
 const ROOM_SHARE = 0.8;
 const ROOM_MAX = 2.1 * 1.35;
 
-export type PropCategory = 'nature' | 'decor' | 'farm' | 'stations';
+export type PropCategory = 'nature' | 'decor' | 'farm' | 'stations' | 'objects';
 
 export interface PropDef {
   id: string;
@@ -90,6 +110,8 @@ export interface PropDef {
    * batches; each instance has its own link count (`PropInstance.length`).
    */
   chain?: true;
+  /** Spider webs: simulated threads drawn by WebField; each instance has its own `web` params. */
+  web?: true;
 }
 
 export interface PropInstance {
@@ -104,6 +126,12 @@ export interface PropInstance {
   length?: number;
   /** Algae: own root and top colours (sRGB hex); none = the developer panel's. */
   colors?: [number, number];
+  /** Spider web: its shape and strength. */
+  web?: WebParams;
+  /** Frameless spider web: where its radials anchor (local x, y, z per radial), found once. */
+  webAnchors?: number[];
+  /** Spider web: tilt about its own right (x) and normal (z) axes, applied after the yaw. */
+  tilt?: [number, number];
 }
 
 export interface PropSaveData {
@@ -116,6 +144,12 @@ export interface PropSaveData {
   n?: number;
   /** Algae: own root and top colours. */
   c?: [number, number];
+  /** Spider web params. */
+  w?: WebParams;
+  /** Frameless spider web anchors. */
+  wa?: number[];
+  /** Spider web tilt (x, z). */
+  t?: [number, number];
 }
 
 // ------------------------------------------------------------------ shared materials
@@ -143,6 +177,20 @@ const M = {
 
 const WHITE = new THREE.Color(1, 1, 1);
 const VERTEX_COLOR_MAT = new THREE.MeshLambertMaterial({ vertexColors: true });
+
+/** Faceted procedural stone for the decorative rocks (built once per type, three LODs). */
+const ROCK_MATERIAL = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+const decorRockLods = new Map<string, THREE.BufferGeometry[]>();
+function getDecorRockLods(type: string): THREE.BufferGeometry[] | null {
+  if (type !== 'rock_small' && type !== 'rock_big') return null;
+  let lods = decorRockLods.get(type);
+  if (!lods) {
+    lods = buildDecorRockLods(type);
+    if (MOBILE && type === 'rock_small') lods.shift()?.dispose();
+    decorRockLods.set(type, lods);
+  }
+  return lods;
+}
 
 /** Self-lit materials the night lighting drives (bulbs brighten at dusk, fire flickers). */
 export const PROP_GLOW_MATERIALS = { lamp: M.lamp, fire: M.fire };
@@ -284,6 +332,14 @@ export const PROP_DEFS: PropDef[] = [
     // Algae stalk: chain links from algae_chain.glb with a top; built by AlgaeField (underwater)
     id: 'algae', name: 'Водорість', icon: 'Waves', category: 'nature', chain: true,
     build: (b) => b.cyl(M.leaf, 0.02, 0.02, 1.5, 0, 0.75, 0, 5),
+  },
+  {
+    // Spider web anchored to the walls around it: threads simulated by WebField (build is unused)
+    id: 'spider_web', name: 'Павутина', icon: 'Bug', category: 'objects', web: true,
+    build: (b) => {
+      b.cyl(M.bark, 0.05, 0.06, 2.5, -1.1, 1.25, 0, 6);
+      b.cyl(M.bark, 0.05, 0.06, 2.5, 1.1, 1.25, 0, 6);
+    },
   },
   {
     id: 'stump', name: 'Пень', icon: 'Circle', category: 'nature',
@@ -459,15 +515,28 @@ export class PropSystem {
 
   /** Algae chains (props with `chain` defs live here instead of the batches). */
   public readonly algae: AlgaeField;
+  /** Spider webs (props with `web` defs). */
+  public readonly webs: WebField;
 
   constructor(scene: THREE.Scene, private readonly physics: PhysicsWorld, private readonly terrain: TerrainSystem) {
     this.group.name = 'Props';
     scene.add(this.group);
     this.algae = new AlgaeField(this.group);
+    this.webs = new WebField(this.group, physics, terrain);
+    this.webs.onAnchors = () => this.revision++;
     // Oak and pine come from the trees pack; until it loads (or if it fails) the procedural trees stand in
     void loadTreeModels().then((lods) => lods && this.applyTreeModels(lods));
     // Tulips from the flowers pack replace the procedural flowers (kept if the pack fails)
     void loadFlowerModels().then((clump) => clump && this.applyModel('flowers', clump, FLOWER_MATERIAL));
+    if (!MOBILE) {
+      // Hidden, so the load-time shader prewarm compiles the rocks' LOD crossfade program too
+      const geo = getDecorRockLods('rock_big')![2].clone();
+      geo.setAttribute('aLodFade', new THREE.InstancedBufferAttribute(new Float32Array(1), 1));
+      const warm = new THREE.InstancedMesh(geo, [acquireInstancedDither(ROCK_MATERIAL)], 1);
+      warm.visible = false;
+      warm.name = 'RockDitherPrewarm';
+      this.group.add(warm);
+    }
   }
 
   /** Swaps a single-LOD type's geometry and material to a loaded model, including cells already built. */
@@ -499,6 +568,7 @@ export class PropSystem {
       b.lods?.dispose();
       b.lods = this.makeLods(b);
       b.passX = Infinity;
+      b.fading = false;
     }
     // Hidden, so the load-time shader prewarm compiles the LOD crossfade program too
     if (this.group.getObjectByName('LodDitherPrewarm')) return;
@@ -517,6 +587,11 @@ export class PropSystem {
     warm.visible = false;
     warm.name = 'LodDitherPrewarm';
     this.group.add(warm);
+    // ...and the edge-of-view dissolve of the trees and bushes
+    const warm3 = new THREE.InstancedMesh(warm.geometry, [acquireDistanceDither(TREE_MATERIAL, TREE_FADE_RANGE), acquireDistanceDither(BUSH_MATERIAL, BUSH_FADE_RANGE)], 1);
+    warm3.visible = false;
+    warm3.name = 'LodDitherPrewarm3';
+    this.group.add(warm3);
   }
 
   private readonly geometries = new Map<string, { geometry: THREE.BufferGeometry; materials: THREE.Material[] }>();
@@ -528,13 +603,14 @@ export class PropSystem {
 
   private static cellSize(type: string): number {
     if (LOD_BUILDS[type]) return CELL_SMALL;
+    if (MOBILE && isDecorRock(type)) return CELL_BIG;
     // Fading types: cells small enough that the near ones stay out of the fade band (solid)
     if (FADE_BAND[type]) return CELL_FADE;
     return (VIEW_DIST[type] ?? 160) > 160 ? CELL_BIG : CELL_SMALL;
   }
 
   private getLod(type: string, near: THREE.BufferGeometry): PropBatch['lod'] {
-    const models = getTreeLods()?.[type];
+    const models = getTreeLods()?.[type] ?? getDecorRockLods(type);
     if (models) return models;
     const build = LOD_BUILDS[type];
     if (!build) return null;
@@ -563,6 +639,7 @@ export class PropSystem {
       const models = getTreeLods()?.[type];
       if (models) shared = { geometry: models[0], materials: [foliageMaterialOf(type)] };
     }
+    if (!shared) shared = this.decorRockShared(type);
     if (!shared) {
       const b = new PropBuilder();
       def.build(b);
@@ -695,6 +772,9 @@ export class PropSystem {
       if (lods) this.applyTreeModels(lods);
     }
     const treeView = veg.treeViewDist * VIEW_SCALE;
+    TREE_FADE_RANGE.value.set(treeView - LOD_FADE_BAND.tree_pine, treeView);
+    const bushView = (VIEW_DIST.bush ?? 160) * VIEW_SCALE;
+    BUSH_FADE_RANGE.value.set(bushView - LOD_FADE_BAND.bush, bushView);
     this.camX = camera.x;
     this.camZ = camera.z;
     this.lodPassIn -= dt;
@@ -712,13 +792,17 @@ export class PropSystem {
         this.passFade(b, camera, Math.sqrt(d2), band);
         continue;
       }
-      const visible = b.ids.length > 0 && d2 < view * view;
+      const lodBand = b.lods ? LOD_FADE_BAND[b.def.id] : undefined;
+      // A dissolving type stays drawn a little past its distance: the shader jitters each tree's
+      const reach = lodBand ? view + lodBand * 0.15 + 1 : view;
+      const visible = b.ids.length > 0 && d2 < reach * reach;
       if (!b.lods) {
         b.mesh.visible = visible;
         continue;
       }
       b.lods.setVisible(visible);
       if (!visible) continue;
+      if (lodBand) this.passLodFade(b, camera, view, lodBand);
       b.lods.step(dt, veg.lodFade, this.matrixOf);
       if (lodPass) this.passLods(b, camera, Math.sqrt(d2));
     }
@@ -754,9 +838,10 @@ export class PropSystem {
     b.passX = camera.x;
     b.passZ = camera.z;
     let all = -2;
+    const fade = MOBILE && isDecorRock(b.def.id) ? 0 : veg.lodFade;
     lods.forEach((id, level) => {
       const want = this.levelFor(b, this.props.get(id)!, level);
-      if (want !== level) lods.setLevel(id, want, this.matrixOf(id, PropSystem._m2), veg.lodFade);
+      if (want !== level) lods.setLevel(id, want, this.matrixOf(id, PropSystem._m2), fade);
       all = all === -2 || all === want ? want : -1;
     });
     if (all >= 0 && !lods.busy) lods.markUniform(all);
@@ -798,6 +883,25 @@ export class PropSystem {
     b.mesh.material = mats;
   }
 
+  /**
+   * A tree / bush cell whose far side reaches into the fade band draws its farthest LOD with the
+   * distance dither (each tree melts away by its own distance); nearer cells stay solid and never
+   * pay for `discard`.
+   */
+  private passLodFade(b: PropBatch, camera: THREE.Vector3, view: number, band: number): void {
+    const x0 = b.cx * b.size;
+    const z0 = b.cz * b.size;
+    const fx = Math.max(Math.abs(camera.x - x0), Math.abs(camera.x - x0 - b.size));
+    const fz = Math.max(Math.abs(camera.z - z0), Math.abs(camera.z - z0 - b.size));
+    const fading = Math.hypot(fx, fz) > view - band - band * 0.15 - 1;
+    if (fading === b.fading) return;
+    b.fading = fading;
+    const solid = this.geometries.get(b.def.id)?.materials;
+    if (!solid) return;
+    const range = lodFadeRange(b.def.id);
+    b.lods!.setFarMaterials(fading ? solid.map((m) => acquireDistanceDither(m, range)) : null);
+  }
+
   private lastVisibilityAt = 0;
   private lodPassIn = 0;
   private leafRevision = vegetationRevision.leaves;
@@ -814,10 +918,23 @@ export class PropSystem {
   }
 
   public add(
-    type: string, x: number, z: number, rotationY = 0, scale = 1, y?: number, grounded = true, length?: number, colors?: [number, number] | null
+    type: string, x: number, z: number, rotationY = 0, scale = 1, y?: number, grounded = true, length?: number, colors?: [number, number] | null,
+    web?: Partial<WebParams> | null, webAnchors?: number[] | null, tilt?: [number, number] | null
   ): number | null {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
     const def = PROP_DEF_MAP.get(type);
+    if (def?.web) {
+      const id = this.nextId++;
+      const prop: PropInstance = {
+        id, type, position: new THREE.Vector3(x, y ?? this.terrain.getHeight(x, z), z), rotationY, scale, grounded, web: clampWeb(web),
+        webAnchors: Array.isArray(webAnchors) && webAnchors.every(Number.isFinite) ? [...webAnchors] : undefined,
+        tilt: Array.isArray(tilt) && tilt.length === 2 && tilt.every(Number.isFinite) && (tilt[0] || tilt[1]) ? [tilt[0], tilt[1]] : undefined,
+      };
+      this.props.set(id, prop);
+      this.webs.add(prop);
+      this.revision++;
+      return id;
+    }
     if (def?.chain) {
       const id = this.nextId++;
       const prop: PropInstance = {
@@ -852,6 +969,7 @@ export class PropSystem {
     if (!prop) return;
     this.detach(id);
     this.algae.remove(id);
+    this.webs.remove(id);
     const body = this.bodies.get(id);
     if (body) this.physics.removeRigidBody(body);
     this.bodies.delete(id);
@@ -895,7 +1013,7 @@ export class PropSystem {
     }
   }
 
-  public setTransform(id: number, position: THREE.Vector3, rotationY: number, scale: number): void {
+  public setTransform(id: number, position: THREE.Vector3, rotationY: number, scale: number, tilt?: [number, number]): void {
     const prop = this.props.get(id);
     if (!prop) return;
     prop.position.copy(position);
@@ -903,6 +1021,14 @@ export class PropSystem {
     prop.scale = scale;
     if (PROP_DEF_MAP.get(prop.type)?.chain) {
       this.algae.refresh(prop);
+      this.revision++;
+      return;
+    }
+    if (PROP_DEF_MAP.get(prop.type)?.web) {
+      // Moved: its threads look for new anchors
+      if (tilt) prop.tilt = tilt[0] || tilt[1] ? [tilt[0], tilt[1]] : undefined;
+      prop.webAnchors = undefined;
+      this.webs.refresh(prop);
       this.revision++;
       return;
     }
@@ -939,21 +1065,47 @@ export class PropSystem {
     this.revision++;
   }
 
+  /** Spider web: changes its shape / strength (the web is rebuilt whole, cuts healed). */
+  public setWebParams(id: number, patch: Partial<WebParams>): void {
+    const prop = this.props.get(id);
+    if (!prop || !PROP_DEF_MAP.get(prop.type)?.web) return;
+    const next = clampWeb({ ...prop.web, ...patch });
+    // A new shape anchors anew (strength alone keeps the anchors)
+    const old = prop.web;
+    if (!old || old.w !== next.w || old.h !== next.h || old.radials !== next.radials) prop.webAnchors = undefined;
+    prop.web = next;
+    this.webs.refresh(prop);
+    this.revision++;
+  }
+
   /** Geometry to preview a type with (the editor's placement ghost); null while it loads. */
-  public previewGeometry(type: string, length?: number): THREE.BufferGeometry | null {
+  public previewGeometry(type: string, length?: number, web?: Partial<WebParams> | null): THREE.BufferGeometry | null {
     const def = PROP_DEF_MAP.get(type);
     if (!def) return null;
     if (def.chain) return algaeGeometry(clampLinks(length));
+    if (def.web) return webPreviewGeometry(clampWeb(web));
     let shared = this.geometries.get(type);
     if (!shared) {
       const models = getTreeLods()?.[type];
       if (models) return models[0];
-      const b = new PropBuilder();
-      def.build(b);
-      shared = b.build();
-      this.geometries.set(type, shared);
+      shared = this.decorRockShared(type);
+      if (!shared) {
+        const b = new PropBuilder();
+        def.build(b);
+        shared = b.build();
+        this.geometries.set(type, shared);
+      }
     }
     return shared.geometry;
+  }
+
+  /** A decorative rock type's near geometry and material (registered as the type's shared one). */
+  private decorRockShared(type: string): { geometry: THREE.BufferGeometry; materials: THREE.Material[] } | undefined {
+    const lods = getDecorRockLods(type);
+    if (!lods) return undefined;
+    const shared = { geometry: lods[0], materials: [ROCK_MATERIAL] };
+    this.geometries.set(type, shared);
+    return shared;
   }
 
   public get(id: number): PropInstance | undefined {
@@ -1004,6 +1156,8 @@ export class PropSystem {
     }
     const algae = this.algae.pick(raycaster);
     if (algae && (!best || algae.distance < best.distance)) best = algae;
+    const web = this.webs.pick(raycaster);
+    if (web && (!best || web.distance < best.distance)) best = web;
     return best;
   }
 
@@ -1025,7 +1179,11 @@ export class PropSystem {
         prop.position.y = y;
         const batch = this.batchOf.get(prop.id);
         if (!batch) {
-          this.algae.refresh(prop);
+          if (PROP_DEF_MAP.get(prop.type)?.web) {
+            prop.webAnchors = undefined;
+            this.webs.refresh(prop);
+          }
+          else this.algae.refresh(prop);
           continue;
         }
         this.writeMatrix(batch, this.slotOf.get(prop.id)!, prop);
@@ -1080,6 +1238,9 @@ export class PropSystem {
       g: p.grounded ? undefined : false,
       n: p.length,
       c: p.colors,
+      w: p.web,
+      wa: p.webAnchors,
+      t: p.tilt ? [+p.tilt[0].toFixed(4), +p.tilt[1].toFixed(4)] : undefined,
     }));
     this.saveCache = { key, data };
     return data;
@@ -1087,7 +1248,7 @@ export class PropSystem {
 
   public deserialize(data: PropSaveData[]): void {
     this.clear();
-    for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.p[1], d.g !== false, d.n, Array.isArray(d.c) && d.c.length === 2 ? d.c : null);
+    for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.p[1], d.g !== false, d.n, Array.isArray(d.c) && d.c.length === 2 ? d.c : null, d.w, d.wa, d.t);
   }
 
   /** Default decoration so a fresh world does not look empty. */

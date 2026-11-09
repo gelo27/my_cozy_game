@@ -106,10 +106,28 @@ export class Precipitation {
           p.z += uSnow * cos(uTime * (0.5 + seed * 0.8) + seed * 25.0) * 0.4;
           p.xz = mod(p.xz - uCenter.xz + ${(PRECIP_BOX / 2).toFixed(1)}, ${PRECIP_BOX.toFixed(1)}) - ${(PRECIP_BOX / 2).toFixed(1)} + uCenter.xz;
 
-          if (p.y < roofAt(p.xz)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-
           vec3 toCam = cameraPosition - p;
           float dist = length(toCam);
+          // Fully faded drops (box corners past the fade radius, and ones right at the lens whose
+          // quads would cover much of the screen) are collapsed instead of rasterised and discarded
+          vFade = (1.0 - smoothstep(8.0, ${(PRECIP_BOX / 2).toFixed(1)}, dist)) * smoothstep(0.4, 1.5, dist);
+          if (vFade < 0.01) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+
+          // Off-screen drops skip the roof-map fetch and the rest of the work. Conservative: the drop
+          // is culled only when both ends of its streak lie beyond the same frustum side.
+          vec3 axis = normalize(vec3(uWind.x, -speed, uWind.y));
+          float len = 0.8 + seed * 0.6;
+          vec4 c0 = projectionMatrix * viewMatrix * vec4(p, 1.0);
+          vec4 c1 = uSnow > 0.5 ? c0 : projectionMatrix * viewMatrix * vec4(p - axis * len, 1.0);
+          const float M = 0.3; // clip-space margin for streak width / flake size
+          if ((c0.w < 0.0 && c1.w < 0.0) ||
+              (c0.x > c0.w + M && c1.x > c1.w + M) || (c0.x < -c0.w - M && c1.x < -c1.w - M) ||
+              (c0.y > c0.w + M && c1.y > c1.w + M) || (c0.y < -c0.w - M && c1.y < -c1.w - M)) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return;
+          }
+
+          if (p.y < roofAt(p.xz)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+
           vec3 world;
           if (uSnow > 0.5) {
             // Camera-facing flake, 5-8 cm up close; grows slightly with distance so it stays visible
@@ -119,15 +137,12 @@ export class Precipitation {
             world = p + (right * position.x + up * (position.y - 0.5)) * s;
           } else {
             // Streak along the fall direction, turned to face the camera around that axis
-            vec3 axis = normalize(vec3(uWind.x, -speed, uWind.y));
             vec3 side = normalize(cross(axis, toCam));
-            float len = 0.8 + seed * 0.6;
             // Widen far streaks a little so they don't shimmer below a pixel
             float width = 0.016 + dist * 0.0018;
             world = p + side * position.x * width - axis * position.y * len;
           }
           vUv = position.xy + vec2(0.5, 0.0);
-          vFade = (1.0 - smoothstep(8.0, ${(PRECIP_BOX / 2).toFixed(1)}, dist)) * smoothstep(0.4, 1.5, dist);
           gl_Position = projectionMatrix * viewMatrix * vec4(world, 1.0);
         }`,
       fragmentShader: `

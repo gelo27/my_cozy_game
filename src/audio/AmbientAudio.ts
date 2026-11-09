@@ -30,6 +30,11 @@ export interface AmbientState {
   falls: { id: string; position: THREE.Vector3; loud: number }[];
   /** Vehicle engine while the player drives it, or null. */
   engine: { position: THREE.Vector3; speedKmh: number; kind: 'truck' | 'scooter' | 'boat' } | null;
+  /**
+   * Underground: the daylight end of the nearest way out. The outside world (weather, birds,
+   * crickets, thunder) is heard from there, quieter and duller the deeper the listener is.
+   */
+  portal: THREE.Vector3 | null;
 }
 
 /** Seconds of looping noise; long enough that the loop point is not audible. */
@@ -87,6 +92,9 @@ export function setBirdSpeciesEnabled(index: number, enabled: boolean): void {
 
 /** Birds are heard from up to this far (m); full loudness within BIRD_REF. */
 const BIRD_RANGE = 70;
+/** Outside sounds heard through a cave mouth: full within PORTAL_REF of it, gone at PORTAL_RANGE. */
+const PORTAL_REF = 4;
+const PORTAL_RANGE = 140;
 const BIRD_REF = 7;
 
 interface BirdTrack {
@@ -136,6 +144,38 @@ export class AmbientAudio {
   private birds: Birds | null = null;
   private breeze: { src: AudioBufferSourceNode; hiSrc: AudioBufferSourceNode; gain: GainNode; hiGain: GainNode; lfos: OscillatorNode[] } | null = null;
   private fogHush: { gain: GainNode; airGain: GainNode } | null = null;
+  /**
+   * Where the outside loops go: straight to the bus above ground, or (in a cave) through a low-pass
+   * into a panner at the cave mouth. Crossfaded by `portalMix`.
+   */
+  private outside: { input: GainNode; direct: GainNode; filter: BiquadFilterNode; portal: GainNode; panner: PannerNode } | null = null;
+  private portalMix = 0;
+  private portalDist = 0;
+  private readonly portalPos = new THREE.Vector3();
+
+  private outsideBus(ctx: AudioContext, bus: AudioNode): AudioNode {
+    if (this.outside) return this.outside.input;
+    const panner = audioEngine.createPanner({ x: 0, y: -1000, z: 0 }, PORTAL_REF, PORTAL_RANGE, 'ambient');
+    const input = ctx.createGain();
+    const direct = ctx.createGain();
+    direct.gain.value = 1;
+    input.connect(direct).connect(bus);
+    if (!panner) return input;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 6000;
+    filter.Q.value = 0.5;
+    const portal = ctx.createGain();
+    portal.gain.value = 0;
+    input.connect(filter).connect(portal).connect(panner);
+    this.outside = { input, direct, filter, portal, panner };
+    return input;
+  }
+
+  /** How far the mouth's low-pass lets the outside through (Hz) for a listener `d` metres in. */
+  private static portalCut(d: number): number {
+    return Math.max(320, 6500 * Math.exp(-d / 22));
+  }
 
   public update(s: AmbientState): void {
     const ctx = audioEngine.context;
@@ -143,12 +183,30 @@ export class AmbientAudio {
     if (!ctx || !bus) return;
     const t = ctx.currentTime;
     this.roofMix += ((s.underRoof ? 1 : 0) - this.roofMix) * 0.08;
+    // Underground the outside comes in through the nearest mouth
+    const out = this.outsideBus(ctx, bus);
+    if (s.portal) {
+      this.portalPos.copy(s.portal);
+      this.portalDist = s.portal.distanceTo(s.listener);
+    }
+    this.portalMix += ((s.portal ? 1 : 0) - this.portalMix) * 0.08;
+    if (this.portalMix < 0.002 && !s.portal) this.portalMix = 0;
+    const portalCut = AmbientAudio.portalCut(this.portalDist);
+    if (this.outside) {
+      const o = this.outside;
+      o.direct.gain.setTargetAtTime(1 - this.portalMix, t, 0.1);
+      // On top of the panner's distance falloff: the bends of the tunnel swallow more
+      o.portal.gain.setTargetAtTime(this.portalMix * Math.exp(-this.portalDist / 45), t, 0.3);
+      o.filter.frequency.setTargetAtTime(portalCut, t, 0.3);
+      if (s.portal) audioEngine.setPannerPos(o.panner, s.portal);
+    }
 
     // Daytime: a few birds sing now and then; a soft breeze under everything
     const under = audioEngine.isUnderwater;
-    if (s.birds > 0.02 && s.birdPerches.length > 0 && !this.birds) this.birds = this.startBirds(ctx, bus);
+    if (s.birds > 0.02 && s.birdPerches.length > 0 && !this.birds) this.birds = this.startBirds(ctx, out);
     if (this.birds) {
-      const cut = under ? 220 : 16000 * Math.pow(0.07, this.roofMix);
+      // (in a cave they sing outside its mouth: muffled like the rest of the outside)
+      const cut = under ? 220 : Math.min(16000 * Math.pow(0.07, this.roofMix), this.portalMix > 0.5 ? portalCut : 16000);
       // x1.5: the panner's distance falloff takes back roughly that much on average
       const lvl = s.birds * 1.5 * (1 - this.roofMix * 0.72) * (under ? 0.25 : 1);
       for (const tr of this.birds.tracks) {
@@ -157,7 +215,7 @@ export class AmbientAudio {
       }
       if (s.birds > 0.05) this.updateBirds(ctx, this.birds, t, s);
     }
-    if (s.breeze > 0.02 && !this.breeze) this.breeze = this.startBreeze(ctx, bus);
+    if (s.breeze > 0.02 && !this.breeze) this.breeze = this.startBreeze(ctx, out);
     if (this.breeze) {
       const k = s.breeze * (1 - this.roofMix * 0.72) * (under ? 0.25 : 1);
       this.breeze.gain.gain.setTargetAtTime(k * 0.05, t, 1.5);
@@ -165,7 +223,7 @@ export class AmbientAudio {
     }
 
     // Fog: a soft, muffled hush with a faint airy layer, slowly swelling
-    if (s.fog > 0.02 && !this.fogHush) this.fogHush = this.startFog(ctx, bus);
+    if (s.fog > 0.02 && !this.fogHush) this.fogHush = this.startFog(ctx, out);
     if (this.fogHush) {
       const k = s.fog * (1 - this.roofMix * 0.75) * (under ? 0.2 : 1);
       this.fogHush.gain.gain.setTargetAtTime(k * 0.045, t, 2.5);
@@ -173,7 +231,7 @@ export class AmbientAudio {
     }
 
     // Night: crickets chirp continuously
-    if (s.night > 0.02 && !this.crickets) this.crickets = this.startCrickets(ctx, bus);
+    if (s.night > 0.02 && !this.crickets) this.crickets = this.startCrickets(ctx, out);
     if (this.crickets) {
       this.updateCrickets(this.crickets, t);
       // (under: see above)
@@ -188,7 +246,7 @@ export class AmbientAudio {
     }
 
     // Rain
-    if (s.rain > 0.01 && !this.rain) this.rain = this.startRain(ctx, bus);
+    if (s.rain > 0.01 && !this.rain) this.rain = this.startRain(ctx, out);
     if (this.rain) {
       const cutoff = 4200 * (1 - this.roofMix) + 520 * this.roofMix;
       this.rain.filter.frequency.setTargetAtTime(cutoff, t, 0.1);
@@ -196,7 +254,7 @@ export class AmbientAudio {
     }
 
     // Wind
-    if (s.wind > 0.01 && !this.wind) this.wind = this.startWind(ctx, bus);
+    if (s.wind > 0.01 && !this.wind) this.wind = this.startWind(ctx, out);
     if (this.wind) this.wind.gain.gain.setTargetAtTime(s.wind * 0.07 * (1 - this.roofMix * 0.6), t, 0.5);
 
     // Campfire: the loop only exists while a fire is close enough to hear
@@ -263,6 +321,10 @@ export class AmbientAudio {
   public thunder(listener: THREE.Vector3, volume = 1, at?: THREE.Vector3): void {
     const ctx = audioEngine.context;
     if (!ctx || volume <= 0.001) return;
+    if (this.portalMix > 0.5) {
+      this.thunderThroughMouth(ctx, volume);
+      return;
+    }
     if (at) this.crack(ctx, listener, at, volume);
     const dist = at ? Math.max(at.distanceTo(listener), 5) : 150 + Math.random() * 450;
     const a = Math.random() * Math.PI * 2;
@@ -289,6 +351,37 @@ export class AmbientAudio {
     src.connect(filter).connect(gain).connect(panner);
     src.start(t);
     src.stop(t + 3.3);
+    src.onended = () => panner.disconnect();
+  }
+
+  /**
+   * Thunder heard from a cave: a dull rolling rumble coming in through the mouth, weaker and lower
+   * the deeper the listener is (no crack: the rock takes the highs).
+   */
+  private thunderThroughMouth(ctx: AudioContext, volume: number): void {
+    const d = this.portalDist;
+    const pos = { x: this.portalPos.x, y: this.portalPos.y + 2, z: this.portalPos.z };
+    const panner = audioEngine.createPanner(pos, 8, 220, 'ambient');
+    if (!panner) return;
+    const t = ctx.currentTime + 0.4 + Math.random() * 1.2 + d / 343;
+    const src = ctx.createBufferSource();
+    src.buffer = this.getNoise(ctx);
+    src.playbackRate.value = 0.45;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    const top = Math.max(160, Math.min(700, AmbientAudio.portalCut(d) * 0.5));
+    filter.frequency.setValueAtTime(top, t);
+    filter.frequency.exponentialRampToValueAtTime(90, t + 3);
+    const gain = ctx.createGain();
+    const peak = Math.max(0.001, 0.75 * volume * Math.exp(-d / 55));
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(peak, t + 0.18);
+    gain.gain.setValueAtTime(peak * 0.65, t + 0.6);
+    gain.gain.exponentialRampToValueAtTime(peak * 0.8, t + 1.0);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 3.8);
+    src.connect(filter).connect(gain).connect(panner);
+    src.start(t);
+    src.stop(t + 3.9);
     src.onended = () => panner.disconnect();
   }
 

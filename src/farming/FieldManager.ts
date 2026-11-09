@@ -71,6 +71,8 @@ interface CropPart {
   matrix: THREE.Matrix4;
   /** Tip offset (m) at full push when this part's plants spring away from bodies; 0 = rigid. */
   maxBend: number;
+  /** How loud its stalks rustle when moved (0 = silent) and how dry they are (0 green, 1 ripe). */
+  rustle?: { gain: number; dry: number };
 }
 
 /** Field layout of single plants: rows x rows, `spacing` m apart, base scale. */
@@ -124,6 +126,9 @@ interface SpringSet {
   active: number[];
   /** Tip offset (m) at full push for this crop. */
   maxBend: number;
+  /** Rustle loudness (0 = silent) and dryness of this batch's stalks. */
+  rustleGain: number;
+  rustleDry: number;
 }
 
 /** Tip offset (m) at full push, spring stiffness and damping (underdamped: a couple of wobbles). */
@@ -131,6 +136,14 @@ const WHEAT_MAX_BEND = 0.42;
 const SPRING_K = 70;
 const SPRING_DAMP = 5.5;
 const MAX_PUSHERS = 16;
+/** Stalks farther than this (m) from the rustle ear aren't heard. */
+const RUSTLE_EAR_RADIUS = 3;
+/** Rustle per wheat stage: seedlings barely whisper, green stalks swish, ripe ones crackle. */
+const WHEAT_RUSTLE: Record<CropStage, { gain: number; dry: number }> = {
+  1: { gain: 0.2, dry: 0 },
+  2: { gain: 0.75, dry: 0.3 },
+  3: { gain: 1, dry: 1 },
+};
 
 const IDENTITY = new THREE.Matrix4();
 const isIdentity = (m: THREE.Matrix4) => m.equals(IDENTITY);
@@ -179,6 +192,15 @@ export class FieldManager {
   /** x, y, z, radius per pusher, refilled every frame. */
   private readonly pushers = new Float32Array(MAX_PUSHERS * 4);
   private pusherCount = 0;
+
+  /** Where the rustle is heard (the player); see setRustleEar(). */
+  private readonly ear = { x: 0, z: 0, on: false };
+  /**
+   * Stalk motion near the ear, refreshed by every update(): `energy` = summed tip speed (m/s,
+   * loudness-weighted), `hits` = stalks a body just started pushing (one brush each), `dry` = the
+   * energy-weighted dryness of what moved. Read by the wheat-rustle audio.
+   */
+  public readonly rustle = { energy: 0, hits: 0, dry: 0 };
 
   private readonly tmpMatrix = new THREE.Matrix4();
   private readonly tmpQuat = new THREE.Quaternion();
@@ -671,8 +693,20 @@ export class FieldManager {
     this.pushers[o + 3] = radius;
   }
 
+  /** The point the rustle is gathered around (null: nobody listening, nothing gathered). */
+  public setRustleEar(x: number, z: number, on: boolean): void {
+    this.ear.x = x;
+    this.ear.z = z;
+    this.ear.on = on;
+  }
+
   private updateSprings(dt: number): void {
+    const rustle = this.rustle;
+    rustle.energy = rustle.hits = 0;
     if (this.wheatSlots.length === 0) return;
+    const ear = this.ear;
+    const earR2 = ear.on ? RUSTLE_EAR_RADIUS * RUSTLE_EAR_RADIUS : -1;
+    let dryW = 0;
 
     // Targets of the moving plants relax to upright unless a pusher holds them this frame
     for (let k = 0; k < this.springSets.length; k++) {
@@ -709,6 +743,10 @@ export class FieldManager {
           if (!s.isActive[i]) {
             s.isActive[i] = 1;
             s.active.push(i);
+            if (s.rustleGain > 0) {
+              const ex = s.base[i * 2] - ear.x, ez = s.base[i * 2 + 1] - ear.z;
+              if (ex * ex + ez * ez < earR2) rustle.hits += s.rustleGain * f;
+            }
           }
         }
       }
@@ -718,6 +756,8 @@ export class FieldManager {
     for (let k = 0; k < this.springSets.length; k++) {
       const s = this.springSets[k];
       if (s.active.length === 0) continue;
+      const loud = s.rustleGain > 0 && earR2 > 0;
+      let energy = 0;
       let lo = Infinity;
       let hi = -1;
       for (let a = s.active.length - 1; a >= 0; a--) {
@@ -735,6 +775,12 @@ export class FieldManager {
         s.vel[ix + 1] += (SPRING_K * (tz - s.bend[ix + 1]) - SPRING_DAMP * s.vel[ix + 1]) * h;
         s.bend[ix] += s.vel[ix] * h;
         s.bend[ix + 1] += s.vel[ix + 1] * h;
+        if (loud) {
+          const ex = s.base[ix] - ear.x, ez = s.base[ix + 1] - ear.z;
+          const e2 = ex * ex + ez * ez;
+          // Nearer stalks louder; |vx| + |vz| is close enough to the speed and needs no sqrt
+          if (e2 < earR2) energy += (Math.abs(s.vel[ix]) + Math.abs(s.vel[ix + 1])) * (1 - e2 / earR2);
+        }
         lo = Math.min(lo, i);
         hi = Math.max(hi, i);
         const settled =
@@ -748,12 +794,18 @@ export class FieldManager {
           s.active.pop();
         }
       }
+      if (energy > 0) {
+        energy *= s.rustleGain;
+        rustle.energy += energy;
+        dryW += energy * s.rustleDry;
+      }
       if (hi >= 0) {
         s.attr.clearUpdateRanges();
         s.attr.addUpdateRange(lo * 2, (hi - lo + 1) * 2);
         s.attr.needsUpdate = true;
       }
     }
+    rustle.dry = rustle.energy > 0 ? dryW / rustle.energy : 0;
   }
 
   /**
@@ -761,7 +813,7 @@ export class FieldManager {
    * disposing it frees its GPU buffers, including the previous smaller aBend: no orphaned buffers.
    * The old set is dropped from the list, leaving its typed arrays to the GC.
    */
-  private createSprings(geometry: THREE.BufferGeometry, capacity: number, previous: SpringSet | null, maxBend: number): SpringSet {
+  private createSprings(geometry: THREE.BufferGeometry, capacity: number, previous: SpringSet | null, maxBend: number, rustle?: { gain: number; dry: number }): SpringSet {
     if (previous) this.springSets = this.springSets.filter((s) => s !== previous);
     const bend = new Float32Array(capacity * 2);
     const attr = new THREE.InstancedBufferAttribute(bend, 2);
@@ -777,6 +829,8 @@ export class FieldManager {
       isActive: new Uint8Array(capacity),
       active: [],
       maxBend,
+      rustleGain: rustle?.gain ?? 0,
+      rustleDry: rustle?.dry ?? 0,
     };
     this.springSets.push(s);
     return s;
@@ -805,7 +859,7 @@ export class FieldManager {
     if (wheat) {
       visual = {
         single: WHEAT_LAYOUT,
-        parts: [{ geometry: wheat[stage], material: FIELD_CROP_MATERIAL, matrix: new THREE.Matrix4(), maxBend: WHEAT_MAX_BEND }],
+        parts: [{ geometry: wheat[stage], material: FIELD_CROP_MATERIAL, matrix: new THREE.Matrix4(), maxBend: WHEAT_MAX_BEND, rustle: WHEAT_RUSTLE[stage] }],
       };
     } else if (model) {
       // Plant pack: one instance per plant (springy batches copy the geometry for their aBend)
@@ -908,7 +962,7 @@ export class FieldManager {
         mesh.name = `FieldCrops_${key}`;
         mesh.matrixAutoUpdate = false;
         this.group.add(mesh);
-        const springs = springy ? this.createSprings(geometry, capacity, null, part.maxBend) : null;
+        const springs = springy ? this.createSprings(geometry, capacity, null, part.maxBend, part.rustle) : null;
         batch = { mesh, capacity, springs, part, ownsGeometry: springy, cx, cz, fading: false };
         this.batches.set(key, batch);
       }

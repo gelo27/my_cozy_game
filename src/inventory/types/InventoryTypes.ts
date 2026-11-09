@@ -191,6 +191,30 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     buyPrice: 12,
     cropType: 'pumpkin',
   },
+  {
+    id: 'apple_sapling',
+    name: 'Саджанець яблуні',
+    category: 'seeds',
+    count: 3,
+    maxStack: 20,
+    iconName: 'Sprout',
+    color: '#65a30d',
+    description: 'Молода яблунька. Посадіть будь-де на відкритій землі — за кілька хвилин виросте дерево, що цвіте й родить яблука.',
+    isEquippable: true,
+    buyPrice: 30,
+  },
+  {
+    id: 'apple',
+    name: 'Яблуко',
+    category: 'food',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Apple',
+    color: '#dc2626',
+    description: 'Соковите червоне яблуко з власного саду. Постукайте по стовбуру стиглої яблуні, щоб їх струсити.',
+    isEquippable: false,
+    sellPrice: 4,
+  },
   // Harvest Crates
   {
     id: 'crate_wheat',
@@ -472,6 +496,8 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'sunflower_seed') return '🌻';
   if (item.id === 'eggplant_seed') return '🍆';
   if (item.id === 'pumpkin_seed') return '🎃';
+  if (item.id === 'apple_sapling') return '🌱';
+  if (item.id === 'apple') return '🍎';
   if (item.id.startsWith('crate_')) return '📦';
   if (item.id === 'crate_wheat') return '📦';
   if (item.id === 'crate_carrot') return '📦';

@@ -123,6 +123,8 @@ export const en = {
   // Gathering
   'gather.fallen': 'Fallen tree',
   'gather.split': 'Split',
+  'web.title': 'Spider web',
+  'web.cut': 'Cut',
   'gather.needAxe': 'Axe needed [Q]',
   'gather.splitHint': 'One chop and {n} wood goes into your backpack.',
   'gather.tree': 'Tree',
@@ -139,6 +141,15 @@ export const en = {
   'gather.hit1': 'hit',
   'gather.hit2': 'hits',
   'gather.hit5': 'hits',
+  'apple.title': 'Apple tree',
+  'apple.plant': 'Plant the apple tree',
+  'apple.tooClose': 'Too close to another tree',
+  'apple.badGround': "Can't plant here",
+  'apple.knock': 'Knock the trunk ({done}/{max})',
+  'apple.growing': 'Apple tree growing ({stage}/3)',
+  'apple.resting': 'Apple tree in leaf',
+  'apple.blooming': 'Apple tree in bloom',
+  'apple.ripening': 'Apples ripening',
 
   // Inventory
   'inv.title': 'Backpack',
