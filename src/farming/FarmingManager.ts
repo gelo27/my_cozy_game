@@ -6,6 +6,10 @@ import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
 import { FieldManager, FarmField, FieldSaveData, FIELD_CELLS, FIELD_CRATE_YIELD, FIELD_SEED_COST } from './FieldManager';
 import { fieldCropTime } from './WheatModel';
+import { HarvestFlight, FlightItem } from './HarvestFlight';
+
+/** Hands one landed item to the inventory. */
+export type GiveItem = (itemId: string, amount: number) => void;
 import type { TerrainSystem } from '../world/TerrainSystem';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
 
@@ -18,6 +22,8 @@ export function cropForSeed(itemId: string | null | undefined): CropType | null 
 
 /** Growth speed of a dry crop relative to a watered one. */
 const UNWATERED_GROWTH_SPEED = 0.3;
+/** Metres past a field's edge where the player's centre still counts as standing on it. */
+const FIELD_EDGE_MARGIN = 0.2;
 
 export interface HarvestResult {
   cropType: CropType;
@@ -40,9 +46,14 @@ export class FarmingManager {
   /** Shovel-dug fields (instanced crops on terrain soil). */
   public readonly fields: FieldManager;
 
+  /** Where harvested crates fly to (the player); without it the items are given at once. */
+  public getCollector: (() => THREE.Vector3) | null = null;
+  private readonly flights: HarvestFlight;
+
   constructor(scene: THREE.Scene, particleManager?: ParticleManager) {
     if (particleManager) this.particleManager = particleManager;
     this.fields = new FieldManager(scene, () => this.getWaterDropMaterial());
+    this.flights = new HarvestFlight(scene);
   }
 
   public setWorld(terrain: TerrainSystem, physics: PhysicsWorld): void {
@@ -63,22 +74,43 @@ export class FarmingManager {
 
   /**
    * Advances a crop. Returns the stage it just reached (2 or 3) or 0 when nothing changed.
-   * Each stage dries the soil again, so a crop needs one watering per stage.
+   * One watering lasts until the crop is ripe; the soil only dries after harvest-ready.
    */
   private advanceCrop(crop: CropState, dt: number): 0 | 2 | 3 {
     if (crop.stage >= 3) return 0;
     // Crops ripen on their own; water makes them grow much faster
     crop.growthTimer += dt * (crop.isWatered ? 1 : UNWATERED_GROWTH_SPEED);
     if (crop.growthTimer < crop.stageDuration) return 0;
-    crop.isWatered = false;
     if (crop.stage === 1) {
       crop.stage = 2;
       crop.growthTimer = 0;
       return 2;
     }
     crop.stage = 3;
+    crop.isWatered = false;
     crop.growthTimer = crop.stageDuration;
     return 3;
+  }
+
+  /**
+   * Grows every crop by `seconds` at once (the player slept): stage by stage, so a long skip can
+   * carry a sprout all the way to ripe. No animation time passes.
+   */
+  public fastForward(seconds: number): void {
+    let changed = false;
+    for (const field of this.fields.getAll()) {
+      const crop = field.crop;
+      if (!crop) continue;
+      let left = seconds;
+      for (let i = 0; i < 3 && left > 0 && crop.stage < 3; i++) {
+        const rate = crop.isWatered ? 1 : UNWATERED_GROWTH_SPEED;
+        const need = Math.max(0, crop.stageDuration - crop.growthTimer) / rate;
+        const used = Math.min(left, need + 1e-3);
+        if (this.advanceCrop(crop, used)) changed = true;
+        left -= used;
+      }
+    }
+    if (changed) this.fields.markCropsDirty();
   }
 
   public update(dt: number): void {
@@ -98,6 +130,7 @@ export class FarmingManager {
       if (this.advanceCrop(crop, dt)) this.fields.markCropsDirty();
     }
     this.fields.update(dt, this.animTime);
+    this.flights.update(dt, this.getCollector?.() ?? null);
   }
 
   /** Seeds one sowing takes. */
@@ -141,7 +174,6 @@ export class FarmingManager {
     field.crop = this.newCrop(cropType);
     this.fields.markCropsDirty();
     audioEngine.at(field.center).playPlantSeed();
-    this.puffField(field);
     return true;
   }
 
@@ -160,19 +192,47 @@ export class FarmingManager {
     return true;
   }
 
-  /** Harvests a ripe field: several crates and some seed back. */
-  public harvest(id: string): HarvestResult | null {
+  /**
+   * Harvests a ripe field: several crates and some seed back. The crates fly to the player and
+   * `give` receives each item as it lands (at once when there is no player to fly to).
+   */
+  public harvest(id: string, give: GiveItem): HarvestResult | null {
     const field: FarmField | null = this.fields.get(id);
     if (!field?.crop || field.crop.stage < 3) return null;
     const cropType = field.crop.cropType;
     field.crop = null;
     this.fields.markCropsDirty();
     audioEngine.at(field.center).playHarvest();
-    this.puffField(field, 6);
-    this.particleManager?.emitBuildPuff(field.center, true, 24);
     // A field always returns some seed (2-4), so it can be sown again
     const bonusSeeds = 2 + Math.floor(Math.random() * 3);
-    return { cropType, crateItemId: CROP_DEFINITIONS[cropType].crateItemId, crates: FIELD_CRATE_YIELD, bonusSeeds };
+    const def = CROP_DEFINITIONS[cropType];
+    const crates: FlightItem[] = Array.from({ length: FIELD_CRATE_YIELD }, () => ({ itemId: def.crateItemId, amount: 1, look: 'crate' as const, cropType }));
+    this.sendToPlayer(field.center, crates, give, [{ itemId: def.seedItemId, amount: bonusSeeds, look: 'seeds', cropType }]);
+    return { cropType, crateItemId: def.crateItemId, crates: FIELD_CRATE_YIELD, bonusSeeds };
+  }
+
+  /**
+   * Digs a sown field up with the shovel. A ripe crop gives exactly what harvesting would;
+   * an unripe one gives the sown seeds back (a seed sack flies to the player). The field stays dug, empty.
+   */
+  public uproot(id: string, give: GiveItem): boolean {
+    const field = this.fields.get(id);
+    if (!field?.crop) return false;
+    if (field.crop.stage >= 3) return this.harvest(id, give) !== null;
+    const cropType = field.crop.cropType;
+    field.crop = null;
+    this.fields.markCropsDirty();
+    this.puffField(field, 6);
+    this.sendToPlayer(field.center, [{ itemId: CROP_DEFINITIONS[cropType].seedItemId, amount: FIELD_SEED_COST, look: 'seeds', cropType }], give);
+    return true;
+  }
+
+  private sendToPlayer(center: THREE.Vector3, pieces: FlightItem[], give: GiveItem, extra: FlightItem[] = []): void {
+    if (!this.getCollector) {
+      for (const it of [...pieces, ...extra]) if (it.amount > 0) give(it.itemId, it.amount);
+      return;
+    }
+    this.flights.launch(center, FIELD_CELLS - 1, pieces, give, extra);
   }
 
   /**
@@ -185,8 +245,8 @@ export class FarmingManager {
     _maxDistance: number = 3.2,
     seedCount: number = Infinity
   ): FarmInteractionPrompt | null {
-    // Fields are measured to their edge, so standing on (or right beside) one targets it
-    const near = this.fields.nearest(playerPosition.x, playerPosition.z, 1.4);
+    // Only the field the player stands on: a small margin forgives the body overhanging the edge
+    const near = this.fields.nearest(playerPosition.x, playerPosition.z, FIELD_EDGE_MARGIN);
     return near ? this.buildPrompt(near.field.id, near.field.crop, equippedItemId, seedCount) : null;
   }
 
@@ -235,7 +295,7 @@ export class FarmingManager {
     const progress = Math.min(1.0, crop.growthTimer / crop.stageDuration);
 
     if (!isWatered) {
-      const waterStepText = stage === 1 ? t('farm.water1') : t('farm.water2');
+      const waterStepText = t('farm.water1');
       return {
         ...base,
         canWater: isWateringCan,

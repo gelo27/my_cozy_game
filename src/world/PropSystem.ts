@@ -9,8 +9,10 @@ import { coastRadius, fbm } from './IslandGenerator';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { BUSH_MATERIAL, TREE_MATERIAL, TreeLods, foliageMaterialOf, getTreeLods, loadTreeModels, rebuildTreeLeaves, stepTreeWind } from './TreeModels';
 import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
-import { acquireDither, acquireInstancedDither } from './LodDither';
+import { FadeRange, acquireDistanceDither, acquireDither, acquireInstancedDither } from './LodDither';
 import { LodInstances } from './LodInstances';
+import { FLOWER_MATERIAL, loadFlowerModels } from './FlowerModels';
+import { AlgaeField, algaeGeometry, clampLinks } from './AlgaeChains';
 
 /**
  * Props are batched per type AND per square cell, so whole cells get culled. Far-seen types (trees,
@@ -18,6 +20,7 @@ import { LodInstances } from './LodInstances';
  */
 const CELL_SMALL = 64;
 const CELL_BIG = 128;
+const CELL_FADE = 32;
 /** Phones draw props a bit less far (the fog is thick there anyway). */
 const VIEW_SCALE = isMobileDevice() ? 0.75 : 1;
 /** How far each type stays drawn (m); small things vanish first. Default for the rest: 160. */
@@ -30,6 +33,11 @@ const VIEW_DIST: Record<string, number> = {
   flowers: 75,
   mushrooms: 60,
 };
+/**
+ * Types that dissolve (dithered, per instance) over the last this-many metres of their draw
+ * distance instead of popping out cell by cell.
+ */
+const FADE_BAND: Record<string, number> = { flowers: 16 };
 /**
  * Distances (from the camera, per tree) where a tree steps down to its next LOD (the trees pack
  * has 3); a few metres of hysteresis keep a tree from flickering between two levels at a boundary.
@@ -77,6 +85,11 @@ export interface PropDef {
   /** Collider: cylinder [radius, height] or box [w, h, d]; none when walk-through. */
   collider?: { kind: 'cyl'; r: number; h: number } | { kind: 'box'; w: number; h: number; d: number };
   build: (b: PropBuilder) => void;
+  /**
+   * Chain props (algae): drawn by AlgaeField from welded chain links instead of the instanced
+   * batches; each instance has its own link count (`PropInstance.length`).
+   */
+  chain?: true;
 }
 
 export interface PropInstance {
@@ -87,6 +100,10 @@ export interface PropInstance {
   scale: number;
   /** Keep the prop glued to the terrain when heights change. */
   grounded: boolean;
+  /** Chain props: number of links. */
+  length?: number;
+  /** Algae: own root and top colours (sRGB hex); none = the developer panel's. */
+  colors?: [number, number];
 }
 
 export interface PropSaveData {
@@ -95,6 +112,10 @@ export interface PropSaveData {
   r: number;
   s: number;
   g?: boolean;
+  /** Chain props: number of links. */
+  n?: number;
+  /** Algae: own root and top colours. */
+  c?: [number, number];
 }
 
 // ------------------------------------------------------------------ shared materials
@@ -260,6 +281,11 @@ export const PROP_DEFS: PropDef[] = [
     },
   },
   {
+    // Algae stalk: chain links from algae_chain.glb with a top; built by AlgaeField (underwater)
+    id: 'algae', name: 'Водорість', icon: 'Waves', category: 'nature', chain: true,
+    build: (b) => b.cyl(M.leaf, 0.02, 0.02, 1.5, 0, 0.75, 0, 5),
+  },
+  {
     id: 'stump', name: 'Пень', icon: 'Circle', category: 'nature',
     collider: { kind: 'cyl', r: 0.4, h: 0.5 },
     build: (b) => {
@@ -399,6 +425,8 @@ interface PropBatch {
   /** Camera spot of the last per-tree LOD pass. */
   passX: number;
   passZ: number;
+  /** Wearing its type's distance-dither materials (the cell reaches into the fade band). */
+  fading: boolean;
 }
 
 /**
@@ -429,11 +457,31 @@ export class PropSystem {
   private static readonly _s = new THREE.Vector3();
   private static readonly _up = new THREE.Vector3(0, 1, 0);
 
+  /** Algae chains (props with `chain` defs live here instead of the batches). */
+  public readonly algae: AlgaeField;
+
   constructor(scene: THREE.Scene, private readonly physics: PhysicsWorld, private readonly terrain: TerrainSystem) {
     this.group.name = 'Props';
     scene.add(this.group);
+    this.algae = new AlgaeField(this.group);
     // Oak and pine come from the trees pack; until it loads (or if it fails) the procedural trees stand in
     void loadTreeModels().then((lods) => lods && this.applyTreeModels(lods));
+    // Tulips from the flowers pack replace the procedural flowers (kept if the pack fails)
+    void loadFlowerModels().then((clump) => clump && this.applyModel('flowers', clump, FLOWER_MATERIAL));
+  }
+
+  /** Swaps a single-LOD type's geometry and material to a loaded model, including cells already built. */
+  private applyModel(type: string, geometry: THREE.BufferGeometry, material: THREE.Material): void {
+    const old = this.geometries.get(type);
+    this.geometries.set(type, { geometry, materials: [material] });
+    this.fadeMaterials.delete(type);
+    for (const b of this.batches.values()) {
+      if (b.def.id !== type) continue;
+      b.mesh.geometry = geometry;
+      b.mesh.material = [material];
+      b.fading = false;
+    }
+    if (old && old.geometry !== geometry) old.geometry.dispose();
   }
 
   /** Swaps the trees' geometries (all LODs) to the loaded models, including cells already built. */
@@ -480,6 +528,8 @@ export class PropSystem {
 
   private static cellSize(type: string): number {
     if (LOD_BUILDS[type]) return CELL_SMALL;
+    // Fading types: cells small enough that the near ones stay out of the fade band (solid)
+    if (FADE_BAND[type]) return CELL_FADE;
     return (VIEW_DIST[type] ?? 160) > 160 ? CELL_BIG : CELL_SMALL;
   }
 
@@ -531,6 +581,7 @@ export class PropSystem {
       lods: null,
       passX: Infinity,
       passZ: Infinity,
+      fading: false,
     };
     batch.lods = this.makeLods(batch);
     this.batches.set(key, batch);
@@ -656,6 +707,11 @@ export class PropSystem {
       const dz = Math.max(z0 - camera.z, 0, camera.z - z0 - b.size);
       const d2 = dx * dx + dz * dz;
       const view = b.def.id === 'tree_pine' || b.def.id === 'tree_round' ? treeView : b.viewDist;
+      const band = FADE_BAND[b.def.id];
+      if (band && !b.lods) {
+        this.passFade(b, camera, Math.sqrt(d2), band);
+        continue;
+      }
       const visible = b.ids.length > 0 && d2 < view * view;
       if (!b.lods) {
         b.mesh.visible = visible;
@@ -706,6 +762,42 @@ export class PropSystem {
     if (all >= 0 && !lods.busy) lods.markUniform(all);
   }
 
+  private readonly fadeRanges = new Map<string, FadeRange>();
+  private readonly fadeMaterials = new Map<string, THREE.Material[]>();
+
+  /**
+   * A fading type's cell: drawn up to its draw distance (plus the shader's jitter), wearing the
+   * distance-dither twins only while its far side reaches into the fade band; nearer cells keep
+   * the solid materials, so their fragments never pay for `discard`.
+   */
+  private passFade(b: PropBatch, camera: THREE.Vector3, near: number, band: number): void {
+    const view = b.viewDist;
+    const slack = band * 0.15;
+    b.mesh.visible = b.ids.length > 0 && near < view + slack;
+    if (!b.mesh.visible) return;
+    const x0 = b.cx * b.size;
+    const z0 = b.cz * b.size;
+    const fx = Math.max(Math.abs(camera.x - x0), Math.abs(camera.x - x0 - b.size));
+    const fz = Math.max(Math.abs(camera.z - z0), Math.abs(camera.z - z0 - b.size));
+    const fading = Math.hypot(fx, fz) > view - band - slack;
+    if (fading === b.fading) return;
+    b.fading = fading;
+    const type = b.def.id;
+    const solid = this.geometries.get(type)?.materials ?? (b.mesh.material as THREE.Material[]);
+    if (!fading) {
+      b.mesh.material = solid;
+      return;
+    }
+    let mats = this.fadeMaterials.get(type);
+    if (!mats) {
+      let range = this.fadeRanges.get(type);
+      if (!range) this.fadeRanges.set(type, (range = { value: new THREE.Vector2(view - band, view) }));
+      mats = solid.map((m) => acquireDistanceDither(m, range));
+      this.fadeMaterials.set(type, mats);
+    }
+    b.mesh.material = mats;
+  }
+
   private lastVisibilityAt = 0;
   private lodPassIn = 0;
   private leafRevision = vegetationRevision.leaves;
@@ -721,8 +813,22 @@ export class PropSystem {
     }
   }
 
-  public add(type: string, x: number, z: number, rotationY = 0, scale = 1, y?: number, grounded = true): number | null {
+  public add(
+    type: string, x: number, z: number, rotationY = 0, scale = 1, y?: number, grounded = true, length?: number, colors?: [number, number] | null
+  ): number | null {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+    const def = PROP_DEF_MAP.get(type);
+    if (def?.chain) {
+      const id = this.nextId++;
+      const prop: PropInstance = {
+        id, type, position: new THREE.Vector3(x, y ?? this.terrain.getHeight(x, z), z), rotationY, scale, grounded, length: clampLinks(length),
+        colors: colors ? [colors[0], colors[1]] : undefined,
+      };
+      this.props.set(id, prop);
+      this.algae.add(prop);
+      this.revision++;
+      return id;
+    }
     const batch = this.getBatch(type, x, z);
     if (!batch) return null;
     const id = this.nextId++;
@@ -745,6 +851,7 @@ export class PropSystem {
     const prop = this.props.get(id);
     if (!prop) return;
     this.detach(id);
+    this.algae.remove(id);
     const body = this.bodies.get(id);
     if (body) this.physics.removeRigidBody(body);
     this.bodies.delete(id);
@@ -761,9 +868,11 @@ export class PropSystem {
   public setPose(id: number, pose: { axis: THREE.Vector3; angle: number; scale: number } | null): void {
     const prop = this.props.get(id);
     if (!prop) return;
+    const batch = this.batchOf.get(id);
+    if (!batch) return;
     if (pose) this.poses.set(id, pose);
     else this.poses.delete(id);
-    this.writeMatrix(this.batchOf.get(id)!, this.slotOf.get(id)!, prop);
+    this.writeMatrix(batch, this.slotOf.get(id)!, prop);
   }
 
   private transientRevision = 0;
@@ -781,7 +890,8 @@ export class PropSystem {
       if (body) this.physics.removeRigidBody(body);
       this.bodies.delete(id);
     } else if (!body) {
-      this.createBody(prop, this.batchOf.get(id)!.def);
+      const def = PROP_DEF_MAP.get(prop.type);
+      if (def) this.createBody(prop, def);
     }
   }
 
@@ -791,6 +901,11 @@ export class PropSystem {
     prop.position.copy(position);
     prop.rotationY = rotationY;
     prop.scale = scale;
+    if (PROP_DEF_MAP.get(prop.type)?.chain) {
+      this.algae.refresh(prop);
+      this.revision++;
+      return;
+    }
     let batch = this.batchOf.get(id)!;
     if (batch.cx !== Math.floor(position.x / batch.size) || batch.cz !== Math.floor(position.z / batch.size)) {
       // Moved into another cell
@@ -804,6 +919,41 @@ export class PropSystem {
     if (body) this.physics.removeRigidBody(body);
     this.createBody(prop, batch.def);
     this.revision++;
+  }
+
+  /** Chain props: sets the number of links (the stalk is rebuilt from the shared geometries). */
+  public setChainLength(id: number, length: number): void {
+    const prop = this.props.get(id);
+    if (!prop || !PROP_DEF_MAP.get(prop.type)?.chain) return;
+    prop.length = clampLinks(length);
+    this.algae.refresh(prop);
+    this.revision++;
+  }
+
+  /** Algae: own root and top colours (sRGB hex), or null for the developer panel's. */
+  public setChainColors(id: number, colors: [number, number] | null): void {
+    const prop = this.props.get(id);
+    if (!prop || !PROP_DEF_MAP.get(prop.type)?.chain) return;
+    prop.colors = colors ? [colors[0], colors[1]] : undefined;
+    this.algae.recolor(prop);
+    this.revision++;
+  }
+
+  /** Geometry to preview a type with (the editor's placement ghost); null while it loads. */
+  public previewGeometry(type: string, length?: number): THREE.BufferGeometry | null {
+    const def = PROP_DEF_MAP.get(type);
+    if (!def) return null;
+    if (def.chain) return algaeGeometry(clampLinks(length));
+    let shared = this.geometries.get(type);
+    if (!shared) {
+      const models = getTreeLods()?.[type];
+      if (models) return models[0];
+      const b = new PropBuilder();
+      def.build(b);
+      shared = b.build();
+      this.geometries.set(type, shared);
+    }
+    return shared.geometry;
   }
 
   public get(id: number): PropInstance | undefined {
@@ -852,6 +1002,8 @@ export class PropSystem {
         best = { id: batch.ids[h.instanceId], point: h.point.clone(), distance: h.distance };
       }
     }
+    const algae = this.algae.pick(raycaster);
+    if (algae && (!best || algae.distance < best.distance)) best = algae;
     return best;
   }
 
@@ -871,7 +1023,11 @@ export class PropSystem {
       const y = this.terrain.getHeight(prop.position.x, prop.position.z);
       if (Math.abs(y - prop.position.y) > 0.01) {
         prop.position.y = y;
-        const batch = this.batchOf.get(prop.id)!;
+        const batch = this.batchOf.get(prop.id);
+        if (!batch) {
+          this.algae.refresh(prop);
+          continue;
+        }
         this.writeMatrix(batch, this.slotOf.get(prop.id)!, prop);
         const body = this.bodies.get(prop.id);
         if (body) body.setTranslation({ x: prop.position.x, y: y + this.colliderOffset(batch.def), z: prop.position.z }, false);
@@ -922,6 +1078,8 @@ export class PropSystem {
       r: +p.rotationY.toFixed(4),
       s: +p.scale.toFixed(3),
       g: p.grounded ? undefined : false,
+      n: p.length,
+      c: p.colors,
     }));
     this.saveCache = { key, data };
     return data;
@@ -929,7 +1087,7 @@ export class PropSystem {
 
   public deserialize(data: PropSaveData[]): void {
     this.clear();
-    for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.p[1], d.g !== false);
+    for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.p[1], d.g !== false, d.n, Array.isArray(d.c) && d.c.length === 2 ? d.c : null);
   }
 
   /** Default decoration so a fresh world does not look empty. */

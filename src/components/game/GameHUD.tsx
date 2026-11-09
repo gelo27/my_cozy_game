@@ -9,6 +9,7 @@ import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
 import { t, dataName } from '../../i18n/i18n';
 import { worldSettings } from '../../world/WorldSettings';
 import { ItemIcon } from '../ItemIcon';
+import { useGameplayPrompt } from '../promptStore';
 
 const WEATHER_ICON: Record<WeatherType, React.ElementType> = {
   clear: Sun,
@@ -53,30 +54,32 @@ const ClockLabel: React.FC = () => {
   return <span className="text-sm font-bold tabular-nums">{text}</span>;
 };
 
-/** Hotbar shows what the player can hold; 1-8 keys or a tap equips. */
-function useHotbar(inventory: InventoryManager): { items: InventoryItem[]; equipped: string | null } {
+/** Hotbar shows the 8 slots the player filled in the backpack; 1-8 keys or a tap equips. */
+function useHotbar(inventory: InventoryManager): { slots: (InventoryItem | null)[]; equipped: string | null } {
   const [state, setState] = useState(() => inventory.getState());
   useEffect(() => inventory.subscribe((s) => setState({ ...s })), [inventory]);
-  const items = state.items.filter((i) => i.isEquippable && i.count > 0).slice(0, 8);
-  return { items, equipped: state.equippedItemId };
+  const slots = state.hotbar.map((id) => (id ? state.items.find((i) => i.id === id && i.count > 0) ?? null : null));
+  return { slots, equipped: state.equippedItemId };
 }
 
 export const GameHUD: React.FC<GameHUDProps> = ({
   hud, inventory, hidden, devToolsEnabled, onOpenBackpack, onToggleBuild, onOpenEditor, onOpenMap, onCallMoped, onPause, onAction,
 }) => {
-  const { items, equipped } = useHotbar(inventory);
+  const { slots, equipped } = useHotbar(inventory);
 
   useEffect(() => {
     if (hidden) return;
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (inventory.isInventoryOpen()) return;
       const n = Number(e.key);
-      if (n >= 1 && n <= items.length && !e.ctrlKey) inventory.equipItem(items[n - 1].id);
+      const item = n >= 1 && n <= slots.length && !e.ctrlKey ? slots[n - 1] : null;
+      if (item?.isEquippable) inventory.equipItem(item.id);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hidden, items, inventory]);
+  }, [hidden, slots, inventory]);
 
   if (hidden || !hud) return null;
   const WeatherIcon = hud.isNight && hud.weather === 'clear' ? Moon : WEATHER_ICON[hud.weather];
@@ -126,43 +129,41 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         </HudButton>
       </div>
 
-      {/* Interaction prompt */}
-      {hud.prompt && !hud.fishing && (
-        <div className="absolute bottom-60 sm:bottom-28 touch:sm:bottom-16 left-1/2 -translate-x-1/2 flex gap-2 pointer-events-auto">
-          <PromptButton keyLabel={hud.prompt.key} text={hud.prompt.text} onClick={() => onAction(hud.prompt!.action)} />
-          {hud.prompt.secondary && (
-            <PromptButton
-              keyLabel={hud.prompt.secondary.key}
-              text={hud.prompt.secondary.text}
-              onClick={() => onAction('treat')}
-            />
-          )}
-        </div>
-      )}
+      {/* Interaction prompt (re-renders on its own, see promptStore) */}
+      {!hud.fishing && <GameplayPromptButtons onAction={onAction} />}
 
       {hud.fishing && <FishingWidget hud={hud} onPress={() => onAction('fish')} />}
 
       {/* Hotbar */}
-      {items.length > 0 && (
+      {slots.some(Boolean) && (
         <div className={`absolute bottom-3 left-1/2 -translate-x-1/2 ${panel} rounded-2xl p-1.5 flex gap-1.5 pointer-events-auto touch:bottom-2 touch:p-1 touch:gap-1 touch:rounded-xl`}>
-          {items.map((item, i) => (
-            <button
-              key={item.id}
-              onClick={() => inventory.equipItem(item.id)}
-              title={dataName('item', item.id, item.name)}
-              className={`relative w-11 h-11 sm:w-12 sm:h-12 touch:w-9 touch:h-9 touch:text-lg rounded-xl touch:rounded-lg flex items-center justify-center text-xl transition-all ${
-                equipped === item.id
-                  ? 'bg-amber-200 ring-2 ring-amber-500 scale-105'
-                  : 'bg-white/70 hover:bg-amber-50'
-              }`}
-            >
-              <ItemIcon item={item} />
-              <span className="absolute top-0.5 left-1 text-[9px] font-bold text-[#a08a68] hidden sm:block touch:hidden">{i + 1}</span>
-              {item.maxStack > 1 && (
-                <span className="absolute bottom-0 right-1 text-[10px] touch:text-[9px] touch:right-0.5 font-bold text-[#4a3b2a]">{item.count}</span>
-              )}
-            </button>
-          ))}
+          {slots.map((item, i) =>
+            item ? (
+              <button
+                key={i}
+                onClick={() => item.isEquippable && inventory.equipItem(item.id)}
+                title={dataName('item', item.id, item.name)}
+                className={`relative w-11 h-11 sm:w-12 sm:h-12 touch:w-9 touch:h-9 touch:text-lg rounded-xl touch:rounded-lg flex items-center justify-center text-xl transition-all ${
+                  equipped === item.id
+                    ? 'bg-amber-200 ring-2 ring-amber-500 scale-105'
+                    : 'bg-white/70 hover:bg-amber-50'
+                }`}
+              >
+                <ItemIcon item={item} />
+                <span className="absolute top-0.5 left-1 text-[9px] font-bold text-[#a08a68] hidden sm:block touch:hidden">{i + 1}</span>
+                {item.maxStack > 1 && (
+                  <span className="absolute bottom-0 right-1 text-[10px] touch:text-[9px] touch:right-0.5 font-bold text-[#4a3b2a]">{item.count}</span>
+                )}
+              </button>
+            ) : (
+              <div
+                key={i}
+                className="relative w-11 h-11 sm:w-12 sm:h-12 touch:w-9 touch:h-9 rounded-xl touch:rounded-lg bg-[#e9ded0]/40 border border-dashed border-[#d8c8b4]"
+              >
+                <span className="absolute top-0.5 left-1 text-[9px] font-bold text-[#a08a68]/60 hidden sm:block touch:hidden">{i + 1}</span>
+              </div>
+            ),
+          )}
         </div>
       )}
     </div>
@@ -180,6 +181,20 @@ const HudButton: React.FC<{ label: string; hotkey: string; onClick(): void; chil
     {children}
   </button>
 );
+
+/** The E (and G) prompt of stations, the NPC and pets; subscribed to promptStore on its own. */
+const GameplayPromptButtons: React.FC<{ onAction: GameHUDProps['onAction'] }> = ({ onAction }) => {
+  const prompt = useGameplayPrompt();
+  if (!prompt) return null;
+  return (
+    <div className="absolute bottom-60 sm:bottom-28 touch:sm:bottom-16 left-1/2 -translate-x-1/2 flex gap-2 pointer-events-auto">
+      <PromptButton keyLabel={prompt.key} text={prompt.text} onClick={() => onAction(prompt.action)} />
+      {prompt.secondary && (
+        <PromptButton keyLabel={prompt.secondary.key} text={prompt.secondary.text} onClick={() => onAction('treat')} />
+      )}
+    </div>
+  );
+};
 
 const PromptButton: React.FC<{ keyLabel: string; text: string; onClick(): void }> = ({ keyLabel, text, onClick }) => (
   <button

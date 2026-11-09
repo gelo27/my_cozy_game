@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Play, Save, Volume2, VolumeX, RotateCcw, Maximize, Minimize } from 'lucide-react';
+import { Play, Save, Volume2, VolumeX, RotateCcw, Maximize, Minimize, BedDouble, Flag } from 'lucide-react';
 import { userSettings, updateUserSettings, onUserSettingsChange, resetUserSettings, UserSettings } from '../../config/userSettings';
 import { t, useLang, setLang, LANGS } from '../../i18n/i18n';
 import { TKey } from '../../i18n/en';
@@ -68,8 +68,13 @@ function useFullscreen(): [boolean, () => void] {
   return [on, toggle];
 }
 
-/** Pause overlay: resume, save, sound mixer and a couple of control options. */
-export const PauseMenu: React.FC<{ onResume(): void; onSave(): void }> = ({ onResume, onSave }) => {
+/** Pause overlay: resume, save, respawn, sound mixer and a couple of control options. */
+export const PauseMenu: React.FC<{ onResume(): void; onSave(): void; onRespawn(): void; respawnAt: 'bed' | 'spawn' }> = ({
+  onResume,
+  onSave,
+  onRespawn,
+  respawnAt,
+}) => {
   const s = useUserSettings();
   const lang = useLang();
   const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -96,6 +101,14 @@ export const PauseMenu: React.FC<{ onResume(): void; onSave(): void }> = ({ onRe
             className="col-span-2 h-10 rounded-2xl bg-white border border-[#e9dcc3] hover:bg-amber-50 font-semibold flex items-center justify-center gap-2 active:scale-[0.98] transition"
           >
             <Save className="w-4 h-4" /> {t('pause.save')}
+          </button>
+          {/* Unstuck / go home: the bed slept in last, or the starting point */}
+          <button
+            onClick={onRespawn}
+            className="col-span-2 h-10 rounded-2xl bg-white border border-[#e9dcc3] hover:bg-amber-50 font-semibold flex items-center justify-center gap-2 active:scale-[0.98] transition"
+          >
+            {respawnAt === 'bed' ? <BedDouble className="w-4 h-4" /> : <Flag className="w-4 h-4" />}
+            {t(respawnAt === 'bed' ? 'pause.respawnBed' : 'pause.respawnSpawn')}
           </button>
           {/* Temporary: full-screen toggle (handy on phones, where the browser bars eat the screen) */}
           {canFullscreen && (

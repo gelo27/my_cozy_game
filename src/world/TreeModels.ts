@@ -37,8 +37,11 @@ export function stepTreeWind(dt: number): void {
 /** Bushes bent by the player, pets, the moped, ... at once (BushSway fills these). */
 export const MAX_BENT_BUSHES = 8;
 /** Per bent bush: world x, z of its instance, then its top's world XZ offset. */
-export const uBushBend = { value: Array.from({ length: MAX_BENT_BUSHES }, () => new THREE.Vector4()) };
-export const uBushBendCount = { value: 0 };
+// Kept on globalThis so a hot-reloaded copy of this module (Vite HMR) shares the uniforms the
+// compiled bush material already reads, instead of BushSway writing into an orphaned copy.
+const bendStore = globalThis as { __bushBend?: { value: THREE.Vector4[] }; __bushBendCount?: { value: number } };
+export const uBushBend = (bendStore.__bushBend ??= { value: Array.from({ length: MAX_BENT_BUSHES }, () => new THREE.Vector4()) });
+export const uBushBendCount = (bendStore.__bushBendCount ??= { value: 0 });
 
 /**
  * Foliage material: vertex colours, double-sided (the pack's crowns are open underneath, so

@@ -11,7 +11,8 @@ import { CavePanel } from './CavePanel';
 import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool } from '../../editor/EditorController';
-import { PROP_DEFS, PropCategory } from '../../world/PropSystem';
+import { PROP_DEFS, PROP_DEF_MAP, PropCategory } from '../../world/PropSystem';
+import { ALGAE_MAX_LINKS, ALGAE_MIN_LINKS, algaeHeight, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
 import { TerrainTileType, TILE_DEFINITIONS } from '../../terrain/types/TerrainTypes';
 import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, WeatherSound } from '../../world/WeatherSystem';
 import { worldSettings } from '../../world/WorldSettings';
@@ -23,7 +24,7 @@ import { causticsSettings, applyCausticsSettings, resetCausticsSettings, Caustic
 
 const ICONS: Record<string, React.ElementType> = {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
-  Flame, Mailbox,
+  Flame, Mailbox, Waves,
 };
 
 const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції' };
@@ -204,6 +205,20 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           </div>
         </Section>
         <Slider label="Масштаб" value={s.placeScale} min={0.3} max={3} step={0.05} onChange={(v) => editor.set('placeScale', v)} fmt={(v) => `${v.toFixed(2)}×`} />
+        {PROP_DEF_MAP.get(s.placeType)?.chain && (
+          <Slider
+            label="Довжина ланцюжка"
+            value={s.placeChainLength}
+            min={ALGAE_MIN_LINKS}
+            max={ALGAE_MAX_LINKS}
+            step={1}
+            onChange={(v) => editor.set('placeChainLength', v)}
+            fmt={(v) => `${v} ланок · ${(algaeHeight(v) * s.placeScale).toFixed(2)} м`}
+          />
+        )}
+        {PROP_DEF_MAP.get(s.placeType)?.chain && (
+          <AlgaeColorFields colors={s.placeAlgaeColors} onChange={(c) => editor.set('placeAlgaeColors', c)} />
+        )}
         <label className="flex items-center gap-2 text-zinc-300">
           <input type="checkbox" checked={s.placeRandomize} onChange={(e) => editor.set('placeRandomize', e.target.checked)} className="accent-sky-500" />
           Випадковий поворот і розмір
@@ -319,6 +334,25 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         />
         Прилипати до землі
       </label>
+      {def?.chain && (
+        <Slider
+          label="Довжина ланцюжка"
+          value={prop.length ?? ALGAE_MIN_LINKS}
+          min={ALGAE_MIN_LINKS}
+          max={ALGAE_MAX_LINKS}
+          step={1}
+          onStart={() => editor.pushUndo()}
+          onChange={(v) => editor.setSelectedChainLength(v)}
+          fmt={(v) => `${v} ланок · ${(algaeHeight(v) * prop.scale).toFixed(2)} м`}
+        />
+      )}
+      {def?.chain && (
+        <AlgaeColorFields
+          colors={prop.colors ?? null}
+          onStart={() => editor.pushUndo()}
+          onChange={(c) => editor.setSelectedChainColors(c)}
+        />
+      )}
       <div className="flex gap-1">
         <button className={`${chip(false)} flex-1`} onClick={() => editor.duplicateSelected()}>
           <Copy className="w-3.5 h-3.5" /> Копія
@@ -391,11 +425,12 @@ const SOUND_ROWS: { key: keyof WeatherSound; label: string; max: number }[] = [
   { key: 'birdRate', label: 'Частота співу птахів', max: 3 },
   { key: 'insects', label: 'Цвіркуни вночі', max: 1.5 },
   { key: 'breeze', label: 'Легкий вітерець', max: 1.5 },
+  { key: 'fog', label: 'Шум туману', max: 2 },
 ];
 
 const PRECIP_LABELS: Record<'none' | 'rain' | 'snow', string> = { none: 'Нема', rain: 'Дощ', snow: 'Сніг' };
 
-const ColorRow: React.FC<{ label: string; value: THREE.Color; onChange(hex: number): void }> = ({ label, value, onChange }) => (
+const ColorRow: React.FC<{ label: string; value: THREE.Color; onChange(hex: number): void; onStart?(): void }> = ({ label, value, onChange, onStart }) => (
   <label className="flex items-center justify-between text-zinc-400">
     <span>{label}</span>
     <span className="flex items-center gap-2">
@@ -403,6 +438,7 @@ const ColorRow: React.FC<{ label: string; value: THREE.Color; onChange(hex: numb
       <input
         type="color"
         value={`#${value.getHexString()}`}
+        onPointerDown={onStart}
         onChange={(e) => onChange(parseInt(e.target.value.slice(1), 16))}
         className="w-8 h-6 bg-transparent border border-white/10 rounded cursor-pointer"
       />
@@ -833,7 +869,58 @@ const VegetationPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
       <button className={chip(false)} onClick={() => (resetVegetationSettings(), rerender())}>
         Скинути до типових
       </button>
+      <AlgaePanel rerender={rerender} />
     </>
+  );
+};
+
+/**
+ * One stalk's colours: off = it follows the panel's algae colours, on = its own root and top
+ * colours (starting from the panel's).
+ */
+const AlgaeColorFields: React.FC<{ colors: [number, number] | null; onChange(c: [number, number] | null): void; onStart?(): void }> = ({
+  colors, onChange, onStart,
+}) => (
+  <div className="flex flex-col gap-1.5">
+    <label className="flex items-center gap-2 text-zinc-300">
+      <input
+        type="checkbox"
+        checked={!!colors}
+        onChange={(e) => {
+          onStart?.();
+          onChange(e.target.checked ? [algaeSettings.baseColor, algaeSettings.tipColor] : null);
+        }}
+        className="accent-sky-500"
+      />
+      Свій колір водорості
+    </label>
+    {colors ? (
+      <>
+        <ColorRow label="Колір біля дна" value={new THREE.Color(colors[0])} onStart={onStart} onChange={(hex) => onChange([hex, colors[1]])} />
+        <ColorRow label="Колір верхівки" value={new THREE.Color(colors[1])} onStart={onStart} onChange={(hex) => onChange([colors[0], hex])} />
+      </>
+    ) : (
+      <p className="text-[10px] text-zinc-500">Бере загальні кольори з вкладки «Рослинність → Водорості».</p>
+    )}
+  </div>
+);
+
+/** Algae look: root-to-top colours and the daylight shimmer (live, kept in this browser). */
+const AlgaePanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const a = algaeSettings;
+  return (
+    <Section title="Водорості">
+      <ColorRow label="Колір біля дна" value={new THREE.Color(a.baseColor)} onChange={(hex) => (setAlgae('baseColor', hex), rerender())} />
+      <ColorRow label="Колір верхівки" value={new THREE.Color(a.tipColor)} onChange={(hex) => (setAlgae('tipColor', hex), rerender())} />
+      <p className="text-[10px] text-zinc-500">Вдень по водоростях біжать відблиски сонця — світліший відтінок їхнього ж кольору (вночі й у печерах їх нема, під дощем слабшають).</p>
+      <ColorRow label="Відтінок відблисків" value={new THREE.Color(a.shimmerColor)} onChange={(hex) => (setAlgae('shimmerColor', hex), rerender())} />
+      <Slider label="Сила відблисків" value={a.shimmer} min={0} max={2} step={0.05} fmt={(v) => v.toFixed(2)} onChange={(v) => (setAlgae('shimmer', v), rerender())} />
+      <Slider label="Швидкість" value={a.shimmerSpeed} min={0} max={3} step={0.05} fmt={(v) => `${v.toFixed(2)}×`} onChange={(v) => (setAlgae('shimmerSpeed', v), rerender())} />
+      <Slider label="Дрібність візерунка" value={a.shimmerScale} min={0.2} max={3} step={0.05} fmt={(v) => v.toFixed(2)} onChange={(v) => (setAlgae('shimmerScale', v), rerender())} />
+      <button className={chip(false)} onClick={() => (resetAlgaeSettings(), rerender())}>
+        Скинути водорості
+      </button>
+    </Section>
   );
 };
 

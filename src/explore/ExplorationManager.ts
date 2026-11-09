@@ -340,6 +340,24 @@ export class ExplorationManager {
     });
   }
 
+  /**
+   * Moves the player to `pos` behind the doorway fade (the respawn button). From the caves this
+   * also leaves the underground, exactly like walking out of a mouth.
+   */
+  public teleport(character: CharacterController, camera: ThirdPersonCamera, pos: THREE.Vector3, done?: () => void): void {
+    this.startTransition(() => {
+      character.respawn(pos);
+      camera.targetYaw = character.model.group.rotation.y + Math.PI;
+      if (this.inCave) {
+        this.inCave = null;
+        this.lightRevision++;
+        this.gameplay.anchorOverride = null;
+      }
+      this.revision++;
+      done?.();
+    });
+  }
+
   /** Just outside a cave's mouth, on the levelled pad. */
   private outsideSpot(cave: CaveEntry): THREE.Vector3 {
     const s = cave.site;

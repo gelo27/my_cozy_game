@@ -14,6 +14,8 @@ export interface SkyParams {
   day: number;
   night: number;
   flash: number;
+  /** 0..1 how much moonlight reaches the clouds (low under thick overcast, rain and storms). */
+  moonCloud: number;
 }
 
 /**
@@ -45,6 +47,11 @@ export class SkyDome {
         uDay: { value: 1 },
         uNight: { value: 0 },
         uFlash: { value: 0 },
+        uMoonCloud: { value: 1 },
+        uMeteorA: { value: new THREE.Vector3(0, 1, 0) },
+        uMeteorB: { value: new THREE.Vector3(0, 1, 0) },
+        uMeteorT: { value: 0 },
+        uMeteorAmp: { value: 0 },
         uTime: { value: 0 },
       },
       vertexShader: `
@@ -56,7 +63,10 @@ export class SkyDome {
       fragmentShader: `
         #define CLOUD_OCTAVES ${octaves}
         uniform vec3 uZenith, uHorizon, uSunDir, uMoonDir, uSunColor, uCloudLit, uCloudShade;
-        uniform float uCover, uDay, uNight, uFlash, uTime;
+        uniform float uCover, uDay, uNight, uFlash, uMoonCloud, uTime;
+        // Shooting star: path from uMeteorA to uMeteorB (unit dirs), uMeteorT = 0..1 progress
+        uniform vec3 uMeteorA, uMeteorB;
+        uniform float uMeteorT, uMeteorAmp;
         varying vec3 vDir;
 
         float hash12(vec2 p) {
@@ -123,6 +133,18 @@ export class SkyDome {
             }
           }
 
+          // Shooting star: a short bright streak whose head runs along the path, tail fading out
+          // behind it. Drawn before the clouds, so a cloud in front hides it.
+          if (uMeteorAmp > 0.001 && h > 0.0) {
+            vec3 head = normalize(mix(uMeteorA, uMeteorB, uMeteorT));
+            vec3 tail = normalize(mix(uMeteorA, uMeteorB, max(uMeteorT - 0.3, 0.0)));
+            vec3 pa = d - tail, ba = head - tail;
+            float seg = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+            float dist = length(pa - ba * seg);
+            float core = smoothstep(0.0022, 0.0, dist) + smoothstep(0.009, 0.0, dist) * 0.25;
+            col += vec3(0.85, 0.92, 1.0) * core * seg * seg * uMeteorAmp * 1.4;
+          }
+
           // Sun: disc + wide warm glow (warmth comes from uSunColor near sunrise/sunset)
           float sd = dot(d, uSunDir);
           float sdp = max(sd, 0.0);
@@ -145,7 +167,14 @@ export class SkyDome {
             vec3 cc = mix(uCloudShade, uCloudLit, lit * (1.0 - smoothstep(0.6, 1.0, dens) * 0.35));
             // Thin edges facing the sun get a silver lining
             cc += uSunColor * pow(sdp, 10.0) * (1.0 - dens) * 0.6 * uDay;
-            col = mix(col, cc, dens * 0.93);
+            // Moonlight: clouds near the moon glow cool silver, thin edges brightest
+            float mdp = max(md, 0.0);
+            float moonGlow = pow(mdp, 14.0) * 0.32 + pow(mdp, 90.0) * 0.55;
+            float moonUp = smoothstep(-0.05, 0.12, uMoonDir.y) * (1.0 - uDay) * uMoonCloud;
+            cc += vec3(0.62, 0.68, 0.85) * moonGlow * moonUp * (0.35 + (1.0 - dens) * 0.65);
+            // Opaque once the cloud has some body, so stars and the moon glow don't shine through;
+            // only the thin wispy edges stay see-through
+            col = mix(col, cc, clamp(dens * 1.6, 0.0, 1.0));
           }
 
           col += vec3(0.75, 0.8, 1.0) * uFlash * 0.55;
@@ -179,5 +208,52 @@ export class SkyDome {
     u.uDay.value = p.day;
     u.uNight.value = p.night;
     u.uFlash.value = p.flash;
+    u.uMoonCloud.value = p.moonCloud;
+    this.updateMeteor(dt, p);
   }
+
+  // Shooting stars: only on clear, dark nights; one at a time, every 6..25 s
+  private meteorWait = 6 + Math.random() * 12;
+  private meteorAge = -1;
+  private meteorDur = 1;
+  private meteorAmp = 1;
+
+  private updateMeteor(dt: number, p: SkyParams): void {
+    const u = this.material.uniforms;
+    const clearNight = p.day < 0.08 && p.cover < 0.45 && p.night > 0.35 && p.flash === 0;
+    if (this.meteorAge < 0) {
+      u.uMeteorAmp.value = 0;
+      if (!clearNight) return;
+      this.meteorWait -= dt;
+      if (this.meteorWait > 0) return;
+      this.meteorWait = 6 + Math.random() * 19;
+      // Start somewhere high in the sky, then fall mostly downward along a random heading
+      const az = Math.random() * Math.PI * 2;
+      const el = 0.45 + Math.random() * 0.6;
+      const a = (u.uMeteorA.value as THREE.Vector3).set(Math.cos(az) * Math.cos(el), Math.sin(el), Math.sin(az) * Math.cos(el));
+      const side = SkyDome._tmp.set(-a.z, 0, a.x).normalize();
+      const down = SkyDome._tmp2.crossVectors(side, a).normalize(); // tangent pointing toward the horizon
+      if (down.y > 0) down.negate();
+      const sway = (Math.random() - 0.5) * 1.6;
+      const len = 0.25 + Math.random() * 0.25;
+      (u.uMeteorB.value as THREE.Vector3).copy(a).addScaledVector(down, len).addScaledVector(side, len * sway).normalize();
+      this.meteorAge = 0;
+      this.meteorDur = 0.55 + Math.random() * 0.6;
+      this.meteorAmp = 0.6 + Math.random() * 0.6;
+    }
+    this.meteorAge += dt;
+    const t = this.meteorAge / this.meteorDur;
+    if (t >= 1) {
+      this.meteorAge = -1;
+      u.uMeteorAmp.value = 0;
+      return;
+    }
+    u.uMeteorT.value = t;
+    // Quick flare-up, then burns out; also fades if the night stops being clear
+    const env = Math.min(1, t * 6) * (1 - t * t);
+    u.uMeteorAmp.value = env * this.meteorAmp * (clearNight ? 1 : 0.3);
+  }
+
+  private static readonly _tmp = new THREE.Vector3();
+  private static readonly _tmp2 = new THREE.Vector3();
 }

@@ -31,13 +31,17 @@ export interface WorldSaveData {
   crops?: unknown;
   /** Shovel-dug fields (their soil tiles are part of the terrain save). */
   fields?: FieldSaveData[];
-  inventory: { items: Record<string, number>; equipped: string | null };
+  inventory: { items: Record<string, number>; equipped: string | null; hotbar?: (string | null)[]; capacity?: number };
   player: [number, number, number];
   vehicle: { p: [number, number, number]; yaw: number } | null;
   moped?: { p: [number, number, number]; yaw: number };
   boat?: { p: [number, number, number]; yaw: number };
   exploration?: ExplorationSaveData;
   pets: PetSaveData[];
+  /** Days passed (missing in older saves: 0). */
+  day?: number;
+  /** Sleep and respawn: the bed slept in last and that night's index. */
+  sleep?: { bed: [number, number, number] | null; night: number };
 }
 
 export interface SaveSlotInfo {
@@ -84,12 +88,22 @@ export class SaveSystem {
       forest: w.props.forestVersion,
       buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
       fields: w.farmingManager.serializeFields(),
-      inventory: { items, equipped: w.inventoryManager.getEquippedItemId() },
+      inventory: {
+        items,
+        equipped: w.inventoryManager.getEquippedItemId(),
+        hotbar: w.inventoryManager.getHotbar(),
+        capacity: w.inventoryManager.getCapacity(),
+      },
       player: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
       vehicle: { p: [vt.x, vt.y + 0.3, vt.z], yaw: Math.atan2(fwd.x, fwd.z) },
       moped: { p: w.moped.getPosition().add(new THREE.Vector3(0, 0.2, 0)).toArray() as [number, number, number], yaw: w.moped.getYaw() },
       boat: { p: w.boat.getPosition().toArray() as [number, number, number], yaw: w.boat.getYaw() },
       pets: w.gameplay.pets.serialize(),
+      day: worldSettings.day,
+      sleep: {
+        bed: w.gameplay.respawnBed ? (w.gameplay.respawnBed.toArray().map((v) => +v.toFixed(2)) as [number, number, number]) : null,
+        night: w.gameplay.lastSleepNight,
+      },
       exploration: w.exploration.serialize(),
     };
   }
@@ -98,6 +112,9 @@ export class SaveSystem {
     const w = this.world;
     worldSettings.waterLevel = data.waterLevel;
     worldSettings.timeOfDay = data.timeOfDay;
+    worldSettings.day = data.day ?? 0;
+    w.gameplay.respawnBed = data.sleep?.bed ? new THREE.Vector3(...data.sleep.bed) : null;
+    w.gameplay.lastSleepNight = data.sleep?.night ?? -1;
     w.weather.setWeather(data.weather);
     w.weather.director.deserialize(data.weather, data.weatherDirector);
     w.terrain.deserialize(data.terrain);
@@ -131,6 +148,11 @@ export class SaveSystem {
       else if (count < item.count) inv.removeItem(item.id, item.count - count);
     }
     if (data.inventory.equipped !== inv.getEquippedItemId()) inv.equipItem(data.inventory.equipped);
+    // Saves from before the hotbar keep the default tool row
+    if (data.inventory.hotbar) inv.setHotbar(data.inventory.hotbar);
+    // Saves from before the slingshot: it joins the hotbar once (if a slot is free)
+    if (data.inventory.items.slingshot === undefined && !inv.isOnHotbar('slingshot')) inv.addToHotbar('slingshot');
+    if (data.inventory.capacity) inv.setCapacity(data.inventory.capacity);
 
     w.character.respawn(new THREE.Vector3(...data.player).add(new THREE.Vector3(0, 0.3, 0)));
     if (data.vehicle) {

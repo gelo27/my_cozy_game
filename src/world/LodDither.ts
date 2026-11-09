@@ -104,3 +104,57 @@ export function acquireInstancedDither(base: THREE.Material): THREE.Material {
   instanced.set(base, m);
   return m;
 }
+
+/** Distance fade band (m) for a family of instanced meshes: x = fade starts, y = fully gone. */
+export interface FadeRange {
+  value: THREE.Vector2;
+}
+
+const distanceTwins = new Map<THREE.Material, THREE.Material>();
+
+/**
+ * Dithering twin of an instanced `base` that dissolves each instance by its distance from the
+ * camera (XZ, measured at the instance origin) across `range`, so things at the edge of the view
+ * melt away plant by plant instead of popping. Only meshes that reach into the fade band should
+ * wear it: the `discard` costs early-z on mobile GPUs, so everything nearer keeps the solid base.
+ * Twins of materials that share a program (every field crop) share one program too.
+ */
+export function acquireDistanceDither(base: THREE.Material, range: FadeRange): THREE.Material {
+  let m = distanceTwins.get(base);
+  if (m) return m;
+  m = base.clone();
+  m.onBeforeCompile = (shader, renderer) => {
+    base.onBeforeCompile.call(base, shader, renderer);
+    shader.uniforms.uFadeRange = range;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        uniform vec2 uFadeRange;
+        varying float vDistFade;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        {
+          #ifdef USE_INSTANCING
+            vec3 io = (modelMatrix * instanceMatrix[3]).xyz;
+          #else
+            vec3 io = modelMatrix[3].xyz;
+          #endif
+          // A little per-instance jitter so neighbours don't dissolve in lockstep
+          float jit = fract(dot(floor(io.xz * 3.0), vec2(0.06711056, 0.00583715)) * 52.9829189) - 0.5;
+          float d = distance(io.xz, cameraPosition.xz) + jit * (uFadeRange.y - uFadeRange.x) * 0.3;
+          vDistFade = clamp((d - uFadeRange.x) / max(uFadeRange.y - uFadeRange.x, 0.001), 0.0, 1.0);
+        }`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        varying float vDistFade;
+        float distBayer(vec2 p) {
+          ivec2 i = ivec2(mod(p, 4.0));
+          const float m[16] = float[16](0., 8., 2., 10., 12., 4., 14., 6., 3., 11., 1., 9., 15., 7., 13., 5.);
+          return (m[i.x + i.y * 4] + 0.5) / 16.0;
+        }`)
+      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+        if (distBayer(gl_FragCoord.xy) < vDistFade) discard;`);
+  };
+  const key = base.customProgramCacheKey();
+  m.customProgramCacheKey = () => `dist-dither-${key}`;
+  distanceTwins.set(base, m);
+  return m;
+}

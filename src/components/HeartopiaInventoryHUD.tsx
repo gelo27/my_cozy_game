@@ -1,7 +1,12 @@
-import React, { useState } from 'react';
-import { InventoryManager } from '../inventory/InventoryManager';
-import { InventoryItem, InventoryCategory, getItemEmoji } from '../inventory/types/InventoryTypes';
-import { X, Sparkles, Check, Droplets, Sprout, Package, Trees, Info, Fish } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  InventoryManager,
+  HOTBAR_SIZE,
+  BACKPACK_COLUMNS,
+  BACKPACK_MAX_SLOTS,
+} from '../inventory/InventoryManager';
+import { InventoryItem } from '../inventory/types/InventoryTypes';
+import { X, Lock } from 'lucide-react';
 import { t, useLang, dataName, itemDesc } from '../i18n/i18n';
 import { ItemIcon } from './ItemIcon';
 
@@ -12,30 +17,88 @@ interface HeartopiaInventoryHUDProps {
   onEquipItem: (itemId: string | null) => void;
 }
 
+/** What is being dragged: an item id and where it was picked up. */
+interface DragPayload {
+  id: string;
+  from: 'grid' | 'hotbar';
+}
+/** Pointer travel (px) before a press turns into a drag. */
+const DRAG_THRESHOLD = 6;
+
+/** Drop target under the pointer: a hotbar slot index, the backpack grid, or nothing. */
+const targetAt = (x: number, y: number): number | 'grid' | null => {
+  const el = document.elementFromPoint(x, y) as HTMLElement | null;
+  const slot = el?.closest<HTMLElement>('[data-hotbar-slot]');
+  if (slot) return Number(slot.dataset.hotbarSlot);
+  return el?.closest('[data-backpack-grid]') ? 'grid' : null;
+};
+
+const CELL = 'relative w-16 h-16 rounded-2xl flex flex-col items-center justify-center p-1.5 transition-all border-2';
+
 export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
   inventoryManager,
   isOpen,
   onClose,
   onEquipItem,
 }) => {
-  const [activeCategory, setActiveCategory] = useState<InventoryCategory>('all');
-  const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+  const [state, setState] = useState(() => inventoryManager.getState());
+  const [dropTarget, setDropTarget] = useState<number | 'grid' | null>(null);
+  const [drag, setDrag] = useState<{ item: InventoryItem; x: number; y: number } | null>(null);
+  const press = useRef<{ payload: DragPayload; item: InventoryItem; x: number; y: number; dragging: boolean } | null>(null);
+  /** Set when a drag just ended so the click that follows pointerup is ignored. */
+  const suppressClick = useRef(false);
+  useEffect(() => inventoryManager.subscribe((s) => setState({ ...s })), [inventoryManager]);
+
+  // Pointer-driven drag and drop (works with mouse and touch alike)
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const p = press.current;
+      if (!p) return;
+      if (!p.dragging && Math.hypot(e.clientX - p.x, e.clientY - p.y) < DRAG_THRESHOLD) return;
+      p.dragging = true;
+      setDrag({ item: p.item, x: e.clientX, y: e.clientY });
+      setDropTarget(targetAt(e.clientX, e.clientY));
+    };
+    const onUp = (e: PointerEvent) => {
+      const p = press.current;
+      press.current = null;
+      if (!p?.dragging) return;
+      suppressClick.current = true;
+      setTimeout(() => (suppressClick.current = false), 0);
+      setDrag(null);
+      setDropTarget(null);
+      const target = targetAt(e.clientX, e.clientY);
+      if (typeof target === 'number') inventoryManager.setHotbarSlot(target, p.payload.id);
+      else if (target === 'grid' && p.payload.from === 'hotbar') inventoryManager.removeFromHotbar(p.payload.id);
+    };
+    const onCancel = () => {
+      press.current = null;
+      setDrag(null);
+      setDropTarget(null);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+  }, [inventoryManager]);
   useLang();
 
   if (!isOpen) return null;
 
-  const state = inventoryManager.getState();
   const equippedId = state.equippedItemId;
+  const gridItems = inventoryManager.getBackpackItems();
+  // Never hide owned items, even past the current capacity
+  const activeSlots = Math.min(BACKPACK_MAX_SLOTS, Math.max(state.capacity, gridItems.length));
+  const hotbarItems = state.hotbar.map((id) =>
+    id ? state.items.find((i) => i.id === id && i.count > 0) ?? null : null,
+  );
 
-  const owned = state.items.filter((it) => it.count > 0 && it.id !== 'coins');
-  const filteredItems = activeCategory === 'all' ? owned : owned.filter((it) => it.category === activeCategory);
-  const slotCount = Math.max(16, Math.ceil(filteredItems.length / 4) * 4);
-
-  const handleSelectSlot = (item: InventoryItem) => {
-    setSelectedItem(item);
-  };
-
-  const handleToggleEquip = (item: InventoryItem) => {
+  const toggleEquip = (item: InventoryItem) => {
+    if (!item.isEquippable) return;
     if (equippedId === item.id) {
       inventoryManager.unequip();
       onEquipItem(null);
@@ -45,282 +108,146 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
     }
   };
 
-  const getItemCategoryIcon = (cat: InventoryItem['category']) => {
-    switch (cat) {
-      case 'tools':
-        return <Droplets className="w-4 h-4 text-sky-400" />;
-      case 'seeds':
-        return <Sprout className="w-4 h-4 text-emerald-400" />;
-      case 'crops':
-        return <Package className="w-4 h-4 text-amber-400" />;
-      case 'materials':
-        return <Trees className="w-4 h-4 text-amber-700" />;
-      default:
-        return <Sparkles className="w-4 h-4 text-purple-400" />;
-    }
+  const startPress = (e: React.PointerEvent, item: InventoryItem, from: DragPayload['from']) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    press.current = { payload: { id: item.id, from }, item, x: e.clientX, y: e.clientY, dragging: false };
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 pointer-events-auto select-none animate-fadeIn font-sans">
-      {/* Heartopia Cozy Pastel Modal Window */}
-      <div className="relative w-[700px] max-w-[95vw] bg-gradient-to-b from-[#fbf8f2] to-[#f4ebe1] rounded-3xl border-4 border-[#e2d5c3] shadow-2xl overflow-hidden text-amber-950">
-        {/* Header Bar */}
-        <div className="px-6 py-4 bg-gradient-to-r from-[#e8dbcc] via-[#efe4d7] to-[#e8dbcc] border-b-2 border-[#dbcbb8] flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center shadow-inner">
-              <Sparkles className="w-5 h-5 text-amber-700" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-xl font-bold tracking-wide text-amber-950">
-                  {t('inv.title')}
-                </h2>
-                <span className="px-2 py-0.5 text-xs font-semibold bg-amber-200/70 text-amber-800 rounded-full border border-amber-300">
-                  {t('inv.key')}
-                </span>
-              </div>
-              <p className="text-xs text-amber-800/80">
-                {t('inv.subtitle')}
-              </p>
-            </div>
-          </div>
+  const tooltip = (item: InventoryItem) =>
+    `${dataName('item', item.id, item.name)}\n${itemDesc(item.id, item.description)}`;
 
+  const renderItem = (item: InventoryItem) => (
+    <>
+      <div className="text-4xl filter drop-shadow-sm pointer-events-none">
+        <ItemIcon item={item} />
+      </div>
+      {item.count > 1 && (
+        <div
+          className="absolute bottom-0.5 right-1.5 text-sm font-black leading-none text-white pointer-events-none"
+          style={{
+            WebkitTextStroke: '3px #000',
+            paintOrder: 'stroke fill',
+          }}
+        >
+          {item.count}
+        </div>
+      )}
+    </>
+  );
+
+  const itemCellClass = (item: InventoryItem) =>
+    equippedId === item.id
+      ? 'bg-amber-100 border-amber-500 ring-2 ring-amber-400 shadow-md'
+      : 'bg-[#faf5ee] border-[#dbcbb8] hover:border-amber-400 hover:bg-white';
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 pointer-events-auto select-none animate-fadeIn font-sans"
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <div className="relative max-w-[95vw] bg-gradient-to-b from-[#fbf8f2] to-[#f4ebe1] rounded-3xl border-4 border-[#e2d5c3] shadow-2xl overflow-hidden text-amber-950">
+        {/* Header */}
+        <div className="px-6 py-3 bg-gradient-to-r from-[#e8dbcc] via-[#efe4d7] to-[#e8dbcc] border-b-2 border-[#dbcbb8] flex items-center justify-between">
+          <h2 className="text-xl font-bold tracking-wide text-amber-950">{t('inv.title')}</h2>
           <button
             onClick={onClose}
-            className="w-9 h-9 rounded-full bg-amber-200/60 hover:bg-amber-300 border border-amber-300/80 flex items-center justify-center transition-all duration-150 active:scale-95 cursor-pointer"
+            className="w-9 h-9 rounded-full bg-red-500 hover:bg-red-600 border border-red-700 shadow-md flex items-center justify-center transition-all duration-150 active:scale-95 cursor-pointer"
             title={t('inv.closeTitle')}
           >
-            <X className="w-5 h-5 text-amber-900" />
+            <X className="w-5 h-5 text-white stroke-[3]" />
           </button>
         </div>
 
-        {/* Category Filters */}
-        <div className="flex items-center gap-2 px-6 pt-3 pb-1 border-b border-[#e8ded0]">
-          <button
-            onClick={() => setActiveCategory('all')}
-            className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
-              activeCategory === 'all'
-                ? 'bg-amber-600 text-white shadow-md'
-                : 'bg-amber-200/50 hover:bg-amber-200/80 text-amber-900'
+        <div className="p-5 flex flex-col gap-4 overflow-x-auto">
+          {/* Backpack grid: drop a hotbar item here to put it back */}
+          <div
+            className={`bg-[#f2e7da] rounded-2xl p-3 border shadow-inner transition-colors ${
+              dropTarget === 'grid' ? 'border-amber-500 bg-[#f6ecdf]' : 'border-[#ded0c0]'
             }`}
+            data-backpack-grid
           >
-            {t('inv.all')}
-          </button>
-          <button
-            onClick={() => setActiveCategory('tools')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
-              activeCategory === 'tools'
-                ? 'bg-sky-600 text-white shadow-md'
-                : 'bg-amber-200/50 hover:bg-amber-200/80 text-amber-900'
-            }`}
-          >
-            <Droplets className="w-3.5 h-3.5" />
-            {t('inv.tools')}
-          </button>
-          <button
-            onClick={() => setActiveCategory('seeds')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
-              activeCategory === 'seeds'
-                ? 'bg-emerald-600 text-white shadow-md'
-                : 'bg-amber-200/50 hover:bg-amber-200/80 text-amber-900'
-            }`}
-          >
-            <Sprout className="w-3.5 h-3.5" />
-            {t('inv.seeds')}
-          </button>
-          <button
-            onClick={() => setActiveCategory('crops')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
-              activeCategory === 'crops'
-                ? 'bg-amber-700 text-white shadow-md'
-                : 'bg-amber-200/50 hover:bg-amber-200/80 text-amber-900'
-            }`}
-          >
-            <Package className="w-3.5 h-3.5" />
-            {t('inv.crops')}
-          </button>
-          <button
-            onClick={() => setActiveCategory('materials')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
-              activeCategory === 'materials'
-                ? 'bg-amber-800 text-white shadow-md'
-                : 'bg-amber-200/50 hover:bg-amber-200/80 text-amber-900'
-            }`}
-          >
-            <Trees className="w-3.5 h-3.5" />
-            {t('inv.materials')}
-          </button>
-          <button
-            onClick={() => setActiveCategory('food')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
-              activeCategory === 'food'
-                ? 'bg-orange-600 text-white shadow-md'
-                : 'bg-amber-200/50 hover:bg-amber-200/80 text-amber-900'
-            }`}
-          >
-            <Fish className="w-3.5 h-3.5" />
-            {t('inv.food')}
-          </button>
-        </div>
-
-        {/* Content Body: Grid & Details Panel */}
-        <div className="grid grid-cols-12 gap-4 p-6 min-h-[340px]">
-          {/* Item Grid */}
-          <div className="col-span-7 bg-[#f2e7da] rounded-2xl p-3 border border-[#ded0c0] shadow-inner overflow-y-auto max-h-[360px]">
-            <div className="grid grid-cols-4 gap-2.5">
-              {Array.from({ length: slotCount }).map((_, idx) => {
-                const item = filteredItems[idx];
-                const isEquipped = item && equippedId === item.id;
-                const isSelected = item && selectedItem?.id === item.id;
-
+            <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${BACKPACK_COLUMNS}, 4rem)` }}>
+              {Array.from({ length: BACKPACK_MAX_SLOTS }).map((_, idx) => {
+                const item = gridItems[idx];
+                if (idx >= activeSlots) {
+                  return (
+                    <div key={idx} className={`${CELL} bg-[#e2d6c7]/50 border-[#d8c8b4]/60`}>
+                      <Lock className="w-4 h-4 text-amber-900/20" />
+                    </div>
+                  );
+                }
+                if (!item) {
+                  return <div key={idx} className={`${CELL} bg-[#e9ded0]/40 border-dashed border-[#d8c8b4]`} />;
+                }
                 return (
                   <div
-                    key={idx}
-                    onClick={() => item && handleSelectSlot(item)}
-                    onDoubleClick={() => item && handleToggleEquip(item)}
-                    className={`relative aspect-square rounded-2xl flex flex-col items-center justify-center p-2 cursor-pointer transition-all border-2 ${
-                      item
-                        ? isEquipped
-                          ? 'bg-amber-100 border-amber-500 ring-2 ring-amber-400 shadow-md scale-95'
-                          : isSelected
-                          ? 'bg-white border-amber-400 shadow-md'
-                          : 'bg-[#faf5ee] border-[#dbcbb8] hover:border-amber-400 hover:bg-white'
-                        : 'bg-[#e9ded0]/40 border-dashed border-[#d8c8b4] cursor-default'
-                    }`}
+                    key={item.id}
+                    onPointerDown={(e) => startPress(e, item, 'grid')}
+                    onDoubleClick={() => {
+                      // Only hotbar items are held: double click moves it there first, then equips
+                      if (item.isEquippable && inventoryManager.addToHotbar(item.id)) toggleEquip(item);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      inventoryManager.addToHotbar(item.id);
+                    }}
+                    title={tooltip(item)}
+                    style={drag?.item.id === item.id ? { opacity: 0.35 } : undefined}
+                    className={`${CELL} cursor-grab touch-none ${itemCellClass(item)}`}
                   >
-                    {item ? (
-                      <>
-                        <div className="text-3xl filter drop-shadow-sm transition-transform hover:scale-110">
-                          <ItemIcon item={item} />
-                        </div>
-                        <span className="text-[10px] font-bold text-center line-clamp-1 mt-1 text-amber-900">
-                          {dataName('item', item.id, item.name)}
-                        </span>
-
-                        {/* Quantity Badge */}
-                        {item.count > 1 && (
-                          <div className="absolute top-1 right-1.5 px-1.5 py-0.2 bg-amber-900 text-amber-100 text-[10px] font-black rounded-full shadow-sm">
-                            {item.count}
-                          </div>
-                        )}
-
-                        {/* Equipped Tag */}
-                        {isEquipped && (
-                          <div className="absolute -bottom-1 bg-amber-600 text-white text-[9px] font-extrabold px-1.5 py-0.2 rounded-md shadow flex items-center gap-0.5">
-                            <Check className="w-2.5 h-2.5 stroke-[3]" /> {t('inv.equipped')}
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <span className="text-[11px] text-amber-800/30 font-bold">{idx + 1}</span>
-                    )}
+                    {renderItem(item)}
                   </div>
                 );
               })}
             </div>
           </div>
 
-          {/* Details Sidebar */}
-          <div className="col-span-5 bg-gradient-to-b from-[#f5ede3] to-[#ebdccf] rounded-2xl p-4 border border-[#dbcab7] flex flex-col justify-between shadow-sm">
-            {selectedItem ? (
-              <div className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-14 h-14 rounded-2xl bg-white border-2 border-[#dbcbb8] flex items-center justify-center text-4xl shadow-sm">
-                    <ItemIcon item={selectedItem} />
+          {/* Hotbar: drag items in, right click sends one back to the backpack */}
+          <div className="bg-[#ebdccf] rounded-2xl p-3 border-2 border-[#d8c7b4] shadow-sm">
+            <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${HOTBAR_SIZE}, 4rem)` }}>
+              {hotbarItems.map((item, idx) => {
+                const isTarget = dropTarget === idx;
+                return (
+                  <div
+                    key={idx}
+                    data-hotbar-slot={idx}
+                    onPointerDown={(e) => item && startPress(e, item, 'hotbar')}
+                    onClick={() => item && !suppressClick.current && toggleEquip(item)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      if (item) inventoryManager.removeFromHotbar(item.id);
+                    }}
+                    title={item ? tooltip(item) : undefined}
+                    className={`${CELL} ${
+                      isTarget
+                        ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-300'
+                        : item
+                        ? `cursor-pointer touch-none ${itemCellClass(item)}`
+                        : 'bg-[#e9ded0]/50 border-dashed border-[#cdbba5]'
+                    }`}
+                  >
+                    <span className="absolute top-0.5 left-1.5 text-[9px] font-bold text-[#a08a68] pointer-events-none">
+                      {idx + 1}
+                    </span>
+                    {item && renderItem(item)}
                   </div>
-                  <div>
-                    <h3 className="font-extrabold text-base text-amber-950">
-                      {dataName('item', selectedItem.id, selectedItem.name)}
-                    </h3>
-                    <div className="flex items-center gap-1 mt-0.5">
-                      {getItemCategoryIcon(selectedItem.category)}
-                      <span className="text-xs font-semibold text-amber-800">
-                        {selectedItem.category === 'tools' && (selectedItem.id === 'watering_can' ? t('inv.catWatering') : t('inv.catTool'))}
-                        {selectedItem.category === 'seeds' && t('inv.catSeeds')}
-                        {selectedItem.category === 'crops' && t('inv.catCrops')}
-                        {selectedItem.category === 'materials' && t('inv.catMaterials')}
-                        {selectedItem.category === 'food' && t('inv.catFood')}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-white/70 rounded-xl border border-amber-200/80 text-xs text-amber-900 leading-relaxed">
-                  {itemDesc(selectedItem.id, selectedItem.description)}
-                </div>
-
-                <div className="bg-[#ede1d3] p-2.5 rounded-xl border border-[#d8c7b4] text-[11px] space-y-1">
-                  <div className="flex justify-between text-amber-800 font-semibold">
-                    <span>{t('inv.count')}</span>
-                    <span className="font-bold text-amber-950">{t('inv.pcs', { n: selectedItem.count })}</span>
-                  </div>
-                  <div className="flex justify-between text-amber-800 font-semibold">
-                    <span>{t('inv.maxStack')}</span>
-                    <span className="font-bold text-amber-950">{selectedItem.maxStack}</span>
-                  </div>
-                </div>
-
-                {selectedItem.cropType && (
-                  <div className="p-2 bg-emerald-50 rounded-xl border border-emerald-200 text-[11px] text-emerald-900 flex items-center gap-2">
-                    <Sprout className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>{t('inv.seedHint')}</span>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="h-full flex flex-col items-center justify-center text-center p-4 text-amber-800/60">
-                <Info className="w-8 h-8 mb-2 opacity-50 text-amber-700" />
-                <p className="text-xs font-semibold">
-                  {t('inv.selectHint')}
-                </p>
-              </div>
-            )}
-
-            {/* Bottom Actions */}
-            <div className="pt-3 border-t border-[#d8c8b6] flex gap-2">
-              {selectedItem && (selectedItem.category === 'tools' || selectedItem.category === 'seeds') ? (
-                <button
-                  onClick={() => handleToggleEquip(selectedItem)}
-                  className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all shadow-md active:scale-95 flex items-center justify-center gap-2 cursor-pointer ${
-                    equippedId === selectedItem.id
-                      ? 'bg-amber-200 hover:bg-amber-300 text-amber-950 border border-amber-400'
-                      : 'bg-amber-600 hover:bg-amber-500 text-white border border-amber-700'
-                  }`}
-                >
-                  {equippedId === selectedItem.id ? (
-                    <>
-                      <X className="w-4 h-4" /> {t('inv.unequip')}
-                    </>
-                  ) : (
-                    <>
-                      <Check className="w-4 h-4" /> {t('inv.equip')}
-                    </>
-                  )}
-                </button>
-              ) : selectedItem && selectedItem.category === 'crops' ? (
-                <div className="flex-1 py-2 px-3 bg-amber-200/50 rounded-xl border border-amber-300/70 text-center text-xs font-bold text-amber-900">
-                  {t('inv.crateNote')}
-                </div>
-              ) : null}
-
-              <button
-                onClick={onClose}
-                className="py-2.5 px-4 bg-[#e5d6c5] hover:bg-[#dccbbb] text-amber-950 text-xs font-bold rounded-xl border border-[#cebcab] transition-all active:scale-95 cursor-pointer"
-              >
-                {t('common.close')}
-              </button>
+                );
+              })}
             </div>
           </div>
         </div>
-
-        {/* Footer info bar */}
-        <div className="px-6 py-2.5 bg-[#ebdccf] border-t border-[#dbcbb8] flex items-center justify-between text-[11px] text-amber-800">
-          <div className="flex items-center gap-4">
-            <span>💡 {t('inv.tipQ')}</span>
-            <span className="hidden sm:inline">💧 {t('inv.tipWater')}</span>
-          </div>
-        </div>
       </div>
+
+      {/* Item following the pointer while dragging */}
+      {drag && (
+        <div
+          className="fixed z-[60] w-16 h-16 rounded-2xl bg-white/90 border-2 border-amber-400 shadow-xl flex items-center justify-center text-3xl pointer-events-none"
+          style={{ left: drag.x - 32, top: drag.y - 32 }}
+        >
+          <ItemIcon item={drag.item} />
+        </div>
+      )}
     </div>
   );
 };

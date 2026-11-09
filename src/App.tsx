@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BuildingTelemetry } from './building/types/BuildingTypes';
-import { FarmInteractionPrompt } from './farming/types/FarmingTypes';
 import { GameEngine, DevStats, EngineMode, DEV_TOOLS_ENABLED } from './engine/GameEngine';
 import { AUTOSAVE_SLOT } from './world/SaveSystem';
 import { GameplayHudState } from './gameplay/GameplayManager';
@@ -15,9 +14,8 @@ import { ViewportHUD } from './components/ViewportHUD';
 import { ControlsOverlay } from './components/ControlsOverlay';
 import { ConsoleFooter } from './components/ConsoleFooter';
 import { HeartopiaInventoryHUD } from './components/HeartopiaInventoryHUD';
-import { FarmingInteractionHUD } from './components/FarmingInteractionHUD';
-import { GatherPromptHUD } from './components/GatherPromptHUD';
-import { GatherPrompt } from './character/abilities/GatheringAbility';
+import { InteractionPrompts } from './components/InteractionPrompts';
+import { promptStore } from './components/promptStore';
 import { GameHUD } from './components/game/GameHUD';
 import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
 import { WorldMap } from './components/game/WorldMap';
@@ -36,8 +34,6 @@ export default function App() {
 
   // Live state pushed from the simulation loop (throttled by GameEngine)
   const [buildingTelemetry, setBuildingTelemetry] = useState<BuildingTelemetry | null>(null);
-  const [farmingPrompt, setFarmingPrompt] = useState<FarmInteractionPrompt | null>(null);
-  const [gatherPrompt, setGatherPrompt] = useState<GatherPrompt | null>(null);
   const [hud, setHud] = useState<GameplayHudState | null>(null);
   const [mode, setMode] = useState<EngineMode>('play');
   const [devStats, setDevStats] = useState<DevStats | null>(null);
@@ -119,8 +115,9 @@ export default function App() {
       onLog: addLog,
       onStats: () => {},
       onBuildingTelemetry: setBuildingTelemetry,
-      onFarmingPrompt: setFarmingPrompt,
-      onGatherPrompt: setGatherPrompt,
+      onFarmingPrompt: promptStore.setFarm,
+      onGatherPrompt: promptStore.setGather,
+      onGameplayPrompt: promptStore.setPlay,
       onResourcesGathered: (items) => {
         const inventory = engineRef.current?.world?.inventoryManager;
         const text = items.map(({ itemId, amount }) => `+${amount} ${dataName('item', itemId, inventory?.getItem(itemId)?.name ?? itemId)}`).join(', ');
@@ -253,12 +250,10 @@ export default function App() {
 
                 {!isBuildingUI && (
                   <>
-                    <FarmingInteractionHUD
-                      prompt={farmingPrompt}
+                    <InteractionPrompts
                       inventoryManager={world.inventoryManager}
                       onOpenInventory={() => handleToggleInventory(true)}
                     />
-                    {gatherPrompt && !farmingPrompt && <GatherPromptHUD prompt={gatherPrompt} />}
                   </>
                 )}
 
@@ -279,6 +274,11 @@ export default function App() {
                       world.saves.save(AUTOSAVE_SLOT);
                       showToast({ text: t('pause.saved'), type: 'success' });
                     }}
+                    respawnAt={hud?.respawnAt ?? 'spawn'}
+                    onRespawn={() => {
+                      setPaused(false);
+                      engine?.respawnPlayer();
+                    }}
                   />
                 )}
 
@@ -289,11 +289,17 @@ export default function App() {
           </>
         )}
 
-        {/* Doorway fade (caves, lighthouse lookout) */}
+        {/* Doorway fade (caves, lighthouse lookout, sleep, respawn) */}
         <div
-          className="absolute inset-0 z-[45] bg-black pointer-events-none transition-opacity duration-300"
+          className={`absolute inset-0 z-[45] bg-black pointer-events-none transition-opacity ${hud?.sleeping ? 'duration-700' : 'duration-300'}`}
           style={{ opacity: hud?.fading ? 1 : 0 }}
         />
+        {hud?.sleeping && (
+          <div className="absolute inset-0 z-[46] flex flex-col items-center justify-center pointer-events-none text-white/85 animate-pulse">
+            <span className="text-4xl font-extrabold tracking-[0.3em]">Z z z</span>
+            <span className="mt-2 text-sm font-semibold">{t('sleep.zzz')}</span>
+          </div>
+        )}
         {toast && <ToastPill toast={toast} />}
         {sceneFiles.isDragOver && <JsonDropOverlay />}
         {loading && <LoadingOverlay />}

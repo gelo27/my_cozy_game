@@ -15,10 +15,12 @@ export type FootSurface =
  * - Solid floors (wood, stone, tile, asphalt) = the shoe as an exciter (a short half-sine force
  *   pulse: the harder the floor, the shorter and brighter) ringing a few damped modal resonators of
  *   the floor, plus a whisper of grit under the sole.
- * - Granular ground (grass, gravel/dirt, sand, snow, carpet fibres, water) = PhISEM: at every sample
+ * - Granular ground (grass, gravel/dirt, sand, snow, carpet fibres) = PhISEM: at every sample
  *   a particle collision happens with a probability that follows the force envelope, each collision
  *   adds a quickly decaying noise burst, and the sum is coloured by a couple of 2-pole resonances
  *   (the "size" of the particles).
+ * - Water (wading, strokes, lapping) = the shore's recipe: falling band-passed "plaps", a
+ *   low-passed wash and a field of tiny upward-chirping bubbles (foam fizz).
  * - Real recorded / mixed footsteps carry almost no energy below ~150-300 Hz (the force itself is
  *   felt, not heard, and Foley is high-passed), so every recipe ends in a 24 dB/oct high-pass at
  *   its surface's corner. That is what removes the fake "bass thump".
@@ -42,7 +44,7 @@ const WARM_ORDER: Kind[] = ['grass', 'dirt', 'wood', 'sand', 'stone', 'water', '
 /** Relative loudness per surface (soft floors are quieter). */
 const SURFACE_GAIN: Record<FootSurface, number> = {
   grass: 0.7, dirt: 0.8, asphalt: 0.75, cobble: 0.8, sand: 0.65, snow: 0.8,
-  wood: 0.85, stone: 0.75, tile: 0.7, carpet: 0.45, water: 0.85,
+  wood: 0.85, stone: 0.75, tile: 0.7, carpet: 0.45, water: 1.25,
 };
 
 const R = Math.random;
@@ -190,38 +192,90 @@ function swish(out: Float32Array, sr: number, at: number, attack: number, decay:
 }
 
 /**
- * Moving water: noise through a resonant band-pass whose centre glides f0 -> peak -> f1 and
- * wobbles randomly (a state-variable filter retuned every sample). The wandering resonance is
- * what makes noise sound liquid ("glug / sloosh") instead of grainy like snow or gravel.
+ * One slap of water (the shore's lap): white noise through a resonant band-pass whose centre
+ * falls f*1.6 -> f*0.6 over 0.25 s (the "plap" drops in pitch), a quick attack, exponential decay.
  */
-function slosh(out: Float32Array, sr: number, at: number, attack: number, decay: number, f0: number, peak: number, f1: number, q: number, amp: number): void {
+function plap(out: Float32Array, sr: number, at: number, f: number, dur: number, amp: number): void {
   const s = Math.floor(at * sr);
-  const len = Math.min(Math.ceil((attack + decay * 4) * sr), out.length - s);
-  let low = 0, band = 0, wob = 0, wobV = 0, pink = 0;
-  const damp = 1 / q;
+  const len = Math.min(Math.ceil(dur * sr), out.length - s);
+  if (len <= 0) return;
+  const attack = rr(0.015, 0.035);
+  const damp = 1 / 1.4;
+  // Per-sample multipliers instead of pow / exp / sin in the loop (the centre stays well below
+  // sr/6, where 2 sin(pi f / sr) ~ 2 pi f / sr)
+  const glideEnd = Math.floor(0.25 * sr);
+  const glide = Math.pow(0.375, 1 / glideEnd);
+  const decay = Math.exp(-9.2 / ((dur - attack) * sr));
+  const atk = Math.floor(attack * sr);
+  let c = (2 * Math.PI * Math.min(f * 1.6, sr * 0.15)) / sr;
+  let env = 1;
+  let low = 0, band = 0;
   for (let i = 0; i < len; i++) {
-    const t = i / sr;
-    const k = i / len;
-    const env = t < attack ? Math.sin((Math.PI / 2) * (t / attack)) : Math.exp(-(t - attack) / decay);
-    // Slow random wobble of the resonance (+-25 %)
-    wobV = wobV * 0.995 + (R() * 2 - 1) * 0.00002;
-    wob = Math.max(-0.25, Math.min(0.25, (wob + wobV) * 0.9995));
-    const f = (k < 0.3 ? f0 + (peak - f0) * (k / 0.3) : peak + (f1 - peak) * ((k - 0.3) / 0.7)) * (1 + wob);
-    const fc = 2 * Math.sin((Math.PI * Math.min(f, sr * 0.2)) / sr);
-    pink = pink * 0.6 + (R() * 2 - 1) * 0.4; // a softer, darker noise
-    const high = pink - low - damp * band;
-    band += fc * high;
-    low += fc * band;
-    out[s + i] += band * env * amp;
+    if (i < glideEnd) c *= glide;
+    const high = (R() * 2 - 1) - low - damp * band;
+    band += c * high;
+    low += c * band;
+    // Quadratic rise to the peak, then exponentially down to -80 dB at `dur`
+    let e: number;
+    if (i < atk) e = (i / atk) * (i / atk);
+    else e = env *= decay;
+    out[s + i] += band * e * amp;
   }
 }
 
-/** A cluster of `n` Minnaert bubbles spread over [from, to] s with frequencies in [fLo, fHi]. */
-function bubbles(out: Float32Array, sr: number, n: number, from: number, to: number, fLo: number, fHi: number, amp: number): void {
-  for (let i = 0; i < n; i++) {
-    // Smaller bubbles (higher) are shorter
-    const f = fLo * Math.pow(fHi / fLo, R());
-    bubble(out, sr, rr(from, to), f, Math.min(0.06, 22 / f) * rr(0.7, 1.3), amp * rr(0.5, 1));
+/**
+ * Fizzing foam (the shore's bubble field): many tiny bubbles, each ringing at its size's
+ * resonance (500 Hz - 3.8 kHz) and chirping upward as it shrinks, their rate following a quick
+ * swell and a slow decay over `dur`. Bigger bubbles are rarer, lower and louder.
+ */
+function fizz(out: Float32Array, sr: number, at: number, dur: number, rate: number, amp: number): void {
+  const n = Math.round(rate * dur);
+  for (let b = 0; b < n; b++) {
+    // Density falls off over the fizz: place bubbles by an exponential-ish distribution
+    const u = R();
+    const when = at + dur * (u * u * 0.85 + u * 0.15);
+    const fade = Math.exp(-3 * ((when - at) / dur));
+    const size = Math.pow(R(), 2.2);
+    const f0 = 3800 - size * 3300;
+    const tau = 0.003 + size * 0.012;
+    const a = (0.15 + size * 0.85) * rr(0.4, 1) * amp * fade;
+    const start = Math.floor(when * sr);
+    const len = Math.min(Math.floor(tau * 6 * sr), out.length - start);
+    // Damped sine as a rotating phasor: the chirp is a slowly growing rotation step, the decay a
+    // per-sample multiplier (no sin / exp per sample)
+    let re = 0, im = a;
+    let w = (2 * Math.PI * f0) / sr;
+    const dw = (w * 0.1) / (tau * sr);
+    const k = Math.exp(-1 / (tau * sr));
+    let cw = 1, sw = 0;
+    for (let i = 0; i < len; i++) {
+      out[start + i] += im;
+      // Exact rotation, re-tuned every 16 samples (bubbles reach w ~ 1 rad / sample at 24 kHz)
+      if ((i & 15) === 0) { cw = Math.cos(w); sw = Math.sin(w); }
+      const nr = (re * cw - im * sw) * k;
+      im = (re * sw + im * cw) * k;
+      re = nr;
+      w += dw;
+    }
+  }
+}
+
+/** A soft body of moving water: noise low-passed with a cutoff sweeping f0 -> f1, swelling then fading. */
+function wash(out: Float32Array, sr: number, at: number, dur: number, f0: number, f1: number, attack: number, amp: number): void {
+  const s = Math.floor(at * sr);
+  const len = Math.min(Math.ceil(dur * sr), out.length - s);
+  let y1 = 0, y2 = 0;
+  // One-pole coefficient ~ 2 pi fc / sr for fc << sr, swept geometrically
+  let a = (2 * Math.PI * f0) / sr;
+  const step = Math.pow(f1 / f0, 1 / len);
+  for (let i = 0; i < len; i++) {
+    const k = i / len;
+    a *= step;
+    // Two one-pole low-passes: a gentle 12 dB/oct, like the shore's biquad
+    y1 += a * ((R() * 2 - 1) - y1);
+    y2 += a * (y1 - y2);
+    const env = k < attack ? k / attack : (1 - k) / (1 - attack);
+    out[s + i] += y2 * env * amp;
   }
 }
 
@@ -264,7 +318,7 @@ function soleOnHardGround(o: Float32Array, sr: number, p: number, grit: number):
 
 function renderStep(sr: number, surface: FootSurface): Float32Array {
   const long = surface === 'snow' || surface === 'sand' || surface === 'water';
-  const o = new Float32Array(Math.ceil(sr * (long ? 0.38 : 0.28)));
+  const o = new Float32Array(Math.ceil(sr * (surface === 'water' ? 0.6 : long ? 0.38 : 0.28)));
   const p = rr(0.92, 1.1); // per-variant shoe / weight
   switch (surface) {
     case 'grass': {
@@ -331,10 +385,13 @@ function renderStep(sr: number, surface: FootSurface): Float32Array {
       return finish(o, sr, 250, 3500);
     }
     case 'water': {
-      // Wading: the foot pushes water (a soft slosh) and drops fall back with liquid "plinks"
-      slosh(o, sr, 0, 0.05, 0.07, 300 * p, 700 * p, 380 * p, 4, 1);
-      bubbles(o, sr, 5 + Math.floor(R() * 4), 0.03, 0.3, 450, 1500, 0.12);
-      return finish(o, sr, 140, 3500);
+      // Wading: the foot slaps the water ("plap"), drags a little of it along, and the stirred
+      // water fizzes as it settles (the same lap + foam as on the shore)
+      plap(o, sr, 0, rr(320, 620) * p, rr(0.2, 0.32), 1);
+      wash(o, sr, 0.02, 0.22, 220, 700, 0.3, 0.35);
+      if (R() < 0.6) plap(o, sr, rr(0.09, 0.16), rr(450, 800) * p, 0.16, 0.35);
+      fizz(o, sr, 0.04, rr(0.3, 0.5), 320, 0.4);
+      return finish(o, sr, 120, 3200);
     }
   }
 }
@@ -353,23 +410,28 @@ function renderWet(sr: number): Float32Array {
  * and fades), then thrown drops fall back with liquid plinks (strongly resonant, not hissy).
  */
 function renderStroke(sr: number): Float32Array {
-  const o = new Float32Array(Math.ceil(sr * 0.8));
-  // The arm pulls a body of water: a low, gliding "sloosh"...
-  slosh(o, sr, 0, 0.12, 0.13, rr(240, 300), rr(520, 650), rr(300, 360), 3.5, 1);
-  // ...the hand leaves the water with a short gurgle...
-  slosh(o, sr, 0.18, 0.04, 0.06, rr(500, 600), rr(900, 1100), rr(600, 700), 5, 0.35);
-  // ...and the thrown water falls back: a scatter of bubbles and small drops
-  bubbles(o, sr, 10 + Math.floor(R() * 6), 0.06, 0.6, 380, 1400, 0.1);
-  bubbles(o, sr, 4, 0.3, 0.7, 1300, 2400, 0.05);
-  return finish(o, sr, 110, 3200, 0.8);
+  const o = new Float32Array(Math.ceil(sr * 1.0));
+  // The hand cuts in: a lap...
+  plap(o, sr, 0, rr(380, 560), rr(0.18, 0.26), 0.8);
+  // ...the arm pulls a body of water past the swimmer: a soft swell of wash...
+  wash(o, sr, 0.03, rr(0.4, 0.5), 180, 620, 0.45, 0.6);
+  // ...it leaves the water and the thrown drops fall back: a few small laps...
+  const n = 2 + Math.floor(R() * 3);
+  for (let k = 0; k < n; k++) plap(o, sr, rr(0.32, 0.5), rr(500, 900), rr(0.1, 0.18), rr(0.25, 0.45));
+  // ...and the churned water fizzes away
+  fizz(o, sr, 0.08, rr(0.6, 0.85), 300, 0.45);
+  return finish(o, sr, 100, 2800, 0.8);
 }
 
 /** Calm water lapping at the body while floating still: a slow, low slosh and a few bloops. */
 function renderLap(sr: number): Float32Array {
-  const o = new Float32Array(Math.ceil(sr * 0.7));
-  slosh(o, sr, 0, 0.18, 0.14, rr(180, 230), rr(360, 460), rr(220, 280), 3, 1);
-  bubbles(o, sr, 3 + Math.floor(R() * 3), 0.1, 0.55, 300, 900, 0.09);
-  return finish(o, sr, 90, 2200, 0.6);
+  const o = new Float32Array(Math.ceil(sr * 0.9));
+  // A small wave rises against the body and slaps it, then fizzes off (the shore's lap, softer)
+  wash(o, sr, 0, 0.35, 160, 480, 0.6, 0.5);
+  plap(o, sr, rr(0.18, 0.24), rr(280, 480), rr(0.22, 0.34), 1);
+  if (R() < 0.5) plap(o, sr, rr(0.3, 0.4), rr(400, 700), 0.14, 0.35);
+  fizz(o, sr, 0.24, rr(0.4, 0.6), 240, 0.5);
+  return finish(o, sr, 90, 2600, 0.6);
 }
 
 /** Jumping or falling in: the impact crack, the plunge and a cloud of bubbles. */
@@ -378,6 +440,9 @@ function renderSplash(sr: number): Float32Array {
   phisem(o, sr, grf(0.003, 0.2, 0.15, 0.6, 0.05, 0.3), 9000, 0.97, [res(900, 0.5), res(2000, 0.55), res(3800, 0.5, 0.5)], 1);
   swish(o, sr, 0.01, 0.02, 0.18, 220, 0.8, 0.25); // the plunge has real low end, kept modest
   for (let i = 0; i < 16; i++) bubble(o, sr, rr(0.04, 0.7), rr(300, 1200), rr(0.03, 0.07), rr(0.04, 0.1));
+  // Water thrown up falls back in laps, and the churned surface fizzes
+  for (let i = 0; i < 4; i++) plap(o, sr, rr(0.25, 0.6), rr(400, 800), rr(0.12, 0.2), rr(0.15, 0.3));
+  fizz(o, sr, 0.1, 0.9, 300, 0.25);
   return finish(o, sr, 90, 6000, 0.95);
 }
 
@@ -505,7 +570,7 @@ export class FootstepAudio {
         // about the level of footsteps on wood
         this.strokeTimer = (0.9 - k * 0.35 + rr(-0.06, 0.06)) * (underwater ? 1.4 : 1);
         if (underwater) this.play('under', 0.14 + k * 0.08, rr(0.92, 1.05), true);
-        else this.play('stroke', 0.2 + k * 0.12, rr(0.94, 1.06), false);
+        else this.play('stroke', (0.2 + k * 0.12) * 1.4, rr(0.94, 1.06), false);
       } else if (!moving) {
         this.strokeTimer = Math.min(this.strokeTimer, 0.15);
       }
@@ -513,7 +578,7 @@ export class FootstepAudio {
         this.lapTimer -= dt;
         if (this.lapTimer <= 0) {
           this.lapTimer = rr(1.6, 3.2);
-          this.play('lap', rr(0.1, 0.15), rr(0.92, 1.06), false);
+          this.play('lap', rr(0.15, 0.22), rr(0.92, 1.06), false);
         }
       }
       if (underwater) {

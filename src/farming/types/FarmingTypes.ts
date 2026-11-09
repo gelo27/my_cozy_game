@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 
-export type CropType = 'wheat' | 'carrot' | 'tomato' | 'strawberry' | 'cabbage' | 'corn' | 'eggplant' | 'pumpkin';
+export type CropType = 'wheat' | 'carrot' | 'tomato' | 'strawberry' | 'cabbage' | 'corn' | 'sunflower' | 'eggplant' | 'pumpkin';
 
 /** Every crop, in shop / inventory order. */
-export const CROP_TYPES: CropType[] = ['wheat', 'carrot', 'tomato', 'strawberry', 'cabbage', 'corn', 'eggplant', 'pumpkin'];
+export const CROP_TYPES: CropType[] = ['wheat', 'carrot', 'tomato', 'strawberry', 'cabbage', 'corn', 'sunflower', 'eggplant', 'pumpkin'];
 
 export type CropStage = 1 | 2 | 3;
 
@@ -86,6 +86,17 @@ export const CROP_DEFINITIONS: Record<CropType, CropDefinition> = {
     stageSeconds: 14,
     description: 'Високі стебла із золотими качанами. Потребує 2 поливи.',
   },
+  sunflower: {
+    type: 'sunflower',
+    nameUk: 'Соняшник',
+    seedNameUk: 'Насіння соняшника',
+    crateNameUk: 'Ящик соняшників',
+    seedItemId: 'sunflower_seed',
+    crateItemId: 'crate_sunflower',
+    color: '#f59e0b',
+    stageSeconds: 15,
+    description: 'Високі стебла з великими золотими кошиками. Потребує 2 поливи.',
+  },
   eggplant: {
     type: 'eggplant',
     nameUk: 'Баклажани',
@@ -132,7 +143,7 @@ export interface FarmInteractionPrompt {
   /** Always true: crops grow only on shovel-dug fields. */
   isField?: boolean;
   /** Set while the shovel is in hand: dig a new field, fill an empty one back in, or blocked. */
-  shovel?: 'dig' | 'fill' | 'blocked';
+  shovel?: 'dig' | 'fill' | 'uproot' | 'blocked';
   /** The shovel can act right now. */
   canDig?: boolean;
   /** 0..1 while E / LMB is being held to dig or fill. */

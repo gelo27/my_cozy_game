@@ -541,7 +541,13 @@ export class CharacterModel {
 
   /** True while an action that roots the player plays (watering, the harvest pick-up). */
   public isActionLocked(): boolean {
-    return this.isPlayingOneShot('WATER') || this.isPlayingOneShot('PICKUP_ONE_HAND');
+    // Chopping and mining root the player too, until the swing clip has played out
+    return (
+      this.isPlayingOneShot('WATER') ||
+      this.isPlayingOneShot('PICKUP_ONE_HAND') ||
+      this.isPlayingOneShot('CHOP') ||
+      this.isPlayingOneShot('MINE')
+    );
   }
 
   public isActivelyPouringWater(): boolean {
@@ -591,6 +597,8 @@ export class CharacterModel {
       this.activeWeapon = 10;
     } else if (itemId === 'fishing_rod') {
       this.activeWeapon = 13;
+    } else if (itemId === 'slingshot') {
+      this.activeWeapon = 15;
 
     } else if (itemId.endsWith('_seed')) {
       this.activeWeapon = 11;
@@ -718,6 +726,24 @@ export class CharacterModel {
       reel.position.set(0.03, 0.02, 0.0);
       rod.add(reel);
       this.weaponPivot.add(rod);
+    } else if (this.activeWeapon === 15) {
+      // Slingshot: a forked hazel stick with a leather band (shared geometry is tiny, built once and cached)
+      const sling = new THREE.Group();
+      const wood = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
+      const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.026, 0.2, 6), wood);
+      grip.position.set(0, 0.05, 0.06);
+      sling.add(grip);
+      const armGeo = new THREE.CylinderGeometry(0.016, 0.02, 0.15, 6);
+      for (const sx of [-1, 1]) {
+        const arm = new THREE.Mesh(armGeo, wood);
+        arm.position.set(sx * 0.045, 0.2, 0.06);
+        arm.rotation.z = -sx * 0.5;
+        sling.add(arm);
+      }
+      const band = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.018, 0.012), new THREE.MeshLambertMaterial({ color: 0x5b3a1e }));
+      band.position.set(0, 0.27, 0.06);
+      sling.add(band);
+      this.weaponPivot.add(sling);
     } else if (this.activeWeapon === 11 && this.equippedPropId) {
       // Seed Pouch
       const seedPouch = new THREE.Group();
@@ -846,6 +872,9 @@ export class CharacterModel {
       this.axeSwingProgress = Math.max(0, this.axeSwingProgress - dt * 3.8);
     }
     this.weaponRecoilKick = THREE.MathUtils.lerp(this.weaponRecoilKick, 0, 1.0 - Math.exp(-22.0 * dt));
+    // Slingshot shot: the fork snaps forward and settles back
+    if (this.activeWeapon === 15) this.weaponPivot.rotation.x = -this.weaponRecoilKick * 0.35;
+    else if (this.weaponPivot.rotation.x !== 0) this.weaponPivot.rotation.x = 0;
 
     // Full-body one-shots that no longer fit once the situation changes
     if (this.isPlayingOneShot('LAND') && (state.isMoving || !state.isGrounded || state.isSwimming)) this.cancelOneShot();

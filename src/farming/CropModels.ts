@@ -22,8 +22,8 @@ interface CropModelSpec {
   /** Wind bend relative to the wheat's, for the mature height. */
   sway: number;
   push: CropPushSpec | null;
-  /** Field layout: rows x rows plants, `spacing` m apart, at `scale`. */
-  field: { rows: number; spacing: number; scale: number };
+  /** Field layout: rows x rows plants, `spacing` m apart, at `scale`; `facing` turns them all one way. */
+  field: { rows: number; spacing: number; scale: number; facing?: number };
 }
 
 /** Crops drawn from the plant pack (wheat has its own model). */
@@ -35,7 +35,7 @@ const SPECS: Partial<Record<CropType, CropModelSpec>> = {
     unripeMix: 0.85,
     sway: 0.7,
     push: { maxBend: 0.3 },
-    field: { rows: 4, spacing: 0.9, scale: 1.25 },
+    field: { rows: 3, spacing: 1.0, scale: 1.25 },
   },
   strawberry: {
     node: 'strawberry',
@@ -44,7 +44,7 @@ const SPECS: Partial<Record<CropType, CropModelSpec>> = {
     unripeMix: 0.8,
     sway: 0.6,
     push: { maxBend: 0.2 },
-    field: { rows: 5, spacing: 0.7, scale: 1.15 },
+    field: { rows: 4, spacing: 0.7, scale: 1.15 },
   },
   corn: {
     node: 'corn',
@@ -53,7 +53,17 @@ const SPECS: Partial<Record<CropType, CropModelSpec>> = {
     unripeMix: 0.92,
     sway: 0.75,
     push: { maxBend: 0.42 },
-    field: { rows: 5, spacing: 0.7, scale: 1.3 },
+    field: { rows: 4, spacing: 0.7, scale: 1.3 },
+  },
+  sunflower: {
+    node: 'sunflower',
+    sproutLeavesOnly: true,
+    unripe: [0.28, 0.5, 0.08],
+    unripeMix: 0.88,
+    sway: 0.75,
+    push: { maxBend: 0.42 },
+    // The head faces the model's +X: the whole field looks east, where the sun rises
+    field: { rows: 4, spacing: 0.7, scale: 1.25, facing: 0 },
   },
   eggplant: {
     node: 'eggplant',
@@ -62,7 +72,7 @@ const SPECS: Partial<Record<CropType, CropModelSpec>> = {
     unripeMix: 0.55,
     sway: 0.6,
     push: { maxBend: 0.3 },
-    field: { rows: 4, spacing: 0.92, scale: 1.2 },
+    field: { rows: 3, spacing: 1.0, scale: 1.2 },
   },
   carrot: {
     node: 'carrot',
@@ -71,7 +81,7 @@ const SPECS: Partial<Record<CropType, CropModelSpec>> = {
     unripeMix: 0,
     sway: 0.55,
     push: null,
-    field: { rows: 6, spacing: 0.6, scale: 1.3 },
+    field: { rows: 5, spacing: 0.55, scale: 1.3 },
   },
   cabbage: {
     node: 'cabbage',
@@ -80,7 +90,7 @@ const SPECS: Partial<Record<CropType, CropModelSpec>> = {
     unripeMix: 0,
     sway: 0.12,
     push: null,
-    field: { rows: 5, spacing: 0.7, scale: 1.5 },
+    field: { rows: 4, spacing: 0.7, scale: 1.5 },
   },
   pumpkin: {
     node: 'pumpkin',
@@ -89,7 +99,7 @@ const SPECS: Partial<Record<CropType, CropModelSpec>> = {
     unripeMix: 0.9,
     sway: 0.08,
     push: null,
-    field: { rows: 4, spacing: 0.92, scale: 1.5 },
+    field: { rows: 3, spacing: 1.05, scale: 1.5 },
   },
 };
 
@@ -126,6 +136,11 @@ export function loadCropModels(): Promise<void> {
         }
         node.updateWorldMatrix(true, false);
         const source = node.geometry.clone().applyMatrix4(node.matrixWorld);
+        // Stand models whose base floats above the origin (e.g. the sunflower) on the ground;
+        // roots below it (the carrot) stay buried
+        source.computeBoundingBox();
+        const lift = source.boundingBox!.min.y;
+        if (lift > 0) source.translate(0, -lift, 0);
         const stages = {
           1: buildStage(source, spec, 1),
           2: buildStage(source, spec, 2),

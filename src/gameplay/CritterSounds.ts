@@ -30,13 +30,21 @@ function tone(ctx: AudioContext, out: AudioNode, t: number, type: OscillatorType
   o.stop(t + dur + 0.02);
 }
 
-function noise(ctx: AudioContext, out: AudioNode, t: number, dur: number, vol: number, freq: number, q = 1, type: BiquadFilterType = 'bandpass', sweepTo?: number): void {
-  const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+/** One shared second of white noise; each voice plays a random slice of it (no buffer per sound). */
+let sharedNoise: AudioBuffer | null = null;
+function noiseBuffer(ctx: AudioContext): AudioBuffer {
+  if (sharedNoise && sharedNoise.sampleRate === ctx.sampleRate) return sharedNoise;
+  const len = ctx.sampleRate;
   const buf = ctx.createBuffer(1, len, ctx.sampleRate);
   const d = buf.getChannelData(0);
   for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  return (sharedNoise = buf);
+}
+
+function noise(ctx: AudioContext, out: AudioNode, t: number, dur: number, vol: number, freq: number, q = 1, type: BiquadFilterType = 'bandpass', sweepTo?: number): void {
   const src = ctx.createBufferSource();
-  src.buffer = buf;
+  src.buffer = noiseBuffer(ctx);
+  src.loop = dur > 0.9;
   const f = ctx.createBiquadFilter();
   f.type = type;
   f.frequency.setValueAtTime(freq, t);
@@ -46,7 +54,8 @@ function noise(ctx: AudioContext, out: AudioNode, t: number, dur: number, vol: n
   g.gain.setValueAtTime(vol, t);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   src.connect(f).connect(g).connect(out);
-  src.start(t);
+  src.start(t, src.loop ? Math.random() : Math.random() * Math.max(0, 0.98 - dur));
+  src.stop(t + dur + 0.02);
 }
 
 export const critterSounds = {
@@ -83,5 +92,35 @@ export const critterSounds = {
   },
   wingFlap(pos: Pos): void {
     voice(pos, 0.15, (ctx, out, t) => noise(ctx, out, t, 0.1, 0.07, 400, 1, 'lowpass'), 4);
+  },
+  /** Slingshot release: the band's twang and a short whip of air. */
+  slingshot(pos: Pos): void {
+    voice(pos, 0.3, (ctx, out, t) => {
+      tone(ctx, out, t, 'triangle', 520, 180, 0.12, 0.08);
+      noise(ctx, out, t, 0.14, 0.12, 2400, 1.2, 'bandpass', 900);
+    }, 4);
+  },
+  /** A pebble knocking on wood, stone or the ground. */
+  pebbleHit(pos: Pos): void {
+    voice(pos, 0.15, (ctx, out, t) => {
+      tone(ctx, out, t, 'sine', 900 + Math.random() * 500, 400, 0.06, 0.07);
+      noise(ctx, out, t, 0.05, 0.12, 3000, 2);
+    }, 4);
+  },
+  /** A pest takes a hit: hedgehogs squeak, dragons yelp lower. */
+  hurt(pos: Pos, kind: 'hedgehog' | 'dragon'): void {
+    const f = kind === 'hedgehog' ? 1250 : 620;
+    voice(pos, 0.35, (ctx, out, t) => {
+      tone(ctx, out, t, 'square', f, f * 0.55, 0.16, 0.06);
+      noise(ctx, out, t, 0.08, 0.16, 1800, 1);
+    }, 5);
+  },
+  /** A beaten pest vanishes in a puff. */
+  poof(pos: Pos): void {
+    voice(pos, 0.7, (ctx, out, t) => {
+      noise(ctx, out, t, 0.45, 0.3, 1800, 0.7, 'lowpass', 200);
+      tone(ctx, out, t, 'sine', 300, 900, 0.25, 0.08);
+      tone(ctx, out, t + 0.12, 'sine', 600, 1400, 0.2, 0.06);
+    }, 6);
   },
 };

@@ -16,6 +16,8 @@ export const worldSettings = {
   waterLevel: -0.6,
   /** Hours 0..24 */
   timeOfDay: 9,
+  /** Days passed since the world began (the clock wrapping past midnight adds one). */
+  day: 0,
   /** Real seconds per in-game hour; 0 freezes the clock. */
   secondsPerHour: 60,
   /** Global simulation speed for the editor (0 = paused). */

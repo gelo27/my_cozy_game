@@ -43,7 +43,7 @@ class AudioEngine {
     if (typeof window !== 'undefined') {
       const unlock = () => {
         this.init();
-        if (this.ctx?.state === 'suspended') this.ctx.resume();
+        if (this.ctx?.state === 'suspended' && !this.paused) this.ctx.resume();
         if (this.ctx?.state === 'running') {
           window.removeEventListener('pointerdown', unlock);
           window.removeEventListener('keydown', unlock);
@@ -56,7 +56,7 @@ class AudioEngine {
       document.addEventListener('visibilitychange', () => {
         if (!this.ctx) return;
         if (document.hidden) this.ctx.suspend();
-        else this.ctx.resume();
+        else if (!this.paused) this.ctx.resume();
       });
     }
   }
@@ -106,6 +106,17 @@ class AudioEngine {
     if (paused === this.paused) return;
     this.paused = paused;
     this.applyVolumes();
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (paused) {
+      // After the quick fade, stop the whole audio graph: nothing can keep sounding behind the
+      // menu (scheduled splashes, loops) and no audio is processed while paused
+      window.setTimeout(() => {
+        if (this.paused && ctx.state === 'running') void ctx.suspend();
+      }, 250);
+    } else if (ctx.state === 'suspended' && !document.hidden) {
+      void ctx.resume();
+    }
   }
 
   /** Input of one mixer channel (null before the first user gesture). */
@@ -298,7 +309,7 @@ class AudioEngine {
   public playHitSound() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -326,7 +337,7 @@ class AudioEngine {
   public playOxygenPulse(critical: boolean = false) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -358,7 +369,7 @@ class AudioEngine {
   public playOxygenReplenished() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -391,7 +402,7 @@ class AudioEngine {
   public playSurfacingBreath() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -419,7 +430,7 @@ class AudioEngine {
   public playAxeSwing() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -455,7 +466,7 @@ class AudioEngine {
   public playWoodChopHit(isFatal: boolean = false) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -516,7 +527,7 @@ class AudioEngine {
   public playTreeFallCreak() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -557,7 +568,7 @@ class AudioEngine {
   public playTreeImpact() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -603,7 +614,7 @@ class AudioEngine {
   public playLogSplit() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -629,7 +640,7 @@ class AudioEngine {
   public playBuildPlace(isWood: boolean = true) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -675,7 +686,7 @@ class AudioEngine {
   public playDoorToggle(isOpen: boolean = true) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -717,7 +728,7 @@ class AudioEngine {
   public playBuildSnap() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -742,7 +753,7 @@ class AudioEngine {
   public playBuildDemolish() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -767,7 +778,7 @@ class AudioEngine {
   public playBuildSelect() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -792,7 +803,7 @@ class AudioEngine {
   public playPaintBrush() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -839,7 +850,7 @@ class AudioEngine {
   public playPaintPick() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -864,7 +875,7 @@ class AudioEngine {
   public playWatering() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -912,7 +923,7 @@ class AudioEngine {
   public playPlantSeed() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -954,7 +965,7 @@ class AudioEngine {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
     if (!this.holdOsc || !this.holdGain) {
-      if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+      if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
       osc.type = 'sine';
@@ -979,7 +990,7 @@ class AudioEngine {
   public playBushRustle(intensity = 1) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
     const ctx = this.ctx;
     const t = ctx.currentTime;
@@ -1008,7 +1019,7 @@ class AudioEngine {
   public playBushChop(isFatal = false) {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
     const ctx = this.ctx;
     const t = ctx.currentTime;
@@ -1050,7 +1061,7 @@ class AudioEngine {
   public playHarvest() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden) this.ctx.resume();
+    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
 
     const t = this.ctx.currentTime;
@@ -1075,5 +1086,9 @@ class AudioEngine {
   }
 }
 
-export const audioEngine = new AudioEngine();
+/**
+ * One engine (and one AudioContext) per page. Kept on globalThis so a hot reload of this module in
+ * development reuses it instead of starting a second context that the pause menu would not mute.
+ */
+export const audioEngine: AudioEngine = ((globalThis as { __farmAudioEngine?: AudioEngine }).__farmAudioEngine ??= new AudioEngine());
 

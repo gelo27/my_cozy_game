@@ -18,6 +18,8 @@ export interface AmbientState {
   birdPerches: THREE.Vector3[];
   /** 0..1 gentle breeze (clear/cloudy weather, anywhere outdoors). */
   breeze: number;
+  /** 0..1 quiet muffled hush of foggy weather. */
+  fog: number;
   /** True when a roof or big static collider is above the player: rain sounds muffled. */
   underRoof: boolean;
   /** Nearest burning campfire within earshot, or null. */
@@ -133,6 +135,7 @@ export class AmbientAudio {
   private crickets: Crickets | null = null;
   private birds: Birds | null = null;
   private breeze: { src: AudioBufferSourceNode; hiSrc: AudioBufferSourceNode; gain: GainNode; hiGain: GainNode; lfos: OscillatorNode[] } | null = null;
+  private fogHush: { gain: GainNode; airGain: GainNode } | null = null;
 
   public update(s: AmbientState): void {
     const ctx = audioEngine.context;
@@ -159,6 +162,14 @@ export class AmbientAudio {
       const k = s.breeze * (1 - this.roofMix * 0.72) * (under ? 0.25 : 1);
       this.breeze.gain.gain.setTargetAtTime(k * 0.05, t, 1.5);
       this.breeze.hiGain.gain.setTargetAtTime(k * 0.012, t, 1.5);
+    }
+
+    // Fog: a soft, muffled hush with a faint airy layer, slowly swelling
+    if (s.fog > 0.02 && !this.fogHush) this.fogHush = this.startFog(ctx, bus);
+    if (this.fogHush) {
+      const k = s.fog * (1 - this.roofMix * 0.75) * (under ? 0.2 : 1);
+      this.fogHush.gain.gain.setTargetAtTime(k * 0.045, t, 2.5);
+      this.fogHush.airGain.gain.setTargetAtTime(k * 0.008, t, 2.5);
     }
 
     // Night: crickets chirp continuously
@@ -339,6 +350,41 @@ export class AmbientAudio {
       lfos.push(o);
     }
     return { src: low.src, hiSrc: hi.src, gain: low.g, hiGain: hi.g, lfos };
+  }
+
+  private startFog(ctx: AudioContext, bus: AudioNode) {
+    // Low, slow noise through a low-pass (the damp "room tone" of fog) plus a very faint high air
+    const mk = (type: BiquadFilterType, freq: number, q: number, rate: number) => {
+      const src = this.loop(ctx, this.getNoise(ctx));
+      src.playbackRate.value = rate;
+      const f = ctx.createBiquadFilter();
+      f.type = type;
+      f.frequency.value = freq;
+      f.Q.value = q;
+      const swell = ctx.createGain();
+      swell.gain.value = 1;
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      src.connect(f).connect(swell).connect(g).connect(bus);
+      src.start(0, Math.random() * NOISE_SECONDS);
+      return { f, swell, g };
+    };
+    const low = mk('lowpass', 260, 0.4, 0.3);
+    const air = mk('bandpass', 4200, 0.6, 0.7);
+    // Very slow swells, so the hush breathes instead of sounding like a static hiss
+    for (const [rate, depth, target] of [
+      [0.045, 0.35, low.swell.gain],
+      [0.07, 70, low.f.frequency],
+      [0.033, 0.45, air.swell.gain],
+    ] as [number, number, AudioParam][]) {
+      const o = ctx.createOscillator();
+      o.frequency.value = rate;
+      const og = ctx.createGain();
+      og.gain.value = depth;
+      o.connect(og).connect(target);
+      o.start();
+    }
+    return { gain: low.g, airGain: air.g };
   }
 
   private startBirds(ctx: AudioContext, bus: AudioNode): Birds {

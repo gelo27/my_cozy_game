@@ -3,6 +3,7 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { InputManager } from '../input/InputManager';
 import { TerrainSystem, TerrainBrushKind } from '../world/TerrainSystem';
 import { PropSystem, PROP_DEF_MAP } from '../world/PropSystem';
+import { ALGAE_DEFAULT_LINKS } from '../world/AlgaeChains';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { RiverEditTool } from './RiverEditTool';
 import type { RiverSystem } from '../world/rivers/RiverSystem';
@@ -21,6 +22,10 @@ export interface EditorState {
   paintFill: boolean;
   placeType: string;
   placeScale: number;
+  /** Links in a placed algae stalk (chain props). */
+  placeChainLength: number;
+  /** Algae: root and top colours given to placed stalks (sRGB hex); null = the panel's colours. */
+  placeAlgaeColors: [number, number] | null;
   placeRandomize: boolean;
   brushRadius: number;
   brushStrength: number;
@@ -53,6 +58,8 @@ export class EditorController {
     paintFill: false,
     placeType: 'tree_pine',
     placeScale: 1,
+    placeChainLength: ALGAE_DEFAULT_LINKS,
+    placeAlgaeColors: null,
     placeRandomize: true,
     brushRadius: 4,
     brushStrength: 2,
@@ -68,7 +75,9 @@ export class EditorController {
   private readonly raycaster = new THREE.Raycaster();
   private readonly cursor: THREE.LineLoop;
   private readonly ghost = new THREE.Group();
+  private readonly ghostMaterial = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide });
   private ghostType = '';
+  private ghostGeometry: THREE.BufferGeometry | null = null;
   private readonly gizmo: TransformControls;
   private readonly gizmoTarget = new THREE.Object3D();
   private readonly hit = new THREE.Vector3();
@@ -227,8 +236,24 @@ export class EditorController {
     const prop = this.state.selectedPropId !== null ? this.props.get(this.state.selectedPropId) : undefined;
     if (!prop) return;
     this.pushUndo();
-    const id = this.props.add(prop.type, prop.position.x + 1.5, prop.position.z, prop.rotationY, prop.scale);
+    const id = this.props.add(prop.type, prop.position.x + 1.5, prop.position.z, prop.rotationY, prop.scale, undefined, true, prop.length, prop.colors);
     this.select(id);
+  }
+
+  /** Algae: the selected stalk's own colours, or null for the panel's (push the undo step first). */
+  public setSelectedChainColors(colors: [number, number] | null): void {
+    const id = this.state.selectedPropId;
+    if (id === null) return;
+    this.props.setChainColors(id, colors);
+    this.touch();
+  }
+
+  /** Chain props: changes the selected stalk's link count (push the undo step on drag start). */
+  public setSelectedChainLength(length: number): void {
+    const id = this.state.selectedPropId;
+    if (id === null) return;
+    this.props.setChainLength(id, length);
+    this.touch();
   }
 
   public setSelectedTransform(position: THREE.Vector3, rotationY: number, scale: number): void {
@@ -438,7 +463,7 @@ export class EditorController {
         const rnd = this.state.placeRandomize;
         const rot = rnd ? Math.random() * Math.PI * 2 : this.ghost.rotation.y;
         const scale = this.state.placeScale * (rnd ? 0.85 + Math.random() * 0.3 : 1);
-        this.props.add(this.state.placeType, this.hit.x, this.hit.z, rot, scale);
+        this.props.add(this.state.placeType, this.hit.x, this.hit.z, rot, scale, undefined, true, this.state.placeChainLength, this.state.placeAlgaeColors);
         this.lastPlaceAt.copy(this.hit);
         this.touch();
       }
@@ -493,20 +518,15 @@ export class EditorController {
   private updateGhost(visible: boolean): void {
     this.ghost.visible = visible;
     if (!visible) return;
-    if (this.ghostType !== this.state.placeType) {
+    // The type's shared geometry (algae: the stalk of the chosen length), rendered translucent
+    const geometry = this.props.previewGeometry(this.state.placeType, this.state.placeChainLength);
+    if (this.ghostType !== this.state.placeType || this.ghostGeometry !== geometry) {
       this.ghostType = this.state.placeType;
+      this.ghostGeometry = geometry;
       this.ghost.clear();
-      const def = PROP_DEF_MAP.get(this.state.placeType);
-      if (def) {
-        // Borrow a throwaway prop to get the merged geometry, then render it translucent
-        const id = this.props.add(def.id, 0, -1000, 0, 1, -1000, false);
-        const batch = this.props.group.getObjectByName(`Props_${def.id}`) as THREE.InstancedMesh;
-        const mesh = new THREE.Mesh(
-          batch.geometry,
-          new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.45, depthWrite: false })
-        );
+      if (geometry && PROP_DEF_MAP.has(this.state.placeType)) {
+        const mesh = new THREE.Mesh(geometry, this.ghostMaterial);
         this.ghost.add(mesh);
-        if (id !== null) this.props.remove(id);
       }
     }
     this.ghost.position.copy(this.hit);

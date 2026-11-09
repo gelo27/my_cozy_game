@@ -113,7 +113,8 @@ export class Gulls extends Species {
     a.x = nx;
     a.z = nz;
     a.y += (cy - a.y) * k;
-    a.roll = -0.35 * dir;
+    // Bank into the turn: the inner wing dips toward the circle's centre
+    a.roll = 0.35 * dir;
     a.pitch = 0;
     // A few beats, then a long glide
     if (a.timer <= 0) {

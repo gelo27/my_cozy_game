@@ -18,15 +18,34 @@ function isWalkable(terrain: TerrainSystem, x: number, z: number): boolean {
 
 const STEER_OFFSETS = [0, 0.45, -0.45, 0.9, -0.9, 1.35, -1.35, 1.8, -1.8, 2.4, -2.4, Math.PI];
 
-/** The most open direction close to `angle` (dry land, no cliff); NaN when boxed in. */
-function steer(terrain: TerrainSystem, x: number, z: number, angle: number, look: number, maxClimb = 0.9): number {
+/**
+ * The physical world as the pests see it (filled in by the gameplay layer with Rapier ray casts).
+ * Terrain is walked on the heightmap; these queries add everything standing on it: walls, fences,
+ * trees, rocks and props.
+ */
+export interface PestEnv {
+  /** A solid (non-terrain) collider within `dist` of (x, y, z) along the unit direction (dx, dz). */
+  blocked(x: number, y: number, z: number, dx: number, dz: number, dist: number): boolean;
+  /** Nothing solid (hills included) between the two points. */
+  canSee(from: THREE.Vector3, to: THREE.Vector3): boolean;
+  /** Distance to the first solid hit along a unit direction, or -1 within `len`. */
+  sweep(from: THREE.Vector3, dir: THREE.Vector3, len: number): number;
+}
+
+/** No physics yet (or in tests): nothing blocks. */
+const OPEN_ENV: PestEnv = { blocked: () => false, canSee: () => true, sweep: () => -1 };
+
+/** The most open direction close to `angle` (dry land, no cliff, no wall); NaN when boxed in. */
+function steer(terrain: TerrainSystem, env: PestEnv, x: number, y: number, z: number, angle: number, look: number, maxClimb = 0.9): number {
   const h0 = terrain.getHeight(x, z);
   for (const off of STEER_OFFSETS) {
     const a = angle + off;
-    const sx = x + Math.sin(a) * look;
-    const sz = z + Math.cos(a) * look;
+    const dx = Math.sin(a), dz = Math.cos(a);
+    const sx = x + dx * look;
+    const sz = z + dz * look;
     if (!isWalkable(terrain, sx, sz)) continue;
     if (Math.abs(terrain.getHeight(sx, sz) - h0) > maxClimb) continue;
+    if (env.blocked(x, y, z, dx, dz, look)) continue;
     return a;
   }
   return NaN;
@@ -36,9 +55,22 @@ function steer(terrain: TerrainSystem, x: number, z: number, angle: number, look
 export interface PestPort {
   /** Hit the player from `from` with knockback power; returns false while the player is invulnerable. */
   hurt(from: THREE.Vector3, power: number, kind: PestKind): boolean;
+  /** The player beat a pest (reward, toast). */
+  defeated(kind: PestKind, at: THREE.Vector3): void;
+}
+
+/** Something a pebble or an axe can strike. */
+export interface PestTarget {
+  readonly kind: PestKind;
+  readonly hitRadius: number;
+  hitPoint(out: THREE.Vector3): THREE.Vector3;
 }
 
 const tmpA = new THREE.Vector3();
+const tmpB = new THREE.Vector3();
+const tmpEye = new THREE.Vector3();
+/** How often a pest re-checks whether it can see the player (s). */
+const SIGHT_INTERVAL = 0.2;
 
 function angleTo(from: THREE.Vector3, to: THREE.Vector3): number {
   return Math.atan2(to.x - from.x, to.z - from.z);
@@ -50,9 +82,11 @@ function turn(current: number, target: number, maxStep: number): number {
   return current + Math.max(-maxStep, Math.min(maxStep, d));
 }
 
-abstract class Pest {
+abstract class Pest implements PestTarget {
   public readonly group = new THREE.Group();
   public removed = false;
+  public abstract readonly hitRadius: number;
+  public health: number;
   protected time = Math.random() * 10;
   protected timer = 0;
   protected heading = Math.random() * Math.PI * 2;
@@ -60,8 +94,23 @@ abstract class Pest {
   protected readonly wander = new THREE.Vector3();
   protected readonly emote: EmoteBubble;
   protected readonly stars: THREE.Sprite[] = [];
+  /** Last line-of-sight result (refreshed every SIGHT_INTERVAL, staggered across pests). */
+  protected sees = false;
+  private sightTimer = Math.random() * SIGHT_INTERVAL;
+  /** 1 right after a hit, decays: a squash-and-stretch wobble (no per-pest material clones). */
+  private wobble = 0;
+  /** Hit by the player recently: skips the calm-down and comes back angry. */
+  protected provoked = false;
 
-  constructor(public readonly kind: PestKind, x: number, z: number, protected readonly terrain: TerrainSystem, emoteHeight: number) {
+  constructor(
+    public readonly kind: PestKind,
+    x: number,
+    z: number,
+    protected readonly terrain: TerrainSystem,
+    emoteHeight: number,
+    public readonly maxHealth: number
+  ) {
+    this.health = maxHealth;
     this.group.position.set(x, terrain.getHeight(x, z), z);
     this.home.copy(this.group.position);
     this.wander.copy(this.group.position);
@@ -103,9 +152,59 @@ abstract class Pest {
     }
   }
 
+  /** Body radius (same as hitRadius; matches the gathering nodes' shape). */
+  get radius(): number {
+    return this.hitRadius;
+  }
+
+  get alive(): boolean {
+    return !this.removed && this.health > 0;
+  }
+
+  /** Throttled line of sight from `eye` to the player within `range` (m). */
+  protected look(dt: number, eye: THREE.Vector3, player: THREE.Vector3, env: PestEnv, range: number): boolean {
+    this.sightTimer -= dt;
+    if (this.sightTimer > 0) return this.sees;
+    this.sightTimer = SIGHT_INTERVAL;
+    const dx = player.x - eye.x, dy = player.y - eye.y, dz = player.z - eye.z;
+    this.sees = dx * dx + dy * dy + dz * dz < range * range && env.canSee(eye, player);
+    return this.sees;
+  }
+
+  /** Struck by the player's axe or a pebble from `from`. Returns false when it was already beaten. */
+  public damage(amount: number, from: THREE.Vector3, port: PestPort, particles?: ParticleManager): boolean {
+    if (!this.alive) return false;
+    this.health -= amount;
+    this.wobble = 1;
+    this.provoked = true;
+    const at = this.hitPoint(tmpB);
+    critterSounds.hurt(at, this.kind);
+    particles?.emitJumpDust(at);
+    if (this.health <= 0) {
+      critterSounds.poof(at);
+      particles?.emitBuildPuff(at, false, 26);
+      port.defeated(this.kind, at);
+      this.removed = true;
+      return true;
+    }
+    this.onHurt(from);
+    return true;
+  }
+
+  /** Reaction to a hit that did not beat it. */
+  protected abstract onHurt(from: THREE.Vector3): void;
+
+  /** Squash-and-stretch after a hit. */
+  protected applyWobble(dt: number): void {
+    if (this.wobble <= 0) return;
+    this.wobble = Math.max(0, this.wobble - dt * 3);
+    const k = Math.sin(this.wobble * 22) * 0.18 * this.wobble;
+    this.group.scale.set(1 + k, 1 - k, 1 + k);
+  }
+
   /** Centre of the pest's body (for sounds and effects). */
   abstract hitPoint(out: THREE.Vector3): THREE.Vector3;
-  abstract update(dt: number, player: THREE.Vector3, port: PestPort, particles?: ParticleManager): void;
+  abstract update(dt: number, player: THREE.Vector3, port: PestPort, env: PestEnv, particles?: ParticleManager): void;
 
   public dispose(): void {
     this.group.removeFromParent();
@@ -144,9 +243,15 @@ export class Hedgehog extends Pest {
   private rumble = 0;
   private bounceV = 0;
   private hopY = 0;
+  /** Knocked back by a hit: slides this fast (m/s) along knockDir, decaying. */
+  private knock = 0;
+  private knockDir = 0;
+  /** Bumps into walls in a row while wandering: gives up on that wander target. */
+  private stuck = 0;
+  public readonly hitRadius = 0.45;
 
   constructor(x: number, z: number, terrain: TerrainSystem) {
-    super('hedgehog', x, z, terrain, 1.0);
+    super('hedgehog', x, z, terrain, 1.0, 3);
     // Walking hedgehog: a spiky dome, a pointy face, four stubby legs
     const dome = new THREE.Mesh(new THREE.SphereGeometry(0.34, 12, 8, 0, Math.PI * 2, 0, Math.PI / 1.7), HEDGE_MATS.spikes);
     dome.scale.set(1, 0.85, 1.25);
@@ -223,7 +328,18 @@ export class Hedgehog extends Pest {
     return out.copy(this.position).setY(this.position.y + 0.3);
   }
 
-  public update(dt: number, player: THREE.Vector3, port: PestPort, particles?: ParticleManager): void {
+  protected onHurt(from: THREE.Vector3): void {
+    // Tumbles away from the blow and lies dazed; comes back angry once it shakes it off
+    this.knockDir = Math.atan2(this.position.x - from.x, this.position.z - from.z);
+    this.knock = 5;
+    this.bounceV = 3.2;
+    this.state = 'dazed';
+    this.timer = 1.4;
+    this.rollSpeed = 0;
+    this.emote.show('angry', 0.8);
+  }
+
+  public update(dt: number, player: THREE.Vector3, port: PestPort, env: PestEnv, particles?: ParticleManager): void {
     const pos = this.position;
     const dist = Math.hypot(player.x - pos.x, player.z - pos.z);
     this.group.visible = dist < 110;
@@ -233,10 +349,12 @@ export class Hedgehog extends Pest {
     this.emote.update(dt);
     let speed = 0;
     let wantCurl = 0;
+    // Eyes a little above the snout: low bumps of the ground don't hide the player
+    const sees = dist < 24 && this.look(dt, tmpEye.copy(pos).setY(pos.y + 0.6), player, env, 24);
 
     switch (this.state) {
       case 'wander': {
-        if (dist < 11 && Math.abs(player.y - pos.y) < 3) {
+        if (dist < 11 && Math.abs(player.y - pos.y) < 3 && sees) {
           this.state = 'angry';
           this.timer = 0.75;
           this.emote.show('angry', 0.9);
@@ -276,8 +394,8 @@ export class Hedgehog extends Pest {
         break;
       case 'roll': {
         wantCurl = 1;
-        // Gently homes in on the player; accelerates down the line
-        this.heading = turn(this.heading, angleTo(pos, player), dt * 0.9);
+        // Gently homes in on the player while it can see them; accelerates down the line
+        if (sees) this.heading = turn(this.heading, angleTo(pos, player), dt * 0.9);
         this.rollSpeed = Math.min(10, this.rollSpeed + dt * 9);
         speed = this.rollSpeed;
         this.rolled += speed * dt;
@@ -304,10 +422,19 @@ export class Hedgehog extends Pest {
         this.spinStars(true, 0.65, 0.3);
         if (this.timer <= 0) {
           this.spinStars(false, 0, 0);
-          this.state = 'calm';
-          this.timer = 3.5;
           this.home.copy(pos);
-          this.pickWander(6);
+          if (this.provoked && sees && dist < 16) {
+            // Hit by the player: no calming down, it charges right back
+            this.provoked = false;
+            this.state = 'angry';
+            this.timer = 0.6;
+            this.emote.show('angry', 0.9);
+            critterSounds.huff(pos);
+          } else {
+            this.state = 'calm';
+            this.timer = 3.5;
+            this.pickWander(6);
+          }
         }
         break;
       case 'calm':
@@ -316,20 +443,43 @@ export class Hedgehog extends Pest {
         break;
     }
 
-    // Movement on the heightmap (bounces off water and cliffs)
-    if (speed > 0) {
-      const nx = pos.x + Math.sin(this.heading) * speed * dt;
-      const nz = pos.z + Math.cos(this.heading) * speed * dt;
-      if (isWalkable(this.terrain, nx, nz) && Math.abs(this.terrain.getHeight(nx, nz) - this.terrain.getHeight(pos.x, pos.z)) < 0.6) {
+    // Knockback slide after a hit (stops at walls and water)
+    if (this.knock > 0.05) {
+      const step = this.knock * dt;
+      const kx = Math.sin(this.knockDir), kz = Math.cos(this.knockDir);
+      const nx = pos.x + kx * step, nz = pos.z + kz * step;
+      if (isWalkable(this.terrain, nx, nz) && !env.blocked(pos.x, pos.y + 0.35, pos.z, kx, kz, this.hitRadius + step)) {
         pos.x = nx;
         pos.z = nz;
+      } else this.knock = 0;
+      this.knock *= Math.exp(-dt * 5);
+    }
+
+    // Movement on the heightmap (bounces off water and cliffs) and around solid colliders
+    if (speed > 0) {
+      const step = speed * dt;
+      const dx = Math.sin(this.heading), dz = Math.cos(this.heading);
+      const nx = pos.x + dx * step;
+      const nz = pos.z + dz * step;
+      const ground = isWalkable(this.terrain, nx, nz) && Math.abs(this.terrain.getHeight(nx, nz) - this.terrain.getHeight(pos.x, pos.z)) < 0.6;
+      // Ray at belly height, reaching the body's radius past this frame's step: no tunnelling at full roll speed
+      const solid = ground && env.blocked(pos.x, pos.y + 0.35, pos.z, dx, dz, this.hitRadius + step);
+      if (ground && !solid) {
+        pos.x = nx;
+        pos.z = nz;
+        this.stuck = Math.max(0, this.stuck - 1);
       } else if (this.state === 'roll') {
+        // Bonks off the wall / water's edge and lies dazed
         this.heading += Math.PI;
+        if (solid) critterSounds.pebbleHit(pos);
         this.endRoll();
       } else {
-        const a = steer(this.terrain, pos.x, pos.z, this.heading, 1, 0.6);
-        if (!Number.isNaN(a)) this.heading = a;
-        else this.pickWander(6);
+        const a = steer(this.terrain, env, pos.x, pos.y + 0.35, pos.z, this.heading, 1, 0.6);
+        if (!Number.isNaN(a) && ++this.stuck < 25) this.heading = a;
+        else {
+          this.stuck = 0;
+          this.pickWander(6);
+        }
       }
     }
     this.bounceV -= 14 * dt;
@@ -355,6 +505,7 @@ export class Hedgehog extends Pest {
     this.legs[3].rotation.x = walk;
     this.legs[1].rotation.x = -walk;
     this.legs[2].rotation.x = -walk;
+    this.applyWobble(dt);
   }
 
   private endRoll(): void {
@@ -367,6 +518,8 @@ export class Hedgehog extends Pest {
 // ------------------------------------------------------------------ baby dragon
 
 type DragonState = 'patrol' | 'aggro' | 'inhale' | 'rest';
+/** Headings a flying dragon tries, relative to where it wants to go (towards its strafe side first). */
+const FLY_OFFSETS = [0, 0.7, -0.7, 1.4, -1.4];
 
 const DRAGON_MATS = {
   body: new THREE.MeshLambertMaterial({ color: 0x6cc24a }),
@@ -414,9 +567,14 @@ export class BabyDragon extends Pest {
   private readonly bursts: Burst[] = [];
   private readonly lastPlayer = new THREE.Vector3();
   private readonly playerVel = new THREE.Vector3();
+  /** Seconds without a clear view while chasing: flies closer, then gives up. */
+  private lost = 0;
+  private knock = 0;
+  private knockDir = 0;
+  public readonly hitRadius = 0.6;
 
   constructor(x: number, z: number, terrain: TerrainSystem, private readonly scene: THREE.Scene) {
-    super('dragon', x, z, terrain, 1.55);
+    super('dragon', x, z, terrain, 1.55, 4);
     // Round belly-heavy body
     const torso = new THREE.Mesh(new THREE.SphereGeometry(0.42, 14, 10), DRAGON_MATS.body);
     torso.scale.set(1, 1.05, 0.95);
@@ -510,15 +668,33 @@ export class BabyDragon extends Pest {
     return out.copy(this.position).setY(this.position.y + this.altitude);
   }
 
-  public update(dt: number, player: THREE.Vector3, port: PestPort, particles?: ParticleManager): void {
+  protected onHurt(from: THREE.Vector3): void {
+    // Knocked back and up; it turns on the player at once
+    this.knockDir = Math.atan2(this.position.x - from.x, this.position.z - from.z);
+    this.knock = 4;
+    this.altitude += 0.5;
+    this.emote.show('angry', 1);
+    if (this.state === 'patrol' || this.state === 'rest') {
+      this.state = 'aggro';
+      this.timer = 0.8;
+    } else if (this.state === 'inhale') {
+      // The hit knocks the breath out of it
+      this.glow.visible = false;
+      this.state = 'aggro';
+      this.timer = 1.2;
+    }
+  }
+
+  public update(dt: number, player: THREE.Vector3, port: PestPort, env: PestEnv, particles?: ParticleManager): void {
     const pos = this.position;
     const dist = Math.hypot(player.x - pos.x, player.z - pos.z);
-    this.updateFireballs(dt, player, port, particles);
+    this.updateFireballs(dt, player, port, env, particles);
     this.group.visible = dist < 140;
     if (dist > 100 && !this.fireballs.length) return;
     this.time += dt;
     this.timer -= dt;
     this.emote.update(dt);
+    const sees = dist < 36 && this.look(dt, this.hitPoint(tmpEye), player, env, 36);
 
     // Track the player's motion to lead the shots
     if (dt > 0) {
@@ -536,7 +712,9 @@ export class BabyDragon extends Pest {
 
     switch (this.state) {
       case 'patrol': {
-        if (dist < 22) {
+        if (dist < 22 && (sees || this.provoked)) {
+          this.provoked = false;
+          this.lost = 0;
           this.state = 'aggro';
           this.timer = 1.2;
           this.emote.show('alert', 1);
@@ -552,6 +730,17 @@ export class BabyDragon extends Pest {
       }
       case 'aggro': {
         face = toPlayer;
+        this.lost = sees ? 0 : this.lost + dt;
+        if (!sees) {
+          // Lost sight (a wall, a tree, a hill): fly closer to look around it, then give up
+          moveDir = toPlayer + (Math.PI / 4) * this.strafe;
+          speed = dist > 5 ? 3.2 : 1.5;
+          if (this.lost > 7 || dist > 34) {
+            this.state = 'patrol';
+            this.pickWander(10);
+          }
+          break;
+        }
         // Keep 8-12 m away and circle the player
         const want = dist < 8 ? toPlayer + Math.PI : dist > 12 ? toPlayer : toPlayer + (Math.PI / 2) * this.strafe;
         moveDir = want;
@@ -572,6 +761,13 @@ export class BabyDragon extends Pest {
         this.glow.visible = true;
         if (this.timer <= 0) {
           this.glow.visible = false;
+          // Only spits with a clear line (fresh check: the player may have just ducked behind cover)
+          if (!env.canSee(this.hitPoint(tmpEye), player)) {
+            this.sees = false;
+            this.state = 'aggro';
+            this.timer = 0.6;
+            break;
+          }
           this.shoot(player);
           this.shots++;
           if (this.shots >= 3) {
@@ -596,15 +792,31 @@ export class BabyDragon extends Pest {
         break;
     }
 
-    // Flight
+    // Flight: around walls and trunks at body height (tries a few headings before turning back)
+    if (this.knock > 0.05) {
+      moveDir = this.knockDir;
+      speed = Math.max(speed, this.knock);
+      this.knock *= Math.exp(-dt * 4);
+    }
     if (speed > 0) {
-      const nx = pos.x + Math.sin(moveDir) * speed * dt;
-      const nz = pos.z + Math.cos(moveDir) * speed * dt;
-      if (this.terrain.isInside(nx, nz) && Math.hypot(nx, nz) < coastRadius(nx, nz) - 10) {
+      const step = speed * dt;
+      const bodyY = pos.y + this.altitude;
+      let moved = false;
+      for (const off of FLY_OFFSETS) {
+        const a = moveDir + off * this.strafe;
+        const dx = Math.sin(a), dz = Math.cos(a);
+        const nx = pos.x + dx * step;
+        const nz = pos.z + dz * step;
+        if (!this.terrain.isInside(nx, nz) || Math.hypot(nx, nz) > coastRadius(nx, nz) - 10) continue;
+        if (env.blocked(pos.x, bodyY, pos.z, dx, dz, this.hitRadius + step)) continue;
         pos.x = nx;
         pos.z = nz;
-      } else {
+        moved = true;
+        break;
+      }
+      if (!moved) {
         this.strafe *= -1;
+        this.knock = 0;
       }
     }
     this.heading = turn(this.heading, face, dt * 5);
@@ -636,6 +848,7 @@ export class BabyDragon extends Pest {
     this.body.scale.set(s, s, s);
     this.jaw.scale.y = 0.3 + this.puff * 0.7 + (this.state === 'rest' ? Math.abs(Math.sin(this.time * 8)) * 0.4 : 0);
     if (this.glow.visible) this.glow.scale.setScalar(0.6 + this.puff * 0.8 + Math.sin(this.time * 40) * 0.15);
+    this.applyWobble(dt);
   }
 
   private shoot(player: THREE.Vector3): void {
@@ -659,20 +872,25 @@ export class BabyDragon extends Pest {
     critterSounds.fireball(from);
   }
 
-  private updateFireballs(dt: number, player: THREE.Vector3, port: PestPort, particles?: ParticleManager): void {
+  private updateFireballs(dt: number, player: THREE.Vector3, port: PestPort, env: PestEnv, particles?: ParticleManager): void {
     for (let i = this.fireballs.length - 1; i >= 0; i--) {
       const f = this.fireballs[i];
       f.life -= dt;
-      f.mesh.position.addScaledVector(f.vel, dt);
+      const p = f.mesh.position;
+      // Swept against walls, trees and rocks: a fireball bursts on the first thing in its way
+      const len = f.vel.length() * dt;
+      const dir = tmpA.copy(f.vel).divideScalar(Math.max(1e-6, f.vel.length()));
+      const wall = len > 0 ? env.sweep(p, dir, len + 0.2) : -1;
+      if (wall >= 0) p.addScaledVector(dir, Math.max(0, wall - 0.25));
+      else p.addScaledVector(f.vel, dt);
       f.mesh.rotation.y += dt * 9;
       f.mesh.children[1].scale.setScalar(0.22 + Math.sin(this.time * 30 + i) * 0.04);
-      const p = f.mesh.position;
-      const hitPlayer = p.distanceTo(tmpA.copy(player)) < 0.95;
+      const hitPlayer = p.distanceTo(player) < 0.95;
       const ground = this.terrain.getHeight(p.x, p.z);
-      if (hitPlayer || p.y <= ground + 0.1 || f.life <= 0) {
+      if (hitPlayer || wall >= 0 || p.y <= ground + 0.1 || f.life <= 0) {
         this.explode(p, particles);
-        // Splash damage near the impact
-        if (hitPlayer || Math.hypot(player.x - p.x, player.z - p.z) < 1.5) port.hurt(p, 7, 'dragon');
+        // Splash damage near the impact, but not through the wall it burst on
+        if (hitPlayer || (Math.hypot(player.x - p.x, player.z - p.z) < 1.5 && env.canSee(p, player))) port.hurt(p, 7, 'dragon');
         f.mesh.removeFromParent();
         this.fireballs.splice(i, 1);
       } else if (Math.random() < dt * 20) {
@@ -725,6 +943,8 @@ const DRAGONS = 2;
 export class PestSystem {
   public readonly pests: Pest[] = [];
   public port: PestPort | null = null;
+  /** Physics queries for walls and sight lines (set once physics is up). */
+  public env: PestEnv = OPEN_ENV;
   private respawnTimer = 0;
 
   constructor(private readonly scene: THREE.Scene, private readonly terrain: TerrainSystem, private readonly particles?: ParticleManager) {}
@@ -758,7 +978,7 @@ export class PestSystem {
     if (!port) return;
     for (let i = this.pests.length - 1; i >= 0; i--) {
       const p = this.pests[i];
-      p.update(active ? dt : 0, player, port, this.particles);
+      p.update(active ? dt : 0, player, port, this.env, this.particles);
       if (p.removed) {
         p.dispose();
         this.pests.splice(i, 1);
@@ -789,8 +1009,88 @@ export class PestSystem {
     return best;
   }
 
+  /** A pest within an axe's reach of the player (body centre at `pos`), in front of them first. */
+  public findMeleeTarget(pos: THREE.Vector3, facing: THREE.Vector3, reach: number): Pest | null {
+    let best: Pest | null = null;
+    let bestScore = Infinity;
+    for (const p of this.pests) {
+      if (!p.alive || !p.group.visible) continue;
+      const c = p.hitPoint(tmpA);
+      // A dragon is only in reach when it sinks low to rest
+      if (Math.abs(c.y - pos.y) > 1.5) continue;
+      const dx = c.x - pos.x, dz = c.z - pos.z;
+      const d = Math.hypot(dx, dz) - p.hitRadius;
+      if (d > reach) continue;
+      const front = d > 0.01 ? (dx * facing.x + dz * facing.z) / (d + p.hitRadius) : 1;
+      if (front < -0.2) continue;
+      const score = d - front;
+      if (score < bestScore) {
+        bestScore = score;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Auto-aim for the slingshot: the visible pest closest to the aim direction, within `maxDist`
+   * and `maxAngle` (radians) of it, with a clear line from `from`.
+   */
+  public findAimTarget(from: THREE.Vector3, aim: THREE.Vector3, maxDist: number, maxAngle: number): Pest | null {
+    const ax = aim.x, az = aim.z;
+    const al = Math.hypot(ax, az) || 1;
+    const cosMax = Math.cos(maxAngle);
+    let best: Pest | null = null;
+    let bestCos = cosMax;
+    for (const p of this.pests) {
+      if (!p.alive || !p.group.visible) continue;
+      const c = p.hitPoint(tmpA);
+      const dx = c.x - from.x, dz = c.z - from.z;
+      const d = Math.hypot(dx, dz);
+      if (d > maxDist || d < 0.01) continue;
+      const cos = (dx * ax + dz * az) / (d * al);
+      if (cos <= bestCos) continue;
+      if (!this.env.canSee(from, c)) continue;
+      bestCos = cos;
+      best = p;
+    }
+    return best;
+  }
+
+  /**
+   * First pest whose body the segment from `from` along the unit `dir` passes through within `len`;
+   * returns its distance along the segment in `out.t`.
+   */
+  public segmentHit(from: THREE.Vector3, dir: THREE.Vector3, len: number, pad: number, out: { t: number }): Pest | null {
+    let best: Pest | null = null;
+    let bestT = len;
+    for (const p of this.pests) {
+      if (!p.alive || !p.group.visible) continue;
+      const c = p.hitPoint(tmpA);
+      const ox = c.x - from.x, oy = c.y - from.y, oz = c.z - from.z;
+      const along = ox * dir.x + oy * dir.y + oz * dir.z;
+      const r = p.hitRadius + pad;
+      if (along < -r || along > bestT + r) continue;
+      const perp2 = ox * ox + oy * oy + oz * oz - along * along;
+      if (perp2 > r * r) continue;
+      const t = Math.max(0, along - Math.sqrt(Math.max(0, r * r - perp2)));
+      if (t > bestT) continue;
+      bestT = t;
+      best = p;
+    }
+    out.t = bestT;
+    return best;
+  }
+
+  /** Hits a pest for the player (axe, pebble). */
+  public damage(pest: Pest, amount: number, from: THREE.Vector3): boolean {
+    return !!this.port && pest.damage(amount, from, this.port, this.particles);
+  }
+
   public clear(): void {
     for (const p of this.pests) p.dispose();
     this.pests.length = 0;
   }
 }
+
+export type { Pest };

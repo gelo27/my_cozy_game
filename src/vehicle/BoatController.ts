@@ -315,7 +315,7 @@ export class BoatController {
   }
 
   /** Steps onto the nearest dry spot (the pier, a beach) or, failing that, into the water beside the boat. */
-  private exit(character: CharacterController, camera: ThirdPersonCamera): void {
+  public exit(character: CharacterController, camera: ThirdPersonCamera): void {
     this.isPlayerInside = false;
     this.speedKmh = 0;
     this.character = null;

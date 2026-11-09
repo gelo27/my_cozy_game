@@ -1,9 +1,8 @@
-import { CROP_DEFINITIONS } from '../../farming/types/FarmingTypes';
 import * as THREE from 'three';
 import { t } from '../../i18n/i18n';
 import { IAbility, CharacterContext } from './IAbility';
 import { FarmingManager, cropForSeed } from '../../farming/FarmingManager';
-import { FIELD_CELLS, ShovelTarget } from '../../farming/FieldManager';
+import { FIELD_CELLS, FIELD_SEED_COST, ShovelTarget } from '../../farming/FieldManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { FarmInteractionPrompt } from '../../farming/types/FarmingTypes';
 import { audioEngine } from '../../audio/AudioEngine';
@@ -14,7 +13,7 @@ const SWING_IMPACT = 0.38;
 const HOLD_TIME = 0.6;
 
 interface ShovelJob {
-  kind: 'dig' | 'fill';
+  kind: 'dig' | 'fill' | 'uproot';
   gx: number;
   gz: number;
   fieldId: string | null;
@@ -51,6 +50,11 @@ export class FarmingAbility implements IAbility {
     return this.holdArmed && this.holdKey.startsWith('h');
   }
   private readonly tmpVec = new THREE.Vector3();
+
+  /** Harvested items land in the inventory as they reach the player. */
+  private readonly give = (itemId: string, amount: number): void => {
+    this.inventoryManager?.addItem(itemId, amount);
+  };
 
   public setManagers(farming: FarmingManager, inventory: InventoryManager): void {
     this.farmingManager = farming;
@@ -118,12 +122,7 @@ export class FarmingAbility implements IAbility {
       audioEngine.setHoldFill(prompt.holdProgress);
       if (this.holdTime < HOLD_TIME) return;
       this.resetHold();
-      const result = this.farmingManager.harvest(prompt.plotId);
-      if (result) {
-        this.inventoryManager.addItem(result.crateItemId, result.crates);
-        if (result.bonusSeeds) this.inventoryManager.addItem(CROP_DEFINITIONS[result.cropType].seedItemId, result.bonusSeeds);
-        context.model?.triggerPickup();
-      }
+      if (this.farmingManager.harvest(prompt.plotId, this.give)) context.model?.triggerPickup();
       return;
     }
     this.resetHold();
@@ -211,7 +210,7 @@ export class FarmingAbility implements IAbility {
     const prompt = (this.currentPrompt = this.buildShovelPrompt(target));
 
     if (target.kind === 'dig') fields.showGhost(target.gx, target.gz, target.reason ? 'bad' : 'ok');
-    else fields.showGhost(target.field.gx, target.field.gz, target.kind === 'fill' ? 'fill' : 'bad');
+    else fields.showGhost(target.field.gx, target.field.gz, 'fill');
 
     // Hold E / LMB: a fresh press arms it, releasing or the frame moving to another spot cancels
     const input = context.input as any;
@@ -235,10 +234,10 @@ export class FarmingAbility implements IAbility {
     const gx = target.kind === 'dig' ? target.gx : target.field.gx;
     const gz = target.kind === 'dig' ? target.gz : target.field.gz;
     this.shovelJob = {
-      kind: target.kind === 'dig' ? 'dig' : 'fill',
+      kind: target.kind,
       gx,
       gz,
-      fieldId: target.kind === 'fill' ? target.field.id : null,
+      fieldId: target.kind === 'dig' ? null : target.field.id,
       swingsLeft: target.kind === 'dig' ? 2 : 1,
       timer: 0,
       impactDone: false,
@@ -285,7 +284,7 @@ export class FarmingAbility implements IAbility {
         this.shovelJob = null;
       }
     }
-    if (this.shovelJob) fields.showGhost(job.gx, job.gz, job.kind === 'fill' ? 'fill' : 'ok');
+    if (this.shovelJob) fields.showGhost(job.gx, job.gz, job.kind === 'dig' ? 'ok' : 'fill');
   }
 
   private finishShovelJob(): void {
@@ -298,9 +297,12 @@ export class FarmingAbility implements IAbility {
       if (target.kind !== 'dig' || target.reason || target.gx !== job.gx || target.gz !== job.gz) return;
       const field = fields.createField(job.gx, job.gz);
       if (field) {
+        fields.onDug?.(field);
         farming.puffField(field, 8);
         audioEngine.at(field.center).playBuildPlace(true);
       }
+    } else if (job.kind === 'uproot' && job.fieldId) {
+      farming.uproot(job.fieldId, this.give);
     } else if (job.fieldId) {
       const field = fields.get(job.fieldId);
       if (field && !field.crop) {
@@ -332,8 +334,15 @@ export class FarmingAbility implements IAbility {
       }
       return { ...base, shovel: 'dig', canDig: true, actionText: t('field.dig'), hintText: t('field.digHint') };
     }
-    if (target.kind === 'busy') {
-      return { ...base, shovel: 'blocked', canDig: false, actionText: t('field.busy'), hintText: t('field.busyHint') };
+    if (target.kind === 'uproot') {
+      const ripe = (target.field.crop?.stage ?? 0) >= 3;
+      return {
+        ...base,
+        shovel: 'uproot',
+        canDig: true,
+        actionText: t(ripe ? 'field.uprootRipe' : 'field.uproot'),
+        hintText: t(ripe ? 'field.uprootRipeHint' : 'field.uprootHint', { n: FIELD_SEED_COST }),
+      };
     }
     return { ...base, shovel: 'fill', canDig: true, actionText: t('field.fill'), hintText: t('field.fillHint') };
   }

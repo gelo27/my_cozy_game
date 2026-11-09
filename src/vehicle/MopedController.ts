@@ -420,7 +420,7 @@ export class MopedController {
     camera.heightOffset = 1.0;
   }
 
-  private exit(character: CharacterController, camera: ThirdPersonCamera): void {
+  public exit(character: CharacterController, camera: ThirdPersonCamera): void {
     this.isPlayerInside = false;
     this.speedKmh = 0;
     this.character = null;

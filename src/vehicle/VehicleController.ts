@@ -312,7 +312,7 @@ export class VehicleController {
     camera.heightOffset = 1.6;
   }
 
-  private exit(character: CharacterController, camera: ThirdPersonCamera): void {
+  public exit(character: CharacterController, camera: ThirdPersonCamera): void {
     this.isPlayerInside = false;
     this.speedKmh = 0;
     this.model.setBrakeLights(false);

@@ -7,6 +7,10 @@ import { PropTreeField, PropTreeNode } from '../../gathering/PropTreeField';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { GATHERING_CONFIG, GatherTool, ROCK_TYPES, RockKind } from '../../gathering/GatheringConfig';
 import { audioEngine } from '../../audio/AudioEngine';
+import type { PestSystem, Pest } from '../../gameplay/Pests';
+
+/** The axe reaches a pest this far past its body (m); a bit more than a tree, they move. */
+const PEST_REACH = 1.9;
 
 export interface GatherPrompt {
   kind: 'tree' | 'fallen' | RockKind;
@@ -21,7 +25,8 @@ export interface GatherPrompt {
 type Target =
   | { type: 'forest'; node: ForestTarget }
   | { type: 'propTree'; node: PropTreeNode }
-  | { type: 'rock'; node: RockNode };
+  | { type: 'rock'; node: RockNode }
+  | { type: 'pest'; node: Pest };
 
 /**
  * Chopping trees with the axe and mining rocks with the pickaxe (E / LMB).
@@ -43,6 +48,9 @@ export class GatheringAbility implements IAbility {
   /** Yaw towards the tree / rock being struck, held while the swing lasts (null otherwise). */
   public swingFacing: number | null = null;
   private pendingHit: { target: Target; direction: THREE.Vector3; delay: number } | null = null;
+  /** Hedgehogs and dragons the axe can strike (wired by the engine). */
+  public pests: PestSystem | null = null;
+  private readonly facingScratch = new THREE.Vector3();
 
   public setSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager, propTrees: PropTreeField | null = null): void {
     this.forest = forest;
@@ -63,16 +71,33 @@ export class GatheringAbility implements IAbility {
 
     const t = context.body.translation();
     const playerPos = this.playerPosScratch.set(t.x, t.y, t.z);
-    const target = this.findTarget(playerPos);
     const tool = this.equippedTool();
+
+    // Axe in hand and a pest close: the swing goes to the pest, not the tree behind it
+    if (tool === 'axe' && this.pests && !context.isBuildModeActive && !this.inventory.isInventoryOpen()) {
+      const yaw = context.model?.group?.rotation.y ?? 0;
+      const facing = this.facingScratch.set(Math.sin(yaw), 0, Math.cos(yaw));
+      const pest = this.pests.findMeleeTarget(playerPos, facing, PEST_REACH);
+      if (pest) {
+        this.currentPrompt = null;
+        const triggered = context.input.interactJustPressed || context.input.shootJustPressed;
+        if (triggered && this.cooldown <= 0 && !this.pendingHit) this.swing({ type: 'pest', node: pest }, playerPos, tool, context);
+        return;
+      }
+    }
+
+    const target = this.findTarget(playerPos);
     this.currentPrompt = target ? this.buildPrompt(target, tool) : null;
 
     if (!target || context.isBuildModeActive || this.inventory.isInventoryOpen()) return;
     const triggered = context.input.interactJustPressed || context.input.shootJustPressed;
     if (!triggered || this.cooldown > 0 || this.pendingHit) return;
-    if (tool !== this.requiredTool(target)) return;
+    if (!tool || tool !== this.requiredTool(target)) return;
+    this.swing(target, playerPos, tool, context);
+  }
 
-    // Face the target and swing
+  /** Faces the target and starts the swing; the hit lands IMPACT_DELAY later. */
+  private swing(target: Target, playerPos: THREE.Vector3, tool: GatherTool, context: CharacterContext): void {
     const targetPos = target.node.position;
     const direction = new THREE.Vector3(targetPos.x - playerPos.x, 0, targetPos.z - playerPos.z);
     if (direction.lengthSq() < 1e-4) direction.set(0, 0, 1);
@@ -98,6 +123,17 @@ export class GatheringAbility implements IAbility {
 
     const { target, direction } = this.pendingHit;
     this.pendingHit = null;
+
+    if (target.type === 'pest') {
+      // Still in reach when the blade comes down? (it may have rolled or flown off)
+      const pest = target.node;
+      if (!this.pests || !pest.alive) return;
+      const c = pest.hitPoint(this.facingScratch);
+      const p = this.playerPosScratch;
+      if (Math.hypot(c.x - p.x, c.z - p.z) - pest.hitRadius > PEST_REACH + 0.5 || Math.abs(c.y - p.y) > 1.7) return;
+      this.pests.damage(pest, 1, p);
+      return;
+    }
 
     if (target.type === 'rock') {
       this.rocks!.hit(target.node, direction);

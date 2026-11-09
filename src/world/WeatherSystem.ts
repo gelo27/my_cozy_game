@@ -39,12 +39,13 @@ export interface WeatherSound {
   birdRate: number; // how often the birds sing (1 = default pauses)
   insects: number; // night crickets
   breeze: number; // soft breeze and leaf rustle
+  fog: number; // quiet muffled hush of foggy weather
 }
 
-export const WEATHER_SOUND_KEYS = ['rain', 'wind', 'thunder', 'birds', 'birdRate', 'insects', 'breeze'] as const;
+export const WEATHER_SOUND_KEYS = ['rain', 'wind', 'thunder', 'birds', 'birdRate', 'insects', 'breeze', 'fog'] as const;
 
-const snd = (rain: number, wind: number, thunder: number, birds: number, birdRate: number, insects: number, breeze: number): WeatherSound => ({
-  rain, wind, thunder, birds, birdRate, insects, breeze,
+const snd = (rain: number, wind: number, thunder: number, birds: number, birdRate: number, insects: number, breeze: number, fog = 0): WeatherSound => ({
+  rain, wind, thunder, birds, birdRate, insects, breeze, fog,
 });
 
 const mk = (
@@ -60,7 +61,7 @@ const makeDefaults = (): Record<WeatherType, WeatherProfile> => ({
   cloudy: mk(0.65, 0.02, 0xeff1f3, 'none', 0, 0.68, 0.25, 0x42adff, 0.5, snd(1, 0, 0, 0.6, 0.7, 1, 1)),
   rain: mk(0.5, 0.0305, 0xdadfe7, 'rain', 0.5, 0.88, 0.6, 0xffffff, 0, snd(1, 0.25, 0, 0, 0.5, 0, 0)),
   storm: mk(0.2, 0.05, 0x8b93a2, 'rain', 1, 1, 1, 0xffffff, 0, snd(1, 0.9, 1, 0, 0.5, 0, 0)),
-  fog: mk(0.6, 0.045, 0xf3f3f3, 'none', 0, 1, 0, 0xffffff, 0, snd(1, 0, 0, 0, 0.5, 0, 0)),
+  fog: mk(0.6, 0.045, 0xf3f3f3, 'none', 0, 1, 0, 0xffffff, 0, snd(1, 0, 0, 0, 0.5, 0, 0, 1)),
   snow: mk(0.7, 0.03, 0xa9e5fe, 'snow', 0.8, 1, 0.35, 0x71d4fe, 1, snd(1, 0.6, 0, 0, 0.5, 0, 0)),
 });
 
@@ -204,6 +205,7 @@ export class WeatherSystem {
     day: 1,
     night: 0,
     flash: 0,
+    moonCloud: 1,
   };
   /** The current change is an automatic one (slow, phased) rather than set by hand. */
   private smooth = false;
@@ -283,7 +285,9 @@ export class WeatherSystem {
   public update(dt: number, cameraPos: THREE.Vector3): void {
     // Clock
     if (worldSettings.secondsPerHour > 0) {
-      worldSettings.timeOfDay = (worldSettings.timeOfDay + dt / worldSettings.secondsPerHour) % 24;
+      const next = worldSettings.timeOfDay + dt / worldSettings.secondsPerHour;
+      if (next >= 24) worldSettings.day++;
+      worldSettings.timeOfDay = next % 24;
     }
     const t = worldSettings.timeOfDay;
     this.director.update(dt);
@@ -328,8 +332,9 @@ export class WeatherSystem {
         ? ((t - SUNRISE) / (SUNSET - SUNRISE)) * Math.PI
         : Math.PI + ((((t - SUNSET) % 24) + 24) % 24 / (24 - (SUNSET - SUNRISE))) * Math.PI;
     const elevation = Math.sin(dayPhase);
-    const daylight = THREE.MathUtils.smoothstep(elevation, -0.15, 0.25);
-    this.nightFactor = 1 - THREE.MathUtils.smoothstep(elevation, -0.2, 0.12);
+    // Wide ranges so dusk and dawn last ~2 game hours instead of snapping past
+    const daylight = THREE.MathUtils.smoothstep(elevation, -0.25, 0.3);
+    this.nightFactor = 1 - THREE.MathUtils.smoothstep(elevation, -0.3, 0.15);
     this.sunDir.set(Math.cos(dayPhase), elevation, 0.35).normalize();
     this.moonDir.set(-Math.cos(dayPhase), -elevation, -0.35).normalize();
     const warm = 1 - THREE.MathUtils.smoothstep(elevation, 0.1, 0.5);
@@ -349,21 +354,28 @@ export class WeatherSystem {
     }
     this.flash = Math.max(0, this.flash - dt * 3);
 
-    // One directional light: the sun by day, cool moonlight by night
-    const moonUp = daylight < 0.15;
+    // One directional light: the sun by day, cool moonlight by night. Both fade to zero at the
+    // handover point (sun just below the horizon), so the 180° flip of direction and the colour
+    // change happen while the light is dark and can't be seen; ambient and hemi carry the dusk.
+    const HANDOVER = -0.04;
+    const sunK = THREE.MathUtils.smoothstep(elevation, HANDOVER, 0.25);
+    const moonK = 1 - THREE.MathUtils.smoothstep(elevation, -0.3, HANDOVER);
+    const moonUp = elevation < HANDOVER;
     const lightDir = moonUp ? this.moonDir : this.sunDir;
     this.sun.position.copy(cameraPos).addScaledVector(lightDir, 70);
     this.sun.target.position.copy(cameraPos);
     if (moonUp) {
       this.sun.color.setRGB(0.6, 0.7, 1.0);
-      this.sun.intensity = 0.45 * this.nightFactor * (0.4 + cur.light * 0.6) + this.flash * 2;
+      this.sun.intensity = 0.45 * moonK * (0.4 + cur.light * 0.6) + this.flash * 2;
     } else {
       this.sun.color.setRGB(1, 1 - warm * 0.3, 1 - warm * 0.55);
-      this.sun.intensity = 1.35 * daylight * cur.light + this.flash * 2;
+      this.sun.intensity = 1.35 * sunK * cur.light + this.flash * 2;
     }
     this.ambient.intensity = 0.24 + 0.38 * daylight * (0.6 + cur.light * 0.4) + this.flash;
     this.hemi.intensity = 0.2 + 0.4 * daylight;
-    this.hemi.color.setHex(daylight > 0.3 ? 0xe0f2fe : 0x6a7ab8);
+    // Sky colour of the hemi light: night blue 0x6a7ab8 -> day 0xe0f2fe, blended
+    const hk = THREE.MathUtils.smoothstep(daylight, 0.05, 0.6);
+    this.hemi.color.setRGB(0.416 + (0.878 - 0.416) * hk, 0.478 + (0.949 - 0.478) * hk, 0.722 + (0.996 - 0.722) * hk, THREE.SRGBColorSpace);
 
     // Sky = time-of-day key colour x weather tint; fog matches the horizon
     this.sampleKeys(SKY_KEYS, t, this.sky).multiply(cur.tint);
@@ -384,13 +396,19 @@ export class WeatherSystem {
     sp.sunColor.setRGB(1, 0.92 - warm * 0.35, 0.8 - warm * 0.55).multiplyScalar(cur.light * 0.6 + 0.4);
     // Clouds: white by day, sunset-tinted, blue-grey under the moon, darker with bad weather
     const dayCloud = WeatherSystem._c.setRGB(1, 1 - warm * 0.25, 1 - warm * 0.4);
-    const nightCloud = WeatherSystem._c2.setRGB(0.16, 0.19, 0.28);
-    sp.cloudLit.copy(nightCloud).lerp(dayCloud, daylight).multiplyScalar(1 - cur.dark * 0.45);
+    // Night clouds sit just above the night sky: dim blue-grey, so they read as dark shapes, not glowing
+    const nightCloud = WeatherSystem._c2.setRGB(0.085, 0.1, 0.145);
+    // Ease toward the day colour only once real daylight returns (dusk clouds go dark early)
+    const cloudDay = THREE.MathUtils.smoothstep(daylight, 0.05, 0.75);
+    sp.cloudLit.copy(nightCloud).lerp(dayCloud, cloudDay).multiplyScalar(1 - cur.dark * 0.45);
     sp.cloudShade.copy(sp.cloudLit).multiplyScalar(0.62 - cur.dark * 0.2);
     sp.cover = cur.cover;
     sp.day = daylight;
     sp.night = this.nightFactor * (1 - cur.cover * 0.7);
     sp.flash = this.flash;
+    // A thick overcast hides the moon: full moonlit edges on clear nights, about half when cloudy,
+    // a faint hint in rain and almost nothing in a storm
+    sp.moonCloud = (1 - THREE.MathUtils.smoothstep(cur.cover, 0.3, 1) * 0.85) * (1 - this.stormMix * 0.5);
     this.skyDome.update(dt, cameraPos, sp);
 
     // Precipitation

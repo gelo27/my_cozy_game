@@ -4,6 +4,8 @@ import { CharacterController } from '../character/CharacterController';
 import { CharacterModel } from '../character/CharacterModel';
 import { loadWheatModel } from '../farming/WheatModel';
 import { loadCropModels } from '../farming/CropModels';
+import { FIELD_CELLS } from '../farming/FieldManager';
+import { hitchLog } from './HitchLog';
 import { loadTreeModels, setFoliageWeatherWind } from '../world/TreeModels';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { DebugRenderer } from '../physics/DebugRenderer';
@@ -20,6 +22,7 @@ import { FarmInteractionPrompt } from '../farming/types/FarmingTypes';
 import { ForestZone } from '../forest/ForestZone';
 import { FURNITURE_LIGHTS, FURNITURE_MATERIALS } from '../building/furniture/FurnitureCatalog';
 import type { ExtraLight } from '../world/NightLighting';
+import { CoastAudio, CoastState } from '../audio/CoastAudio';
 import { AmbientAudio } from '../audio/AmbientAudio';
 import { audioEngine } from '../audio/AudioEngine';
 import { caveAudio } from '../audio/CaveAudio';
@@ -49,7 +52,7 @@ import { GridNavigator } from '../navigation/GridNavigator';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { t } from '../i18n/i18n';
 import { PropTreeField } from '../gathering/PropTreeField';
-import { BushSway } from '../world/BushSway';
+import { BushSway, FLOWER_SWAY_OPTIONS } from '../world/BushSway';
 import { FallingLeaves } from '../particles/FallingLeaves';
 import { RockField } from '../gathering/RockField';
 import { GATHERING_CONFIG, ROCK_SPOTS, TREE_SPOTS } from '../gathering/GatheringConfig';
@@ -71,8 +74,9 @@ import { WeatherSystem } from '../world/WeatherSystem';
 import { PropSystem, PropInstance, PROP_GLOW_MATERIALS } from '../world/PropSystem';
 import { NightLighting, installGlobalNightLights } from '../world/NightLighting';
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
+import { setAlgaeDaylight } from '../world/AlgaeChains';
 import { VIEW_DISTANCE, isMobileDevice, worldSettings } from '../world/WorldSettings';
-import { GameplayManager, GameplayHudState } from '../gameplay/GameplayManager';
+import { GameplayManager, GameplayHudState, GameplayPrompt } from '../gameplay/GameplayManager';
 import { EditorController } from '../editor/EditorController';
 import { ExplorationManager } from '../explore/ExplorationManager';
 
@@ -110,6 +114,7 @@ export interface GameEngineCallbacks {
   onBuildingTelemetry(telemetry: BuildingTelemetry): void;
   onFarmingPrompt(prompt: FarmInteractionPrompt | null): void;
   onGatherPrompt(prompt: GatherPrompt | null): void;
+  onGameplayPrompt(prompt: GameplayPrompt | null): void;
   /** Items just added to the backpack by chopping or mining. */
   onResourcesGathered(items: { itemId: string; amount: number }[]): void;
   onWireframeToggled(enabled: boolean): void;
@@ -142,6 +147,7 @@ export interface GameWorld {
   forest: ForestZone;
   propTrees: PropTreeField;
   bushSway: BushSway;
+  flowerSway: BushSway;
   fallingLeaves: FallingLeaves;
   rocks: RockField;
   particleManager: ParticleManager;
@@ -189,6 +195,9 @@ export class GameEngine {
   private isDisposed = false;
   private keyG = false;
   public readonly ambient = new AmbientAudio();
+  /** Surf and gulls along the shores. */
+  private readonly coast = new CoastAudio();
+  private coastState: CoastState | null = null;
   private readonly footsteps = new FootstepAudio();
   private prevSwimming = false;
   private prevVelY = 0;
@@ -216,10 +225,11 @@ export class GameEngine {
   private readonly listenerPos = new THREE.Vector3();
 
   // Adaptive resolution: drops the pixel ratio when frames run long, restores it when there is headroom
-  private lastFarmPrompt: unknown = null;
+  private lastFarmPrompt = '';
   /** Reused for the field-wheat pushers so the frame loop doesn't allocate. */
   private readonly pushTmp = new THREE.Vector3();
   private lastGatherPrompt: unknown = null;
+  private lastPlayPrompt: GameplayPrompt | null = null;
 
   private maxPixelRatio = 1;
   private minPixelRatio = 0.75;
@@ -233,6 +243,18 @@ export class GameEngine {
   private pixelRatioCeilingUntil = 0;
 
   constructor(private readonly container: HTMLElement, private readonly callbacks: GameEngineCallbacks) {
+    // Dev: the hitch logger notes every push into React (each one is a commit after the frame)
+    if (import.meta.env.DEV) {
+      const cb = callbacks as unknown as Record<string, unknown>;
+      for (const k of Object.keys(cb)) {
+        const fn = cb[k];
+        if (typeof fn !== 'function' || k === 'onStats') continue;
+        cb[k] = (...args: unknown[]) => {
+          hitchLog.react();
+          return (fn as (...a: unknown[]) => unknown)(...args);
+        };
+      }
+    }
     const width = container.clientWidth || window.innerWidth;
     const height = container.clientHeight || window.innerHeight;
 
@@ -301,6 +323,22 @@ export class GameEngine {
 
   public get isPaused(): boolean {
     return this.paused;
+  }
+
+  /**
+   * Pause menu: back to the bed the player last slept in (if it still stands), otherwise to the
+   * starting point. Works from a vehicle and from the caves; the doorway fade covers the jump.
+   */
+  public respawnPlayer(): void {
+    const w = this.world;
+    if (!w || this.mode !== 'play' || w.gameplay.sleeping) return;
+    const spawn = SPAWN_POSITION.clone();
+    spawn.y = Math.max(w.terrain.getHeight(spawn.x, spawn.z), worldSettings.waterLevel) + 1.5;
+    const { pos, atBed } = w.gameplay.respawnTarget(spawn);
+    for (const ride of [w.vehicle, w.moped, w.boat]) if (ride.isPlayerInside) ride.exit(w.character, this.camera);
+    if (w.gameplay.fishing.busy) w.gameplay.fishing.cancel();
+    w.gameplay.openPanel(null);
+    w.exploration.teleport(w.character, this.camera, pos, () => this.callbacks.onNotify(t(atBed ? 'respawn.bed' : 'respawn.spawn'), 'info'));
   }
 
   /** Freezes the whole game (simulation, clock, rendering) and ducks the ambience. */
@@ -390,8 +428,26 @@ export class GameEngine {
       rocks.onMined = (drops) => giveResources(drops);
       const propTrees = new PropTreeField(props, particleManager, physics);
       propTrees.getCollector = () => character.getPosition();
+      farmingManager.getCollector = () => character.getPosition();
       const bushSway = new BushSway(props);
       propTrees.bushSway = bushSway;
+      const flowerSway = new BushSway(props, FLOWER_SWAY_OPTIONS);
+      // A freshly dug field clears the flowers and mushrooms standing on it
+      farmingManager.fields.onDug = (field) => {
+        const cx = field.gx + FIELD_CELLS / 2;
+        const cz = field.gz + FIELD_CELLS / 2;
+        const doomed: number[] = [];
+        for (const type of ['flowers', 'mushrooms']) {
+          props.forEachNear(cx, cz, FIELD_CELLS, (p) => {
+            const reach = FIELD_CELLS / 2 + 0.35 * p.scale;
+            if (Math.abs(p.position.x - cx) < reach && Math.abs(p.position.z - cz) < reach) doomed.push(p.id);
+          }, type);
+        }
+        for (const id of doomed) {
+          flowerSway.forget(id);
+          props.remove(id);
+        }
+      };
       const fallingLeaves = new FallingLeaves(scene, (x, z) => terrain.getHeight(x, z));
       propTrees.leaves = fallingLeaves;
       propTrees.onWood = (amount) => giveResources([{ itemId: 'wood', amount }]);
@@ -403,6 +459,17 @@ export class GameEngine {
       const moped = new MopedController(physics, scene, terrain, mopedSpawn, -Math.PI / 2);
       const gameplay = new GameplayManager(scene, character, inventoryManager, props, weather, terrain, particleManager);
       gameplay.onNotify = (text, type) => callbacks.onNotify(text, type);
+      // Pests and pebbles query walls / sight lines through physics; the slingshot aims where the camera looks
+      gameplay.attachPhysics(physics);
+      gameplay.aim = (out) => this.camera.camera.getWorldDirection(out);
+      gameplay.eye = (out) => this.camera.camera.getWorldPosition(out);
+      character.gatheringAbility.pests = gameplay.pests;
+      // Sleeping skips eight hours: crops grow and the weather chain moves on; the morning is autosaved
+      gameplay.onTimeSkip = (seconds) => {
+        weather.director.update(seconds);
+        farmingManager.fastForward(seconds);
+      };
+      gameplay.onWake = () => this.world?.saves.save(AUTOSAVE_SLOT);
       // Stations, the NPC, finds and a faced pet take E from the shovel
       character.farmingAbility.activityProbe = (pos) => gameplay.hasActivityForShovel(pos);
 
@@ -489,6 +556,7 @@ export class GameEngine {
         forest,
         propTrees,
         bushSway,
+        flowerSway,
         fallingLeaves,
         rocks,
         particleManager,
@@ -602,6 +670,8 @@ export class GameEngine {
       this.lastFrameAt = Math.max(this.lastFrameAt + interval, now - interval);
     }
     const frameStart = performance.now();
+    hitchLog.begin(now);
+    hitchLog.mark(0);
 
     const w = this.world;
     const { character, farmingManager, forest, rocks, particleManager, debugRenderer, vehicle, moped, terrain, editor } = w;
@@ -634,16 +704,19 @@ export class GameEngine {
     const isDriving = truckDriving || mopedDriving || boatDriving;
     const ride = truckDriving ? vehicle : mopedDriving ? moped : boatDriving ? w.boat : null;
 
+    hitchLog.mark(1);
     const pStart = performance.now();
     if (dt > 0) physics.step(dt);
     const stepTime = performance.now() - pStart;
     this.lastStepMs = stepTime;
+    hitchLog.mark(2);
     vehicle.syncVisuals(dt);
     moped.syncVisuals(dt);
     w.boat.night = w.weather.nightFactor;
     w.boat.syncVisuals(dt);
 
-    if (!editing && !isDriving) character.update(dt, inputManager, tpCamera);
+    // Asleep in bed: the player stays put until morning
+    if (!editing && !isDriving && !w.gameplay.sleeping) character.update(dt, inputManager, tpCamera);
     // Splash drops, the swimmer's rising air bubbles and the caustics' clock
     character.swimAbility?.waterParticles?.update(dt);
     const camPos = this.camera.camera.position;
@@ -654,6 +727,7 @@ export class GameEngine {
       inputManager.setPaintMode(character.buildAbility.isPaintingModeActive);
     }
 
+    hitchLog.mark(3);
     // World systems
     terrain.update(rawDt);
     w.props.update();
@@ -676,28 +750,45 @@ export class GameEngine {
     farmingManager.rainIntensity = w.weather.rainIntensity;
     this.updateAudio(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), ride);
 
+    hitchLog.mark(4);
     // Bodies that part the field wheat (springs run only for stalks they touch)
     const fields = farmingManager.fields;
     const bushes = w.bushSway;
+    const flowers = w.flowerSway;
     fields.clearPushers();
     bushes.clearPushers();
+    flowers.clearPushers();
+    const algae = w.props.algae;
+    algae.clearPushers();
     if (!editing) {
       if (character.body) {
         const cp = character.body.translation();
         fields.addPusher(cp.x, cp.y - 0.9, cp.z, 0.8);
         bushes.addPusher(cp.x, cp.y - 0.9, cp.z, 0.4);
+        flowers.addPusher(cp.x, cp.y - 0.9, cp.z, 0.35);
+        algae.addPusher(cp.x, cp.y - 0.9, cp.z, 0.35, 1.8);
       }
       moped.getPosition(this.pushTmp);
       fields.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 1.0);
       bushes.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.7);
+      flowers.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.7);
       const pets = w.gameplay.pets.pets;
       for (let i = 0; i < pets.length; i++) {
         const pp = pets[i].group.position;
         fields.addPusher(pp.x, pp.y, pp.z, 0.55);
         bushes.addPusher(pp.x, pp.y, pp.z, 0.35);
+        flowers.addPusher(pp.x, pp.y, pp.z, 0.3);
       }
+    } else {
+      // Editor: the fly camera parts the algae, so the springs can be tried while placing them
+      const cam = this.camera.camera.position;
+      algae.addPusher(cam.x, cam.y - 0.4, cam.z, 0.4, 0.8);
     }
+    // Sunlight on the algae: full by day, none at night or in caves, dimmed by rain
+    setAlgaeDaylight(w.exploration.inCave ? 0 : (1 - w.weather.nightFactor) * (1 - w.weather.rainIntensity * 0.6));
+    algae.update(dt, this.camera.camera.position);
     bushes.update(dt);
+    flowers.update(dt);
     w.fallingLeaves.update(dt);
     const grass = w.grass;
     grass.enabled = !w.exploration.inCave;
@@ -706,7 +797,10 @@ export class GameEngine {
     w.propTrees.gustsAllowed = wt !== 'rain' && wt !== 'storm' && wt !== 'snow' && w.weather.rainIntensity < 0.05;
     setFoliageWeatherWind(w.exploration.inCave ? 0 : w.weather.sound.wind);
     grass.update(dt, tpCamera.camera, w.weather.sound.wind);
+    hitchLog.mark(5);
     farmingManager.update(dt);
+    farmingManager.fields.updateVisibility(this.camera.camera.position);
+    hitchLog.mark(6);
     forest.update(dt);
     w.propTrees.update(dt);
     rocks.update(dt);
@@ -719,10 +813,20 @@ export class GameEngine {
     if (this.frameCount % 4 === 0 && character.farmingAbility) {
       const farm = character.farmingAbility.currentPrompt;
       const gather = character.gatheringAbility.currentPrompt;
-      if (!deepEqual(farm, this.lastFarmPrompt)) {
-        const copy = farm ? { ...farm } : null;
-        this.lastFarmPrompt = copy;
-        callbacks.onFarmingPrompt(copy);
+      // Compared by what the HUD shows: the raw prompt also carries growthProgress and the plot id,
+      // which change every frame on a growing crop / every bed while running across a field, and each
+      // push is a React commit
+      const farmKey = farm
+        ? `${farm.actionText}|${farm.canPlant}${farm.canWater}${farm.canHarvest}${!!farm.canDig}|${farm.shovel ?? ''}|${Math.round((farm.holdProgress ?? 0) * 40)}`
+        : '';
+      if (farmKey !== this.lastFarmPrompt) {
+        this.lastFarmPrompt = farmKey;
+        callbacks.onFarmingPrompt(farm ? { ...farm } : null);
+      }
+      // Changes only through GameplayManager.setPrompt (a new object each time)
+      if (w.gameplay.prompt !== this.lastPlayPrompt) {
+        this.lastPlayPrompt = w.gameplay.prompt;
+        callbacks.onGameplayPrompt(this.lastPlayPrompt);
       }
       if (!deepEqual(gather, this.lastGatherPrompt)) {
         const copy = gather ? { ...gather } : null;
@@ -735,7 +839,9 @@ export class GameEngine {
     debugRenderer.update(character);
 
     w.terrain.updateLod(tpCamera.camera.position);
+    hitchLog.mark(7);
     this.renderer.render(this.scene, tpCamera.camera);
+    hitchLog.mark(8);
 
     // Throttled UI pushes
     this.hudTimer -= rawDt;
@@ -766,6 +872,7 @@ export class GameEngine {
 
     this.frameMsAccum += performance.now() - frameStart;
     this.updateDiagnostics(stepTime);
+    hitchLog.mark(9);
   };
 
   /**
@@ -879,7 +986,9 @@ export class GameEngine {
     }
     if (Math.abs(next - pr) > 0.01) {
       this.renderer.setPixelRatio(next);
-      this.callbacks.onLog('info', `Роздільна здатність рендера: ${Math.round(next * 100)}% (FPS ${Math.round(avgFps)})`);
+      // Browser console only: the in-game log is App state, a push would re-render the whole UI on
+      // top of the canvas reallocation
+      console.info(`Render resolution: ${Math.round(next * 100)}% (FPS ${Math.round(avgFps)})`);
     }
   }
 
@@ -972,6 +1081,21 @@ export class GameEngine {
     } else {
       this.riverSound = null;
     }
+    const underRoof = !outdoors || weather.isSheltered(playerPos);
+    // One state object reused every frame (no per-frame garbage)
+    const cs = (this.coastState ??= {
+      listener: this.listenerPos,
+      height: (x, z) => w.terrain.getHeight(x, z),
+      terrainRevision: 0, waterLevel: 0, inCave: false, night: 0, rain: 0, wind: 0, underRoof: false,
+    });
+    cs.terrainRevision = w.terrain.revision;
+    cs.waterLevel = worldSettings.waterLevel;
+    cs.inCave = !!w.exploration.inCave;
+    cs.night = weather.nightFactor;
+    cs.rain = weather.rainIntensity * (1 - weather.snowAmount);
+    cs.wind = snd.wind;
+    cs.underRoof = underRoof;
+    this.coast.update(cs, dt);
     this.ambient.update({
       listener: this.listenerPos,
       river: this.riverSound,
@@ -983,8 +1107,9 @@ export class GameEngine {
       birdRate: snd.birdRate,
       birdPerches: outdoors ? this.birdPerches : [],
       breeze: snd.breeze * outdoors * (1 - weather.nightFactor * 0.4),
+      fog: snd.fog * outdoors,
       night: snd.insects * weather.nightFactor * outdoors * this.landNear,
-      underRoof: !outdoors || weather.isSheltered(playerPos),
+      underRoof,
       campfire: this.nearestCampfire,
       engine: ride
         ? { position: ride.getPosition(), speedKmh: ride.speedKmh, kind: ride === w.moped ? 'scooter' : ride === w.boat ? 'boat' : 'truck' }
@@ -1021,6 +1146,7 @@ export class GameEngine {
     const exposed = !w.exploration.inCave && !weather.isSheltered(point) && !(collider as unknown as { userData?: { pieceId?: string } } | null)?.userData?.pieceId;
     const wet = exposed ? weather.rainIntensity * (1 - weather.snowAmount) : 0;
     this.footsteps.step(surface, intensity, wet);
+    this.coast.duck(intensity);
   }
 
   /** Brings the scooter to the player (V key / HUD button). Not underground or while riding. */

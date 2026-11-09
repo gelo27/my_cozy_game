@@ -7,19 +7,32 @@ import { waterLevelAt } from '../world/rivers/RiverWorld';
 import { CropStage, CropState, CropType } from './types/FarmingTypes';
 import { FIELD_CROP_MATERIAL, getWheatStageGeometries, loadWheatModel } from './WheatModel';
 import { getCropModel, loadCropModels } from './CropModels';
+import { FadeRange, acquireDistanceDither } from '../world/LodDither';
+import { isMobileDevice } from '../world/WorldSettings';
 
 /** Field side in terrain cells (1 m each). */
-export const FIELD_CELLS = 4;
+export const FIELD_CELLS = 3;
+/** Field side used by older saves; such fields are shrunk to FIELD_CELLS on load. */
+const LEGACY_FIELD_CELLS = 4;
 /** Seeds a whole field takes, and crates it yields. */
-export const FIELD_SEED_COST = 5;
-export const FIELD_CRATE_YIELD = 6;
-/** Wheat clumps per side (5 x 5 = 25 per field) and their spacing in metres. */
-const WHEAT_ROWS = 5;
+export const FIELD_SEED_COST = 3;
+export const FIELD_CRATE_YIELD = 4;
+/** Wheat clumps per side (4 x 4 = 16 per field) and their spacing in metres. */
+const WHEAT_ROWS = 4;
 const WHEAT_SPACING = 0.68;
-/** Max height difference (m) across the field's 5 x 5 corner grid: 2 m over 4 m is ~27°. */
-const MAX_SLOPE = 2.0;
+/** Max height difference (m) across the field's 4 x 4 corner grid: 1.5 m over 3 m is ~27°. */
+const MAX_SLOPE = 1.5;
 const HALF = FIELD_CELLS / 2;
-const WHEAT_LAYOUT = { rows: WHEAT_ROWS, spacing: WHEAT_SPACING, scale: 1.2 };
+const WHEAT_LAYOUT = { rows: WHEAT_ROWS, spacing: WHEAT_SPACING, scale: 1.2, interleave: true };
+/**
+ * Crops are batched per CROP_CELL x CROP_CELL m cell, so fields out of view or out of range cost
+ * nothing. Plants dissolve (dithered) between the fade start and end (m from the camera); phones
+ * stop drawing them sooner.
+ */
+const CROP_CELL = 32;
+/** Darkest the damp soil overlay gets. */
+const WET_OPACITY = 0.55;
+const CROP_FADE: FadeRange = { value: isMobileDevice() ? new THREE.Vector2(42, 55) : new THREE.Vector2(68, 85) };
 
 export interface FarmField {
   id: string;
@@ -43,7 +56,7 @@ export type DigBlockReason = 'tile' | 'water' | 'slope' | 'blocked' | 'overlap';
 export type ShovelTarget =
   | { kind: 'dig'; gx: number; gz: number; reason: DigBlockReason | null }
   | { kind: 'fill'; field: FarmField }
-  | { kind: 'busy'; field: FarmField };
+  | { kind: 'uproot'; field: FarmField };
 
 export interface FieldSaveData {
   gx: number;
@@ -65,7 +78,14 @@ interface SingleLayout {
   rows: number;
   spacing: number;
   scale: number;
+  /** Also fill the gap between every four plants (a staggered, denser stand). */
+  interleave?: boolean;
+  /** Yaw (rad) every plant faces, give or take a little; random when unset. 0 = model +X to the east. */
+  facing?: number;
 }
+
+/** Spread around a crop's `facing` (rad, either way). */
+const FACING_JITTER = 0.6;
 
 /** Instanced crop parts per (crop, stage), one plant per placement (no parts until the model loads). */
 interface CropVisual {
@@ -78,6 +98,14 @@ interface Batch {
   capacity: number;
   /** Per-plant springs (single-plant springy batches only). */
   springs: SpringSet | null;
+  part: CropPart;
+  /** The batch's own copy of the geometry (springy batches carry their aBend on it). */
+  ownsGeometry: boolean;
+  /** Cell (CROP_CELL m) the batch's fields stand in. */
+  cx: number;
+  cz: number;
+  /** Wearing the distance-dither twin (the cell reaches into the fade band). */
+  fading: boolean;
 }
 
 /**
@@ -104,6 +132,9 @@ const SPRING_K = 70;
 const SPRING_DAMP = 5.5;
 const MAX_PUSHERS = 16;
 
+const IDENTITY = new THREE.Matrix4();
+const isIdentity = (m: THREE.Matrix4) => m.equals(IDENTITY);
+
 /** Deterministic per-field random so plants keep their layout across reloads. */
 function rng(seed: number): () => number {
   let s = seed >>> 0 || 1;
@@ -116,10 +147,11 @@ function rng(seed: number): () => number {
 }
 
 /**
- * Big dug-up fields (4 x 4 m of terrain turned to soil) made with the shovel.
+ * Big dug-up fields (3 x 3 m of terrain turned to soil) made with the shovel.
  *
- * Performance: every plant of every field is drawn through shared InstancedMeshes, one per
- * crop / stage / material part, so a farm of any size costs a handful of draw calls. Instance
+ * Performance: plants are drawn through InstancedMeshes, one per crop / stage / part in each
+ * CROP_CELL cell, so a farm costs a handful of draw calls and cells out of view or past the fade
+ * distance are skipped (far ones dissolve with a dither, see updateVisibility). Instance
  * buffers are rebuilt only when a field is dug, planted, grows a stage or is harvested; the wind sway
  * runs in the vertex shader. The soil itself is the terrain's own dirt splat layer: no extra mesh.
  */
@@ -210,12 +242,13 @@ export class FieldManager {
       this.group.add(mesh);
     };
     warm(wheatProbe, FIELD_CROP_MATERIAL);
+    // ...and its distance-dither twin, which every crop's far fields share
+    warm(wheatProbe, acquireDistanceDither(FIELD_CROP_MATERIAL, CROP_FADE));
 
     // Damp-soil overlay: same material setup as createWetMesh (per-field copies share the program)
-    const dampProbe = new THREE.Mesh(
-      new THREE.PlaneGeometry(1, 1),
-      new THREE.MeshLambertMaterial({ color: 0x1e1009, alphaMap: FieldManager.wetAlphaTexture(), transparent: true, depthWrite: false })
-    );
+    const dampGeo = new THREE.PlaneGeometry(1, 1);
+    dampGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(16).fill(1), 4));
+    const dampProbe = new THREE.Mesh(dampGeo, FieldManager.wetMaterial());
     dampProbe.name = 'FieldShaderWarmer';
     dampProbe.visible = false;
     dampProbe.frustumCulled = false;
@@ -278,7 +311,7 @@ export class FieldManager {
    */
   public resolveShovelTarget(cx: number, cz: number): ShovelTarget {
     const inside = this.fieldContaining(cx, cz);
-    if (inside) return inside.crop ? { kind: 'busy', field: inside } : { kind: 'fill', field: inside };
+    if (inside) return inside.crop ? { kind: 'uproot', field: inside } : { kind: 'fill', field: inside };
 
     let gx = Math.round(cx - HALF);
     let gz = Math.round(cz - HALF);
@@ -349,6 +382,9 @@ export class FieldManager {
 
   // ---------------------------------------------------------------- editing
 
+  /** Called when the shovel digs a new field (not when a save restores one). */
+  public onDug: ((field: FarmField) => void) | null = null;
+
   public createField(gx: number, gz: number, crop: CropState | null = null, prevTiles?: number[]): FarmField | null {
     const terrain = this.terrain;
     if (!terrain) return null;
@@ -395,6 +431,7 @@ export class FieldManager {
     }
     this.group.remove(field.indicator);
     this.disposeWetMesh(field);
+    this.placementCache.delete(id);
     this.fields.delete(id);
     this.dirty = true;
     return true;
@@ -406,6 +443,7 @@ export class FieldManager {
       this.disposeWetMesh(f);
     }
     this.fields.clear();
+    this.placementCache.clear();
     this.dirty = true;
   }
 
@@ -462,7 +500,7 @@ export class FieldManager {
       ctx.lineTo(x, y + dy * c);
       ctx.stroke();
     }
-    // Planting spots, matching the 5 x 5 wheat layout
+    // Planting spots, matching the wheat layout
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
     const span = (WHEAT_SPACING * (WHEAT_ROWS - 1)) / FIELD_CELLS;
     for (let r = 0; r < WHEAT_ROWS; r++) {
@@ -484,9 +522,11 @@ export class FieldManager {
 
   /** Bobs the water-drop indicators, pulses the ghost and rebuilds instances when something changed. */
   public update(dt: number, animTime: number): void {
+    this.wetBudget = 1;
     if (this.dirty) {
       this.dirty = false;
       this.rebuildInstances();
+      this.visibilityAt.set(Infinity, Infinity);
     }
     this.updateSprings(dt);
     if (this.ghost.visible) {
@@ -510,15 +550,32 @@ export class FieldManager {
   // ---------------------------------------------------------------- damp soil
 
   /** Soaks in quickly after watering, dries out slowly once the stage has used the water up. */
+  /**
+   * New damp patches this frame may still build. Rain soaks every field at once; building all their
+   * patches in one frame (terrain sampling, normals, buffers, first upload) was a visible hitch on
+   * a big farm, so they are spread over frames (a patch fades in anyway).
+   */
+  private wetBudget = 0;
+
   private updateWetness(f: FarmField, dt: number): void {
     const target = f.crop?.isWatered || this.rainWet ? 1 : 0;
     if (f.wetness === target && (target === 0 || f.wetMesh)) return;
-    f.wetness = target > f.wetness ? Math.min(1, f.wetness + dt * 1.6) : Math.max(0, f.wetness - dt * 0.25);
-    if (f.wetness > 0 && !f.wetMesh) f.wetMesh = this.createWetMesh(f);
-    if (f.wetMesh) {
-      f.wetMesh.visible = f.wetness > 0.01;
-      (f.wetMesh.material as THREE.MeshLambertMaterial).opacity = 0.55 * f.wetness;
+    if (target > 0 && !f.wetMesh) {
+      if (this.wetBudget <= 0) return; // its turn comes in a later frame
+      this.wetBudget--;
+      f.wetMesh = this.createWetMesh(f);
     }
+    f.wetness = target > f.wetness ? Math.min(1, f.wetness + dt * 1.6) : Math.max(0, f.wetness - dt * 0.25);
+    const mesh = f.wetMesh;
+    if (!mesh) return;
+    mesh.visible = f.wetness > 0.01;
+    // Opacity lives in the vertex alpha, so every patch shares one material (one program, no
+    // per-field material state); only fields that are drying or soaking rewrite their 81 alphas
+    const col = mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
+    const arr = col.array as Float32Array;
+    const a = WET_OPACITY * f.wetness;
+    for (let i = 3; i < arr.length; i += 4) arr[i] = a;
+    col.needsUpdate = true;
   }
 
   /** A terrain-hugging dark patch with soft edges over the field's soil (one per field, 81 verts). */
@@ -533,17 +590,11 @@ export class FieldManager {
       pos.setY(i, h + 0.035);
     }
     geo.computeVertexNormals();
-    const mat = new THREE.MeshLambertMaterial({
-      color: 0x1e1009,
-      alphaMap: FieldManager.wetAlphaTexture(),
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-    });
-    const mesh = new THREE.Mesh(geo, mat);
+    // RGBA vertex colour: white, alpha = the field's wetness (see updateWetness)
+    const rgba = new Float32Array(pos.count * 4).fill(1);
+    for (let i = 3; i < rgba.length; i += 4) rgba[i] = 0;
+    geo.setAttribute('color', new THREE.BufferAttribute(rgba, 4).setUsage(THREE.DynamicDrawUsage));
+    const mesh = new THREE.Mesh(geo, FieldManager.wetMaterial());
     mesh.name = `FieldDamp_${f.id}`;
     mesh.position.set(cx, 0, cz);
     mesh.renderOrder = 1;
@@ -555,9 +606,24 @@ export class FieldManager {
   private disposeWetMesh(f: FarmField): void {
     if (!f.wetMesh) return;
     this.group.remove(f.wetMesh);
-    f.wetMesh.geometry.dispose();
-    (f.wetMesh.material as THREE.Material).dispose(); // the shared alpha texture stays
+    f.wetMesh.geometry.dispose(); // the material and its alpha texture are shared
     f.wetMesh = null;
+  }
+
+  private static wetMat: THREE.MeshLambertMaterial | null = null;
+
+  /** The one material every damp patch draws with (its opacity comes from the vertex alpha). */
+  private static wetMaterial(): THREE.MeshLambertMaterial {
+    return (this.wetMat ??= new THREE.MeshLambertMaterial({
+      color: 0x1e1009,
+      vertexColors: true,
+      alphaMap: FieldManager.wetAlphaTexture(),
+      transparent: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    }));
   }
 
   private static wetAlpha: THREE.CanvasTexture | null = null;
@@ -742,12 +808,10 @@ export class FieldManager {
         parts: [{ geometry: wheat[stage], material: FIELD_CROP_MATERIAL, matrix: new THREE.Matrix4(), maxBend: WHEAT_MAX_BEND }],
       };
     } else if (model) {
-      // Plant pack: one instance per plant. A springy crop's batch owns its aBend attribute, so it
-      // gets its own copy of the stage geometry; rigid crops share the model's
-      const geometry = model.push ? model.stages[stage].clone() : model.stages[stage];
+      // Plant pack: one instance per plant (springy batches copy the geometry for their aBend)
       visual = {
         single: model.field,
-        parts: [{ geometry, material: model.material, matrix: new THREE.Matrix4(), maxBend: model.push?.maxBend ?? 0 }],
+        parts: [{ geometry: model.stages[stage], material: model.material, matrix: new THREE.Matrix4(), maxBend: model.push?.maxBend ?? 0 }],
       };
     } else {
       // Model still loading: nothing to draw yet (the load clears this cache)
@@ -757,50 +821,95 @@ export class FieldManager {
     return visual;
   }
 
+  /** Frees a batch: its instance buffers, its own geometry copy and its springs. */
+  private disposeBatch(batch: Batch): void {
+    this.group.remove(batch.mesh);
+    batch.mesh.dispose();
+    if (batch.ownsGeometry) batch.mesh.geometry.dispose();
+    if (batch.springs) this.springSets = this.springSets.filter((s) => s !== batch.springs);
+  }
+
+  /** Camera spot (XZ) of the last visibility pass; reset to force one. */
+  private readonly visibilityAt = new THREE.Vector2(Infinity, Infinity);
+
+  /**
+   * Per frame, from the camera: cells past the fade end are skipped, cells reaching into the fade
+   * band dissolve their far plants (dither twin), nearer cells draw solid (no discard, so mobile
+   * GPUs keep early-z). Re-checked only once the camera has moved a bit.
+   */
+  public updateVisibility(camera: THREE.Vector3): void {
+    if (Math.abs(camera.x - this.visibilityAt.x) + Math.abs(camera.z - this.visibilityAt.y) < 0.5) return;
+    this.visibilityAt.set(camera.x, camera.z);
+    const start = CROP_FADE.value.x;
+    const end = CROP_FADE.value.y;
+    // Fields poke a little past their cell (a field's centre picks the cell)
+    const pad = 2;
+    for (const b of this.batches.values()) {
+      const x0 = b.cx * CROP_CELL - pad;
+      const z0 = b.cz * CROP_CELL - pad;
+      const x1 = x0 + CROP_CELL + 2 * pad;
+      const z1 = z0 + CROP_CELL + 2 * pad;
+      const near = Math.hypot(Math.max(x0 - camera.x, 0, camera.x - x1), Math.max(z0 - camera.z, 0, camera.z - z1));
+      const far = Math.hypot(Math.max(Math.abs(camera.x - x0), Math.abs(camera.x - x1)), Math.max(Math.abs(camera.z - z0), Math.abs(camera.z - z1)));
+      // The shader's per-plant jitter moves the band by up to 15% of its width either way
+      const slack = (end - start) * 0.15;
+      b.mesh.visible = b.mesh.count > 0 && near < end + slack;
+      const fading = b.mesh.visible && far > start - slack;
+      if (fading !== b.fading) {
+        b.fading = fading;
+        b.mesh.material = fading ? acquireDistanceDither(b.part.material, CROP_FADE) : b.part.material;
+      }
+    }
+  }
+
   private rebuildInstances(): void {
     const terrain = this.terrain;
-    type Entry = { part: CropPart; matrices: THREE.Matrix4[]; owners: { field: FarmField; start: number; count: number }[] };
+    type Entry = { part: CropPart; cx: number; cz: number; matrices: THREE.Matrix4[]; owners: { field: FarmField; start: number; count: number }[] };
     const lists = new Map<string, Entry>();
 
     for (const field of this.fields.values()) {
       if (!field.crop || !terrain) continue;
       const { cropType, stage } = field.crop;
       const visual = this.getVisual(cropType, stage);
-      const placements = this.placementsFor(field, visual.single, terrain);
+      const placements = this.cachedPlacements(field, visual.single, terrain);
+      const cx = Math.floor(field.center.x / CROP_CELL);
+      const cz = Math.floor(field.center.z / CROP_CELL);
       visual.parts.forEach((part, pi) => {
-        const key = `${cropType}:${stage}:${pi}`;
+        const key = `${cropType}:${stage}:${pi}|${cx}|${cz}`;
         let entry = lists.get(key);
-        if (!entry) lists.set(key, (entry = { part, matrices: [], owners: [] }));
+        if (!entry) lists.set(key, (entry = { part, cx, cz, matrices: [], owners: [] }));
         entry.owners.push({ field, start: entry.matrices.length, count: placements.length });
-        for (const m of placements) entry.matrices.push(m.clone().multiply(part.matrix));
+        // Parts sit at the plant's origin (identity matrix): share the cached placement matrices
+        if (isIdentity(part.matrix)) for (const m of placements) entry.matrices.push(m);
+        else for (const m of placements) entry.matrices.push(m.clone().multiply(part.matrix));
       });
     }
 
     this.wheatSlots = [];
 
+    // Cells whose fields were all harvested or filled in let go of their batch entirely
     for (const [key, batch] of this.batches) {
       if (!lists.has(key)) {
-        batch.mesh.count = 0;
-        batch.mesh.visible = false;
+        this.disposeBatch(batch);
+        this.batches.delete(key);
       }
     }
 
-    for (const [key, { part, matrices, owners }] of lists) {
+    for (const [key, { part, cx, cz, matrices, owners }] of lists) {
       const springy = part.maxBend > 0;
       let batch = this.batches.get(key);
-      if (!batch || batch.capacity < matrices.length) {
-        const previousSprings = batch?.springs ?? null;
-        if (batch) {
-          this.group.remove(batch.mesh);
-          batch.mesh.dispose(); // instance buffers only; geometry and material are shared
-        }
-        const capacity = Math.max(32, THREE.MathUtils.ceilPowerOfTwo(matrices.length));
-        const mesh = new THREE.InstancedMesh(part.geometry, part.material, capacity);
+      if (!batch || batch.capacity < matrices.length || batch.part !== part) {
+        if (batch) this.disposeBatch(batch);
+        // Small cells hold few plants: start small, grow in powers of two
+        const capacity = Math.max(16, THREE.MathUtils.ceilPowerOfTwo(matrices.length));
+        // A springy batch carries its aBend on the geometry, so it gets its own copy
+        const geometry = springy ? part.geometry.clone() : part.geometry;
+        const mesh = new THREE.InstancedMesh(geometry, part.material, capacity);
         mesh.name = `FieldCrops_${key}`;
         mesh.matrixAutoUpdate = false;
         this.group.add(mesh);
-        const springs = springy ? this.createSprings(part.geometry, capacity, previousSprings, part.maxBend) : null;
-        batch = { mesh, capacity, springs };
+        const springs = springy ? this.createSprings(geometry, capacity, null, part.maxBend) : null;
+        batch = { mesh, capacity, springs, part, ownsGeometry: springy, cx, cz, fading: false };
         this.batches.set(key, batch);
       }
       const mesh = batch.mesh;
@@ -816,9 +925,26 @@ export class FieldManager {
       }
       mesh.count = matrices.length;
       mesh.visible = matrices.length > 0;
+      batch.fading = false;
+      mesh.material = part.material;
       mesh.instanceMatrix.needsUpdate = true;
       mesh.computeBoundingSphere();
     }
+  }
+
+  /**
+   * A field's plant transforms for a layout, kept between rebuilds: a stage change anywhere on the
+   * farm rebuilds every batch, and re-sampling the terrain for every plant of every field each time
+   * was most of that cost. Fields never move; the cache entry goes with the field.
+   */
+  private readonly placementCache = new Map<string, { layout: SingleLayout; matrices: THREE.Matrix4[] }>();
+
+  private cachedPlacements(field: FarmField, layout: SingleLayout, terrain: TerrainSystem): THREE.Matrix4[] {
+    const hit = this.placementCache.get(field.id);
+    if (hit && hit.layout === layout) return hit.matrices;
+    const matrices = this.placementsFor(field, layout, terrain);
+    this.placementCache.set(field.id, { layout, matrices });
+    return matrices;
   }
 
   /** Plant transforms on the terrain: a jittered rows x rows grid. */
@@ -833,14 +959,24 @@ export class FieldManager {
       this.tmpScale.setScalar(scale);
       out.push(new THREE.Matrix4().compose(this.tmpPos, this.tmpQuat, this.tmpScale));
     };
-    const { rows, spacing, scale } = layout;
+    const { rows, spacing, scale, facing } = layout;
+    const yaw = () => (facing === undefined ? rand() * Math.PI * 2 : facing + (rand() - 0.5) * 2 * FACING_JITTER);
     const start = -((rows - 1) * spacing) / 2;
     const jitter = spacing * 0.32;
     for (let r = 0; r < rows; r++) {
       for (let q = 0; q < rows; q++) {
         const x = cx + start + q * spacing + (rand() - 0.5) * jitter;
         const z = cz + start + r * spacing + (rand() - 0.5) * jitter;
-        put(x, z, rand() * Math.PI * 2, scale * (0.88 + rand() * 0.25), 0.03);
+        put(x, z, yaw(), scale * (0.88 + rand() * 0.25), 0.03);
+      }
+    }
+    if (layout.interleave) {
+      for (let r = 0; r < rows - 1; r++) {
+        for (let q = 0; q < rows - 1; q++) {
+          const x = cx + start + (q + 0.5) * spacing + (rand() - 0.5) * jitter;
+          const z = cz + start + (r + 0.5) * spacing + (rand() - 0.5) * jitter;
+          put(x, z, yaw(), scale * (0.8 + rand() * 0.25), 0.03);
+        }
       }
     }
     return out;
@@ -855,6 +991,18 @@ export class FieldManager {
   /** Terrain tiles are already in the terrain save; this restores the fields and their crops. */
   public deserialize(data: FieldSaveData[]): void {
     this.clear();
-    for (const d of data) this.createField(d.gx, d.gz, d.crop ? { ...d.crop } : null, d.prev);
+    const legacyLen = LEGACY_FIELD_CELLS * LEGACY_FIELD_CELLS;
+    for (const d of data) {
+      let prev = d.prev;
+      if (prev && prev.length === legacyLen && this.terrain) {
+        // Old 4 x 4 field: give its ground back, then re-dig it as a 3 x 3 field from the same corner
+        let i = 0;
+        for (let z = d.gz; z < d.gz + LEGACY_FIELD_CELLS; z++) {
+          for (let x = d.gx; x < d.gx + LEGACY_FIELD_CELLS; x++) this.terrain.setTile(x, z, prev[i++] ?? TerrainTileType.GRASS);
+        }
+        prev = undefined;
+      }
+      this.createField(d.gx, d.gz, d.crop ? { ...d.crop } : null, prev);
+    }
   }
 }

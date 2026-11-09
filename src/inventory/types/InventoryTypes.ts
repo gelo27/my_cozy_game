@@ -23,6 +23,8 @@ export interface InventoryState {
   items: InventoryItem[];
   equippedItemId: string | null;
   isOpen: boolean;
+  hotbar: (string | null)[];
+  capacity: number;
 }
 
 export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
@@ -68,7 +70,7 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     maxStack: 1,
     iconName: 'Shovel',
     color: '#8b5a2b',
-    description: 'Міцна лопата. Викопує поле 4×4 м на траві для 25 рослин; засипає порожнє поле назад.',
+    description: 'Міцна лопата. Викопує поле 3×3 м на траві, викопує те, що на ньому росте, засипає порожнє поле назад.',
     isEquippable: true,
   },
   // Seeds
@@ -149,6 +151,19 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     isEquippable: true,
     buyPrice: 10,
     cropType: 'corn',
+  },
+  {
+    id: 'sunflower_seed',
+    name: 'Насіння соняшника',
+    category: 'seeds',
+    count: 10,
+    maxStack: 99,
+    iconName: 'Flower2',
+    color: '#f59e0b',
+    description: 'Насіння соняшника. Високі стебла з великими золотими кошиками.',
+    isEquippable: true,
+    buyPrice: 10,
+    cropType: 'sunflower',
   },
   {
     id: 'eggplant_seed',
@@ -250,6 +265,18 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     sellPrice: 42,
   },
   {
+    id: 'crate_sunflower',
+    name: 'Ящик соняшників',
+    category: 'crops',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Package',
+    color: '#d97706',
+    description: 'Ящик золотих соняшникових кошиків, повних насіння.',
+    isEquippable: false,
+    sellPrice: 44,
+  },
+  {
     id: 'crate_eggplant',
     name: 'Ящик баклажанів',
     category: 'crops',
@@ -339,6 +366,17 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     iconName: 'Fish',
     color: '#0ea5e9',
     description: 'Підійдіть до води, візьміть вудку і натисніть ЛКМ / E, щоб закинути. Тисніть, коли поплавок смикнеться!',
+    isEquippable: true,
+  },
+  {
+    id: 'slingshot',
+    name: 'Рогатка',
+    category: 'tools',
+    count: 1,
+    maxStack: 1,
+    iconName: 'Target',
+    color: '#b45309',
+    description: 'Міцна дерев’яна рогатка. ЛКМ / E — постріл камінцем у найближчого шкідника в полі зору: три влучання проганяють їжака, чотири — дракончика.',
     isEquippable: true,
   },
   ...fish('fish_carp', 'Короп', '#a3a35c', 'Звичайна ставкова риба. Клює будь-коли.', 12),
@@ -431,6 +469,7 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'strawberry_seed') return '🍓';
   if (item.id === 'cabbage_seed') return '🥬';
   if (item.id === 'corn_seed') return '🌽';
+  if (item.id === 'sunflower_seed') return '🌻';
   if (item.id === 'eggplant_seed') return '🍆';
   if (item.id === 'pumpkin_seed') return '🎃';
   if (item.id.startsWith('crate_')) return '📦';
@@ -440,6 +479,7 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'wood') return '🌲';
   if (item.id === 'stone') return '⛰️';
   if (item.id === 'fishing_rod') return '🎣';
+  if (item.id === 'slingshot') return '🪃';
   if (item.id === 'fish_golden') return '🐠';
   if (item.id.startsWith('fish_')) return '🐟';
   if (item.id === 'dish_bread') return '🍞';

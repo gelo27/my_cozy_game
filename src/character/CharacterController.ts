@@ -600,6 +600,9 @@ export class CharacterController {
       for (const ability of this.abilities) {
         ability.update(dt, context);
       }
+      // Aiming the slingshot: RMB held with it in hand, on foot (not swimming, climbing, carrying or building)
+      context.isAiming = !!move.aim && this.model.activeWeapon === 15 && !context.isSwimming && !context.isClimbing
+        && !context.isHoldingObject && !context.isBuildModeActive && !actionLocked;
 
       // 5. Update Locomotion Dust Particles
       if (this.particleManager && CHARACTER_CONFIG.FOOT_DUST_ENABLED) {
@@ -620,7 +623,10 @@ export class CharacterController {
       let targetFacingAngle: number | null = null;
       const isMovingInput = Math.abs(move.forward) > 0.01 || Math.abs(move.right) > 0.01;
 
-      if (context.isClimbing && this.wallClimbAbility) {
+      if (context.isAiming) {
+        // Aiming: the body turns with the view, so the shot leaves where the crosshair is
+        targetFacingAngle = Math.atan2(cameraForward.x, cameraForward.z);
+      } else if (context.isClimbing && this.wallClimbAbility) {
         const wallNorm = this.wallClimbAbility.wallNormal;
         if (wallNorm.lengthSq() > 0.001) {
           targetFacingAngle = Math.atan2(-wallNorm.x, -wallNorm.z);
