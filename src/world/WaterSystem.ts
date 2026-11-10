@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { SEA_FLOOR_Y, WORLD_SIZE, worldSettings } from './WorldSettings';
 import type { TerrainSystem } from './TerrainSystem';
 import { injectCaustics } from '../scene/WaterEffects';
-import { WATER_DETAIL_GLSL, updateWaterDetails } from '../scene/WaterDetails';
+import { WATER_DETAIL_GLSL, WATER_RIPPLE_GLSL, rippleUniforms, updateWaterDetails } from '../scene/WaterDetails';
 import { waterSettings } from './WaterSettings';
 
 /** The sea planes follow the camera and reach past the far plane, so the ocean meets the horizon. */
@@ -27,7 +27,8 @@ const HEIGHT_REFRESH = 0.25;
  *   diffuse light, a sharp sun glint and a Fresnel sky reflection at grazing angles; the detail
  *   calms down with distance, so far water does not shimmer;
  * - shore foam: a crisp white line where the water meets the land and broken ripple bands that
- *   drift in, plus rain rings while it rains (WaterDetails.ts);
+ *   drift in, plus rain rings while it rains and ripple rings around the swimmer / wader
+ *   (WaterDetails.ts);
  * - from below (camera under water) the surface is a dim ceiling with a bright Snell's window.
  */
 export class WaterSystem {
@@ -84,7 +85,7 @@ export class WaterSystem {
     mat.customProgramCacheKey = () => 'sea-water';
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader);
-      Object.assign(shader.uniforms, this.uniforms);
+      Object.assign(shader.uniforms, this.uniforms, rippleUniforms);
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vSeaW;')
         .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSeaW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
@@ -106,6 +107,7 @@ uniform vec4 uShine;
 uniform vec3 uFoam;
 uniform float uOpacity;
 ${WATER_DETAIL_GLSL}
+${WATER_RIPPLE_GLSL}
 float seaDepth;
 float seaFoam;
 vec3 seaWorldN;`
@@ -124,6 +126,11 @@ float detail = 1.0 - smoothstep(uWaveB.z, uWaveB.w, seaDist);
 vec3 n1 = texture2D(uWaterNormals, vSeaW.xz * uWaveB.x + uTime * uWaveA.w * vec2(0.011, 0.007)).xyz * 2.0 - 1.0;
 vec3 n2 = texture2D(uWaterNormals, vSeaW.xz * uWaveB.y + uTime * uWaveA.w * vec2(-0.015, 0.010)).xyz * 2.0 - 1.0;
 vec2 slope = (n1.xy * 0.6 + n2.xy * 0.4) * mix(uWaveA.z, uWaveA.y, detail);
+// Simulated waves around the player (developer toggle): they tilt the surface, so they catch the sun
+float simH;
+vec2 simG;
+wdSimSample(vSeaW.xz, simH, simG);
+slope += simG * uWdSimLook.y;
 seaWorldN = normalize(vec3(slope.x, 1.0, slope.y));
 
 // Shallow turquoise -> deep blue (linear colours)
@@ -146,6 +153,12 @@ seaFoam *= inIsland * uShine.w;
 // Rain: crisp rings where the drops hit (open sea too); the uniform test skips them in dry weather
 float seaRings = wdRainRings(vSeaW.xz, uTime, uRain) * (1.0 - smoothstep(25.0, 55.0, seaDist));
 if (uRain > 0.01) seaFoam = max(seaFoam, seaRings);
+// Ripple rings from the swimmer, wading legs and splashes
+// (derivatives first: the distance test below skips the loop for far pixels)
+float seaRipAa = length(fwidth(vSeaW.xz));
+float seaSimAa = fwidth(simH);
+float seaRip = seaDist < 80.0 ? wdRipples(vSeaW.xz, seaRipAa) * (1.0 - smoothstep(45.0, 80.0, seaDist)) : 0.0;
+seaFoam = max(seaFoam, max(seaRip * 0.9, wdSimCrest(simH, seaSimAa)));
 diffuseColor.rgb = mix(seaCol, uFoamCol, clamp(seaFoam, 0.0, 1.0));
 diffuseColor.a = max(uOpacity, clamp(seaFoam, 0.0, 1.0));`
         )

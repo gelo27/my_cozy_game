@@ -159,6 +159,33 @@ export class CharacterModel {
     return parts;
   }
 
+  private limbTipCache: { bone: THREE.Object3D; tip: THREE.Vector3 }[] | null = null;
+
+  /**
+   * World positions of the ends of the limbs as animated last frame (hands and feet), in the order
+   * right arm, left arm, right leg, left leg, written into `out` (4 vectors). The tip is the far end
+   * of each part's box along its long axis. False until the model has loaded.
+   */
+  public limbTips(out: THREE.Vector3[]): boolean {
+    if (!this.limbTipCache) {
+      const parts = this.bodyParts();
+      if (!parts) return false;
+      const tips: { bone: THREE.Object3D; tip: THREE.Vector3 }[] = [];
+      for (const name of ['arm_1_right', 'arm_1_left', 'leg_1_right', 'leg_1_left']) {
+        const p = parts.find((q) => q.bone.name === name);
+        if (!p) return false;
+        const size = p.max.clone().sub(p.min);
+        const axis = size.x >= size.y && size.x >= size.z ? 'x' : size.y >= size.z ? 'y' : 'z';
+        const tip = p.min.clone().add(p.max).multiplyScalar(0.5);
+        tip[axis] = Math.abs(p.max[axis]) > Math.abs(p.min[axis]) ? p.max[axis] : p.min[axis];
+        tips.push({ bone: p.bone, tip });
+      }
+      this.limbTipCache = tips;
+    }
+    for (let i = 0; i < 4; i++) out[i].copy(this.limbTipCache[i].tip).applyMatrix4(this.limbTipCache[i].bone.matrixWorld);
+    return true;
+  }
+
   // Squash & Stretch Spring Physics (Feet-anchored, Mario Odyssey style)
   public currentSquashY: number = 1.0;
   private squashVelocity: number = 0;

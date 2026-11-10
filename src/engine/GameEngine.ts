@@ -71,6 +71,8 @@ import { GrassField } from '../world/GrassField';
 import { LightningStrikes } from '../world/Lightning';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
+import { setRippleCamera } from '../scene/WaterDetails';
+import { waterRippleSim } from '../scene/WaterRippleSim';
 import { RiverSystem } from '../world/rivers/RiverSystem';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { WeatherSystem } from '../world/WeatherSystem';
@@ -386,6 +388,7 @@ export class GameEngine {
       terrain.commit();
       const water = new WaterSystem(scene);
       water.setTerrain(terrain);
+      setRippleCamera(this.camera.camera);
       const rivers = new RiverSystem(scene, terrain);
       const weather = new WeatherSystem(scene);
       weather.onLightning = () => this.ambient.thunder(this.listenerPos, weather.sound.thunder);
@@ -765,6 +768,8 @@ export class GameEngine {
     w.props.updateVisibility(this.camera.camera.position);
     const rainOnWater = w.exploration.inCave ? 0 : w.weather.rainIntensity * (1 - w.weather.snowAmount);
     w.water.update(dt, this.camera.camera.position, rainOnWater);
+    // Ripple wave simulation around the player (developer toggle; asleep when nothing stirs)
+    waterRippleSim.update(this.renderer, dt);
     w.rivers.update(dt, w.weather.nightFactor, rainOnWater);
     if (editing) {
       editor.update(rawDt);

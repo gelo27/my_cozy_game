@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { injectNightLights } from '../NightLighting';
 import type { TerrainSystem } from '../TerrainSystem';
 import { riverWorld } from './RiverWorld';
-import { WATER_DETAIL_GLSL } from '../../scene/WaterDetails';
+import { WATER_DETAIL_GLSL, WATER_RIPPLE_GLSL, rippleUniforms } from '../../scene/WaterDetails';
 import { buildLakeGeometry, buildRiverGeometry } from './RiverMesh';
 import type { RiverDef, RiverSample, WaterfallInfo } from './RiverTypes';
 
@@ -283,11 +283,12 @@ export class RiverSystem {
       shader.uniforms.uTime = this.uniforms.uTime;
       shader.uniforms.uDay = this.uniforms.uDay;
       shader.uniforms.uRain = this.uniforms.uRain;
+      Object.assign(shader.uniforms, rippleUniforms);
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nattribute vec4 aRiver;\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRiver = aRiver;\nvRiverUv = uv;');
+        .replace('#include <common>', '#include <common>\nattribute vec4 aRiver;\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;\nvarying vec3 vRipW;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRiver = aRiver;\nvRiverUv = uv;\nvRipW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;\nuniform float uTime;\nuniform float uDay;\nuniform float uRain;\n${NOISE_GLSL}\n${WATER_DETAIL_GLSL}`)
+        .replace('#include <common>', `#include <common>\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;\nvarying vec3 vRipW;\nuniform float uTime;\nuniform float uDay;\nuniform float uRain;\n${NOISE_GLSL}\n${WATER_DETAIL_GLSL}\n${WATER_RIPPLE_GLSL}`)
         .replace(
           '#include <map_fragment>',
           `// Calm flow: stretched ripples drifting downstream (lakes: slow, round ripples that barely move)
@@ -305,6 +306,18 @@ water = mix(water, vec3(0.08, 0.48, 0.46), smoothstep(0.5, 1.0, vRiver.z) * 0.35
 water *= 0.93 + rip * 0.1;
 // Rain: crisp white rings spreading where drops hit (the same chunk as the sea's)
 float rainRings = wdRainRings(vRiverUv, uTime, uRain);
+// Ripple rings from the swimmer / wader (world space, shared with the sea)
+// (derivatives first: the distance test skips the loop for far pixels)
+float ripAa = length(fwidth(vRipW.xz));
+float ripDist = distance(vRipW, cameraPosition);
+float ripRings = ripDist < 80.0 ? wdRipples(vRipW.xz, ripAa) * (1.0 - smoothstep(45.0, 80.0, ripDist)) : 0.0;
+// Simulated waves (developer toggle): white crests, and a light / shade from their slope
+float simH;
+vec2 simG;
+wdSimSample(vRipW.xz, simH, simG);
+float simAa = fwidth(simH);
+ripRings = max(ripRings, wdSimCrest(simH, simAa));
+water *= 1.0 + clamp(dot(simG, vec2(0.45, 0.55)) * uWdSimLook.y, -0.3, 0.3);
 // Estuary: the colour turns into the sea's, a lighter silty plume drifts out past the shore, and
 // a soft band of foam marks where the current meets the waves
 float mouth = vRiver.w;
@@ -316,6 +329,7 @@ float meet = smoothstep(0.85, 1.0, mouth) * (1.0 - smoothstep(1.0, 1.35, mouth))
 foam = max(foam, meet * smoothstep(0.5, 0.8, rNoise(vec2(vRiverUv.x * 1.3, vRiverUv.y * 0.6 + uTime * 0.4) + 5.0)) * 0.6);
 foam *= 1.0 - smoothstep(1.3, 1.8, mouth);
 if (uRain > 0.01) foam = max(foam, rainRings * 0.9);
+foam = max(foam, ripRings * 0.85);
 diffuseColor.rgb = mix(water, vec3(0.94, 0.97, 1.0), foam);
 diffuseColor.a = mix(diffuseColor.a, 0.96, foam) * vRiver.y;
 // Over open water no bank hides the ribbon's sides: feather them out in the estuary, with a

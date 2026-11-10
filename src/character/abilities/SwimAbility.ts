@@ -10,6 +10,7 @@ import {
 } from '../../config/constants';
 import { WaterEffects } from '../../scene/WaterEffects';
 import { WaterParticleSystem } from '../../particles/WaterParticleSystem';
+import { setWaterBody, setWaterLimb } from '../../scene/WaterDetails';
 
 /** Water shallower than this (m, surface to bed) is waded on foot; deeper is swum. */
 const WADE_DEPTH_ENTER = 1.15;
@@ -17,6 +18,10 @@ const WADE_DEPTH_EXIT = 1.0;
 /** Within this distance (m) below the resting height the swimmer is caught by the surface. */
 const SURFACE_CAPTURE = 0.55;
 const DOWN = new THREE.Vector3(0, -1, 0);
+/** Body centre to the soles (capsule half height + radius, m). */
+const CAPSULE_HALF_TOTAL = 0.75;
+/** 1 ± amount, uniformly random: keeps repeated ripples from looking machine-made. */
+const jitter = (amount: number): number => 1 + (Math.random() * 2 - 1) * amount;
 
 export class SwimAbility implements IAbility {
   // Per-frame scratch values (this update runs every frame while swimming)
@@ -38,6 +43,17 @@ export class SwimAbility implements IAbility {
   private wasSwimming = false;
   private mantleTimer = 0;
   private rippleTimer = 0;
+  private wadeTimer = 0;
+  /** Randomised waits until the next body ring (swimming / wading). */
+  private rippleNext = 0.3;
+  private wadeNext = 0.5;
+  /** Hand / foot tips (right arm, left arm, right leg, left leg) now and last frame. */
+  private readonly limbTips = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  private readonly limbPrev = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  private readonly limbCooldown = [0, 0, 0, 0];
+  /** Seconds since the limbs were last tracked (stale above a frame or two). */
+  private limbAge = 1;
+  private readonly sLimbVel = new THREE.Vector3();
   private bubbleTimer = 0;
   private bubblePauseTimer = 0;
   private mantleCooldown = 0;
@@ -71,6 +87,7 @@ export class SwimAbility implements IAbility {
   private detectedLedgeTopY = 0;
 
   public update(dt: number, context: CharacterContext): void {
+    this.limbAge += dt;
     if (this.mantleCooldown > 0) {
       this.mantleCooldown -= dt;
     }
@@ -262,18 +279,36 @@ export class SwimAbility implements IAbility {
       context.isJumping = false;
 
       // 6. Surface Ripples Emission while Swimming
+      // (strokes leave a trail of rings behind the moving body; floating still, slow gentle rings)
       const currentSpeed = Math.sqrt(currentLat.x * currentLat.x + currentLat.z * currentLat.z);
-      if (currentSpeed > 0.5 && pos.y > this.waterMax.y - 0.75) {
+      const atSurface = pos.y > this.waterMax.y - 0.75;
+      if (atSurface && !inCavePool && this.waterEffects) {
+        const moving = currentSpeed > 0.5;
+        // The wave simulation follows the swimmer and its motion pushes a wake
+        setWaterBody(pos.x, pos.z, currentSpeed, 0.45);
+        // The hands break the surface on their own (their rings and wakes keep it from looking too even)
+        this.updateLimbRipples(dt, context, this.waterMax.y, true, 0);
         this.rippleTimer += dt;
-        if (this.rippleTimer >= WATER_PHYSICS_CONFIG.SWIM_STROKE_RIPPLE_INTERVAL) {
+        if (this.rippleTimer >= this.rippleNext) {
           this.rippleTimer = 0;
-          if (this.waterEffects) {
+          // Uneven on purpose: interval, place, strength and size all wander a little
+          this.rippleNext = moving
+            ? WATER_PHYSICS_CONFIG.SWIM_STROKE_RIPPLE_INTERVAL * (context.isSprinting ? 1.0 : 1.3) * jitter(0.25)
+            : 1.3 * jitter(0.2);
+          if (moving) {
+            // Born at the head (a little ahead of the body), squeezed in front: a bow wave
+            const ahead = 0.45 / currentSpeed;
             this.waterEffects.emitRipple(
-              pos.x,
-              pos.z,
-              context.isSprinting ? 0.85 : 0.55,
-              context.isSprinting ? 3.8 : 2.6
+              pos.x + currentLat.x * ahead + (Math.random() - 0.5) * 0.16,
+              pos.z + currentLat.z * ahead + (Math.random() - 0.5) * 0.16,
+              (context.isSprinting ? 0.8 : 0.55) * jitter(0.2),
+              (context.isSprinting ? 3.4 : 2.5) * jitter(0.15),
+              undefined,
+              currentLat.x,
+              currentLat.z
             );
+          } else {
+            this.waterEffects.emitRipple(pos.x, pos.z, 0.35 * jitter(0.2), 1.7 * jitter(0.15), 2.4);
           }
         }
       } else {
@@ -324,6 +359,107 @@ export class SwimAbility implements IAbility {
       }
     } else {
       context.body.setGravityScale(1, true);
+      this.updateWadeRipples(dt, context, pos, vel, level, inCavePool);
+    }
+  }
+
+  /**
+   * Hands (swimming) or feet (wading) as their own ripple sources, at the real animated limb tips:
+   * - each pushes its own small wake in the wave simulation while it moves through the surface;
+   * - a hand that dips in from above drops a splash ring, and a limb sweeping fast through the
+   *   water throws small rings now and then (random cooldowns, sizes and strengths),
+   * so the surface no longer looks like one perfect ring train from the body.
+   */
+  private updateLimbRipples(dt: number, context: CharacterContext, level: number, swimming: boolean, deep: number): void {
+    const model = context.model as { limbTips?(out: THREE.Vector3[]): boolean } | undefined;
+    if (!this.waterEffects || !model?.limbTips || dt <= 0 || !model.limbTips(this.limbTips)) return;
+    // Not called last frame (left the water, dived...): the previous tips are stale
+    const valid = this.limbAge < 0.1;
+    this.limbAge = 0;
+    const lin = context.body.linvel();
+    const bodySpeed = Math.hypot(lin.x, lin.z);
+    for (let i = 0; i < 4; i++) {
+      const isHand = i < 2;
+      if (!swimming && isHand) continue;
+      const tip = this.limbTips[i];
+      const prev = this.limbPrev[i];
+      const vx = valid ? (tip.x - prev.x) / dt : 0;
+      const vz = valid ? (tip.z - prev.z) / dt : 0;
+      const vy = valid ? (tip.y - prev.y) / dt : 0;
+      const speedH = Math.hypot(vx, vz);
+      this.limbCooldown[i] -= dt;
+      // Swimming: only a limb at the surface stirs it. Wading: the leg always crosses the surface
+      const inBand = swimming ? tip.y < level + 0.12 && tip.y > level - 0.4 : true;
+      if (inBand) {
+        const stir = swimming ? Math.hypot(speedH, vy) * 0.8 : speedH * (0.5 + deep * 0.6);
+        setWaterLimb(i + 1, tip.x, tip.z, stir, swimming ? 0.14 : 0.16);
+      }
+      const v = this.sLimbVel.set(vx, 0, vz);
+      if (swimming && valid && prev.y >= level && tip.y < level) {
+        // A hand (or a kicking foot) dipping in: a splash ring
+        this.waterEffects.emitRipple(tip.x, tip.z, 0.4 * jitter(0.25), 1.2 * jitter(0.2), undefined, v.x * 0.5, v.z * 0.5);
+        this.limbCooldown[i] = 0.3 + Math.random() * 0.2;
+      } else if (inBand && this.limbCooldown[i] <= 0) {
+        const fast = swimming ? speedH > 1.3 : speedH > Math.max(0.9, bodySpeed * 1.15);
+        if (fast) {
+          const s = swimming ? 0.22 : 0.22 + deep * 0.28;
+          const r = swimming ? 0.8 : 0.9 + deep * 0.8;
+          this.waterEffects.emitRipple(
+            tip.x + (Math.random() - 0.5) * 0.1,
+            tip.z + (Math.random() - 0.5) * 0.1,
+            s * jitter(0.3),
+            r * jitter(0.25),
+            undefined,
+            v.x,
+            v.z
+          );
+          this.limbCooldown[i] = (swimming ? 0.35 : 0.22) + Math.random() * (swimming ? 0.4 : 0.25);
+        }
+      }
+      prev.copy(tip);
+    }
+  }
+
+  /** Walking (or standing) in the shallows: rings spread from the legs, quicker the faster the stride. */
+  private updateWadeRipples(
+    dt: number,
+    context: CharacterContext,
+    pos: { x: number; y: number; z: number },
+    vel: { x: number; y: number; z: number },
+    level: number,
+    inCavePool: boolean
+  ): void {
+    const feet = pos.y - CAPSULE_HALF_TOTAL;
+    const depthIn = level - feet;
+    // Feet covered by a few cm, and the water below the head
+    if (inCavePool || !this.waterEffects || depthIn < 0.06 || depthIn > CAPSULE_HALF_TOTAL * 2 - 0.2) {
+      this.wadeTimer = 0;
+      return;
+    }
+    const speed = Math.hypot(vel.x, vel.z);
+    const moving = speed > 0.4;
+    const deep = Math.min(depthIn, 0.9);
+    // The legs push the simulated water aside (deeper = more water moved)
+    setWaterBody(pos.x, pos.z, speed * (0.3 + deep * 0.5), 0.3);
+    // Each foot stirs the water where it really is, ring by ring as it swings through
+    this.updateLimbRipples(dt, context, level, false, deep);
+    this.wadeTimer += dt;
+    if (this.wadeTimer < this.wadeNext) return;
+    this.wadeTimer = 0;
+    this.wadeNext = moving ? THREE.MathUtils.clamp(1.4 / speed, 0.3, 0.7) * jitter(0.25) : 1.8 * jitter(0.2);
+    if (moving) {
+      const ahead = 0.3 / speed;
+      this.waterEffects.emitRipple(
+        pos.x + vel.x * ahead + (Math.random() - 0.5) * 0.14,
+        pos.z + vel.z * ahead + (Math.random() - 0.5) * 0.14,
+        (0.25 + deep * 0.35) * jitter(0.2),
+        (1.4 + deep * 1.1 + Math.min(speed, 6) * 0.12) * jitter(0.15),
+        undefined,
+        vel.x,
+        vel.z
+      );
+    } else {
+      this.waterEffects.emitRipple(pos.x, pos.z, 0.35 + deep * 0.25, 1.2 + deep * 0.6, 2.2);
     }
   }
 

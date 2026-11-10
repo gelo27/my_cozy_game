@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { WATER_EFFECTS_CONFIG } from '../config/constants';
 import { WORLD_SIZE, worldSettings } from '../world/WorldSettings';
 import { riverWorld } from '../world/rivers/RiverWorld';
-import { injectWaterline } from './WaterDetails';
+import { emitWaterRipple, injectWaterline } from './WaterDetails';
 
 /**
  * Fake caustics: sunlight focused by the surface waves into a moving web of bright lines on
@@ -280,11 +280,17 @@ export class WaterEffects {
     material.needsUpdate = true;
   }
 
-  /** Kept for callers: the surface ripple rings were removed. */
-  public emitRipple(_x: number, _z: number, _strength = 1.0, _maxRadius = 3.5, _customDuration?: number): void {}
+  /** A ring spreading on the water surface (drawn by the sea / river shaders, see WaterDetails.ts). */
+  public emitRipple(x: number, z: number, strength = 1.0, maxRadius = 3.5, customDuration?: number, vx = 0, vz = 0): void {
+    emitWaterRipple(x, z, strength, maxRadius, customDuration, vx, vz);
+  }
 
-  /** Kept for callers: the surface ripple rings were removed. */
-  public emitRippleBurst(_x: number, _z: number, _intensity = 1.0): void {}
+  /** A splash: one strong wide ring with a quicker, smaller one inside it. */
+  public emitRippleBurst(x: number, z: number, intensity = 1.0): void {
+    const k = Math.min(Math.max(intensity, 0.3), 2);
+    emitWaterRipple(x, z, Math.min(1, 0.6 + k * 0.3), 2.2 + k * 1.6);
+    emitWaterRipple(x, z, Math.min(1, 0.4 + k * 0.25), 1.0 + k * 0.7, 0.9 + k * 0.3);
+  }
 
   /** Per frame: advance the pattern, follow the sea level, switch on only with the camera under water. */
   public update(dt: number, cameraUnderwater: boolean): void {

@@ -39,6 +39,22 @@ export interface WaterSettings {
   foamLine: number;
   rippleFoam: boolean;
   rippleSpeed: number;
+  /** Rings around the player: true = GPU wave simulation, false = analytic rings (cheapest). */
+  rippleSim: boolean;
+  /** Simulated area around the player (m, square). */
+  rippleSimArea: number;
+  /** Wave speed (c^2 of the wave equation, stable up to 0.5). */
+  rippleSimSpeed: number;
+  /** Per-step energy kept (lower = waves die sooner). */
+  rippleSimDamping: number;
+  /** Draw white crests on the simulated waves (off = only the light / glints show them). */
+  rippleSimCrestOn: boolean;
+  /** Height above which a crest turns white. */
+  rippleSimCrest: number;
+  /** How much the waves tilt the surface normal (glints). */
+  rippleSimSlope: number;
+  /** Strength of the wake pushed by a moving body. */
+  rippleSimWake: number;
 }
 
 export const WATER_DEFAULTS: Readonly<WaterSettings> = {
@@ -62,6 +78,14 @@ export const WATER_DEFAULTS: Readonly<WaterSettings> = {
   foamLine: 0.09,
   rippleFoam: true,
   rippleSpeed: 0.22,
+  rippleSim: true,
+  rippleSimArea: 16,
+  rippleSimSpeed: 0.18,
+  rippleSimDamping: 0.985,
+  rippleSimCrestOn: false,
+  rippleSimCrest: 0.035,
+  rippleSimSlope: 2.2,
+  rippleSimWake: 0.1,
 };
 
 const STORAGE_KEY = 'farm.waterSettings.v1';

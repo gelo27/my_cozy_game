@@ -20,6 +20,7 @@ import { worldSettings } from '../../world/WorldSettings';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
 import { waterSettings, WaterSettings, saveWaterSettings, resetWaterSettings } from '../../world/WaterSettings';
+import { RIPPLE_SIM_RES } from '../../scene/WaterRippleSim';
 import { vegetationSettings, VegetationSettings, setVegetation, resetVegetationSettings } from '../../world/VegetationSettings';
 import { causticsSettings, applyCausticsSettings, resetCausticsSettings, CausticsSettings } from '../../scene/WaterEffects';
 
@@ -724,6 +725,15 @@ const WATER_GROUPS: { title: string; sliders: WaterSlider[] }[] = [
   },
 ];
 
+const RIPPLE_SIM_SLIDERS: WaterSlider[] = [
+  { k: 'rippleSimArea', label: 'Розмір області', min: 8, max: 64, step: 1, fmt: (v) => `${v} м (${((v / RIPPLE_SIM_RES) * 100).toFixed(1)} см/тексель)` },
+  { k: 'rippleSimSpeed', label: 'Швидкість хвиль', min: 0.03, max: 0.5, step: 0.01, fmt: (v) => v.toFixed(2) },
+  { k: 'rippleSimDamping', label: 'Затухання', min: 0.95, max: 0.998, step: 0.001, fmt: (v) => v.toFixed(3) },
+  { k: 'rippleSimCrest', label: 'Поріг білого гребеня', min: 0.002, max: 0.08, step: 0.001, fmt: (v) => v.toFixed(3) },
+  { k: 'rippleSimSlope', label: 'Нахил (блиск)', min: 0, max: 3, step: 0.05, fmt: (v) => v.toFixed(2) },
+  { k: 'rippleSimWake', label: 'Слід за тілом', min: 0, max: 4, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
+];
+
 /** Live look of the sea shader (saved in this browser). */
 const WaterPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
   const w = waterSettings;
@@ -776,6 +786,30 @@ const WaterPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
           )}
         </Section>
       ))}
+      <Section title="Хвилі від гравця">
+        <div className="flex gap-1">
+          <button className={chip(!w.rippleSim)} onClick={() => set('rippleSim', false)}>
+            Кола (шейдер)
+          </button>
+          <button className={chip(w.rippleSim)} onClick={() => set('rippleSim', true)}>
+            Симуляція
+          </button>
+        </div>
+        <p className="text-[10px] text-zinc-500">
+          {w.rippleSim
+            ? `Справжні хвилі на GPU: ${RIPPLE_SIM_RES}² текселів на ${w.rippleSimArea} м навколо гравця, засинає, коли вода спокійна`
+            : 'Аналітичні кола: найдешевше, рахуються лише видимі'}
+        </p>
+        <div className={w.rippleSim ? '' : 'opacity-40 pointer-events-none'}>
+          <label className="flex items-center gap-2 text-zinc-400">
+            <input type="checkbox" checked={w.rippleSimCrestOn} onChange={(e) => set('rippleSimCrestOn', e.target.checked)} className="accent-sky-500" />
+            Білий гребінь (вимк. = хвилі видно лише за світлом і бликами)
+          </label>
+          {RIPPLE_SIM_SLIDERS.filter((s) => w.rippleSimCrestOn || s.k !== 'rippleSimCrest').map((s) => (
+            <Slider key={s.k} label={s.label} value={w[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(v) => set(s.k, v)} />
+          ))}
+        </div>
+      </Section>
       <button className={chip(false)} onClick={() => (resetWaterSettings(), rerender())}>
         Скинути
       </button>
