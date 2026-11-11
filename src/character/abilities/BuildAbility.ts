@@ -1,7 +1,7 @@
 import { t, localName } from '../../i18n/i18n';
 import * as THREE from 'three';
 import { IAbility, CharacterContext } from './IAbility';
-import { BuildingPieceType, BuildingTelemetry, SnapResult, isDoorPiece } from '../../building/types/BuildingTypes';
+import { BuildingPieceType, BuildingTelemetry, SnapResult, isSwingDoorPiece } from '../../building/types/BuildingTypes';
 import { BUILDING_PIECES } from '../../building/config/BuildingPiecesConfig';
 import { BuildingManager } from '../../building/BuildingManager';
 import { SnapSystem } from '../../building/SnapSystem';
@@ -34,6 +34,12 @@ const PIECE_TYPES_ORDER: BuildingPieceType[] = [
   BuildingPieceType.WOOD_POLE_2M,
   BuildingPieceType.CHECKER_PILLAR_1M,
   BuildingPieceType.CORNER_RUSTICATED_QUOIN_1M,
+  BuildingPieceType.GLASS_WALL_2X3,
+  BuildingPieceType.GLASS_WALL_1X3,
+  BuildingPieceType.GLASS_DOORWAY_1X3,
+  BuildingPieceType.GLASS_DOOR_1X3,
+  BuildingPieceType.GLASS_ROOF_GABLE_2X2,
+  BuildingPieceType.GLASS_ROOF_SHED_2X2,
 ];
 
 export class BuildAbility implements IAbility {
@@ -398,7 +404,7 @@ export class BuildAbility implements IAbility {
           rayDir = raycaster.ray.direction;
         }
         const doorPiece = this.buildingManager.findPieceUnderRay(rayOrigin, rayDir, 25.0, context.collider);
-        if (doorPiece && isDoorPiece(doorPiece.type)) {
+        if (doorPiece && isSwingDoorPiece(doorPiece.type)) {
           this.buildingManager.toggleDoor(doorPiece.id, playerPos);
         }
       }
@@ -554,7 +560,7 @@ export class BuildAbility implements IAbility {
       const nearbyDoorInfo = this.buildingManager.getNearbyDoor(playerPos);
       if (nearbyDoorInfo) {
         this.buildingManager.toggleDoor(nearbyDoorInfo.piece.id, playerPos);
-      } else if (targetPiece && isDoorPiece(targetPiece.type)) {
+      } else if (targetPiece && isSwingDoorPiece(targetPiece.type)) {
         this.buildingManager.toggleDoor(targetPiece.id, playerPos);
       }
     }
@@ -612,7 +618,7 @@ export class BuildAbility implements IAbility {
       }
 
       // 7c. PRIORITY 3: Clicked a door or an already placed piece -> toggle door or select piece!
-      if (targetPiece && isDoorPiece(targetPiece.type)) {
+      if (targetPiece && isSwingDoorPiece(targetPiece.type)) {
         this.buildingManager.toggleDoor(targetPiece.id, playerPos);
         return;
       }

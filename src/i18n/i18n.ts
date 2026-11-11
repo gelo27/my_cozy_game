@@ -116,6 +116,8 @@ const BADGE_WORDS: [string, string][] = [
   ['Чекер', 'Checker'],
   ['Русти', 'Rustic'],
   ['Прямі', 'Straight'],
+  ['Вхід', 'Entry'],
+  ['Двері', 'Door'],
   ['Білий', 'White'],
   ['Сходи', 'Stairs'],
   ['Стілець', 'Chair'],

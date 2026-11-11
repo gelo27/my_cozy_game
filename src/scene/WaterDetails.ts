@@ -101,6 +101,9 @@ export function setWaterBody(x: number, z: number, speed: number, radius = 0.4):
   if (waterRippleSim.active) waterRippleSim.setBody(x, z, speed, radius);
 }
 
+/** Wave-simulation slots for animals breaking the surface (a shark's fin and back). */
+export const WATER_ANIMAL_SLOTS = [5, 6];
+
 /** Per frame for a hand / foot moving in the water (slot 1..4): its own small wake in the simulation. */
 export function setWaterLimb(slot: number, x: number, z: number, speed: number, radius = 0.16): void {
   if (waterRippleSim.active) waterRippleSim.setPusher(slot, x, z, speed, radius);

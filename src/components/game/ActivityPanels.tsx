@@ -24,7 +24,7 @@ interface PanelProps {
   onClose(): void;
 }
 
-const Shell: React.FC<{ title: string; icon: React.ReactNode; onClose(): void; children: React.ReactNode }> = ({
+export const Shell: React.FC<{ title: string; icon: React.ReactNode; onClose(): void; children: React.ReactNode }> = ({
   title, icon, onClose, children,
 }) => (
   <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/25 pointer-events-auto font-sans" onClick={onClose}>

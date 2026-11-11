@@ -99,9 +99,13 @@ export interface TerrainSaveData {
  *
  * - Heights: (N+1)^2 grid, 1 m spacing, rendered as 64 m chunk meshes sharing one index buffer;
  *   chunks outside the camera frustum (and beyond the far plane) are skipped by three.js.
- * - Surface types: one byte per cell, uploaded to two RGBA weight textures (N x N) that the shader
- *   samples bilinearly, so tile borders blend softly; only the painted rows are rewritten and
- *   uploaded. splatB's blue channel is the damp soil of watered fields (setWetness).
+ * - Surface types: one byte per cell (`tiles`), uploaded as is to an R8 id texture (N x N). The
+ *   shader reads the 4 cells around each pixel, weights them bilinearly itself (soft borders) and
+ *   samples each surface from one texture array (one layer per type, one texture unit for all),
+ *   so any number of surface types costs the same: a pixel fetches only the 1-4 surfaces it
+ *   actually touches. Only painted rows are re-uploaded. splatB's blue channel is the damp soil of
+ *   watered fields (setWetness), its alpha the ground under roofs (setShelter): kept dry in the
+ *   rain and free of fallen snow.
  * - Physics: one Rapier heightfield per chunk, so a brush stroke rebuilds only the chunks it touched.
  * - Beyond the island: a sea-bed collider, and invisible walls far out in the open sea.
  */
@@ -118,7 +122,8 @@ export class TerrainSystem {
   /** Triangles in the chunk meshes' current LODs (all chunks, before frustum culling). */
   public lodTriangles = 0;
   private readonly dirtyChunks = new Set<number>();
-  private readonly splatA: THREE.DataTexture;
+  /** Surface type per cell: `tiles` itself as an R8 texture (nearest; the shader blends). */
+  private readonly tileTex: THREE.DataTexture;
   private readonly splatB: THREE.DataTexture;
   private splatDirty = true;
   /**
@@ -156,13 +161,16 @@ export class TerrainSystem {
     this.group.name = 'Terrain';
     scene.add(this.group);
 
-    this.splatA = new THREE.DataTexture(new Uint8Array(N * N * 4), N, N, THREE.RGBAFormat);
+    this.tileTex = new THREE.DataTexture(this.tiles, N, N, THREE.RedFormat, THREE.UnsignedByteType);
+    this.tileTex.magFilter = THREE.NearestFilter;
+    this.tileTex.minFilter = THREE.NearestFilter;
+    this.tileTex.generateMipmaps = false;
+    this.tileTex.unpackAlignment = 1;
     this.splatB = new THREE.DataTexture(new Uint8Array(N * N * 4), N, N, THREE.RGBAFormat);
-    for (const t of [this.splatA, this.splatB]) {
-      t.magFilter = THREE.LinearFilter;
-      t.minFilter = THREE.LinearFilter;
-      t.generateMipmaps = false;
-    }
+    this.splatB.magFilter = THREE.LinearFilter;
+    this.splatB.minFilter = THREE.LinearFilter;
+    this.splatB.generateMipmaps = false;
+    this.splatB.needsUpdate = true;
 
     this.material = this.createMaterial();
     this.generateDefaultWorld();
@@ -558,46 +566,24 @@ export class TerrainSystem {
   }
 
   private uploadSplat(): void {
-    const a = this.splatA.image.data as Uint8Array;
-    const b = this.splatB.image.data as Uint8Array;
-    // Layer order: A = dirt, asphalt, cobble, sand | B = snow
-    const slot: Record<number, [Uint8Array, number] | null> = {
-      [TerrainTileType.GRASS]: null,
-      [TerrainTileType.DIRT_ROAD]: [a, 0],
-      [TerrainTileType.ASPHALT_ROAD]: [a, 1],
-      [TerrainTileType.STONE_COBBLE]: [a, 2],
-      [TerrainTileType.SAND_BEACH]: [a, 3],
-      [TerrainTileType.SNOW]: [b, 0],
-    };
+    // The id texture's data *is* `tiles`: only the changed rows go to the GPU (a brush stroke is a
+    // few rows, not the whole 256 KB); a big rectangle (load, world reset) goes in one full upload
     const r = this.splatRect;
-    for (let z = r.z0; z <= r.z1; z++) {
-      for (let x = r.x0; x <= r.x1; x++) {
-        const i = z * N + x;
-        a.fill(0, i * 4, i * 4 + 4);
-        // B's blue channel is the damp soil (setWetness): only the surface weights are reset
-        b[i * 4] = 0;
-        b[i * 4 + 1] = 0;
-        const s = slot[this.tiles[i]];
-        if (s) s[0][i * 4 + s[1]] = 255;
-      }
-    }
-    // Only the changed rows go to the GPU (a brush stroke is a few rows, not the whole 1 MB);
-    // a big rectangle (load, world reset) goes in one full upload
     const rows = r.z1 - r.z0 + 1;
     if (this.splatFullPending || rows * (r.x1 - r.x0 + 1) > (N * N) / 4) {
-      this.splatA.clearUpdateRanges();
-      this.splatB.clearUpdateRanges();
+      this.tileTex.clearUpdateRanges();
+      if (!this.splatFullPending) {
+        this.splatB.clearUpdateRanges();
+        this.splatB.needsUpdate = true;
+      }
       this.splatFullPending = true;
     } else {
+      // three.js reads update ranges as RGBA components (stride hard-coded to 4) even for this
+      // one-byte R8 texture: ranges are given x4 so they map back to texels
       const count = (r.x1 - r.x0 + 1) * 4;
-      for (let z = r.z0; z <= r.z1; z++) {
-        const start = (z * N + r.x0) * 4;
-        this.splatA.addUpdateRange(start, count);
-        this.splatB.addUpdateRange(start, count);
-      }
+      for (let z = r.z0; z <= r.z1; z++) this.tileTex.addUpdateRange((z * N + r.x0) * 4, count);
     }
-    this.splatA.needsUpdate = true;
-    this.splatB.needsUpdate = true;
+    this.tileTex.needsUpdate = true;
   }
 
   /** Rain soaking all bare earth (the dirt layer): 0 dry .. 1 the darkest damp soil. */
@@ -644,6 +630,51 @@ export class TerrainSystem {
     if (changed) this.splatB.needsUpdate = true;
   }
 
+  /** Cells (row-major indices into the N x N grid) currently marked as under a roof. */
+  private shelteredCells: number[] = [];
+
+  /**
+   * Ground under roofs (greenhouses, houses): world-space rectangles whose cells stay dry in the
+   * rain and get no fallen snow. Replaces the previous set; kept in splatB's alpha channel.
+   */
+  public setShelter(rects: { x0: number; z0: number; x1: number; z1: number }[]): void {
+    const b = this.splatB.image.data as Uint8Array;
+    const next: number[] = [];
+    for (const r of rects) {
+      // Cells whose centre lies inside the rectangle
+      const cx0 = Math.max(0, Math.ceil(r.x0 - 0.5) + WORLD_HALF);
+      const cx1 = Math.min(N - 1, Math.floor(r.x1 - 0.5) + WORLD_HALF);
+      const cz0 = Math.max(0, Math.ceil(r.z0 - 0.5) + WORLD_HALF);
+      const cz1 = Math.min(N - 1, Math.floor(r.z1 - 0.5) + WORLD_HALF);
+      for (let iz = cz0; iz <= cz1; iz++) for (let ix = cx0; ix <= cx1; ix++) next.push(iz * N + ix);
+    }
+    const keep = new Set(next);
+    const rows = new Set<number>();
+    for (const i of this.shelteredCells) {
+      if (keep.has(i) || b[i * 4 + 3] === 0) continue;
+      b[i * 4 + 3] = 0;
+      rows.add(Math.floor(i / N));
+    }
+    for (const i of next) {
+      if (b[i * 4 + 3] === 255) continue;
+      b[i * 4 + 3] = 255;
+      rows.add(Math.floor(i / N));
+    }
+    this.shelteredCells = next;
+    if (!rows.size) return;
+    // Whole rows: few roofs touch few rows
+    if (!this.splatFullPending) for (const z of rows) this.splatB.addUpdateRange(z * N * 4, N * 4);
+    this.splatB.needsUpdate = true;
+  }
+
+  /** True when the ground cell at world (x, z) is under a roof (see setShelter). */
+  public isSheltered(x: number, z: number): boolean {
+    const ix = Math.floor(x) + WORLD_HALF;
+    const iz = Math.floor(z) + WORLD_HALF;
+    if (ix < 0 || iz < 0 || ix >= N || iz >= N) return false;
+    return (this.splatB.image.data as Uint8Array)[(iz * N + ix) * 4 + 3] > 127;
+  }
+
   private createMaterial(): THREE.MeshLambertMaterial {
     const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
     // Phones get a lighter fragment path: 2-3 fewer texture fetches and no snow glints
@@ -652,20 +683,17 @@ export class TerrainSystem {
     mat.customProgramCacheKey = () => (lite ? 'terrain-lite' : 'terrain');
     const layers = {
       tGrass: createLayerTexture(TerrainTileType.GRASS),
-      tDirt: createLayerTexture(TerrainTileType.DIRT_ROAD),
-      tAsphalt: createLayerTexture(TerrainTileType.ASPHALT_ROAD),
-      tCobble: createLayerTexture(TerrainTileType.STONE_COBBLE),
-      tSand: createLayerTexture(TerrainTileType.SAND_BEACH),
-      tSnow: createLayerTexture(TerrainTileType.SNOW),
+      tLayers: createSurfaceArray(),
       tRock: createRockTexture(),
     };
     this.grassLayer = layers.tGrass;
-    this.sandLayer = layers.tSand;
+    // The sea bed past the map edge continues the sand (WaterSystem): its own 2D texture
+    this.sandLayer = createLayerTexture(TerrainTileType.SAND_BEACH);
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader, { perVertex: lite });
       Object.assign(shader.uniforms, this.uniforms, causticsUniforms, {
         tRiver: { value: riverWorld.texture },
-        tSplatA: { value: this.splatA },
+        tTiles: { value: this.tileTex },
         tSplatB: { value: this.splatB },
         uWorldSize: { value: WORLD_SIZE },
       });
@@ -685,7 +713,9 @@ varying vec3 vTerrWorld;
 varying float vTerrUpY;
 varying vec3 vTerrN;
 varying float vShade;
-uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tSnow, tRock, tSplatA, tSplatB, tRiver;
+uniform sampler2D tGrass, tRock, tTiles, tSplatB, tRiver;
+uniform highp sampler2DArray tLayers;
+${SURFACE_GLSL}
 uniform float uWorldSize;
 uniform float uWaterLevel;
 uniform float uRainWet;
@@ -721,12 +751,67 @@ vec3 terrainColor() {
 #else
   float n = texture2D(tGrass, vTerrWorld.xz * 0.061).a - 0.5;
 #endif
-  vec4 wa = smoothstep(0.32, 0.68, texture2D(tSplatA, suv) + n * 0.45);
-  vec2 wb = smoothstep(0.32, 0.68, texture2D(tSplatB, suv).rg + n * 0.45);
+  // Surface layers, blended in two steps so a seam between two surfaces never lets the grass
+  // through (each weight thresholded on its own used to drop both to ~0 mid-seam where the noise
+  // dips, showing a green stripe):
+  // 1. coverage: is there any surface here at all? The summed weight is ~1 across a seam between
+  //    two surfaces, so only the edge against grass gets the ragged noisy border.
+  // 2. which surface: the raw shares, jittered by the noise with opposite signs per layer (ragged
+  //    seams between surfaces too) and sharpened, then renormalised to sum to 1.
+  // The 4 cells around the pixel are read by id and weighted bilinearly here; equal ids merge,
+  // so a pixel deals with at most 4 (usually 0-1) distinct surfaces, whatever the type count.
+  vec2 tp = vTerrWorld.xz + uWorldSize * 0.5 - 0.5;
+  vec2 tf = fract(tp);
+  ivec2 t0 = ivec2(floor(tp));
+  ivec2 tMax = ivec2(int(uWorldSize) - 1);
+  ivec4 sIds = ivec4(0);
+  vec4 sW = vec4(0.0);
+  int sN = 0;
+  terrAddTile(terrTileAt(t0, tMax), (1.0 - tf.x) * (1.0 - tf.y), sIds, sW, sN);
+  terrAddTile(terrTileAt(t0 + ivec2(1, 0), tMax), tf.x * (1.0 - tf.y), sIds, sW, sN);
+  terrAddTile(terrTileAt(t0 + ivec2(0, 1), tMax), (1.0 - tf.x) * tf.y, sIds, sW, sN);
+  terrAddTile(terrTileAt(t0 + ivec2(1, 1), tMax), tf.x * tf.y, sIds, sW, sN);
   vec3 c = g.rgb;
-  if (wa.r > 0.001) c = mix(c, texture2D(tDirt, uv).rgb, wa.r);
-  if (wa.g > 0.001) c = mix(c, texture2D(tAsphalt, uv).rgb, wa.g);
-  if (wa.b > 0.001) c = mix(c, texture2D(tCobble, uv).rgb, wa.b);
+  // Weights of bare earth (rain darkens it, fallen snow melts on it) and of painted snow tiles
+  float earthW = 0.0;
+  float snowTileW = 0.0;
+  if (sN > 0) {
+    float total = sW.x + sW.y + sW.z + sW.w;
+    float cover = smoothstep(0.32, 0.68, total + n * 0.45);
+    float invT = 1.0 / max(total, 1e-4);
+    vec4 sp = vec4(0.0);
+    float pSum = 0.0;
+    for (int i = 0; i < 4; i++) {
+      if (i >= sN) break;
+      float pi = max(sW[i] * invT + T_JITTER[sIds[i]] * n, 0.0);
+      pi *= pi;
+      pi *= pi;
+      sp[i] = pi;
+      pSum += pi;
+    }
+    // Final weights, summing to cover. Overlay surfaces (snow) are laid on top later, so the
+    // ground ones are renormalised among themselves: a snow / asphalt seam shows asphalt under the
+    // thinning snow, never grass
+    vec4 wt = sp * (cover / max(pSum, 1e-4));
+    vec2 duvX = dFdx(uv);
+    vec2 duvY = dFdy(uv);
+    vec3 surf = vec3(0.0);
+    float other = 0.0;
+    for (int i = 0; i < 4; i++) {
+      if (i >= sN) break;
+      float w = wt[i];
+      if (w < 0.001) continue;
+      int id = sIds[i];
+      earthW += w * T_EARTH[id];
+      if (T_OVERLAY[id] > 0.5) {
+        snowTileW += w;
+        continue;
+      }
+      surf += textureGrad(tLayers, vec3(uv, float(T_LAYER[id])), duvX, duvY).rgb * w;
+      other += w;
+    }
+    if (other > 0.001) c = mix(c, surf / other, cover);
+  }
   // Sandy shore by the sea and in estuaries, a narrow gravel strip along rivers upstream
   bool riverBank = river.g > 0.5 && waterY > uWaterLevel + 0.3;
   // River gravel only hugs the water (the weight is 1 within ~2.5 m of the channel): flat
@@ -734,13 +819,16 @@ vec3 terrainColor() {
   float beach = riverBank
     ? smoothstep(waterY + 0.32, waterY + 0.08, vTerrWorld.y) * smoothstep(0.8, 0.97, river.g)
     : smoothstep(waterY + 0.55, waterY + 0.15, vTerrWorld.y);
-  float sandW = max(wa.a, beach);
-  if (sandW > 0.001) c = mix(c, texture2D(tSand, uv).rgb, sandW);
+  // Painted sand is already part of the surface blend above; the shore adds sand on top
+  if (beach > 0.001) c = mix(c, texture(tLayers, vec3(uv, ${SAND_LAYER}.0)).rgb, beach);
   float rock = smoothstep(0.8, 0.62, vTerrUpY);
   if (rock > 0.001) c = mix(c, rockTriplanar(0.5), rock);
   // Damp soil: watered fields, and in the rain every patch of bare earth (the dirt layer) as one
   // surface; dark wet earth, a little mottled, under the snow
-  float wet = max(texture2D(tSplatB, suv).b, uRainWet * wa.r);
+  // splatB.a: ground under a roof (greenhouse, house) stays dry in the rain and gets no snow
+  vec2 wetDry = texture2D(tSplatB, suv).ba;
+  float roofed = wetDry.y;
+  float wet = max(wetDry.x, uRainWet * earthW * (1.0 - roofed));
   if (wet > 0.004) c = mix(c, vec3(0.0123, 0.0052, 0.003), wet * (0.82 + 0.36 * n));
   // Snow: settles last, but never on rocky slopes (weight fades with the rock mask) and melts
   // into slush at the waterline. Drifts (macro noise) are bright, hollows take a cold blue tint,
@@ -748,7 +836,7 @@ vec3 terrainColor() {
   // Fallen snow from the weather: the drift noise decides where it settles first, so a light
   // dusting shows as patches that join up as it deepens (no extra texture fetches)
   // Bare earth (fields, dirt paths) stays dark: the snow melts on tilled soil and trodden tracks
-  float snowW = uSnowCover > 0.001 ? max(wb.r, smoothstep(0.0, 0.3, uSnowCover * 1.6 - 0.55 + n * 1.2) * (1.0 - wa.r)) : wb.r;
+  float snowW = uSnowCover > 0.001 ? max(snowTileW, smoothstep(0.0, 0.3, uSnowCover * 1.6 - 0.55 + n * 1.2) * (1.0 - earthW) * (1.0 - roofed)) : snowTileW;
   if (snowW > 0.001) {
     float sw = snowW * (1.0 - rock) * smoothstep(waterY + 0.05, waterY + 0.35, vTerrWorld.y);
     float drift = clamp(n * 2.2 + 0.5, 0.0, 1.0);
@@ -756,7 +844,7 @@ vec3 terrainColor() {
     vec3 snow = mix(vec3(0.76, 0.84, 0.94), vec3(1.0, 1.0, 1.02), drift);
     snow = mix(snow, vec3(0.70, 0.78, 0.90), smoothstep(0.97, 0.75, vTerrUpY) * 0.5);
 #else
-    vec3 sTex = texture2D(tSnow, uv * 0.5).rgb;
+    vec3 sTex = texture(tLayers, vec3(uv * 0.5, ${SNOW_LAYER}.0)).rgb;
     vec3 snow = mix(vec3(0.74, 0.82, 0.93), vec3(1.0, 1.0, 1.02), drift) * mix(0.93, 1.04, sTex.g);
     snow = mix(snow, vec3(0.70, 0.78, 0.90), smoothstep(0.97, 0.75, vTerrUpY) * 0.5);
     // Fine crystal grid (~3.5cm cells); each glint is a small round dot, not the whole cell
@@ -967,6 +1055,100 @@ function fromBase64(b64: string): Uint8Array {
 }
 
 /** Seamless 2 m x 2 m surface texture per tile type (alpha channel of grass = macro noise). */
+// ---------------------------------------------------------------- surface layers
+
+/** Every surface type drawn from the texture array (all but grass, the base), in layer order. */
+const SURFACE_TILES = (Object.keys(TILE_DEFINITIONS).map(Number) as TerrainTileType[]).filter(
+  (t) => t !== TerrainTileType.GRASS
+);
+
+/**
+ * Shader traits per surface type. `jitter`: how the border noise pushes this layer's share
+ * (neighbouring types with opposite signs make the seam between them ragged; defaults cycle
+ * through +-0.45 / +-0.3). `earth`: bare soil, darkened by rain, fallen snow melts on it.
+ * `overlay`: laid over the other surfaces afterwards with its own look (snow). A new type needs
+ * only a TerrainTileType + TILE_DEFINITIONS entry (+ a pattern in createLayerTexture); add it here
+ * only if it needs one of these traits.
+ */
+const SURFACE_TRAITS: Partial<Record<TerrainTileType, { jitter?: number; earth?: boolean; overlay?: boolean }>> = {
+  [TerrainTileType.DIRT_ROAD]: { jitter: 0.45, earth: true },
+  [TerrainTileType.ASPHALT_ROAD]: { jitter: -0.45 },
+  [TerrainTileType.STONE_COBBLE]: { jitter: 0.3 },
+  [TerrainTileType.SAND_BEACH]: { jitter: -0.3 },
+  [TerrainTileType.SNOW]: { jitter: 0, overlay: true },
+};
+
+const SAND_LAYER = SURFACE_TILES.indexOf(TerrainTileType.SAND_BEACH);
+const SNOW_LAYER = SURFACE_TILES.indexOf(TerrainTileType.SNOW);
+
+/** GLSL lookup tables indexed by tile id (layer, jitter, traits) and the tile fetch helpers. */
+const SURFACE_GLSL = (() => {
+  const count = Math.max(...SURFACE_TILES, 0) + 1;
+  const layer: number[] = new Array(count).fill(-1);
+  const jitter: number[] = new Array(count).fill(0);
+  const earth: number[] = new Array(count).fill(0);
+  const overlay: number[] = new Array(count).fill(0);
+  const cycle = [0.45, -0.45, 0.3, -0.3];
+  SURFACE_TILES.forEach((t, i) => {
+    const tr = SURFACE_TRAITS[t] ?? {};
+    layer[t] = i;
+    jitter[t] = tr.jitter ?? cycle[i % cycle.length];
+    earth[t] = tr.earth ? 1 : 0;
+    overlay[t] = tr.overlay ? 1 : 0;
+  });
+  const f = (v: number[]) => v.map((x) => x.toFixed(3)).join(', ');
+  return `
+#define TERR_TILE_N ${count}
+const int T_LAYER[${count}] = int[${count}](${layer.join(', ')});
+const float T_JITTER[${count}] = float[${count}](${f(jitter)});
+const float T_EARTH[${count}] = float[${count}](${f(earth)});
+const float T_OVERLAY[${count}] = float[${count}](${f(overlay)});
+int terrTileAt(ivec2 p, ivec2 tMax) {
+  return int(texelFetch(tTiles, clamp(p, ivec2(0), tMax), 0).r * 255.0 + 0.5);
+}
+// Accumulates a cell's bilinear weight per distinct surface (grass and unknown ids are skipped)
+void terrAddTile(int id, float w, inout ivec4 ids, inout vec4 ws, inout int cnt) {
+  if (id <= 0 || id >= TERR_TILE_N || w <= 0.0) return;
+  if (T_LAYER[id] < 0) return;
+  for (int i = 0; i < 4; i++) {
+    if (i < cnt && ids[i] == id) {
+      ws[i] += w;
+      return;
+    }
+  }
+  ids[cnt] = id;
+  ws[cnt] = w;
+  cnt++;
+}`;
+})();
+
+/**
+ * All surface textures in one texture array (layer i = SURFACE_TILES[i]): one texture unit for any
+ * number of surface types, instead of one sampler each (WebGL2 guarantees only 16 per shader).
+ */
+function createSurfaceArray(): THREE.DataArrayTexture {
+  const size = 256;
+  const layerBytes = size * size * 4;
+  const data = new Uint8Array(layerBytes * SURFACE_TILES.length);
+  SURFACE_TILES.forEach((t, i) => {
+    const tex = createLayerTexture(t);
+    const canvas = tex.image as HTMLCanvasElement;
+    data.set(canvas.getContext('2d')!.getImageData(0, 0, size, size).data, i * layerBytes);
+    tex.dispose();
+  });
+  const arr = new THREE.DataArrayTexture(data, size, size, SURFACE_TILES.length);
+  arr.format = THREE.RGBAFormat;
+  arr.type = THREE.UnsignedByteType;
+  arr.colorSpace = THREE.SRGBColorSpace;
+  arr.wrapS = arr.wrapT = THREE.RepeatWrapping;
+  arr.magFilter = THREE.LinearFilter;
+  arr.minFilter = THREE.LinearMipmapLinearFilter;
+  arr.generateMipmaps = true;
+  arr.anisotropy = 4;
+  arr.needsUpdate = true;
+  return arr;
+}
+
 function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
   const size = 256;
   const canvas = document.createElement('canvas');

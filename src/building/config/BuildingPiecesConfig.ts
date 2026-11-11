@@ -1,9 +1,12 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { FURNITURE_PIECE_DEFS, buildFurnitureTemplate, isFurniturePiece } from '../furniture/FurnitureCatalog';
-import { BuildingPieceDef, BuildingPieceType, BuiltPiece, PieceCategory, SocketType } from '../types/BuildingTypes';
+import { BuildingPieceDef, BuildingPieceType, BuiltPiece, PieceCategory, SocketType, isGlassRoofPiece, shapeOf } from '../types/BuildingTypes';
 import { PROCEDURAL_ROOF_MATERIALS, ProceduralRoofSystem, ProceduralRoofGenerator } from '../ProceduralRoofSystem';
+import { GreenhouseRoofGenerator } from '../GreenhouseRoofGenerator';
+import type { ProceduralRoofConfig } from '../ProceduralRoofSystem';
 import { BUILDING_CONFIG } from '../../config/constants';
+import { createGlassMaterial } from '../../scene/GlassMatcap';
 
 // Procedural texture generator for stylized Norse wood and stone
 function createNorseWoodTexture(): THREE.CanvasTexture {
@@ -508,12 +511,8 @@ export const BUILDING_MATERIALS = {
   windowChecker: new THREE.MeshLambertMaterial({
     map: createCheckerWindowTexture(),
     }),
-  windowGlass: new THREE.MeshLambertMaterial({
-    color: 0x93c5fd,
-    transparent: true,
-    opacity: 0.45,
-    depthWrite: false,
-  }),
+  // Glass is matcap-shaded (no per-light work): see createGlassMatcap / setGlassLight
+  windowGlass: createGlassMaterial({ color: 0xa9cff5, opacity: 0.5, dither: 'near' }),
   wood: new THREE.MeshLambertMaterial({
     map: createNorseWoodTexture(),
     }),
@@ -526,6 +525,11 @@ export const BUILDING_MATERIALS = {
   roof: new THREE.MeshLambertMaterial({
     map: createThatchRoofTexture(),
     }),
+  // Greenhouse: oak glazing frame + clear glass (double-sided so it reads from inside)
+  greenhouseFrame: new THREE.MeshLambertMaterial({
+    color: 0x9a6a3e, // warm oak: the greenhouse is timber-framed
+  }),
+  greenhouseGlass: createGlassMaterial({ color: 0xe4f5f6, opacity: 0.32, side: THREE.DoubleSide, dither: 'near' }),
   roofHeartopia: PROCEDURAL_ROOF_MATERIALS.heartopiaShingle,
   roofTrim: PROCEDURAL_ROOF_MATERIALS.woodTrim,
   roofGableWall: PROCEDURAL_ROOF_MATERIALS.gableWall,
@@ -563,6 +567,57 @@ export const BUILDING_MATERIALS = {
     wireframe: false,
   }),
 };
+
+/**
+ * Glass LOD for every glazed building piece (windows, glazed doors, greenhouse panels and roofs),
+ * split over two complementary materials drawn on the same glass geometry:
+ * - the near material (transparent pass): clear, alpha-blended glass up close;
+ * - its far twin (opaque pass, writes depth): solid glass colour far away.
+ * Between GLASS_DITHER_NEAR and GLASS_DITHER_FAR metres a 4x4 Bayer screen-door pattern hands
+ * pixels from one to the other, so the switch never pops. Beyond the far distance the blended
+ * material discards everything: distant glass costs no blending/overdraw and sorts correctly.
+ */
+/** Greenhouse glass from afar: the reflection over the green interior, opaque. */
+export const GREENHOUSE_GLASS_FAR = createGlassMaterial({ color: 0xc4dcd8, side: THREE.DoubleSide, dither: 'far' });
+/** Window / door glass seen from afar: the blue-grey the tinted pane reads as over a dark room. */
+export const WINDOW_GLASS_FAR = createGlassMaterial({ color: 0x93b4cc, dither: 'far' });
+
+/** Near (blended) glass material -> its opaque far twin. */
+const FAR_GLASS = new Map<THREE.Material, THREE.Material>([
+  [BUILDING_MATERIALS.greenhouseGlass, GREENHOUSE_GLASS_FAR],
+  [BUILDING_MATERIALS.windowGlass, WINDOW_GLASS_FAR],
+]);
+
+/** Skips a geometry group (three.js does not draw groups whose material is invisible). */
+const SKIP_GROUP = new THREE.MeshBasicMaterial({ visible: false });
+
+/**
+ * Gives every mesh that uses a near glass material a twin on the same geometry that draws only
+ * the glass groups with the far (opaque) material. Twins share geometry, so roof resizes that swap
+ * `geometry` must update all meshes of the piece. No-op for pieces without glass.
+ */
+export function addFarGlassTwins(root: THREE.Object3D): void {
+  const meshes: THREE.Mesh[] = [];
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh || m.name === 'farGlassTwin') return;
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    if (mats.some((x) => FAR_GLASS.has(x))) meshes.push(m);
+  });
+  for (const m of meshes) {
+    const twinMat = Array.isArray(m.material)
+      ? m.material.map((x) => FAR_GLASS.get(x) ?? SKIP_GROUP)
+      : FAR_GLASS.get(m.material)!;
+    const twin = new THREE.Mesh(m.geometry, twinMat);
+    twin.name = 'farGlassTwin';
+    twin.position.copy(m.position);
+    twin.quaternion.copy(m.quaternion);
+    twin.scale.copy(m.scale);
+    twin.matrixAutoUpdate = m.matrixAutoUpdate;
+    twin.updateMatrix();
+    m.parent!.add(twin);
+  }
+}
 
 // Wire up dynamic material updates for ProceduralRoofSystem
 ProceduralRoofSystem.roofMaterial = BUILDING_MATERIALS.roofHeartopia;
@@ -2442,7 +2497,267 @@ export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
     ],
   },
 
+  // ===========================================================================
+  // GREENHOUSE (glasshouse). Sockets are copied from the wooden twin after this table.
+  // ===========================================================================
+  [BuildingPieceType.GLASS_WALL_2X3]: {
+    type: BuildingPieceType.GLASS_WALL_2X3,
+    name: 'Glass Wall 2x3m',
+    ukrainianName: 'Скляна стіна 2х3м',
+    category: PieceCategory.GREENHOUSE,
+    dimensions: new THREE.Vector3(MODULE_SIZE, 3.0, WALL_THICKNESS),
+    woodCost: 2,
+    stoneCost: 1,
+    maxHealth: 80,
+    iconName: 'PanelsTopLeft',
+    description: 'Скляна панель теплиці 2х3м у білій рамі: пропускає світло, захищає від дощу та снігу.',
+    sockets: [],
+  },
+
+  [BuildingPieceType.GLASS_WALL_1X3]: {
+    type: BuildingPieceType.GLASS_WALL_1X3,
+    name: 'Glass Wall 1x3m',
+    ukrainianName: 'Скляна стіна 1х3м',
+    category: PieceCategory.GREENHOUSE,
+    dimensions: new THREE.Vector3(1.0, 3.0, WALL_THICKNESS),
+    woodCost: 1,
+    stoneCost: 1,
+    maxHealth: 60,
+    iconName: 'PanelsTopLeft',
+    description: 'Вузька скляна панель теплиці 1х3м.',
+    sockets: [],
+  },
+
+  [BuildingPieceType.GLASS_DOORWAY_1X3]: {
+    type: BuildingPieceType.GLASS_DOORWAY_1X3,
+    name: 'Glass Doorway 1x3m',
+    ukrainianName: 'Скляний вхід 1х3м',
+    category: PieceCategory.GREENHOUSE,
+    dimensions: new THREE.Vector3(1.0, 3.0, WALL_THICKNESS),
+    woodCost: 1,
+    stoneCost: 1,
+    maxHealth: 60,
+    iconName: 'DoorOpen',
+    description: 'Вхід у теплицю: рама зі скляною фрамугою над прохідним отвором.',
+    sockets: [],
+  },
+
+  [BuildingPieceType.GLASS_DOOR_1X3]: {
+    type: BuildingPieceType.GLASS_DOOR_1X3,
+    name: 'Glass Door 1x3m',
+    ukrainianName: 'Скляні двері 1х3м',
+    category: PieceCategory.GREENHOUSE,
+    dimensions: new THREE.Vector3(1.0, 3.0, WALL_THICKNESS),
+    woodCost: 2,
+    stoneCost: 1,
+    maxHealth: 70,
+    iconName: 'DoorClosed',
+    description: 'Засклені двері теплиці зі стулкою, що відчиняється, та скляною фрамугою над нею.',
+    sockets: [],
+  },
+
+  [BuildingPieceType.GLASS_ROOF_GABLE_2X2]: {
+    type: BuildingPieceType.GLASS_ROOF_GABLE_2X2,
+    name: 'Glass Gable Roof',
+    ukrainianName: 'Скляний двосхилий дах',
+    category: PieceCategory.GREENHOUSE,
+    dimensions: new THREE.Vector3(MODULE_SIZE, 0.85, MODULE_SIZE),
+    woodCost: 2,
+    stoneCost: 2,
+    maxHealth: 120,
+    iconName: 'Home',
+    description: 'Засклений двосхилий дах теплиці; розтягується стрілками як звичайний дах.',
+    sockets: [],
+  },
+
+  [BuildingPieceType.GLASS_ROOF_SHED_2X2]: {
+    type: BuildingPieceType.GLASS_ROOF_SHED_2X2,
+    name: 'Glass Lean-to Roof',
+    ukrainianName: 'Скляний односхилий дах',
+    category: PieceCategory.GREENHOUSE,
+    dimensions: new THREE.Vector3(MODULE_SIZE, 0.85, MODULE_SIZE),
+    woodCost: 2,
+    stoneCost: 2,
+    maxHealth: 120,
+    iconName: 'Home',
+    description: 'Засклений односхилий дах для прибудованої до стіни теплиці.',
+    sockets: [],
+  },
 };
+
+// Glass pieces snap exactly like their wooden twins
+for (const def of Object.values(BUILDING_PIECES)) {
+  const twin = shapeOf(def.type);
+  if (twin !== def.type) def.sockets = BUILDING_PIECES[twin].sockets;
+}
+
+/**
+ * Greenhouse wall panel: wooden glazing frame (sill, head, jambs, mullions, a low kick rail and
+ * a transom rail) around one thin pane of glass. With `doorway`, the lower 2.4m is an open
+ * walk-through and only the transom above it is glazed.
+ */
+function buildGreenhouseWallGeometry(width: number, height: number, doorway = false): PieceMeshTemplate {
+  const bar = 0.06;
+  const depth = 0.08;
+  const halfW = width / 2;
+  const halfH = height / 2;
+  const frame: THREE.BufferGeometry[] = [];
+  const glass: THREE.BufferGeometry[] = [];
+  const box = (w: number, h: number, d: number, x: number, y: number) => {
+    const g = new THREE.BoxGeometry(w, h, d);
+    g.translate(x, y, 0);
+    frame.push(g);
+  };
+  const pane = (w: number, h: number, x: number, y: number) => {
+    const g = new THREE.BoxGeometry(w, h, 0.012);
+    g.translate(x, y, 0);
+    glass.push(g);
+  };
+
+  // Jambs and head
+  box(bar, height, depth, -halfW + bar / 2, 0);
+  box(bar, height, depth, halfW - bar / 2, 0);
+  box(width, bar, depth, 0, halfH - bar / 2);
+
+  const transomY = -halfH + 2.4; // top of the walk-through height
+  box(width - bar * 2, bar * 0.8, depth * 0.9, 0, transomY);
+
+  if (doorway) {
+    // Glazed transom above the opening
+    pane(width - bar * 2, halfH - transomY - bar * 1.2, 0, (transomY + halfH - bar) / 2);
+  } else {
+    // Sill, low kick rail, and vertical mullions every 0.5m
+    box(width, bar * 1.4, depth * 1.1, 0, -halfH + bar * 0.7);
+    box(width - bar * 2, bar * 0.8, depth * 0.9, 0, -halfH + 0.45);
+    const bays = Math.max(1, Math.round(width / 0.5));
+    for (let i = 1; i < bays; i++) {
+      box(bar * 0.6, height - bar * 2, depth * 0.8, -halfW + (i * width) / bays, 0);
+    }
+    pane(width - bar * 2, height - bar * 2.4, 0, bar * 0.2);
+  }
+
+  const mergedFrame = mergeGeometries(frame)!;
+  const mergedGlass = mergeGeometries(glass)!;
+  frame.forEach((g) => g.dispose());
+  glass.forEach((g) => g.dispose());
+  const geometry = mergeGeometries([mergedFrame, mergedGlass], true)!;
+  mergedFrame.dispose();
+  mergedGlass.dispose();
+  return {
+    geometry,
+    materials: [BUILDING_MATERIALS.greenhouseFrame, BUILDING_MATERIALS.greenhouseGlass],
+    boundingBox: new THREE.Box3(),
+  };
+}
+
+/** Greenhouse door leaf: 0.86 x 2.24m, centred on the origin, hinge side at -X. */
+const GH_LEAF_W = 0.86;
+const GH_LEAF_H = 2.24;
+const GH_LEAF_Y = -0.355; // leaf centre in the 3m panel (bottom of the leaf ~1cm above the sill)
+const GH_HINGE_X = -0.43;
+
+interface GreenhouseParts {
+  frame: THREE.BufferGeometry[];
+  glass: THREE.BufferGeometry[];
+  hardware: THREE.BufferGeometry[];
+}
+
+function pushBox(list: THREE.BufferGeometry[], w: number, h: number, d: number, x: number, y: number, z = 0): void {
+  const g = new THREE.BoxGeometry(w, h, d);
+  g.translate(x, y, z);
+  list.push(g);
+}
+
+/** Leaf parts (frame stiles/rails, solid kick panel, glazing, lever handles), offset by (ox, oy). */
+function greenhouseDoorLeafParts(parts: GreenhouseParts, ox: number, oy: number): void {
+  const w = GH_LEAF_W;
+  const h = GH_LEAF_H;
+  const st = 0.06; // stile / rail width
+  const d = 0.05;
+  const bottom = oy - h / 2;
+  const top = oy + h / 2;
+  pushBox(parts.frame, st, h, d, ox - w / 2 + st / 2, oy);
+  pushBox(parts.frame, st, h, d, ox + w / 2 - st / 2, oy);
+  pushBox(parts.frame, w - st * 2, st, d, ox, top - st / 2);
+  // Solid kick panel at the bottom, then a lock rail
+  const kickH = 0.38;
+  pushBox(parts.frame, w - st * 2, kickH, d * 0.7, ox, bottom + kickH / 2);
+  const lockY = bottom + 0.95;
+  pushBox(parts.frame, w - st * 2, st * 0.8, d, ox, lockY);
+  // Glazing: lower pane between kick panel and lock rail, upper pane above, a thin glazing bar in the upper pane
+  const lowH = lockY - (bottom + kickH) - st * 0.4;
+  pushBox(parts.glass, w - st * 2, lowH, 0.012, ox, bottom + kickH + lowH / 2);
+  const upB = lockY + st * 0.4;
+  const upT = top - st;
+  pushBox(parts.glass, w - st * 2, upT - upB, 0.012, ox, (upB + upT) / 2);
+  pushBox(parts.frame, 0.03, upT - upB, d * 0.6, ox, (upB + upT) / 2);
+  // Lever handles on both faces, away from the hinge
+  for (const z of [-1, 1]) {
+    pushBox(parts.hardware, 0.035, 0.09, 0.03, ox + w / 2 - 0.1, lockY, z * (d / 2 + 0.015));
+    pushBox(parts.hardware, 0.12, 0.022, 0.022, ox + w / 2 - 0.14, lockY + 0.02, z * (d / 2 + 0.04));
+  }
+  // Hinges on the hinge stile
+  for (const y of [bottom + 0.3, top - 0.3]) {
+    pushBox(parts.hardware, 0.03, 0.1, d + 0.01, ox - w / 2 + 0.005, y);
+  }
+}
+
+/** Static greenhouse door frame: jambs, head, transom rail + transom glass, threshold. */
+function greenhouseDoorFrameParts(parts: GreenhouseParts): void {
+  const bar = 0.06;
+  const depth = 0.08;
+  pushBox(parts.frame, bar, 3.0, depth, -0.5 + bar / 2, 0);
+  pushBox(parts.frame, bar, 3.0, depth, 0.5 - bar / 2, 0);
+  pushBox(parts.frame, 1.0, bar, depth, 0, 1.5 - bar / 2);
+  const openTop = GH_LEAF_Y + GH_LEAF_H / 2 + 0.01;
+  pushBox(parts.frame, 1.0 - bar * 2, bar, depth, 0, openTop + bar / 2);
+  pushBox(parts.frame, 1.0 - bar * 2, 0.02, depth * 1.2, 0, -1.5 + 0.01);
+  const tB = openTop + bar;
+  const tT = 1.5 - bar;
+  pushBox(parts.glass, 1.0 - bar * 2, tT - tB, 0.012, 0, (tB + tT) / 2);
+  pushBox(parts.frame, 0.035, tT - tB, depth * 0.7, 0, (tB + tT) / 2);
+}
+
+function mergeGreenhouseParts(parts: GreenhouseParts): PieceMeshTemplate {
+  const lists = [parts.frame, parts.glass, parts.hardware];
+  const merged = lists.map((l) => mergeGeometries(l)!);
+  lists.forEach((l) => l.forEach((g) => g.dispose()));
+  const geometry = mergeGeometries(merged, true)!;
+  merged.forEach((g) => g.dispose());
+  return {
+    geometry,
+    materials: [BUILDING_MATERIALS.greenhouseFrame, BUILDING_MATERIALS.greenhouseGlass, BUILDING_MATERIALS.brassHardware],
+    boundingBox: new THREE.Box3(),
+  };
+}
+
+const newParts = (): GreenhouseParts => ({ frame: [], glass: [], hardware: [] });
+
+/** Whole closed door in one geometry (ghost preview, bounds). */
+function buildGreenhouseDoorGeometry(): PieceMeshTemplate {
+  const parts = newParts();
+  greenhouseDoorFrameParts(parts);
+  greenhouseDoorLeafParts(parts, 0, GH_LEAF_Y);
+  return mergeGreenhouseParts(parts);
+}
+
+function buildGreenhouseDoorFrame(): PieceMeshTemplate {
+  const parts = newParts();
+  greenhouseDoorFrameParts(parts);
+  // Hardware list must not be empty for the merge: a strike plate on the latch jamb
+  pushBox(parts.hardware, 0.02, 0.14, 0.09, 0.44, GH_LEAF_Y - GH_LEAF_H / 2 + 0.95);
+  return mergeGreenhouseParts(parts);
+}
+
+/** Leaf centred on its own origin (placed under the hinge pivot). */
+function buildGreenhouseDoorLeaf(): PieceMeshTemplate {
+  const parts = newParts();
+  greenhouseDoorLeafParts(parts, 0, 0);
+  return mergeGreenhouseParts(parts);
+}
+
+let ghDoorFrameTpl: PieceMeshTemplate | null = null;
+let ghDoorLeafTpl: PieceMeshTemplate | null = null;
 
 export interface PieceMeshTemplate {
   geometry: THREE.BufferGeometry;
@@ -3732,6 +4047,25 @@ function buildColonial6PanelDoorLeaf(): PieceMeshTemplate {
 
 function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
   switch (type) {
+    case BuildingPieceType.GLASS_WALL_2X3:
+      return buildGreenhouseWallGeometry(MODULE_SIZE, 3.0);
+    case BuildingPieceType.GLASS_WALL_1X3:
+      return buildGreenhouseWallGeometry(1.0, 3.0);
+    case BuildingPieceType.GLASS_DOORWAY_1X3:
+      return buildGreenhouseWallGeometry(1.0, 3.0, true);
+    case BuildingPieceType.GLASS_DOOR_1X3:
+      return buildGreenhouseDoorGeometry();
+    case BuildingPieceType.GLASS_ROOF_GABLE_2X2:
+    case BuildingPieceType.GLASS_ROOF_SHED_2X2: {
+      // Real glasshouse roof mesh: [glass, wooden glazing frame]
+      const geo = createRoofGeometry(type, getDefaultRoofConfig(type));
+      return {
+        geometry: geo,
+        materials: [BUILDING_MATERIALS.greenhouseGlass, BUILDING_MATERIALS.greenhouseFrame],
+        boundingBox: new THREE.Box3().setFromBufferAttribute(geo.getAttribute('position') as THREE.BufferAttribute),
+      };
+    }
+
     case BuildingPieceType.DOOR_GRAND_SIDELITES_2X2: {
       const outerFrameTpl = buildGrandSideliteDoorFrameGeometry();
       const leafTpl = buildGrandMahoganyDoorLeaf();
@@ -4553,6 +4887,21 @@ export function createPieceMeshGroup(
     return group;
   }
 
+  if (!isGhost && type === BuildingPieceType.GLASS_DOOR_1X3) {
+    // Shared cached geometry: frame stays put, the leaf swings on a hinge pivot (toggleDoor)
+    ghDoorFrameTpl ??= buildGreenhouseDoorFrame();
+    ghDoorLeafTpl ??= buildGreenhouseDoorLeaf();
+    group.add(new THREE.Mesh(ghDoorFrameTpl.geometry, ghDoorFrameTpl.materials));
+    const pivotGroup = new THREE.Group();
+    pivotGroup.name = 'doorPivot';
+    pivotGroup.position.set(GH_HINGE_X, 0, 0);
+    const leafMesh = new THREE.Mesh(ghDoorLeafTpl.geometry, ghDoorLeafTpl.materials);
+    leafMesh.position.set(-GH_HINGE_X, GH_LEAF_Y, 0);
+    pivotGroup.add(leafMesh);
+    group.add(pivotGroup);
+    return group;
+  }
+
   if (!isGhost && type === BuildingPieceType.WOOD_DOOR_DOUBLE) {
     const frameTpl = buildOuterDoorFrameGeometry(MODULE_SIZE, MODULE_SIZE);
     const frameMesh = new THREE.Mesh(
@@ -4715,7 +5064,7 @@ export function createPieceMeshGroup(
   const isRoof = isProceduralRoofPiece(type);
   // CRITICAL: Procedural roofs MUST have their own unique BufferGeometry instance per piece!
   // Sharing template.geometry causes procedural deformation of one roof to mutate all instances in the scene.
-  const geometry = isRoof ? ProceduralRoofGenerator.createBufferGeometry(getDefaultRoofConfig(type)) : template.geometry;
+  const geometry = isRoof ? createRoofGeometry(type, getDefaultRoofConfig(type)) : template.geometry;
 
   const mesh = new THREE.Mesh(geometry, mat);
 
@@ -4724,7 +5073,15 @@ export function createPieceMeshGroup(
   return group;
 }
 
+/** Fresh per-piece roof geometry: glass roofs use the greenhouse generator, the rest the shingle one. */
+export function createRoofGeometry(type: BuildingPieceType, config: Partial<ProceduralRoofConfig>): THREE.BufferGeometry {
+  return isGlassRoofPiece(type)
+    ? GreenhouseRoofGenerator.createGeometry(config)
+    : ProceduralRoofGenerator.createBufferGeometry(config);
+}
+
 export function isProceduralRoofPiece(type: BuildingPieceType): boolean {
+  if (isGlassRoofPiece(type)) return true;
   return [
     BuildingPieceType.ROOF_GABLE_2X2,
     BuildingPieceType.ROOF_GABLE_2X4,
@@ -4743,7 +5100,7 @@ export function getDefaultRoofConfig(type: BuildingPieceType) {
   if (type.includes('HIP')) roofType = 'hip';
   else if (type.includes('SHED')) roofType = 'shed';
 
-  switch (type) {
+  switch (shapeOf(type)) {
     case BuildingPieceType.ROOF_GABLE_2X2:
     case BuildingPieceType.ROOF_HIP_2X2:
     case BuildingPieceType.ROOF_SHED_2X2:

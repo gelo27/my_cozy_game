@@ -29,8 +29,8 @@ const RES = RIPPLE_SIM_RES;
 const STEP = 1 / 60;
 const MAX_STEPS = 3;
 const MAX_DROPS = 8;
-/** Moving pushers: 0 = the body, 1..4 = hands / feet. */
-export const MAX_PUSHERS = 5;
+/** Moving pushers: 0 = the body, 1..4 = hands / feet, 5..6 = animals cutting the surface (sharks). */
+export const MAX_PUSHERS = 7;
 /** Rain: world cell (m) that gets at most one drop per step. */
 const RAIN_CELL = 0.5;
 /** Rain: chance per cell and step at full rain and amount 1 (≈ 300 drops/s over 16×16 m). */

@@ -174,6 +174,9 @@ export class ExplorationManager {
       isCaveLayout(cavesJson) ? cavesJson : null
     );
     this.network.onContents = (c) => this.populateCave(c);
+    // Spiders live in the caves: the pests simulate the pocket's ones only while the player is down there
+    this.gameplay.pests.isCave = (p) => this.network.contains(p);
+    this.gameplay.pests.caveReady = () => this.network.collidersReady;
     // A camera down in the network sees fog, not sky, at the far end of a tunnel
     this.weather.isCaveAt = (p) => this.network.contains(p);
     riverWorld.caveWater = (x, y, z) => this.network.waterLevelAt(x, y, z);
@@ -293,6 +296,9 @@ export class ExplorationManager {
       this.addChest(ch.id, ch.pos, ch.yaw, true);
       if (this.openedChestIds.has(ch.id)) this.markChestOpened(ch.id, true);
     }
+    // Cave spiders lurk by the chests and mushrooms (ore sits in the walls: not a place to stand);
+    // each spot is checked against the colliders before a spider is put there
+    this.gameplay.pests.setCaveSpots([...c.mushrooms, ...c.chests.map((ch) => ch.pos)]);
     this.caveLightKey = NaN;
     this.lightRevision++;
     this.revision++;

@@ -1,3 +1,5 @@
+import type { PestKind } from '../gameplay/Pests';
+import type { Shark } from '../gameplay/Shark';
 import * as THREE from 'three';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { CharacterController } from '../character/CharacterController';
@@ -56,6 +58,8 @@ function floorSurface(wallpaperId: string): FootSurface {
 import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
 import { GridNavigator } from '../navigation/GridNavigator';
 import { CompanionNPC } from '../npc/CompanionNPC';
+import { MAX_WORKERS, WorkerManager } from '../npc/WorkerManager';
+import { TaskBoard } from '../npc/TaskBoard';
 import { t } from '../i18n/i18n';
 import { PropTreeField } from '../gathering/PropTreeField';
 import { AppleOrchard } from '../gathering/AppleOrchard';
@@ -92,6 +96,7 @@ import { NightLighting, installGlobalNightLights, setGroundMist } from '../world
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
 import { setAlgaeDaylight } from '../world/AlgaeChains';
 import { setWebLight } from '../world/SpiderWebs';
+import { setGlassLight } from '../scene/GlassMatcap';
 import { VIEW_DISTANCE, isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState, GameplayPrompt } from '../gameplay/GameplayManager';
 import { EditorController } from '../editor/EditorController';
@@ -258,6 +263,8 @@ export class GameEngine {
   private lastFarmPrompt = '';
   /** Reused for the field-wheat pushers so the frame loop doesn't allocate. */
   private readonly pushTmp = new THREE.Vector3();
+  /** Scratch list: the sharks parting the algae this frame. */
+  private readonly sharkTmp: Shark[] = [];
   private lastGatherPrompt: unknown = null;
   private lastPlayPrompt: GameplayPrompt | null = null;
   private readonly glowClump = { x: 0, z: 0, half: 0 };
@@ -559,6 +566,7 @@ export class GameEngine {
       gameplay.onTimeSkip = (seconds) => {
         weather.director.update(seconds);
         farmingManager.fastForward(seconds);
+        gameplay.workers?.fastForward(seconds);
         orchard.fastForward(seconds);
         nursery.fastForward(seconds);
       };
@@ -580,10 +588,25 @@ export class GameEngine {
       buildingManager.onDoorToggled = (piece) => nav.invalidateAround(piece.position, 2.5);
       const npcSpawn = new THREE.Vector3(-4, 0, 7);
       npcSpawn.y = terrain.getHeight(npcSpawn.x, npcSpawn.z);
-      gameplay.companion = new CompanionNPC(physics, scene, nav, npcSpawn, t('npc.name'), {
-        isOpen: (id) => !!buildingManager.getPiece(id)?.isOpen,
-        toggle: (id, from) => buildingManager.toggleDoor(id, from),
-      });
+      const doorControl = {
+        isOpen: (id: string) => !!buildingManager.getPiece(id)?.isOpen,
+        toggle: (id: string, from: THREE.Vector3) => buildingManager.toggleDoor(id, from),
+      };
+      gameplay.companion = new CompanionNPC(physics, scene, nav, npcSpawn, t('npc.name'), doorControl);
+      // Farmhands with energy and a daily routine; in work hours they take jobs from the fields
+      // (harvest, watering, sowing with seeds from the player's inventory)
+      const taskBoard = new TaskBoard(
+        farmingManager,
+        {
+          count: (id) => inventoryManager.getItemCount(id),
+          take: (id, n) => inventoryManager.removeItem(id, n),
+          give: (items) => giveResources(items),
+        },
+        () => farmingManager.rainIntensity > 0.35
+      );
+      const workers = new WorkerManager(physics, scene, nav, doorControl, () => buildingManager.getAllPieces(), (x, z) => terrain.getHeight(x, z), taskBoard, new THREE.Vector3(npcSpawn.x + 6, npcSpawn.y, npcSpawn.z + 5));
+      for (let i = 0; i < 3; i++) workers.spawn(new THREE.Vector3(npcSpawn.x + 2 + i * 1.6, 0, npcSpawn.z + 2.5));
+      gameplay.workers = workers;
       exploration = new ExplorationManager(scene, physics, terrain, props, rocks, inventoryManager, gameplay, weather, nightLighting, particleManager);
       exploration.onNotify = (text, type) => callbacks.onNotify(text, type);
       exploration.onItems = (items) => callbacks.onResourcesGathered(items);
@@ -634,6 +657,8 @@ export class GameEngine {
         return false;
       };
       const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers, exploration.caveNetwork, physics);
+      editor.pests = gameplay.pests;
+      editor.onNotify = (text, type) => callbacks.onNotify(text, type);
       const debugRenderer = new DebugRenderer(physics, scene);
 
       this.world = {
@@ -680,7 +705,8 @@ export class GameEngine {
         callbacks.onLog('info', 'Відновлено останнє автозбереження.');
       }
       if (!gameplay.pets.pets.length) gameplay.pets.spawnDefaults(SPAWN_POSITION);
-      // Hedgehogs and baby dragons out in the wilds (not saved: each session gets fresh ones)
+      // Hedgehogs and baby dragons in the wilds, sharks in the sea, spiders in the caves (not saved:
+      // each session gets fresh ones; the cave spiders come once the network has built)
       gameplay.pests.populate(character.getPosition());
 
       window.addEventListener('keydown', this.handleKeyDown);
@@ -742,6 +768,8 @@ export class GameEngine {
   private lastEditorRevision = -1;
   private frameMsAccum = 0;
   private lastStepMs = 0;
+  /** Building revision the terrain's roof-shelter mask was last built from. */
+  private shelterRevision = -1;
 
   /** Frame cap (0 = every vsync). On 120 / 144 Hz screens this halves the work for the same look. */
   public maxFps = 60;
@@ -818,7 +846,13 @@ export class GameEngine {
     character.swimAbility?.waterParticles?.update(dt);
     const camPos = this.camera.camera.position;
     character.swimAbility?.waterEffects?.update(dt, camPos.y < riverWorld.waterLevelAt3(camPos.x, camPos.y, camPos.z));
-    character.buildAbility?.buildingManager?.flushPendingRegeneration();
+    const buildings = character.buildAbility?.buildingManager;
+    buildings?.flushPendingRegeneration();
+    // Ground under roofs (greenhouses) stays dry: refresh the terrain mask when buildings change
+    if (buildings && buildings.revision !== this.shelterRevision) {
+      this.shelterRevision = buildings.revision;
+      w.terrain.setShelter(buildings.getShelterRects());
+    }
     if (character.buildAbility) {
       inputManager.setBuildMode(character.buildAbility.isBuildModeActive);
       inputManager.setPaintMode(character.buildAbility.isPaintingModeActive);
@@ -885,11 +919,27 @@ export class GameEngine {
         if (!isDriving) grassField.addPusher(cp.x, cp.y - 0.9, cp.z, 0.55);
         algae.addPusher(cp.x, cp.y - 0.9, cp.z, 0.35, 1.8);
       }
+      // Sharks swimming through the algae part it (two nearest the camera: 3 capsules each)
+      for (const shark of w.gameplay.pests.sharksNear(this.camera.camera.position, 45, 2, this.sharkTmp)) {
+        shark.bodyCapsules((x, y, z, r, h) => algae.addPusher(x, y, z, r, h));
+      }
       moped.getPosition(this.pushTmp);
       fields.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 1.0);
       bushes.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.7);
       flowers.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.7);
       grassField.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.8);
+      // Farmhands walking through the wheat (only near the camera, where it shows)
+      const crew = w.gameplay.workers?.workers;
+      if (crew) {
+        const cam = this.camera.camera.position;
+        for (let i = 0; i < crew.length; i++) {
+          const wp = crew[i].model.group.position;
+          if (crew[i].asleep || Math.abs(wp.x - cam.x) + Math.abs(wp.z - cam.z) > 50) continue;
+          const fy = wp.y - 0.9;
+          fields.addPusher(wp.x, fy, wp.z, 0.7);
+          grassField.addPusher(wp.x, fy, wp.z, 0.5);
+        }
+      }
       const pets = w.gameplay.pets.pets;
       for (let i = 0; i < pets.length; i++) {
         const pp = pets[i].group.position;
@@ -911,6 +961,12 @@ export class GameEngine {
     webs.setPlayer(!editing && !isDriving && !w.gameplay.sleeping && character.body ? character.body.translation() : null);
     webs.setViewportHeight(this.renderer.domElement.height);
     setWebLight(w.exploration.inCave ? 0.35 : 1 - w.weather.nightFactor * 0.8);
+    // Matcap glass is unlit: dim it with the daylight (night, overcast) so it never glows in the dark
+    setGlassLight(
+      w.exploration.inCave
+        ? 0.25
+        : (1 - w.weather.nightFactor * 0.82) * (1 - w.weather.cloudCover * 0.25) * (1 - w.weather.rainIntensity * 0.15)
+    );
     webs.update(dt, this.camera.camera);
     bushes.update(dt);
     flowers.update(dt);
@@ -1383,6 +1439,9 @@ export class GameEngine {
       this.callMoped();
     } else if (e.code === 'KeyM' && !e.repeat) {
       this.callbacks.onMapHotkey();
+    } else if (e.code === 'KeyJ' && !e.repeat && this.world?.gameplay.workers) {
+      const gp = this.world.gameplay;
+      gp.openPanel(gp.panel === 'workers' ? null : 'workers');
     } else if (e.code === 'KeyQ') {
       this.callbacks.onInventoryHotkey();
     } else if (e.code === 'Escape') {
@@ -1436,12 +1495,33 @@ export class GameEngine {
       forecast: () => w.weather.director.forecast().map((f) => ({ ...f })),
       water: (level: number) => (worldSettings.waterLevel = level),
       give: (itemId: string, n = 1) => w.inventoryManager.addItem(itemId, n),
+      /** An enemy ('hedgehog' | 'dragon' | 'shark' | 'spider') a few metres from the player. */
+      enemy: (kind: PestKind) => !!w.gameplay.pests.spawnNear(kind, w.character.getPosition(), !!w.exploration.inCave),
       spawn: (type: string, x: number, z: number, rot = 0, scale = 1) => w.props.add(type, x, z, rot, scale),
       save: (slot = 'dev') => w.saves.save(slot),
       load: (slot = 'dev') => w.saves.load(slot),
       editor: (on = true) => this.setMode(on ? 'editor' : 'play'),
       stats: () => ({ ...this.renderer.info.render, ...this.renderer.info.memory }),
-      npcPath: (on = true) => w.gameplay.companion?.setDebug(on),
+      npcPath: (on = true) => {
+        w.gameplay.companion?.setDebug(on);
+        w.gameplay.workers?.setDebug(on);
+      },
+      /** Farmhands: `dev.workers.list()`, `dev.workers.hire(n)` near the player (up to MAX_WORKERS). */
+      workers: {
+        list: () =>
+          w.gameplay.workers?.workers.map((x) => ({ name: x.name, role: x.role, energy: Math.round(x.energy), activity: x.activity, task: x.task?.key ?? null, done: x.jobsDone, bed: x.bed?.key ?? null })),
+        jobs: () => w.gameplay.workers?.board?.counts(),
+        hire: (n = 1) => {
+          let hired = 0;
+          for (let i = 0; i < n; i++) {
+            const p = w.character.getPosition();
+            if (!w.gameplay.workers?.spawn(new THREE.Vector3(p.x + 2 + Math.random() * 2, 0, p.z + Math.random() * 2))) break;
+            hired++;
+          }
+          return `${hired} hired, ${w.gameplay.workers?.workers.length ?? 0}/${MAX_WORKERS}`;
+        },
+        energy: (v: number) => w.gameplay.workers?.workers.forEach((x) => (x.energy = v)),
+      },
       /** Rivers: defs, samples (`riverWorld.get(id)`), water queries. */
       rivers: riverWorld,
       /** Wildlife: `dev.wild.stats`, `dev.wild.enabled = false` to measure its cost. */

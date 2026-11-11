@@ -126,7 +126,8 @@ export class FarmingManager {
     for (const field of this.fields.getAll()) {
       const crop = field.crop;
       if (!crop) continue;
-      if (raining && !crop.isWatered && crop.stage < 3) {
+      // Under a greenhouse roof the rain never reaches the soil: those beds are watered by hand
+      if (raining && !crop.isWatered && crop.stage < 3 && !this.fields.isSheltered(field)) {
         crop.isWatered = true;
         crop.waterCount += 1;
       }
@@ -197,9 +198,10 @@ export class FarmingManager {
 
   /**
    * Harvests a ripe field: several crates and some seed back. The crates fly to the player and
-   * `give` receives each item as it lands (at once when there is no player to fly to).
+   * `give` receives each item as it lands (at once when there is no player to fly to, or with
+   * `toPlayer` false: a farmhand harvested it and takes the crates to the store).
    */
-  public harvest(id: string, give: GiveItem): HarvestResult | null {
+  public harvest(id: string, give: GiveItem, toPlayer = true): HarvestResult | null {
     const field: FarmField | null = this.fields.get(id);
     if (!field?.crop || field.crop.stage < 3) return null;
     const cropType = field.crop.cropType;
@@ -211,7 +213,9 @@ export class FarmingManager {
     const bonusSeeds = 2 + Math.floor(Math.random() * 3);
     const def = CROP_DEFINITIONS[cropType];
     const crates: FlightItem[] = Array.from({ length: FIELD_CRATE_YIELD }, () => ({ itemId: def.crateItemId, amount: 1, look: 'crate' as const, cropType }));
-    this.sendToPlayer(field.center, crates, give, [{ itemId: def.seedItemId, amount: bonusSeeds, look: 'seeds', cropType }]);
+    const seeds: FlightItem = { itemId: def.seedItemId, amount: bonusSeeds, look: 'seeds', cropType };
+    if (toPlayer) this.sendToPlayer(field.center, crates, give, [seeds]);
+    else for (const it of [...crates, seeds]) give(it.itemId, it.amount);
     return { cropType, crateItemId: def.crateItemId, crates: FIELD_CRATE_YIELD, bonusSeeds };
   }
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Wind, Coins, Zap, Settings2, Pause,
+  Backpack, Hammer, Map as MapIcon, Bike, Users, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Wind, Coins, Zap, Settings2, Pause,
 } from 'lucide-react';
 import { GameplayHudState, GameplayPrompt } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
@@ -35,6 +35,8 @@ interface GameHUDProps {
   onOpenMap(): void;
   onCallMoped(): void;
   onPause(): void;
+  /** Farmhands panel (absent when there is no crew system). */
+  onOpenWorkers?(): void;
   onAction(action: GameplayPrompt['action'] | 'treat'): void;
 }
 
@@ -65,7 +67,7 @@ function useHotbar(inventory: InventoryManager): { slots: (InventoryItem | null)
 }
 
 export const GameHUD: React.FC<GameHUDProps> = ({
-  hud, inventory, hidden, devToolsEnabled, onOpenBackpack, onToggleBuild, onOpenEditor, onOpenMap, onCallMoped, onPause, onAction,
+  hud, inventory, hidden, devToolsEnabled, onOpenBackpack, onToggleBuild, onOpenEditor, onOpenMap, onCallMoped, onPause, onOpenWorkers, onAction,
 }) => {
   const { slots, equipped } = useHotbar(inventory);
 
@@ -119,6 +121,11 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         <HudButton label={t('hud.backpack')} hotkey="Q" onClick={onOpenBackpack}>
           <Backpack className="w-5 h-5" />
         </HudButton>
+        {onOpenWorkers && (
+          <HudButton label={t('hud.workers')} hotkey="J" onClick={onOpenWorkers}>
+            <Users className="w-5 h-5" />
+          </HudButton>
+        )}
         <HudButton label={t('hud.build')} hotkey="B" onClick={onToggleBuild}>
           <Hammer className="w-5 h-5" />
         </HudButton>

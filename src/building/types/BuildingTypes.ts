@@ -55,6 +55,13 @@ export enum BuildingPieceType {
   FURN_BOOKSHELF = 'FURN_BOOKSHELF',
   FURN_CHANDELIER = 'FURN_CHANDELIER',
   FURN_TABLE_LAMP = 'FURN_TABLE_LAMP',
+  // Greenhouse (glasshouse) pieces: same footprint and snapping as their wooden twins
+  GLASS_WALL_2X3 = 'GLASS_WALL_2X3',
+  GLASS_WALL_1X3 = 'GLASS_WALL_1X3',
+  GLASS_DOORWAY_1X3 = 'GLASS_DOORWAY_1X3',
+  GLASS_DOOR_1X3 = 'GLASS_DOOR_1X3',
+  GLASS_ROOF_GABLE_2X2 = 'GLASS_ROOF_GABLE_2X2',
+  GLASS_ROOF_SHED_2X2 = 'GLASS_ROOF_SHED_2X2',
 }
 
 export enum PieceCategory {
@@ -70,6 +77,7 @@ export enum PieceCategory {
   ROOFING = 'ROOFING',
   FOUNDATION = 'FOUNDATION',
   FURNITURE = 'FURNITURE',
+  GREENHOUSE = 'GREENHOUSE',
 }
 
 export enum SocketType {
@@ -132,6 +140,45 @@ export interface BuiltPiece {
   lastSwingMultiplier?: number;
 }
 
+/** Glass greenhouse wall panels: stand-alone walls (not merged into continuous walls, no openings cut). */
+export function isGlassWallPiece(type: BuildingPieceType): boolean {
+  return (
+    type === BuildingPieceType.GLASS_WALL_2X3 ||
+    type === BuildingPieceType.GLASS_WALL_1X3 ||
+    type === BuildingPieceType.GLASS_DOORWAY_1X3 ||
+    type === BuildingPieceType.GLASS_DOOR_1X3
+  );
+}
+
+export function isGlassRoofPiece(type: BuildingPieceType): boolean {
+  return type === BuildingPieceType.GLASS_ROOF_GABLE_2X2 || type === BuildingPieceType.GLASS_ROOF_SHED_2X2;
+}
+
+export function isGreenhousePiece(type: BuildingPieceType): boolean {
+  return isGlassWallPiece(type) || isGlassRoofPiece(type);
+}
+
+/**
+ * The wooden piece whose shape (size, sockets, snapping, roof config) a glass piece shares.
+ * Every non-glass type maps to itself, so size/snap lookups can switch on `shapeOf(type)`.
+ */
+export function shapeOf(type: BuildingPieceType): BuildingPieceType {
+  switch (type) {
+    case BuildingPieceType.GLASS_WALL_2X3:
+      return BuildingPieceType.WOOD_WALL_2X3;
+    case BuildingPieceType.GLASS_WALL_1X3:
+    case BuildingPieceType.GLASS_DOORWAY_1X3:
+    case BuildingPieceType.GLASS_DOOR_1X3:
+      return BuildingPieceType.WOOD_WALL_1X3;
+    case BuildingPieceType.GLASS_ROOF_GABLE_2X2:
+      return BuildingPieceType.ROOF_GABLE_2X2;
+    case BuildingPieceType.GLASS_ROOF_SHED_2X2:
+      return BuildingPieceType.ROOF_SHED_2X2;
+    default:
+      return type;
+  }
+}
+
 export function isDoorPiece(type: BuildingPieceType): boolean {
   return (
     type === BuildingPieceType.WOOD_DOOR_SINGLE ||
@@ -141,6 +188,14 @@ export function isDoorPiece(type: BuildingPieceType): boolean {
     type === BuildingPieceType.DOOR_COTTAGE_WINDOW_1X2 ||
     type === BuildingPieceType.DOOR_COLONIAL_6PANEL_1X2
   );
+}
+
+/**
+ * Any piece with a swinging leaf the player can open: wall-embedded doors plus the stand-alone
+ * greenhouse glass door (which is a wall panel itself, so it is not an `isDoorPiece` opening).
+ */
+export function isSwingDoorPiece(type: BuildingPieceType): boolean {
+  return isDoorPiece(type) || type === BuildingPieceType.GLASS_DOOR_1X3;
 }
 
 export function isDoorwayPiece(type: BuildingPieceType): boolean {
@@ -171,6 +226,7 @@ export function isSolidWallPiece(type: BuildingPieceType): boolean {
 }
 
 export function getWallHalfWidth(type: BuildingPieceType): number {
+  type = shapeOf(type);
   if (
     type === BuildingPieceType.WOOD_WALL_1X3 ||
     type === BuildingPieceType.WOOD_WALL_1X2 ||
@@ -189,6 +245,7 @@ export function getWallHalfWidth(type: BuildingPieceType): number {
 }
 
 export function getWallHalfHeight(type: BuildingPieceType): number {
+  type = shapeOf(type);
   if (type === BuildingPieceType.WOOD_WALL_WINDOW_2X4) {
     return 2.0;
   }

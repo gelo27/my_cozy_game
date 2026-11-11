@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { BuiltPiece, BuildingPieceType } from './types/BuildingTypes';
+import { BuiltPiece, BuildingPieceType, shapeOf } from './types/BuildingTypes';
 import { BuildingManager } from './BuildingManager';
 import { audioEngine } from '../audio/AudioEngine';
 import { isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface } from './config/BuildingPiecesConfig';
@@ -71,7 +71,7 @@ export function getPieceDimensions(type: BuildingPieceType, piece?: BuiltPiece):
     return new THREE.Vector3(cfg.maxX - cfg.minX, cfg.height, cfg.maxZ - cfg.minZ);
   }
 
-  switch (type) {
+  switch (shapeOf(type)) {
     case BuildingPieceType.WOOD_WALL_1X1:
       return new THREE.Vector3(1.0, 1.0, 0.12);
     case BuildingPieceType.WOOD_WALL_WINDOW_1X1_5:
@@ -145,7 +145,7 @@ export function getPieceExtensionConfigs(type: BuildingPieceType, piece?: BuiltP
   const arrowDist = 0.28;
   const configs: ExtensionConfig[] = [];
 
-  switch (type) {
+  switch (shapeOf(type)) {
     // 1. Walls, Windows, and Doorways (width = dim.x, height = dim.y, depth = 0.12)
     case BuildingPieceType.WOOD_WALL_1X1:
     case BuildingPieceType.WOOD_WALL_1X2:

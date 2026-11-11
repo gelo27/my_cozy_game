@@ -11,6 +11,7 @@ import type { FieldSaveData } from '../farming/FieldManager';
 import type { ExplorationSaveData } from '../explore/ExplorationManager';
 import type { OrchardSaveData } from '../gathering/AppleOrchard';
 import type { NurserySaveData } from '../gathering/TreeNursery';
+import type { WorkerSaveData } from '../npc/WorkerManager';
 
 export const SAVE_VERSION = 2;
 const KEY_PREFIX = 'cozyfarm.save.';
@@ -46,6 +47,8 @@ export interface WorldSaveData {
   boat?: { p: [number, number, number]; yaw: number };
   exploration?: ExplorationSaveData;
   pets: PetSaveData[];
+  /** Farmhands (missing in older saves: the starting crew stays). */
+  workers?: WorkerSaveData[];
   /** Days passed (missing in older saves: 0). */
   day?: number;
   /** Sleep and respawn: the bed slept in last and that night's index. */
@@ -110,6 +113,7 @@ export class SaveSystem {
       moped: { p: w.moped.getPosition().add(new THREE.Vector3(0, 0.2, 0)).toArray() as [number, number, number], yaw: w.moped.getYaw() },
       boat: { p: w.boat.getPosition().toArray() as [number, number, number], yaw: w.boat.getYaw() },
       pets: w.gameplay.pets.serialize(),
+      workers: w.gameplay.workers?.serialize(),
       day: worldSettings.day,
       sleep: {
         bed: w.gameplay.respawnBed ? (w.gameplay.respawnBed.toArray().map((v) => +v.toFixed(2)) as [number, number, number]) : null,
@@ -178,6 +182,7 @@ export class SaveSystem {
     if (data.moped) w.moped.place(new THREE.Vector3(...data.moped.p), data.moped.yaw);
     if (data.boat) w.boat.place(new THREE.Vector3(...data.boat.p), data.boat.yaw);
     if (data.pets?.length) w.gameplay.pets.deserialize(data.pets);
+    if (data.workers && w.gameplay.workers) w.gameplay.workers.deserialize(data.workers);
   }
 
   // ---------------------------------------------------------------- slots

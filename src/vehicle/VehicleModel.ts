@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createGlassMaterial } from '../scene/GlassMatcap';
 import { mergeColoredGroups } from '../scene/MergeColored';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
@@ -26,7 +27,7 @@ export class VehicleModel {
 
     const paint = new THREE.MeshLambertMaterial({ color: 0xd9534f });
     const trim = new THREE.MeshLambertMaterial({ color: 0x3b3f46 });
-    const glass = new THREE.MeshLambertMaterial({ color: 0x9fc6d8 });
+    const glass = createGlassMaterial({ color: 0x9fbccc }); // opaque matcap: reflects sky / grass
     const wood = new THREE.MeshLambertMaterial({ color: 0xa87444 });
     this.tailLightMaterial = new THREE.MeshLambertMaterial({ color: 0x8a1010, emissive: 0x550000 });
     const headLight = new THREE.MeshBasicMaterial({ color: 0xfff6d0 });

@@ -6,6 +6,7 @@ import type { ForestZone } from '../forest/ForestZone';
 import type { RockField } from '../gathering/RockField';
 import type { PropTreeField } from '../gathering/PropTreeField';
 import type { BuildingManager } from '../building/BuildingManager';
+import { isGreenhousePiece } from '../building/types/BuildingTypes';
 import type { GrassField } from './GrassField';
 import type { AppleOrchard } from '../gathering/AppleOrchard';
 
@@ -185,7 +186,8 @@ export class StaticShadows {
       // Every piece near the ground (floors and paths too) keeps the 3D grass out of its footprint
       if (bb.min.y - ground < 0.6) addBlock({ x0: bb.min.x, z0: bb.min.z, x1: bb.max.x, z1: bb.max.z, k: 1 });
       if (bb.max.y - ground < 0.4) continue; // floors and paths lie on the ground: no shade
-      const box: Box = { x0: bb.min.x, z0: bb.min.z, x1: bb.max.x, z1: bb.max.z, k: 0.6 };
+      // Greenhouse glass lets the light through: only its frame leaves a faint shade
+      const box: Box = { x0: bb.min.x, z0: bb.min.z, x1: bb.max.x, z1: bb.max.z, k: isGreenhousePiece(piece.type) ? 0.12 : 0.6 };
       n++;
       this.bucketRange(box.x0, box.z0, box.x1, box.z1, (c) => this.buckets[c].boxes.push(box));
     }

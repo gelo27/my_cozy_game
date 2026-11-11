@@ -20,17 +20,21 @@ import { critterSounds } from './CritterSounds';
 import { RECIPES, FISH_IDS, SEA_FISH_IDS, DISH_BUFF, Recipe } from './Recipes';
 import { audioEngine } from '../audio/AudioEngine';
 import { CompanionNPC } from '../npc/CompanionNPC';
+import { MAX_WORKERS, WORKER_HIRE_COST, WorkerManager } from '../npc/WorkerManager';
+import { WorkerNPC } from '../npc/WorkerNPC';
 import { t, dataName, getLang } from '../i18n/i18n';
 
 /** Flour from one crate of wheat at the millstone (3 flour bake one loaf). */
 const FLOUR_PER_CRATE = 3;
 
-export type GameplayPanel = 'cook' | 'shop' | null;
+export type GameplayPanel = 'cook' | 'shop' | 'workers' | null;
 
 /** Coins a pest knocks out of the player's pockets per hit. */
 const HIT_COIN_LOSS = 5;
 /** Coins for beating a pest. */
-const PEST_REWARD: Record<PestKind, number> = { hedgehog: 6, dragon: 15 };
+const PEST_REWARD: Record<PestKind, number> = { hedgehog: 6, dragon: 15, shark: 20, spider: 8 };
+const PEST_HIT_MSG = { hedgehog: 'pest.hitHedgehog', dragon: 'pest.hitDragon', shark: 'pest.hitShark', spider: 'pest.hitSpider' } as const;
+const PEST_DEFEAT_MSG = { hedgehog: 'pest.defeatedHedgehog', dragon: 'pest.defeatedDragon', shark: 'pest.defeatedShark', spider: 'pest.defeatedSpider' } as const;
 
 /** Beds take sleepers from SLEEP_FROM in the evening until SLEEP_UNTIL in the morning. */
 const SLEEP_FROM = 18;
@@ -58,7 +62,7 @@ function clockLabel(hour: number): string {
 export interface GameplayPrompt {
   text: string;
   key: string;
-  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'explore' | 'mill' | 'sleep' | 'flowers';
+  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'worker' | 'explore' | 'mill' | 'sleep' | 'flowers';
   secondary?: { text: string; key: string; action: 'treat' };
 }
 
@@ -103,6 +107,9 @@ export class GameplayManager {
   public readonly pests: PestSystem;
   public readonly slingshot: SlingshotSystem;
   public companion: CompanionNPC | null = null;
+  public workers: WorkerManager | null = null;
+  /** The farmhand the current 'worker' prompt is about. */
+  private promptWorker: WorkerNPC | null = null;
   public explore: ExplorePort | null = null;
   /** Tulip clumps picked by hand with E (wired by the engine). */
   public flowers: FlowerBeds | null = null;
@@ -161,9 +168,10 @@ export class GameplayManager {
       defeated: (kind) => {
         const n = PEST_REWARD[kind];
         this.inventory.addItem('coins', n);
-        this.onNotify(t(kind === 'hedgehog' ? 'pest.defeatedHedgehog' : 'pest.defeatedDragon', { n }), 'success');
+        this.onNotify(t(PEST_DEFEAT_MSG[kind], { n }), 'success');
         this.revision++;
       },
+      playerSwimming: () => !!this.character.swimAbility?.isSwimming,
     };
     this.slingshot = new SlingshotSystem(scene, this.pests, particles);
   }
@@ -194,7 +202,25 @@ export class GameplayManager {
         return -1;
       }
     };
+    const castNormal = (from: THREE.Vector3, dir: THREE.Vector3, len: number, normal: THREE.Vector3): number => {
+      if (!physics.isInitialized() || !(len > 1e-4)) return -1;
+      ray.origin.x = from.x;
+      ray.origin.y = from.y;
+      ray.origin.z = from.z;
+      ray.dir.x = dir.x;
+      ray.dir.y = dir.y;
+      ray.dir.z = dir.z;
+      try {
+        const hit = physics.world.castRayAndGetNormal(ray, len, true, flags, groups);
+        if (!hit) return -1;
+        normal.set(hit.normal.x, hit.normal.y, hit.normal.z);
+        return hit.timeOfImpact;
+      } catch {
+        return -1;
+      }
+    };
     const env: PestEnv = {
+      cast: castNormal,
       blocked: (x, y, z, dx, dz, dist) => cast(x, y, z, dx, 0, dz, dist, false) >= 0,
       canSee: (from, to) => {
         const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
@@ -316,7 +342,7 @@ export class GameplayManager {
     critterSounds.ouch();
     const lost = Math.min(HIT_COIN_LOSS, this.inventory.getItemCount('coins'));
     if (lost > 0) this.inventory.removeItem('coins', lost);
-    this.onNotify(t(kind === 'hedgehog' ? 'pest.hitHedgehog' : 'pest.hitDragon', { n: lost }), 'warning');
+    this.onNotify(t(PEST_HIT_MSG[kind], { n: lost }), 'warning');
     this.revision++;
     return true;
   }
@@ -330,11 +356,12 @@ export class GameplayManager {
     const anchor = this.anchorOverride ?? pos;
     this.pets.update(dt, anchor, moving && !this.anchorOverride);
     this.companion?.update(dt, anchor);
+    this.workers?.update(dt, pos);
     this.updateBuff(dt);
     this.updateCooking(dt);
     this.invulnerable -= dt;
     this.updateSleep(dt);
-    this.pests.update(dt, pos, !this.explore?.inCave && !isDriving && !this.sleep);
+    this.pests.update(dt, pos, !isDriving && !this.sleep, !!this.explore?.inCave);
     this.slingshot.update(dt);
     if (this.sleep) return;
 
@@ -441,6 +468,11 @@ export class GameplayManager {
     if (npc && npc.getPosition(this.tmp).distanceTo(pos) < 2.6) {
       return { text: t(npc.following ? 'npc.stay' : 'npc.follow', { name: npc.name }), key: 'E', action: 'npc' };
     }
+    const worker = this.workers?.nearest(pos, 2.4);
+    if (worker) {
+      if (!ignoreTools) this.promptWorker = worker;
+      return { text: t('worker.talk', { name: worker.name }), key: 'E', action: 'worker' };
+    }
 
     // Tulips stand still: they come before the pets, who follow the player everywhere
     const clump = this.flowers?.findPickTarget(pos, facing);
@@ -488,6 +520,14 @@ export class GameplayManager {
       const following = this.companion.toggleFollow();
       audioEngine.at(this.companion.getPosition()).playBuildSelect();
       this.onNotify(t(following ? 'npc.following' : 'npc.waiting', { name: this.companion.name }), 'info');
+      this.promptTimer = 0;
+    } else if (action === 'worker') {
+      const w = this.promptWorker ?? this.workers?.nearest(pos, 2.4);
+      if (w && this.workers) {
+        const role = this.workers.cycleRole(w);
+        audioEngine.at(w.getPosition()).playBuildSelect();
+        this.onNotify(t('worker.roleSet', { name: w.name, role: this.workers.roleLabel(role), energy: Math.round(w.energy) }), 'info');
+      }
       this.promptTimer = 0;
     } else if (action === 'pet') {
       this.pets.petNearest(pos);
@@ -567,6 +607,41 @@ export class GameplayManager {
   public recipeName(recipeId: string): string {
     const recipe = RECIPES.find((r) => r.id === recipeId);
     return dataName('recipe', recipeId, recipe?.name ?? recipeId);
+  }
+
+  // ---------------------------------------------------------------- farmhands
+
+  /** Hires a farmhand for WORKER_HIRE_COST coins; it turns up next to the player. */
+  public hireWorker(): boolean {
+    const crew = this.workers;
+    if (!crew) return false;
+    if (crew.workers.length >= MAX_WORKERS) {
+      this.onNotify(t('worker.full', { n: MAX_WORKERS }), 'warning');
+      return false;
+    }
+    if (this.inventory.getItemCount('coins') < WORKER_HIRE_COST) {
+      this.onNotify(t('worker.noCoins', { n: WORKER_HIRE_COST }), 'warning');
+      return false;
+    }
+    const pos = this.character.getPosition();
+    const facing = this.character.getFacingDirection();
+    const w = crew.spawn(this.tmp.set(pos.x + facing.x * 2, 0, pos.z + facing.z * 2));
+    if (!w) return false;
+    this.inventory.removeItem('coins', WORKER_HIRE_COST);
+    audioEngine.playBuildSelect();
+    this.onNotify(t('worker.hired', { name: w.name }), 'success');
+    this.revision++;
+    return true;
+  }
+
+  /** Lets a farmhand go (no refund). */
+  public dismissWorker(id: number): void {
+    const w = this.workers?.byId(id);
+    if (!w || !this.workers) return;
+    if (this.promptWorker === w) this.promptWorker = null;
+    this.workers.remove(w);
+    this.onNotify(t('worker.dismissed', { name: w.name }), 'info');
+    this.revision++;
   }
 
   public openPanel(panel: GameplayPanel): void {

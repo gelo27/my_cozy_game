@@ -18,6 +18,7 @@ import { InteractionPrompts } from './components/InteractionPrompts';
 import { promptStore } from './components/promptStore';
 import { GameHUD } from './components/game/GameHUD';
 import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
+import { WorkersPanel } from './components/game/WorkersPanel';
 import { WorldMap } from './components/game/WorldMap';
 import { SavingBadge } from './components/game/SavingBadge';
 import { PauseMenu } from './components/game/PauseMenu';
@@ -212,6 +213,7 @@ export default function App() {
                   onOpenMap={() => handleToggleMap()}
                   onCallMoped={() => engine!.callMoped()}
                   onPause={() => setPaused(true)}
+                  onOpenWorkers={world.gameplay.workers ? () => world.gameplay.openPanel(world.gameplay.panel === 'workers' ? null : 'workers') : undefined}
                   onAction={(a) => world.gameplay.runAction(a)}
                 />
 
@@ -284,6 +286,7 @@ export default function App() {
 
                 {hud?.panel === 'cook' && <CookingPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'shop' && <ShopPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
+                {hud?.panel === 'workers' && <WorkersPanel gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
               </>
             )}
           </>

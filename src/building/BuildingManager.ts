@@ -10,9 +10,14 @@ import {
   isSolidWallPiece,
   getWallHalfWidth,
   getWallHalfHeight,
-  BuildingSceneExportData
+  BuildingSceneExportData,
+  shapeOf,
+  isGlassRoofPiece,
+  isSwingDoorPiece,
+  isGreenhousePiece,
 } from './types/BuildingTypes';
-import { BUILDING_PIECES, BUILDING_MATERIALS, createPieceMeshGroup, getPieceMeshTemplate, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface } from './config/BuildingPiecesConfig';
+import { GreenhouseBatch } from './GreenhouseBatch';
+import { BUILDING_PIECES, BUILDING_MATERIALS, createPieceMeshGroup, getPieceMeshTemplate, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface, createRoofGeometry, addFarGlassTwins } from './config/BuildingPiecesConfig';
 import { ProceduralRoofGenerator, ProceduralRoofConfig } from './ProceduralRoofSystem';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
@@ -113,6 +118,12 @@ export class BuildingManager {
   private dirtyFloors = false;
   private dirtyFoundations = false;
 
+  // Greenhouse pieces are merged per chunk into a few shared meshes (see GreenhouseBatch);
+  // "live" ones (a roof whose resize arrows are being dragged) stay as their own mesh meanwhile.
+  public readonly greenhouseBatch: GreenhouseBatch;
+  private dirtyGreenhouse = false;
+  private readonly liveGreenhouseIds = new Set<string>();
+
   // Reusable scratch objects to eliminate per-frame allocations during raycasts
   private static readonly _tempRay = new THREE.Ray();
   private static readonly _tempHitPoint = new THREE.Vector3();
@@ -127,6 +138,11 @@ export class BuildingManager {
     this.scene.add(this.group);
     this.wallPaintingSystem = new WallPaintingSystem(this.group, BUILDING_MATERIALS.wallChecker);
     this.continuousWallSystem = new ContinuousWallSystem(this.group, this.wallPaintingSystem);
+    this.greenhouseBatch = new GreenhouseBatch(this.group);
+  }
+
+  private markGreenhouseDirty(type: BuildingPieceType): void {
+    if (isGreenhousePiece(type)) this.dirtyGreenhouse = true;
   }
 
   /**
@@ -179,6 +195,10 @@ export class BuildingManager {
     if (this.dirtyFoundations) {
       this.dirtyFoundations = false;
       this.continuousWallSystem.regenerateFoundations(this.pieces);
+    }
+    if (this.dirtyGreenhouse) {
+      this.dirtyGreenhouse = false;
+      this.greenhouseBatch.rebuild(this.pieces.values(), (id) => this.liveGreenhouseIds.has(id));
     }
   }
 
@@ -268,6 +288,7 @@ export class BuildingManager {
 
     // 1. Create Consolidated 3D Visual Mesh (1 single mesh per piece, sharing template geometry)
     const meshGroup = createPieceMeshGroup(type, false);
+    addFarGlassTwins(meshGroup); // windows, glazed doors, greenhouse: near/far dithered glass
     meshGroup.position.copy(position);
     meshGroup.quaternion.copy(quaternion);
     meshGroup.userData = { pieceId: id, pieceType: type };
@@ -320,13 +341,14 @@ export class BuildingManager {
 
     this.pieces.set(id, builtPiece);
     this.spatialGrid.insert(builtPiece);
+    this.markGreenhouseDirty(type);
     this.cachedPiecesArray = null; // Invalidate cached pieces array
     this.revision++;
 
     if (isProceduralRoofPiece(type)) {
       this.rebuildRoofPhysicsCollider(builtPiece);
     }
-    if (isDoorPiece(type)) {
+    if (isSwingDoorPiece(type)) {
       this.rebuildDoorPhysicsCollider(builtPiece);
     }
 
@@ -383,8 +405,25 @@ export class BuildingManager {
       piece.meshGroup.matrixAutoUpdate = true;
       (roofMesh as THREE.Mesh).matrixAutoUpdate = true;
 
-      // Update geometry procedurally
-      ProceduralRoofGenerator.updateBufferGeometry((roofMesh as THREE.Mesh).geometry, updatedConfig);
+      // Update geometry procedurally. Glass roofs change topology with size (more glazing bars),
+      // so they get a fresh geometry instead of an in-place update.
+      if (isGlassRoofPiece(piece.type)) {
+        // The roof mesh and its far-glass twin share one geometry: swap it on both
+        const mesh = roofMesh as THREE.Mesh;
+        const old = mesh.geometry;
+        const geo = createRoofGeometry(piece.type, updatedConfig);
+        piece.meshGroup.traverse((o) => {
+          if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry = geo;
+        });
+        old.dispose();
+        // While dragging (no physics update) the roof is drawn on its own, then rejoins the batch
+        const wasLive = this.liveGreenhouseIds.has(piece.id);
+        if (updatePhysics) this.liveGreenhouseIds.delete(piece.id);
+        else this.liveGreenhouseIds.add(piece.id);
+        if (updatePhysics || !wasLive) this.dirtyGreenhouse = true;
+      } else {
+        ProceduralRoofGenerator.updateBufferGeometry((roofMesh as THREE.Mesh).geometry, updatedConfig);
+      }
 
       piece.meshGroup.updateMatrix();
       piece.meshGroup.updateMatrixWorld(true);
@@ -398,6 +437,8 @@ export class BuildingManager {
     // 3. Re-create Rapier Physics Collider for new slope geometry if requested
     if (updatePhysics) {
       this.rebuildRoofPhysicsCollider(piece);
+      // Final size: dependants (roof shelter on the ground, baked shade) follow the revision
+      this.revision++;
     }
 
     return piece;
@@ -497,6 +538,7 @@ export class BuildingManager {
     // 6. Update Spatial Grid
     this.spatialGrid.remove(piece);
     this.spatialGrid.insert(piece);
+    this.markGreenhouseDirty(piece.type);
     this.cachedPiecesArray = null;
     this.revision++;
 
@@ -528,7 +570,7 @@ export class BuildingManager {
    */
   public toggleDoor(pieceId: string, playerPosition?: THREE.Vector3): boolean {
     const piece = this.pieces.get(pieceId);
-    if (!piece || !isDoorPiece(piece.type)) return false;
+    if (!piece || !isSwingDoorPiece(piece.type)) return false;
 
     piece.isOpen = !piece.isOpen;
     const isOpen = piece.isOpen;
@@ -590,14 +632,15 @@ export class BuildingManager {
   public getDoorOpenings(): { id: string; x: number; y: number; z: number; nx: number; nz: number; half: number; body: RAPIER.RigidBody | null }[] {
     const out = [];
     for (const piece of this.pieces.values()) {
-      if (!isDoorPiece(piece.type)) continue;
+      if (!isSwingDoorPiece(piece.type)) continue;
       const n = new THREE.Vector3(0, 0, 1).applyQuaternion(piece.quaternion);
+      const isGlass = piece.type === BuildingPieceType.GLASS_DOOR_1X3;
       const half =
-        piece.type === BuildingPieceType.WOOD_DOOR_DOUBLE ? 0.9 : piece.type === BuildingPieceType.DOOR_GRAND_SIDELITES_2X2 ? 0.46 : 0.42;
+        piece.type === BuildingPieceType.WOOD_DOOR_DOUBLE ? 0.9 : piece.type === BuildingPieceType.DOOR_GRAND_SIDELITES_2X2 ? 0.46 : isGlass ? 0.43 : 0.42;
       out.push({
         id: piece.id,
         x: piece.position.x,
-        y: piece.position.y - 1.0,
+        y: piece.position.y - (isGlass ? 1.5 : 1.0),
         z: piece.position.z,
         nx: n.x,
         nz: n.z,
@@ -620,7 +663,7 @@ export class BuildingManager {
     let minDistance = maxDistance;
 
     for (const piece of this.pieces.values()) {
-      if (!isDoorPiece(piece.type)) continue;
+      if (!isSwingDoorPiece(piece.type)) continue;
 
       const dist = playerPosition.distanceTo(piece.position);
       if (dist < minDistance) {
@@ -647,7 +690,7 @@ export class BuildingManager {
    * Re-creates door physics colliders based on current isOpen rotation state and swing direction.
    */
   public rebuildDoorPhysicsCollider(piece: BuiltPiece): void {
-    if (!piece || !isDoorPiece(piece.type)) return;
+    if (!piece || !isSwingDoorPiece(piece.type)) return;
 
     try {
       if (piece.staticBody && piece.staticBody.isValid()) {
@@ -678,7 +721,41 @@ export class BuildingManager {
         piece.type === BuildingPieceType.DOOR_COTTAGE_WINDOW_1X2 ||
         piece.type === BuildingPieceType.DOOR_COLONIAL_6PANEL_1X2;
 
-      if (isSingleDoorType) {
+      if (piece.type === BuildingPieceType.GLASS_DOOR_1X3) {
+        // Greenhouse door, 3m panel: transom above a 0.86 x 2.25m opening (leaf centre y = -0.355)
+        const transomDesc = this.physics.rapier.ColliderDesc.cuboid(0.5, 0.36, WALL_THICKNESS / 2.0)
+          .setTranslation(0, 1.14, 0)
+          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+        this.physics.world.createCollider(transomDesc, piece.staticBody);
+        for (const x of [-0.47, 0.47]) {
+          const jamb = this.physics.rapier.ColliderDesc.cuboid(0.03, 1.5, WALL_THICKNESS / 2.0)
+            .setTranslation(x, 0, 0)
+            .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+          this.physics.world.createCollider(jamb, piece.staticBody);
+        }
+
+        const sensorDesc = this.physics.rapier.ColliderDesc.cuboid(0.8, 1.5, 1.3)
+          .setSensor(true)
+          .setCollisionGroups(sensorColGroup);
+        const sensorCollider = this.physics.world.createCollider(sensorDesc, piece.staticBody);
+        (sensorCollider as any).userData = { isDoorSensor: true, pieceId: piece.id };
+
+        if (piece.isOpen) {
+          const rotY = swingMultiplier === 1 ? -Math.PI / 2 : Math.PI / 2;
+          const openQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+          const offsetZ = swingMultiplier === 1 ? -0.43 : 0.43;
+          const desc = this.physics.rapier.ColliderDesc.cuboid(0.43, 1.12, 0.03)
+            .setTranslation(-0.43, -0.355, offsetZ)
+            .setRotation({ x: openQuat.x, y: openQuat.y, z: openQuat.z, w: openQuat.w })
+            .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+          piece.staticCollider = this.physics.world.createCollider(desc, piece.staticBody);
+        } else {
+          const desc = this.physics.rapier.ColliderDesc.cuboid(0.43, 1.12, 0.03)
+            .setTranslation(0, -0.355, 0)
+            .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+          piece.staticCollider = this.physics.world.createCollider(desc, piece.staticBody);
+        }
+      } else if (isSingleDoorType) {
         // Permanent outer frame colliders (top header, left jamb, right jamb)
         const topHeaderDesc = this.physics.rapier.ColliderDesc.cuboid(0.50, 0.06, WALL_THICKNESS / 2.0)
           .setTranslation(0, 0.94, 0)
@@ -1090,6 +1167,8 @@ export class BuildingManager {
 
     // 3. Update spatial index & cache
     this.spatialGrid.remove(piece);
+    this.liveGreenhouseIds.delete(piece.id);
+    this.markGreenhouseDirty(piece.type);
     this.cachedPiecesArray = null;
     this.revision++;
 
@@ -1208,7 +1287,23 @@ export class BuildingManager {
       return this.physics.world.createCollider(colliderDesc, body);
     }
 
-    switch (type) {
+    // Glass doorway 1x3: transom header over a walk-through opening, flanked by slim posts
+    if (type === BuildingPieceType.GLASS_DOORWAY_1X3) {
+      const header = this.physics.rapier.ColliderDesc.cuboid(0.5, 0.3, WALL_THICKNESS / 2.0)
+        .setTranslation(0, 1.2, 0)
+        .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+      this.physics.world.createCollider(header, body);
+      for (const x of [-0.46, 0.46]) {
+        const post = this.physics.rapier.ColliderDesc.cuboid(0.04, 1.2, WALL_THICKNESS / 2.0)
+          .setTranslation(x, -0.3, 0)
+          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+        if (x > 0) return this.physics.world.createCollider(post, body);
+        this.physics.world.createCollider(post, body);
+      }
+    }
+
+    // Glass greenhouse pieces collide exactly like their wooden twins
+    switch (shapeOf(type)) {
       case BuildingPieceType.WOOD_FLOOR_2X2: {
         colliderDesc = this.physics.rapier.ColliderDesc.cuboid(HALF_SIZE, 0.06, HALF_SIZE)
           .setFriction(0.6)
@@ -1657,6 +1752,19 @@ export class BuildingManager {
     return success;
   }
 
+  /** Ground rectangles under roofs (world XZ, without the eave overhang) that rain cannot reach. */
+  public getShelterRects(): { x0: number; z0: number; x1: number; z1: number }[] {
+    const out: { x0: number; z0: number; x1: number; z1: number }[] = [];
+    for (const piece of this.pieces.values()) {
+      if (!isProceduralRoofPiece(piece.type) && piece.type !== BuildingPieceType.WOOD_ROOF_26) continue;
+      const bb = piece.worldBoundingBox;
+      if (!bb) continue;
+      const inset = 0.25; // drop the overhang/gutter: drips fall just outside the walls
+      out.push({ x0: bb.min.x + inset, z0: bb.min.z + inset, x1: bb.max.x - inset, z1: bb.max.z - inset });
+    }
+    return out;
+  }
+
   public getUnconfirmedWallCount(): number {
     return this.continuousWallSystem.getUnconfirmedWallCount();
   }
@@ -1696,6 +1804,7 @@ export class BuildingManager {
   public dispose(): void {
     this.clear();
     this.continuousWallSystem.dispose();
+    this.greenhouseBatch.dispose();
     if (this.group.parent) {
       this.group.parent.remove(this.group);
     }

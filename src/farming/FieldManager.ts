@@ -276,6 +276,11 @@ export class FieldManager {
 
   // ---------------------------------------------------------------- queries
 
+  /** The field's soil is under a roof (greenhouse): rain and snowmelt do not reach it. */
+  public isSheltered(f: FarmField): boolean {
+    return !!this.terrain && this.terrain.isSheltered(f.center.x, f.center.z);
+  }
+
   public getAll(): FarmField[] {
     return Array.from(this.fields.values());
   }

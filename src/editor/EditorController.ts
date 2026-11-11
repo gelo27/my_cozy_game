@@ -13,8 +13,10 @@ import type { RiverDef } from '../world/rivers/RiverTypes';
 import { CaveEditTool } from './CaveEditTool';
 import type { CaveNetwork } from '../explore/cave/CaveNetwork';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
+import type { PestKind, PestSystem } from '../gameplay/Pests';
+import { worldSettings } from '../world/WorldSettings';
 
-export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave';
+export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy';
 
 export interface EditorState {
   tool: EditorTool;
@@ -32,6 +34,8 @@ export interface EditorState {
   /** Placed webs turn to span the passage under the cursor (its narrowest way across). */
   placeWebAutoOrient: boolean;
   placeRandomize: boolean;
+  /** Enemy put down by the enemy tool. */
+  enemyKind: PestKind;
   brushRadius: number;
   brushStrength: number;
   gizmoMode: 'translate' | 'rotate';
@@ -68,6 +72,7 @@ export class EditorController {
     placeWeb: { ...WEB_DEFAULTS },
     placeWebAutoOrient: true,
     placeRandomize: true,
+    enemyKind: 'spider',
     brushRadius: 4,
     brushStrength: 2,
     gizmoMode: 'translate',
@@ -78,6 +83,10 @@ export class EditorController {
   };
   /** Bumped whenever `state` changes so React can re-read it. */
   public revision = 0;
+  /** The enemies (set by the engine once gameplay is up): the enemy tool puts them in the world. */
+  public pests: PestSystem | null = null;
+  /** Messages for the developer (a refused enemy placement). */
+  public onNotify: (text: string, type?: 'success' | 'info' | 'warning') => void = () => {};
 
   private readonly raycaster = new THREE.Raycaster();
   private readonly cursor: THREE.LineLoop;
@@ -99,6 +108,8 @@ export class EditorController {
   private hasHit = false;
   /** The cursor is on the island's terrain (props placed there stay glued to it); false in the caves. */
   private hitOnTerrain = true;
+  /** Surface normal at the hit (facing the camera): a placed spider stands on walls and ceilings too. */
+  private readonly hitNormal = new THREE.Vector3(0, 1, 0);
   private readonly rayDir = new THREE.Vector3();
   private stroking = false;
   private flattenHeight = 0;
@@ -410,6 +421,8 @@ export class EditorController {
       this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
       const hit = this.terrain.raycast(this.raycaster.ray, 300, new THREE.Vector3());
       this.rivers.pointerDown(this.raycaster, hit, e.shiftKey);
+    } else if (tool === 'enemy') {
+      this.placeEnemy();
     } else if (tool === 'select') {
       this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
       const hit = this.props.pick(this.raycaster);
@@ -466,7 +479,7 @@ export class EditorController {
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
       this.deleteSelected();
     } else if (!e.ctrlKey && !this.looking) {
-      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave' };
+      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave', Digit7: 'enemy' };
       if (tools[e.code]) this.set('tool', tools[e.code]);
       if (e.code === 'KeyG') this.set('gizmoMode', 'translate');
       if (e.code === 'KeyR' && this.state.tool === 'select') this.set('gizmoMode', 'rotate');
@@ -494,12 +507,15 @@ export class EditorController {
     this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
     this.hasHit = !!this.terrain.raycast(this.raycaster.ray, 300, this.hit);
     this.hitOnTerrain = true;
+    this.hitNormal.set(0, 1, 0);
     const { tool } = this.state;
     // Placing in the caves: the terrain ray misses the cave pocket, its colliders take the hit
-    if (tool === 'place') this.castIntoCaves();
+    if (tool === 'place' || tool === 'enemy') this.castIntoCaves();
+    // Sharks go in the water: the sea surface under the cursor counts as the hit
+    if (tool === 'enemy' && this.state.enemyKind === 'shark') this.castOntoSea();
     const brushTool = tool === 'sculpt' || tool === 'paint';
 
-    this.updateCursor(brushTool && this.hasHit);
+    this.updateCursor((brushTool || tool === 'enemy') && this.hasHit);
     this.updateGhost(tool === 'place' && this.hasHit);
 
     if (!this.stroking || !this.input.isMouseDown || !this.hasHit) return;
@@ -524,16 +540,45 @@ export class EditorController {
     }
   }
 
+  /** The sea surface under the cursor, when the ray crosses it before the ground (or misses the island). */
+  private castOntoSea(): void {
+    const ray = this.raycaster.ray;
+    if (ray.direction.y >= -1e-3) return;
+    const t = (worldSettings.waterLevel - ray.origin.y) / ray.direction.y;
+    if (t < 0 || t > 600) return;
+    if (this.hasHit && (!this.hitOnTerrain || ray.origin.distanceTo(this.hit) < t)) return;
+    ray.at(t, this.hit);
+    this.hasHit = true;
+    this.hitOnTerrain = true;
+  }
+
+  /** Enemy tool click: the chosen kind at the cursor, or why it cannot live there. */
+  private placeEnemy(): void {
+    const pests = this.pests;
+    if (!pests || !this.hasHit) return;
+    const kind = this.state.enemyKind;
+    const err = pests.placementError(kind, this.hit, this.hitOnTerrain, this.hitNormal);
+    if (err) {
+      this.onNotify(err, 'warning');
+      return;
+    }
+    pests.spawnAt(kind, this.hit, this.hitOnTerrain, kind === 'spider' ? this.hitNormal : undefined);
+    this.touch();
+  }
+
   /** A cave surface under the cursor nearer than the terrain hit (if any) becomes the hit. */
   private castIntoCaves(): void {
     const ray = this.raycaster.ray;
-    const hit = this.physics.castRay(ray.origin, this.rayDir.copy(ray.direction), 300);
-    if (!hit) return;
-    const toi = hit.timeOfImpact;
+    const res = this.physics.castRayAndGetNormal(ray.origin, this.rayDir.copy(ray.direction), 300);
+    if (!res) return;
+    const toi = res.hit.timeOfImpact;
     if (this.hasHit && ray.origin.distanceTo(this.hit) <= toi) return;
     const point = ray.at(toi, new THREE.Vector3());
     if (!this.caveNetwork.contains(point)) return;
     this.hit.copy(point);
+    this.hitNormal.copy(res.normal);
+    // The ray's hit normal can face either way: the camera's side is the open air
+    if (this.hitNormal.dot(ray.direction) > 0) this.hitNormal.negate();
     this.hasHit = true;
     this.hitOnTerrain = false;
   }
@@ -565,6 +610,23 @@ export class EditorController {
   private updateCursor(visible: boolean): void {
     this.cursor.visible = visible;
     if (!visible) return;
+    if (this.state.tool === 'enemy') {
+      // A flat ring where the enemy goes: green where it can live, red where it cannot
+      const kind = this.state.enemyKind;
+      const r = kind === 'shark' ? 1.8 : kind === 'dragon' ? 1 : 0.8;
+      const attr = this.cursor.geometry.getAttribute('position') as THREE.BufferAttribute;
+      const a = attr.array as Float32Array;
+      for (let i = 0; i <= 64; i++) {
+        const t = (i / 64) * Math.PI * 2;
+        a[i * 3] = this.hit.x + Math.cos(t) * r;
+        a[i * 3 + 1] = this.hit.y + 0.08;
+        a[i * 3 + 2] = this.hit.z + Math.sin(t) * r;
+      }
+      attr.needsUpdate = true;
+      const ok = !!this.pests && !this.pests.placementError(kind, this.hit, this.hitOnTerrain, this.hitNormal);
+      (this.cursor.material as THREE.LineBasicMaterial).color.setHex(ok ? 0x22c55e : 0xef4444);
+      return;
+    }
     const r = this.state.tool === 'paint' ? this.state.brushRadius * 0.5 : this.state.brushRadius;
     const attr = this.cursor.geometry.getAttribute('position') as THREE.BufferAttribute;
     const a = attr.array as Float32Array;

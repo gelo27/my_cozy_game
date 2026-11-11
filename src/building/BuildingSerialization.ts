@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BuildingManager } from './BuildingManager';
-import { BuildingPieceType, BuildingSceneExportData, SavedPieceData, isDoorPiece } from './types/BuildingTypes';
+import { BuildingPieceType, BuildingSceneExportData, SavedPieceData, isSwingDoorPiece } from './types/BuildingTypes';
 import { isProceduralRoofPiece } from './config/BuildingPiecesConfig';
 import { ProceduralRoofSystem } from './ProceduralRoofSystem';
 import { audioEngine } from '../audio/AudioEngine';
@@ -252,7 +252,7 @@ export function importBuildingScene(
         }
 
         // Restore door hinge position
-        if (pieceData.isOpen && isDoorPiece(piece.type)) {
+        if (pieceData.isOpen && isSwingDoorPiece(piece.type)) {
           buildingManager.toggleDoor(piece.id);
         }
       }

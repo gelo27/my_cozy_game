@@ -113,6 +113,12 @@ export class GridNavigator {
     this.box = new RAPIER.Cuboid(cfg.radius, (cfg.height - cfg.maxStepUp) / 2, cfg.radius);
   }
 
+  /** Forgets every cached cell (e.g. a save was loaded: cells sampled meanwhile saw a half-built world). */
+  public reset(): void {
+    this.cells.clear();
+    this.revision = -1;
+  }
+
   /** Forget cells around a point (e.g. when an agent got stuck on something the cache missed). */
   public invalidateAround(p: THREE.Vector3, radius: number): void {
     const r = Math.ceil(radius / this.cfg.cell);
@@ -213,6 +219,9 @@ export class GridNavigator {
 
   /** Walkable floor at (x, z) for an agent standing near height y, or null. */
   public snap(x: number, z: number, y: number): { x: number; z: number; y: number } | null {
+    // Called on its own too (spawns, beds, work spots): cells cached before the world changed
+    // (a save still loading its buildings) would answer for the old world
+    this.checkRevision();
     const cx = this.toCell(x);
     const cz = this.toCell(z);
     const c = this.sample(cx, cz, y);
@@ -221,6 +230,7 @@ export class GridNavigator {
 
   /** Closest walkable cell in growing rings around p (for unreachable goals). */
   public nearestWalkable(p: THREE.Vector3, maxRing = 6): { x: number; z: number; y: number } | null {
+    this.checkRevision();
     const cx = this.toCell(p.x);
     const cz = this.toCell(p.z);
     for (let r = 1; r <= maxRing; r++) {

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createGlassMaterial } from '../scene/GlassMatcap';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createPromptSprite } from './VehicleModel';
 
@@ -32,7 +33,7 @@ export class BoatModel {
       deck: new THREE.MeshLambertMaterial({ color: 0xa8774c }),
       trim: new THREE.MeshLambertMaterial({ color: 0x30343a }),
       seat: new THREE.MeshLambertMaterial({ color: 0xe9e1cf }),
-      glass: new THREE.MeshLambertMaterial({ color: 0x9fd2e8, transparent: true, opacity: 0.45, depthWrite: false }),
+      glass: createGlassMaterial({ color: 0xb4dcec, opacity: 0.4 }),
     };
     this.navLight = new THREE.MeshBasicMaterial({ color: 0x9cff9c });
     const parts: Record<Bucket, THREE.BufferGeometry[]> = { hull: [], stripe: [], deck: [], trim: [], seat: [], glass: [] };

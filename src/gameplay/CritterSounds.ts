@@ -107,9 +107,24 @@ export const critterSounds = {
       noise(ctx, out, t, 0.05, 0.12, 3000, 2);
     }, 4);
   },
-  /** A pest takes a hit: hedgehogs squeak, dragons yelp lower. */
-  hurt(pos: Pos, kind: 'hedgehog' | 'dragon'): void {
-    const f = kind === 'hedgehog' ? 1250 : 620;
+  /** Shark rushing in: a low surge of water. */
+  sharkSurge(pos: Pos): void {
+    voice(pos, 0.9, (ctx, out, t) => {
+      noise(ctx, out, t, 0.8, 0.22, 300, 0.6, 'lowpass', 900);
+      tone(ctx, out, t, 'sine', 70, 45, 0.7, 0.12);
+    }, 6);
+  },
+  /** Shark jaws snapping shut. */
+  sharkBite(pos: Pos): void {
+    voice(pos, 0.4, (ctx, out, t) => {
+      noise(ctx, out, t, 0.09, 0.4, 2600, 1.4);
+      tone(ctx, out, t, 'square', 180, 60, 0.12, 0.12);
+      noise(ctx, out, t + 0.05, 0.25, 0.25, 500, 0.7, 'lowpass', 150);
+    }, 6);
+  },
+  /** A pest takes a hit: hedgehogs squeak, dragons yelp lower, sharks thud, spiders screech. */
+  hurt(pos: Pos, kind: 'hedgehog' | 'dragon' | 'shark' | 'spider'): void {
+    const f = kind === 'hedgehog' ? 1250 : kind === 'dragon' ? 620 : kind === 'shark' ? 240 : 1900;
     voice(pos, 0.35, (ctx, out, t) => {
       tone(ctx, out, t, 'square', f, f * 0.55, 0.16, 0.06);
       noise(ctx, out, t, 0.08, 0.16, 1800, 1);

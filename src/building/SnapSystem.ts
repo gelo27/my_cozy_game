@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { BuildingPieceType, BuiltPiece, SnapResult, SnapSocket, SocketType, WallGridInfo, isWindowPiece, isDoorPiece, isDoorwayPiece, isWindowOrDoorPiece, isSolidWallPiece } from './types/BuildingTypes';
+import { BuildingPieceType, BuiltPiece, SnapResult, SnapSocket, SocketType, WallGridInfo, isWindowPiece, isDoorPiece, isDoorwayPiece, isWindowOrDoorPiece, isSolidWallPiece, isGlassWallPiece, isGlassRoofPiece, shapeOf } from './types/BuildingTypes';
 import { BUILDING_PIECES, FLOOR_THICKNESS, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isPieceBelowSurface, getPieceMeshTemplate } from './config/BuildingPiecesConfig';
 import { FURNITURE_GRID_STEP, isCeilingFurniture, isFurniturePiece } from './furniture/FurnitureCatalog';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
@@ -18,6 +18,7 @@ interface CandidatePlacement {
 }
 
 function getWallHalfWidth(type: BuildingPieceType): number {
+  type = shapeOf(type);
   if (
     type === BuildingPieceType.WOOD_WALL_1X3 ||
     type === BuildingPieceType.WOOD_WALL_1X2 ||
@@ -36,6 +37,7 @@ function getWallHalfWidth(type: BuildingPieceType): number {
 }
 
 function getWallHalfHeight(type: BuildingPieceType): number {
+  type = shapeOf(type);
   if (type === BuildingPieceType.WOOD_WALL_WINDOW_2X4) {
     return 2.0;
   }
@@ -73,7 +75,7 @@ function getRailingHalfWidth(type: BuildingPieceType): number {
 }
 
 export function getRoofDimensions(type: BuildingPieceType): { width: number; length: number; height: number } {
-  switch (type) {
+  switch (shapeOf(type)) {
     case BuildingPieceType.ROOF_GABLE_2X2:
     case BuildingPieceType.ROOF_HIP_2X2:
     case BuildingPieceType.ROOF_SHED_2X2:
@@ -2295,12 +2297,14 @@ export class SnapSystem {
       type === BuildingPieceType.WOOD_WALL_WINDOW_2X2 ||
       type === BuildingPieceType.WOOD_WALL_WINDOW_2X4 ||
       type === BuildingPieceType.WOOD_WALL_DOORWAY_2X2 ||
-      type === BuildingPieceType.WOOD_WALL_DOORWAY_1X2
+      type === BuildingPieceType.WOOD_WALL_DOORWAY_1X2 ||
+      isGlassWallPiece(type)
     );
   }
 
   public isRoof(type: BuildingPieceType): boolean {
     return (
+      isGlassRoofPiece(type) ||
       type === BuildingPieceType.WOOD_ROOF_26 ||
       type === BuildingPieceType.ROOF_GABLE_2X2 ||
       type === BuildingPieceType.ROOF_GABLE_2X4 ||

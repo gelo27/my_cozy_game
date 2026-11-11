@@ -41,6 +41,7 @@ import {
   Library,
   Lamp,
   LampCeiling,
+  Warehouse,
 } from 'lucide-react';
 import { BuildingPieceType, BuildingTelemetry, PieceCategory } from '../building/types/BuildingTypes';
 import { BUILDING_PIECES } from '../building/config/BuildingPiecesConfig';
@@ -316,6 +317,50 @@ const PIECE_ITEMS: PieceItemConfig[] = [
     dimBadge: '2х2м (Сходи)',
   },
 
+  // Greenhouse (glasshouse)
+  {
+    type: BuildingPieceType.GLASS_WALL_2X3,
+    category: PieceCategory.GREENHOUSE,
+    slot: 1,
+    icon: <Columns2 className="w-5 h-5 text-cyan-200" />,
+    dimBadge: '2x3м',
+  },
+  {
+    type: BuildingPieceType.GLASS_WALL_1X3,
+    category: PieceCategory.GREENHOUSE,
+    slot: 2,
+    icon: <Columns className="w-5 h-5 text-cyan-200" />,
+    dimBadge: '1x3м',
+  },
+  {
+    type: BuildingPieceType.GLASS_DOORWAY_1X3,
+    category: PieceCategory.GREENHOUSE,
+    slot: 3,
+    icon: <DoorOpen className="w-5 h-5 text-cyan-200" />,
+    dimBadge: 'Вхід',
+  },
+  {
+    type: BuildingPieceType.GLASS_DOOR_1X3,
+    category: PieceCategory.GREENHOUSE,
+    slot: 4,
+    icon: <DoorClosed className="w-5 h-5 text-cyan-200" />,
+    dimBadge: 'Двері',
+  },
+  {
+    type: BuildingPieceType.GLASS_ROOF_GABLE_2X2,
+    category: PieceCategory.GREENHOUSE,
+    slot: 5,
+    icon: <Home className="w-5 h-5 text-cyan-200" />,
+    dimBadge: '2-похилий',
+  },
+  {
+    type: BuildingPieceType.GLASS_ROOF_SHED_2X2,
+    category: PieceCategory.GREENHOUSE,
+    slot: 6,
+    icon: <Home className="w-5 h-5 text-cyan-200" />,
+    dimBadge: '1-похилий',
+  },
+
   // Furniture
   { type: BuildingPieceType.FURN_DINING_TABLE, category: PieceCategory.FURNITURE, icon: <Table2 className="w-5 h-5" />, dimBadge: '1.6×0.9м' },
   { type: BuildingPieceType.FURN_COFFEE_TABLE, category: PieceCategory.FURNITURE, icon: <Table2 className="w-4 h-4" />, dimBadge: '1.0×0.6м' },
@@ -342,6 +387,7 @@ const CATEGORY_TABS: { id: PieceCategory | 'ALL'; name: string; icon: React.Reac
   { id: PieceCategory.RAILINGS, name: 'build.cat.railings', icon: <Fence className="w-3.5 h-3.5" /> },
   { id: PieceCategory.ROOFS, name: 'build.cat.roofs', icon: <Home className="w-3.5 h-3.5" /> },
   { id: PieceCategory.PILLARS, name: 'build.cat.pillars', icon: <MoveVertical className="w-3.5 h-3.5" /> },
+  { id: PieceCategory.GREENHOUSE, name: 'build.cat.greenhouse', icon: <Warehouse className="w-3.5 h-3.5" /> },
   { id: PieceCategory.FURNITURE, name: 'build.cat.furniture', icon: <Sofa className="w-3.5 h-3.5" /> },
 ];
 

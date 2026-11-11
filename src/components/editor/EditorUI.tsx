@@ -4,7 +4,7 @@ import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
-  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music,
+  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music, Skull, Fish, X,
 } from 'lucide-react';
 import { RiverPanel } from './RiverPanel';
 import { MusicPanel } from './MusicPanel';
@@ -12,6 +12,7 @@ import { CavePanel } from './CavePanel';
 import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool } from '../../editor/EditorController';
+import { PEST_KINDS, PestKind } from '../../gameplay/Pests';
 import { PROP_DEFS, PROP_DEF_MAP, PropCategory } from '../../world/PropSystem';
 import { WEB_LIMITS, WebParams, webSettings, setWebSetting, resetWebSettings } from '../../world/SpiderWebs';
 import { ALGAE_MAX_LINKS, ALGAE_MIN_LINKS, algaeHeight, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
@@ -75,6 +76,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'paint', icon: Brush, label: 'Покриття (4)' },
     { id: 'river', icon: Spline, label: 'Річки та водоспади (5)' },
     { id: 'cave', icon: Shell, label: 'Печери (6)' },
+    { id: 'enemy', icon: Skull, label: 'Вороги (7)' },
   ];
   const tabs: { id: Tab; icon: React.ElementType; label: string }[] = [
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
@@ -250,6 +252,7 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
 
   if (s.tool === 'river') return <RiverPanel engine={engine} />;
   if (s.tool === 'cave') return <CavePanel engine={engine} />;
+  if (s.tool === 'enemy') return <EnemyPanel engine={engine} />;
 
   if (s.tool === 'sculpt') {
     const kinds = [
@@ -401,6 +404,133 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         </button>
       </div>
     </Section>
+  );
+};
+
+const ENEMY_INFO: Record<PestKind, { name: string; icon: React.ElementType; where: string }> = {
+  hedgehog: { name: 'Їжак', icon: PawPrint, where: 'суша острова' },
+  dragon: { name: 'Дракончик', icon: Flame, where: 'суша острова' },
+  shark: { name: 'Акула', icon: Fish, where: 'глибоке море' },
+  spider: { name: 'Павук', icon: Bug, where: 'печери (і будь-де)' },
+};
+
+/** The enemy tool: pick a kind, click the world to put one down; lists and removes the live ones. */
+const EnemyPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
+  const w = engine.world!;
+  const editor = w.editor;
+  const pests = w.gameplay.pests;
+  const s = editor.state;
+  const [, force] = useState(0);
+  const refresh = () => force((n) => n + 1);
+  const player = w.character.getPosition();
+  const counts = Object.fromEntries(PEST_KINDS.map((k) => [k, 0])) as Record<PestKind, number>;
+  for (const p of pests.pests) counts[p.kind]++;
+  const list = [...pests.pests].sort((a, b) => a.position.distanceToSquared(player) - b.position.distanceToSquared(player));
+  return (
+    <>
+      <Section title="Ворог">
+        <div className="grid grid-cols-2 gap-1">
+          {PEST_KINDS.map((k) => {
+            const info = ENEMY_INFO[k];
+            const Icon = info.icon;
+            return (
+              <button
+                key={k}
+                onClick={() => editor.set('enemyKind', k)}
+                className={`${btn} flex-col gap-0.5 py-2 text-[11px] ${s.enemyKind === k ? 'bg-sky-500 text-white' : 'bg-white/5 hover:bg-white/10'}`}
+              >
+                <Icon className="w-5 h-5" />
+                {info.name}
+                <span className={`text-[9px] ${s.enemyKind === k ? 'text-sky-100' : 'text-zinc-500'}`}>{info.where}</span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-zinc-400 leading-relaxed">
+          Клік у світі — поставити. Зелене коло — тут може жити, червоне — ні. У редакторі вороги стоять, оживають у грі (F1).
+        </p>
+        <button
+          className={`${btn} gap-1.5 py-1.5 bg-white/5 hover:bg-white/10`}
+          onClick={() => {
+            const p = pests.spawnNear(s.enemyKind, w.character.getPosition(), !!w.exploration.inCave);
+            if (p) editor.focusOn(p.position);
+            else w.editor.onNotify(`Поруч із гравцем немає місця для: ${ENEMY_INFO[s.enemyKind].name}`, 'warning');
+            refresh();
+          }}
+        >
+          <User className="w-3.5 h-3.5" /> Поставити біля гравця
+        </button>
+      </Section>
+      <Section title="Природний спавн">
+        <label className="flex items-center gap-2 text-zinc-300">
+          <input
+            type="checkbox"
+            checked={pests.naturalSpawn}
+            onChange={(e) => {
+              pests.naturalSpawn = e.target.checked;
+              refresh();
+            }}
+            className="accent-sky-500"
+          />
+          Вороги з’являються самі
+        </label>
+        <button
+          className={`${btn} gap-1.5 py-1.5 bg-white/5 hover:bg-white/10 disabled:opacity-30`}
+          disabled={!pests.naturalSpawn}
+          onClick={() => {
+            pests.populate(w.character.getPosition());
+            refresh();
+          }}
+        >
+          <Plus className="w-3.5 h-3.5" /> Доповнити до норми
+        </button>
+      </Section>
+      <Section title={`У світі (${pests.pests.length})`}>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-zinc-400">
+          {PEST_KINDS.map((k) => (
+            <span key={k}>
+              {ENEMY_INFO[k].name}: <span className="text-zinc-200 tabular-nums">{counts[k]}</span>
+            </span>
+          ))}
+        </div>
+        <div className="flex flex-col max-h-64 overflow-y-auto">
+          {list.slice(0, 150).map((p) => {
+            const Icon = ENEMY_INFO[p.kind].icon;
+            return (
+              <div key={p.id} className="flex items-center gap-1 px-1 py-0.5 rounded hover:bg-white/10">
+                <button className="flex items-center gap-2 flex-1 text-left" onClick={() => editor.focusOn(p.position)} title="Показати">
+                  <Icon className="w-3.5 h-3.5 text-rose-400" />
+                  {ENEMY_INFO[p.kind].name}
+                  <span className="text-zinc-500 tabular-nums">#{p.id}</span>
+                  {p.placed && <span className="text-sky-400 text-[9px]">вручну</span>}
+                  <span className="ml-auto text-zinc-500 tabular-nums">{Math.round(p.position.distanceTo(player))} м</span>
+                </button>
+                <button
+                  className="text-zinc-500 hover:text-rose-400"
+                  title="Прибрати"
+                  onClick={() => {
+                    pests.remove(p);
+                    refresh();
+                  }}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <button
+          className={`${btn} gap-1.5 py-1.5 bg-rose-600/80 hover:bg-rose-500 text-white disabled:opacity-30`}
+          disabled={!pests.pests.length}
+          onClick={() => {
+            pests.clear();
+            refresh();
+          }}
+        >
+          <Trash2 className="w-3.5 h-3.5" /> Прибрати всіх
+        </button>
+      </Section>
+    </>
   );
 };
 

@@ -1,222 +1,24 @@
 import * as THREE from 'three';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { coastRadius } from '../world/IslandGenerator';
-import { worldSettings } from '../world/WorldSettings';
-import { waterLevelAt } from '../world/rivers/RiverWorld';
 import { ParticleManager } from '../particles/ParticleManager';
-import { EmoteBubble, emoteMaterial, makeBlobShadow } from './Emotes';
+import { makeBlobShadow } from './Emotes';
 import { critterSounds } from './CritterSounds';
+import { worldSettings } from '../world/WorldSettings';
+import { waterLevelAt, riverWorld } from '../world/rivers/RiverWorld';
+import { Shark, SHARK_MIN_DEPTH, seaDepthAt } from './Shark';
+import { Spider, flushSpiderLegs, insideRock } from './Spider';
+import { setWaterLimb, WATER_ANIMAL_SLOTS } from '../scene/WaterDetails';
+import {
+  Pest, PestEnv, PestKind, PestPort, PestHabitat, OPEN_ENV, SHARED_GEOS, angleTo, isWalkable, steer, turn,
+} from './PestBase';
 
-export type PestKind = 'hedgehog' | 'dragon';
-
-/** Ground a pest can stand on: dry land inside the island. */
-function isWalkable(terrain: TerrainSystem, x: number, z: number): boolean {
-  if (!terrain.isInside(x, z)) return false;
-  const h = terrain.getHeight(x, z);
-  return h > worldSettings.waterLevel + 0.15 && h > waterLevelAt(x, z) + 0.1;
-}
-
-const STEER_OFFSETS = [0, 0.45, -0.45, 0.9, -0.9, 1.35, -1.35, 1.8, -1.8, 2.4, -2.4, Math.PI];
-
-/**
- * The physical world as the pests see it (filled in by the gameplay layer with Rapier ray casts).
- * Terrain is walked on the heightmap; these queries add everything standing on it: walls, fences,
- * trees, rocks and props.
- */
-export interface PestEnv {
-  /** A solid (non-terrain) collider within `dist` of (x, y, z) along the unit direction (dx, dz). */
-  blocked(x: number, y: number, z: number, dx: number, dz: number, dist: number): boolean;
-  /** Nothing solid (hills included) between the two points. */
-  canSee(from: THREE.Vector3, to: THREE.Vector3): boolean;
-  /** Distance to the first solid hit along a unit direction, or -1 within `len`. */
-  sweep(from: THREE.Vector3, dir: THREE.Vector3, len: number): number;
-}
-
-/** No physics yet (or in tests): nothing blocks. */
-const OPEN_ENV: PestEnv = { blocked: () => false, canSee: () => true, sweep: () => -1 };
-
-/** The most open direction close to `angle` (dry land, no cliff, no wall); NaN when boxed in. */
-function steer(terrain: TerrainSystem, env: PestEnv, x: number, y: number, z: number, angle: number, look: number, maxClimb = 0.9): number {
-  const h0 = terrain.getHeight(x, z);
-  for (const off of STEER_OFFSETS) {
-    const a = angle + off;
-    const dx = Math.sin(a), dz = Math.cos(a);
-    const sx = x + dx * look;
-    const sz = z + dz * look;
-    if (!isWalkable(terrain, sx, sz)) continue;
-    if (Math.abs(terrain.getHeight(sx, sz) - h0) > maxClimb) continue;
-    if (env.blocked(x, y, z, dx, dz, look)) continue;
-    return a;
-  }
-  return NaN;
-}
-
-/** What the pests can do to the player (filled in by the gameplay layer). */
-export interface PestPort {
-  /** Hit the player from `from` with knockback power; returns false while the player is invulnerable. */
-  hurt(from: THREE.Vector3, power: number, kind: PestKind): boolean;
-  /** The player beat a pest (reward, toast). */
-  defeated(kind: PestKind, at: THREE.Vector3): void;
-}
-
-/** Something a pebble or an axe can strike. */
-export interface PestTarget {
-  readonly kind: PestKind;
-  readonly hitRadius: number;
-  hitPoint(out: THREE.Vector3): THREE.Vector3;
-}
+export type { PestKind, PestEnv, PestPort, PestHabitat } from './PestBase';
 
 const tmpA = new THREE.Vector3();
-const tmpB = new THREE.Vector3();
 const tmpEye = new THREE.Vector3();
-/** How often a pest re-checks whether it can see the player (s). */
-const SIGHT_INTERVAL = 0.2;
-
-function angleTo(from: THREE.Vector3, to: THREE.Vector3): number {
-  return Math.atan2(to.x - from.x, to.z - from.z);
-}
-
-function turn(current: number, target: number, maxStep: number): number {
-  let d = target - current;
-  d = Math.atan2(Math.sin(d), Math.cos(d));
-  return current + Math.max(-maxStep, Math.min(maxStep, d));
-}
-
-abstract class Pest implements PestTarget {
-  public readonly group = new THREE.Group();
-  public removed = false;
-  public abstract readonly hitRadius: number;
-  public health: number;
-  protected time = Math.random() * 10;
-  protected timer = 0;
-  protected heading = Math.random() * Math.PI * 2;
-  protected readonly home = new THREE.Vector3();
-  protected readonly wander = new THREE.Vector3();
-  protected readonly emote: EmoteBubble;
-  protected readonly stars: THREE.Sprite[] = [];
-  /** Last line-of-sight result (refreshed every SIGHT_INTERVAL, staggered across pests). */
-  protected sees = false;
-  private sightTimer = Math.random() * SIGHT_INTERVAL;
-  /** 1 right after a hit, decays: a squash-and-stretch wobble (no per-pest material clones). */
-  private wobble = 0;
-  /** Hit by the player recently: skips the calm-down and comes back angry. */
-  protected provoked = false;
-
-  constructor(
-    public readonly kind: PestKind,
-    x: number,
-    z: number,
-    protected readonly terrain: TerrainSystem,
-    emoteHeight: number,
-    public readonly maxHealth: number
-  ) {
-    this.health = maxHealth;
-    this.group.position.set(x, terrain.getHeight(x, z), z);
-    this.home.copy(this.group.position);
-    this.wander.copy(this.group.position);
-    this.emote = new EmoteBubble(this.group, emoteHeight, 0.42);
-    for (let i = 0; i < 3; i++) {
-      const s = new THREE.Sprite(emoteMaterial('star'));
-      s.scale.setScalar(0.2);
-      s.visible = false;
-      this.stars.push(s);
-      this.group.add(s);
-    }
-  }
-
-  get position(): THREE.Vector3 {
-    return this.group.position;
-  }
-
-  protected pickWander(radius: number): void {
-    for (let i = 0; i < 6; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = 2 + Math.random() * radius;
-      const x = this.home.x + Math.cos(a) * r;
-      const z = this.home.z + Math.sin(a) * r;
-      if (isWalkable(this.terrain, x, z)) {
-        this.wander.set(x, 0, z);
-        return;
-      }
-    }
-    this.wander.copy(this.home);
-  }
-
-  protected spinStars(on: boolean, y: number, r: number): void {
-    for (let i = 0; i < this.stars.length; i++) {
-      const s = this.stars[i];
-      s.visible = on;
-      if (!on) continue;
-      const a = this.time * 5 + (i / 3) * Math.PI * 2;
-      s.position.set(Math.cos(a) * r, y, Math.sin(a) * r);
-    }
-  }
-
-  /** Body radius (same as hitRadius; matches the gathering nodes' shape). */
-  get radius(): number {
-    return this.hitRadius;
-  }
-
-  get alive(): boolean {
-    return !this.removed && this.health > 0;
-  }
-
-  /** Throttled line of sight from `eye` to the player within `range` (m). */
-  protected look(dt: number, eye: THREE.Vector3, player: THREE.Vector3, env: PestEnv, range: number): boolean {
-    this.sightTimer -= dt;
-    if (this.sightTimer > 0) return this.sees;
-    this.sightTimer = SIGHT_INTERVAL;
-    const dx = player.x - eye.x, dy = player.y - eye.y, dz = player.z - eye.z;
-    this.sees = dx * dx + dy * dy + dz * dz < range * range && env.canSee(eye, player);
-    return this.sees;
-  }
-
-  /** Struck by the player's axe or a pebble from `from`. Returns false when it was already beaten. */
-  public damage(amount: number, from: THREE.Vector3, port: PestPort, particles?: ParticleManager): boolean {
-    if (!this.alive) return false;
-    this.health -= amount;
-    this.wobble = 1;
-    this.provoked = true;
-    const at = this.hitPoint(tmpB);
-    critterSounds.hurt(at, this.kind);
-    particles?.emitJumpDust(at);
-    if (this.health <= 0) {
-      critterSounds.poof(at);
-      particles?.emitBuildPuff(at, false, 26);
-      port.defeated(this.kind, at);
-      this.removed = true;
-      return true;
-    }
-    this.onHurt(from);
-    return true;
-  }
-
-  /** Reaction to a hit that did not beat it. */
-  protected abstract onHurt(from: THREE.Vector3): void;
-
-  /** Squash-and-stretch after a hit. */
-  protected applyWobble(dt: number): void {
-    if (this.wobble <= 0) return;
-    this.wobble = Math.max(0, this.wobble - dt * 3);
-    const k = Math.sin(this.wobble * 22) * 0.18 * this.wobble;
-    this.group.scale.set(1 + k, 1 - k, 1 + k);
-  }
-
-  /** Centre of the pest's body (for sounds and effects). */
-  abstract hitPoint(out: THREE.Vector3): THREE.Vector3;
-  abstract update(dt: number, player: THREE.Vector3, port: PestPort, env: PestEnv, particles?: ParticleManager): void;
-
-  /** For the music: 0 minding its own business, 1 after the player, 2 attacking right now. */
-  abstract get threat(): number;
-
-  public dispose(): void {
-    this.group.removeFromParent();
-    this.group.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (m.isMesh && !m.userData.shared && m.geometry !== FIRE_GEO) m.geometry.dispose();
-    });
-  }
-}
+const tA = new THREE.Vector3();
+const sepTmp = new THREE.Vector3();
 
 // ------------------------------------------------------------------ hedgehog
 
@@ -256,6 +58,7 @@ export class Hedgehog extends Pest {
   /** Bumps into walls in a row while wandering: gives up on that wander target. */
   private stuck = 0;
   public readonly hitRadius = 0.45;
+  public readonly habitat = 'land';
 
   constructor(x: number, z: number, terrain: TerrainSystem) {
     super('hedgehog', x, z, terrain, 1.0, 3);
@@ -541,6 +344,7 @@ const DRAGON_MATS = {
 const FIRE_CORE = new THREE.MeshBasicMaterial({ color: 0xfff1a8 });
 const FIRE_SHELL = new THREE.MeshBasicMaterial({ color: 0xff6a1a, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending });
 const FIRE_GEO = new THREE.IcosahedronGeometry(1, 1);
+SHARED_GEOS.add(FIRE_GEO);
 
 interface Fireball {
   mesh: THREE.Group;
@@ -577,12 +381,14 @@ export class BabyDragon extends Pest {
   private readonly fireballs: Fireball[] = [];
   private readonly bursts: Burst[] = [];
   private readonly lastPlayer = new THREE.Vector3();
+  private readonly spiderTmp: Spider[] = [];
   private readonly playerVel = new THREE.Vector3();
   /** Seconds without a clear view while chasing: flies closer, then gives up. */
   private lost = 0;
   private knock = 0;
   private knockDir = 0;
   public readonly hitRadius = 0.6;
+  public readonly habitat = 'land';
 
   constructor(x: number, z: number, terrain: TerrainSystem, private readonly scene: THREE.Scene) {
     super('dragon', x, z, terrain, 1.55, 4);
@@ -947,62 +753,314 @@ export class BabyDragon extends Pest {
 
 // ------------------------------------------------------------------ system
 
-const HEDGEHOGS = 5;
-const DRAGONS = 2;
+/** How many of each kind the wilds keep (driven-off ones come back after a while). */
+const NATURAL_COUNT: Record<PestKind, number> = { hedgehog: 5, dragon: 2, shark: 3, spider: 6 };
+export const PEST_KINDS: PestKind[] = ['hedgehog', 'dragon', 'shark', 'spider'];
 
-/** Keeps a few hedgehogs and baby dragons out in the wilds, away from the farm. */
+export const PEST_HABITAT: Record<PestKind, PestHabitat> = { hedgehog: 'land', dragon: 'land', shark: 'sea', spider: 'cave' };
+
+/** Keeps hedgehogs and baby dragons in the wilds, sharks in the sea and spiders in the caves. */
 export class PestSystem {
   public readonly pests: Pest[] = [];
   public port: PestPort | null = null;
   /** Physics queries for walls and sight lines (set once physics is up). */
   public env: PestEnv = OPEN_ENV;
+  /** Whether a point lies in the cave pocket (set by the exploration layer). */
+  public isCave: (p: THREE.Vector3) => boolean = () => false;
+  /** Whether the caves' colliders are all built (spider spots are checked with rays against them). */
+  public caveReady: () => boolean = () => false;
+  /** Natural spawning and respawning (the developer panel can switch it off to test by hand). */
+  public naturalSpawn = true;
+  /** Bumped whenever pests come or go (the developer panel's list). */
+  public revision = 0;
   private respawnTimer = 0;
+  /** Floor spots in the caves spiders can be put on (chests, mushrooms, ore). */
+  private caveSpots: THREE.Vector3[] = [];
+  /** New cave spots arrived before the colliders: the natural spiders are put down once they are built. */
+  private caveSpawnPending = false;
+  private readonly lastPlayer = new THREE.Vector3();
+  private readonly spiderTmp: Spider[] = [];
 
   constructor(private readonly scene: THREE.Scene, private readonly terrain: TerrainSystem, private readonly particles?: ParticleManager) {}
 
   public populate(player: THREE.Vector3): void {
-    for (let i = 0; i < HEDGEHOGS; i++) this.spawn('hedgehog', player);
-    for (let i = 0; i < DRAGONS; i++) this.spawn('dragon', player);
+    this.lastPlayer.copy(player);
+    if (!this.naturalSpawn) return;
+    for (const kind of PEST_KINDS) {
+      let n = 0;
+      for (const p of this.pests) if (p.kind === kind && !p.placed) n++;
+      for (; n < NATURAL_COUNT[kind]; n++) if (!this.spawnNatural(kind, player)) break;
+    }
   }
 
-  private spawn(kind: PestKind, player: THREE.Vector3): boolean {
-    // Pests live out in the wilds, not on the farm itself
-    const minR = kind === 'dragon' ? 70 : 40;
+  /** The cave network was (re)built: its natural spiders move to the new floor spots. */
+  public setCaveSpots(spots: THREE.Vector3[]): void {
+    this.caveSpots = spots.map((p) => p.clone());
+    for (let i = this.pests.length - 1; i >= 0; i--) {
+      const p = this.pests[i];
+      if (p.kind !== 'spider' || p.placed) continue;
+      p.dispose();
+      this.pests.splice(i, 1);
+    }
+    this.caveSpawnPending = true;
+    this.revision++;
+  }
+
+  /**
+   * A safe spot for a spider near the floor point `s`: in open air (not inside the rock), on a
+   * floor with room around it and out of the water; sometimes up on the ceiling above it instead.
+   */
+  private caveSpot(s: THREE.Vector3, ceiling: boolean): { pos: THREE.Vector3; up: THREE.Vector3 } | null {
+    const env = this.env;
+    const o = tA.copy(s).setY(s.y + 0.6);
+    if (insideRock(env, o)) return null;
+    const n = new THREE.Vector3();
+    const t = env.cast(o, tmpEye.set(0, -1, 0), 1.6, n);
+    if (t < 0 || n.y < 0.5) return null;
+    const floor = new THREE.Vector3(o.x, o.y - t, o.z);
+    // Room for the legs: walls close on three sides or more is a crevice
+    let walls = 0;
+    const side = new THREE.Vector3();
+    const from = new THREE.Vector3(floor.x, floor.y + 0.4, floor.z);
+    for (let i = 0; i < 4; i++) {
+      side.set(Math.cos((i * Math.PI) / 2), 0, Math.sin((i * Math.PI) / 2));
+      if (env.sweep(from, side, 0.7) >= 0) walls++;
+    }
+    if (walls >= 3) return null;
+    if (riverWorld.waterLevelAt3(from.x, from.y, from.z) > from.y) return null;
+    if (ceiling) {
+      const up = new THREE.Vector3();
+      const tc = env.cast(from, side.set(0, 1, 0), 10, up);
+      if (tc > 1.5 && up.y < -0.5) {
+        const c = from.clone().setY(from.y + tc);
+        if (riverWorld.waterLevelAt3(c.x, c.y - 0.4, c.z) <= c.y - 0.4) return { pos: c, up };
+      }
+    }
+    return { pos: floor, up: n };
+  }
+
+  private create(kind: PestKind, x: number, y: number, z: number, up?: THREE.Vector3): Pest {
+    const pest =
+      kind === 'hedgehog' ? new Hedgehog(x, z, this.terrain)
+      : kind === 'dragon' ? new BabyDragon(x, z, this.terrain, this.scene)
+      : kind === 'shark' ? new Shark(x, y, z, this.terrain)
+      : new Spider(x, y, z, this.terrain, this.scene, up);
+    this.pests.push(pest);
+    this.scene.add(pest.group);
+    this.revision++;
+    // Uploaded at once: in the editor the pests are not stepped, the legs still have to show
+    flushSpiderLegs();
+    return pest;
+  }
+
+  private spawnNatural(kind: PestKind, player: THREE.Vector3): boolean {
     for (let tries = 0; tries < 40; tries++) {
+      if (kind === 'spider') {
+        if (!this.caveSpots.length || !this.caveReady()) return false;
+        const s = this.caveSpots[Math.floor(Math.random() * this.caveSpots.length)];
+        // Not right next to the player, and not two on one spot
+        if (tries < 30 && s.distanceTo(player) < 20) continue;
+        if (tries < 30 && this.pests.some((p) => p.kind === 'spider' && p.position.distanceToSquared(s) < 9)) continue;
+        const spot = this.caveSpot(s, Math.random() < 0.4);
+        if (!spot) continue;
+        this.create('spider', spot.pos.x, spot.pos.y, spot.pos.z, spot.up);
+        return true;
+      }
       const a = Math.random() * Math.PI * 2;
+      if (kind === 'shark') {
+        // Out in the open sea, beyond the shallows round the coast
+        const r = coastRadius(Math.cos(a), Math.sin(a)) + 20 + Math.random() * 120;
+        const x = Math.cos(a) * r, z = Math.sin(a) * r;
+        if (Math.hypot(x - player.x, z - player.z) < 45) continue;
+        if (seaDepthAt(this.terrain, x, z) < SHARK_MIN_DEPTH + 1.5) continue;
+        this.create('shark', x, worldSettings.waterLevel - 0.6, z);
+        return true;
+      }
+      // Pests live out in the wilds, not on the farm itself
+      const minR = kind === 'dragon' ? 70 : 40;
       const r = minR + Math.random() * 160;
       const x = Math.cos(a) * r;
       const z = Math.sin(a) * r;
       if (Math.hypot(x, z) > coastRadius(x, z) - 25) continue;
       if (!isWalkable(this.terrain, x, z)) continue;
       if (Math.hypot(x - player.x, z - player.z) < 35) continue;
-      const pest = kind === 'hedgehog' ? new Hedgehog(x, z, this.terrain) : new BabyDragon(x, z, this.terrain, this.scene);
-      this.pests.push(pest);
-      this.scene.add(pest.group);
+      this.create(kind, x, 0, z);
       return true;
     }
     return false;
   }
 
-  public update(dt: number, player: THREE.Vector3, active: boolean): void {
+  /**
+   * Why `kind` cannot be put at `at` (a message for the developer panel), or null when it can.
+   * `onIsland`: the point is on the island's heightmap (false in the caves).
+   */
+  public placementError(kind: PestKind, at: THREE.Vector3, onIsland: boolean, normal?: THREE.Vector3): string | null {
+    if (kind === 'shark') {
+      if (!onIsland || this.isCave(at)) return 'Акули живуть лише в морі';
+      if (seaDepthAt(this.terrain, at.x, at.z) < SHARK_MIN_DEPTH) return `Акулі потрібне глибоке море (від ${SHARK_MIN_DEPTH} м)`;
+      return null;
+    }
+    if (kind === 'spider') {
+      if (onIsland && !this.isCave(at) && at.y < waterLevelAt(at.x, at.z) - 0.1) return 'Павуки не плавають: оберіть сушу або печеру';
+      // The body (off the surface along its normal) must be out of the water too
+      const n = normal ?? tmpEye.set(0, 1, 0);
+      if (riverWorld.waterLevelAt3(at.x + n.x * 0.35, at.y + n.y * 0.35, at.z + n.z * 0.35) > at.y + n.y * 0.35) return 'Павуки не плавають: тут вода';
+      return null;
+    }
+    if (!onIsland || this.isCave(at)) return 'Їжаки й дракончики живуть лише на поверхні острова';
+    if (!isWalkable(this.terrain, at.x, at.z)) return 'Тут вода або край світу';
+    return null;
+  }
+
+  /**
+   * Puts a pest down by hand (the developer panel). Sharks go to mid-depth of the water column at
+   * (x, z); spiders stand on the surface hit (cave floor or island). Null when it cannot go there.
+   */
+  public spawnAt(kind: PestKind, at: THREE.Vector3, onIsland: boolean, normal?: THREE.Vector3): Pest | null {
+    if (this.placementError(kind, at, onIsland, normal)) return null;
+    let y = at.y;
+    if (kind === 'shark') y = worldSettings.waterLevel - Math.min(seaDepthAt(this.terrain, at.x, at.z) * 0.5, 4);
+    const pest = this.create(kind, at.x, y, at.z, normal);
+    pest.placed = true;
+    return pest;
+  }
+
+  /** A pest of `kind` a few metres from the player where it can live; null if there is no such spot near. */
+  public spawnNear(kind: PestKind, player: THREE.Vector3, playerInCave: boolean): Pest | null {
+    if (kind === 'spider') {
+      for (let i = 0; i < 16; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const d = 4 + Math.random() * 4;
+        tA.set(player.x + Math.cos(a) * d, player.y + 1, player.z + Math.sin(a) * d);
+        if (this.isCave(tA) && insideRock(this.env, tA)) continue;
+        const n = new THREE.Vector3();
+        const down = this.env.cast(tA, tmpEye.set(0, -1, 0), 4, n);
+        if (down < 0) continue;
+        tA.y -= down;
+        if (this.placementError('spider', tA, !playerInCave, n)) continue;
+        const p = this.create('spider', tA.x, tA.y, tA.z, n);
+        p.placed = true;
+        return p;
+      }
+      return null;
+    }
+    if (playerInCave) return null;
+    for (let i = 0; i < 60; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = (kind === 'shark' ? 10 : 7) + Math.random() * (kind === 'shark' ? 30 : 8) + i * 0.6;
+      tA.set(player.x + Math.cos(a) * d, 0, player.z + Math.sin(a) * d);
+      tA.y = this.terrain.getHeight(tA.x, tA.z);
+      const p = this.spawnAt(kind, tA, true);
+      if (p) return p;
+    }
+    return null;
+  }
+
+  public remove(pest: Pest): void {
+    const i = this.pests.indexOf(pest);
+    if (i < 0) return;
+    pest.dispose();
+    this.pests.splice(i, 1);
+    this.revision++;
+    flushSpiderLegs();
+  }
+
+  public update(dt: number, player: THREE.Vector3, active: boolean, playerInCave: boolean): void {
     const port = this.port;
     if (!port) return;
+    this.lastPlayer.copy(player);
+    this.separateSpiders();
     for (let i = this.pests.length - 1; i >= 0; i--) {
       const p = this.pests[i];
-      p.update(active ? dt : 0, player, port, this.env, this.particles);
+      // Only the pests of the world the player is in (the surface or the caves) are simulated
+      const here = this.isCave(p.position) === playerInCave;
+      p.update(active && here ? dt : 0, player, port, this.env, this.particles);
       if (p.removed) {
         p.dispose();
         this.pests.splice(i, 1);
+        this.revision++;
+      }
+    }
+    flushSpiderLegs();
+    this.feedSharkWakes(player);
+    if (this.caveSpawnPending && this.caveReady()) {
+      this.caveSpawnPending = false;
+      if (this.naturalSpawn) {
+        let n = 0;
+        for (const p of this.pests) if (p.kind === 'spider' && !p.placed) n++;
+        for (; n < NATURAL_COUNT.spider; n++) if (!this.spawnNatural('spider', player)) break;
       }
     }
     // Driven-off pests come back after a while, somewhere else
     this.respawnTimer -= dt;
     if (this.respawnTimer <= 0) {
       this.respawnTimer = 90;
-      const hedge = this.pests.filter((p) => p.kind === 'hedgehog').length;
-      const drag = this.pests.length - hedge;
-      if (hedge < HEDGEHOGS) this.spawn('hedgehog', player);
-      else if (drag < DRAGONS) this.spawn('dragon', player);
+      if (!this.naturalSpawn) return;
+      for (const kind of PEST_KINDS) {
+        let n = 0;
+        for (const p of this.pests) if (p.kind === kind && !p.placed) n++;
+        if (n < NATURAL_COUNT[kind] && this.spawnNatural(kind, player)) break;
+      }
+    }
+  }
+
+  /** Spiders whose leg spans overlap get pushed apart (a handful of spiders: pairwise is cheap). */
+  private separateSpiders(): void {
+    const sp = this.spiderTmp;
+    sp.length = 0;
+    for (const p of this.pests) if (p instanceof Spider) { p.avoid.set(0, 0, 0); sp.push(p); }
+    for (let i = 0; i < sp.length; i++) {
+      const a = sp[i];
+      for (let j = i + 1; j < sp.length; j++) {
+        const b = sp[j];
+        const r = a.spacing + b.spacing;
+        sepTmp.subVectors(a.position, b.position);
+        const d2 = sepTmp.lengthSq();
+        if (d2 >= r * r) continue;
+        const d = Math.sqrt(d2);
+        // Exactly on top of each other: split them along an arbitrary direction
+        if (d < 1e-3) sepTmp.set(Math.cos(a.id * 2.4), 0, Math.sin(a.id * 2.4));
+        else sepTmp.divideScalar(d);
+        const w = (r - d) / r;
+        a.avoid.addScaledVector(sepTmp, w);
+        b.avoid.addScaledVector(sepTmp, -w);
+      }
+    }
+  }
+
+  /** Up to `max` sharks within `range` of `near`, always in the same (id) order. */
+  public sharksNear(near: THREE.Vector3, range: number, max: number, out: Shark[]): Shark[] {
+    out.length = 0;
+    const r2 = range * range;
+    for (const p of this.pests) {
+      if (!(p instanceof Shark) || !p.group.visible) continue;
+      if (p.position.distanceToSquared(near) > r2) continue;
+      out.push(p);
+    }
+    if (out.length > max) {
+      out.sort((a, b) => a.position.distanceToSquared(near) - b.position.distanceToSquared(near));
+      out.length = max;
+    }
+    return out.sort((a, b) => a.id - b.id);
+  }
+
+  /** The sharks nearest the player whose fins cut the surface push the wave simulation. */
+  private feedSharkWakes(player: THREE.Vector3): void {
+    let a: Shark | null = null, b: Shark | null = null;
+    let da = 30 * 30, db = 30 * 30;
+    for (const p of this.pests) {
+      if (!(p instanceof Shark) || p.wakeSpeed <= 0) continue;
+      const d = p.position.distanceToSquared(player);
+      if (d < da) {
+        b = a; db = da;
+        a = p; da = d;
+      } else if (d < db) {
+        b = p; db = d;
+      }
+    }
+    for (let i = 0; i < WATER_ANIMAL_SLOTS.length; i++) {
+      const s = i === 0 ? a : b;
+      if (s) setWaterLimb(WATER_ANIMAL_SLOTS[i], s.wakeAt.x, s.wakeAt.z, s.wakeSpeed, 0.5);
     }
   }
 
@@ -1012,18 +1070,17 @@ export class PestSystem {
     for (const p of this.pests) {
       const t = p.threat;
       if (t <= level || p.removed) continue;
-      const dx = p.position.x - player.x, dz = p.position.z - player.z;
-      if (dx * dx + dz * dz <= maxDist * maxDist) level = t;
+      if (p.position.distanceToSquared(player) <= maxDist * maxDist) level = t;
     }
     return level;
   }
 
-  /** Nearest pest that is after the player (for the compass / HUD warning). */
+  /** Nearest pest to the player (for the compass / HUD warning, and no sleeping with one about). */
   public nearestThreat(player: THREE.Vector3, maxDist: number): Pest | null {
     let best: Pest | null = null;
     let bestD = maxDist;
     for (const p of this.pests) {
-      const d = Math.hypot(p.position.x - player.x, p.position.z - player.z);
+      const d = p.position.distanceTo(player);
       if (d < bestD) {
         bestD = d;
         best = p;
@@ -1113,6 +1170,8 @@ export class PestSystem {
   public clear(): void {
     for (const p of this.pests) p.dispose();
     this.pests.length = 0;
+    this.revision++;
+    flushSpiderLegs();
   }
 }
 
