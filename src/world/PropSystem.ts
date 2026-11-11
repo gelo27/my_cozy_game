@@ -11,6 +11,7 @@ import { BUSH_MATERIAL, TREE_MATERIAL, TreeLods, foliageMaterialOf, getTreeLods,
 import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
 import { BUSH_FADE_RANGE, FadeRange, TREE_FADE_RANGE, acquireDistanceDither, acquireDither, acquireInstancedDither } from './LodDither';
 import { LodInstances } from './LodInstances';
+import { withSnowCover } from './SnowCover';
 import { buildDecorRockLods } from './RockModels';
 import { FLOWER_MATERIAL, loadFlowerModels } from './FlowerModels';
 import { AlgaeField, algaeGeometry, clampLinks } from './AlgaeChains';
@@ -156,10 +157,10 @@ export interface PropSaveData {
 
 const M = {
   bark: new THREE.MeshLambertMaterial({ color: 0x6b4426 }),
-  pine: new THREE.MeshLambertMaterial({ color: 0x2f6b3a }),
-  leaf: new THREE.MeshLambertMaterial({ color: 0x4f9a3c }),
-  bush: new THREE.MeshLambertMaterial({ color: 0x3f8a3a }),
-  rock: new THREE.MeshLambertMaterial({ color: 0x8a8580, flatShading: true }),
+  pine: withSnowCover(new THREE.MeshLambertMaterial({ color: 0x2f6b3a })),
+  leaf: withSnowCover(new THREE.MeshLambertMaterial({ color: 0x4f9a3c })),
+  bush: withSnowCover(new THREE.MeshLambertMaterial({ color: 0x3f8a3a })),
+  rock: withSnowCover(new THREE.MeshLambertMaterial({ color: 0x8a8580, flatShading: true })),
   wood: new THREE.MeshLambertMaterial({ color: 0xa87444 }),
   darkWood: new THREE.MeshLambertMaterial({ color: 0x6e4a2c }),
   metal: new THREE.MeshLambertMaterial({ color: 0x3c4148 }),
@@ -179,7 +180,7 @@ const WHITE = new THREE.Color(1, 1, 1);
 const VERTEX_COLOR_MAT = new THREE.MeshLambertMaterial({ vertexColors: true });
 
 /** Faceted procedural stone for the decorative rocks (built once per type, three LODs). */
-const ROCK_MATERIAL = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+const ROCK_MATERIAL = withSnowCover(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }));
 const decorRockLods = new Map<string, THREE.BufferGeometry[]>();
 function getDecorRockLods(type: string): THREE.BufferGeometry[] | null {
   if (type !== 'rock_small' && type !== 'rock_big') return null;

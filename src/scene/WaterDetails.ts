@@ -9,7 +9,6 @@ import { rippleSimUniforms, waterRippleSim } from './WaterRippleSim';
  * - the WATERLINE: every lit object that crosses a water surface (sea or river) gets a thin white
  *   band where it meets the water — posts, legs, hulls, the swimmer. It costs one river-texture
  *   fetch per VERTEX and a compare per pixel, so it is patched into every lit material;
- * - RAIN RINGS: crisp rings spreading where drops hit (sea and rivers share this chunk);
  * - a small value noise for the broken shore ripples on the sea;
  * - RIPPLE RINGS: crisp rings spreading from whatever disturbs the surface (the swimmer's strokes,
  *   wading legs, splashes, floating props). The CPU keeps a small ring buffer of sources (centre,
@@ -143,32 +142,13 @@ export function updateWaterDetails(dt: number): void {
   rippleUniforms.uWdRipCount.value = n;
 }
 
-/** Hash, value noise and rain rings. Uses derivatives: call outside non-uniform branches. */
+/** Hash and value noise. */
 export const WATER_DETAIL_GLSL = /* glsl */ `
 float wdHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float wdNoise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   f = f * f * (3.0 - 2.0 * f);
   return mix(mix(wdHash(i), wdHash(i + vec2(1, 0)), f.x), mix(wdHash(i + vec2(0, 1)), wdHash(i + vec2(1, 1)), f.x), f.y);
-}
-/** One layer: a ring per cell, at a random spot and phase, kept inside its cell. */
-float wdRingLayer(vec2 q, float aa, float t, float rain, float seed) {
-  vec2 ci = floor(q);
-  float ph = fract(t * 1.15 + wdHash(ci + seed) * 7.0);
-  float alive = step(wdHash(ci + seed + 1.3), rain * 0.7);
-  vec2 c = vec2(wdHash(ci + seed + 3.1), wdHash(ci + seed + 7.7)) * 0.5 + 0.25;
-  float r = sqrt(ph) * 0.24;                 // fast at first, then slowing down
-  float w = mix(0.04, 0.012, ph);           // thins out as it spreads
-  float d = abs(length(fract(q) - c) - r);
-  return (1.0 - smoothstep(w, w + aa, d)) * (1.0 - smoothstep(0.65, 1.0, ph)) * alive;
-}
-/** Rain rings at world point xz (0..1). rain 0..1 = how many cells are dripping. */
-float wdRainRings(vec2 xz, float t, float rain) {
-  vec2 q = xz * 2.2;
-  float aa = length(fwidth(q)) * 0.8;
-  float far = 1.0 - smoothstep(0.06, 0.2, aa); // cells smaller than a few pixels: fade out
-  float v = max(wdRingLayer(q, aa, t, rain, 0.0), wdRingLayer(q + 0.5, aa, t * 0.93 + 0.4, rain, 17.0));
-  return v * far;
 }
 `;
 
@@ -184,7 +164,7 @@ uniform vec4 uWdRipB[WD_RIPPLES];
 uniform int uWdRipCount;
 uniform sampler2D uWdSim;
 uniform vec4 uWdSimArea;
-uniform vec3 uWdSimLook;
+uniform vec4 uWdSimLook;
 /** Analytic rings. No derivatives inside: may be called in a branch (e.g. a distance early-out). */
 float wdRipples(vec2 xz, float aa) {
   if (uWdRipCount == 0) return 0.0;

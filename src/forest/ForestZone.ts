@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { withSnowCover } from '../world/SnowCover';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
@@ -151,20 +152,20 @@ export class ForestZone {
       color: 0xd2b48c, // Tan wood interior
       });
 
-    this.foliageMaterial1 = new THREE.MeshLambertMaterial({
+    this.foliageMaterial1 = withSnowCover(new THREE.MeshLambertMaterial({
       color: 0x2e6f40, // BotW forest deep evergreen
       flatShading: true,
-    });
+    }));
 
-    this.foliageMaterial2 = new THREE.MeshLambertMaterial({
+    this.foliageMaterial2 = withSnowCover(new THREE.MeshLambertMaterial({
       color: 0x3d8b4e, // BotW vibrant mid leaf
       flatShading: true,
-    });
+    }));
 
-    this.foliageMaterial3 = new THREE.MeshLambertMaterial({
+    this.foliageMaterial3 = withSnowCover(new THREE.MeshLambertMaterial({
       color: 0x5ab16b, // BotW bright canopy crown
       flatShading: true,
-    });
+    }));
 
     this.woodLogMaterial = new THREE.MeshLambertMaterial({
       color: 0x8a5530,

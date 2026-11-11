@@ -5,6 +5,7 @@ import { addRingScallops } from './RingScallops';
 import { loadPineCrown, trunkWithCrown } from './PineCrownModel';
 import { injectNightLights } from './NightLighting';
 import { injectWaterline } from '../scene/WaterDetails';
+import { injectSnowCover } from './SnowCover';
 import { vegetationSettings as veg } from './VegetationSettings';
 
 const TREES_URL = `${import.meta.env.BASE_URL}models/trees_pack.glb`;
@@ -94,6 +95,7 @@ uniform int uBushBendCount;`;
       #endif`;
     }
     shader.vertexShader = shader.vertexShader.replace('#include <common>', head).replace('#include <begin_vertex>', body);
+    injectSnowCover(shader);
   };
   mat.customProgramCacheKey = () => (bend ? 'bush-wind-bend' : 'tree-wind');
   return mat;

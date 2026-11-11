@@ -18,6 +18,8 @@ export const worldSettings = {
   timeOfDay: 9,
   /** Days passed since the world began (the clock wrapping past midnight adds one). */
   day: 0,
+  /** In-game days in each season (spring, summer, autumn, winter; see Seasons.ts). */
+  daysPerSeason: 7,
   /** Real seconds per in-game hour; 0 freezes the clock. */
   secondsPerHour: 60,
   /** Global simulation speed for the editor (0 = paused). */

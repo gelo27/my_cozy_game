@@ -21,6 +21,11 @@ export interface VegetationSettings {
   /** Brightness at the blade's root / tip. */
   grassBaseShade: number;
   grassTipShade: number;
+  /** Extra brightness of a blade's tip the lower it is bent (wind gusts sweep light over the field). */
+  grassBendLight: number;
+  /** Trampling: how hard bodies push the blades aside (0 = off), and how long they take to stand back up (s). */
+  grassTrail: number;
+  grassTrailRecover: number;
 
   // ---- trees and bushes: distances
   /** Trees are drawn up to this far (m). */
@@ -88,6 +93,9 @@ export const VEGETATION_DEFAULTS: Readonly<VegetationSettings> = {
   grassWind: 1,
   grassBaseShade: 0.64,
   grassTipShade: 1.18,
+  grassBendLight: 0.35,
+  grassTrail: 1,
+  grassTrailRecover: 4,
 
   treeViewDist: 240,
   oakNearDist: MOBILE ? 40 : 60,

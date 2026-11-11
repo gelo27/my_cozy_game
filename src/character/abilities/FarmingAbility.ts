@@ -62,7 +62,8 @@ export class FarmingAbility implements IAbility {
   }
 
   public update(dt: number, context: CharacterContext): void {
-    if (!this.enabled || !this.farmingManager || !this.inventoryManager) {
+    // Swimming / diving: tools are put away, nothing in hand can be used
+    if (!this.enabled || !this.farmingManager || !this.inventoryManager || context.isSwimming) {
       this.farmingManager?.fields.showGhost(0, 0, null);
       this.shovelJob = null;
       this.resetHold();
@@ -205,15 +206,32 @@ export class FarmingAbility implements IAbility {
       return;
     }
 
-    // Preview the field centred under the character: walk to move it
-    const target = fields.resolveShovelTarget(playerPos.x, playerPos.z);
+    // The shovel works only where the crosshair meets the ground (aimed as soon as it is in hand),
+    // within reach of the player
+    const input = context.input as any;
+    const aim = context.isGroundAiming ? context.groundAim : null;
+    if (!context.isGroundAiming) {
+      // Swimming, climbing, building: nothing to aim at
+      fields.showGhost(0, 0, null);
+      this.currentPrompt = null;
+      this.resetHold();
+      return;
+    }
+    if (!aim || !aim.inReach) {
+      fields.showGhost(0, 0, null);
+      this.currentPrompt = { ...this.tooFarPrompt() };
+      this.resetHold();
+      return;
+    }
+
+    // The field ghost sits under the crosshair
+    const target = fields.resolveShovelTarget(aim.point.x, aim.point.z);
     const prompt = (this.currentPrompt = this.buildShovelPrompt(target));
 
     if (target.kind === 'dig') fields.showGhost(target.gx, target.gz, target.reason ? 'bad' : 'ok');
     else fields.showGhost(target.field.gx, target.field.gz, 'fill');
 
     // Hold E / LMB: a fresh press arms it, releasing or the frame moving to another spot cancels
-    const input = context.input as any;
     const actionable = canAct && !!prompt.canDig;
     const key = target.kind === 'dig' ? `d${target.gx},${target.gz}` : `f${target.field.id}`;
     if (actionable && (input.interactJustPressed || input.shootJustPressed)) {
@@ -242,6 +260,9 @@ export class FarmingAbility implements IAbility {
       timer: 0,
       impactDone: false,
     };
+    // Turn to the field for the dig (the body is free while aiming)
+    const fdx = gx + FIELD_CELLS / 2 - playerPos.x, fdz = gz + FIELD_CELLS / 2 - playerPos.z;
+    if (fdx * fdx + fdz * fdz > 1) context.model?.setFacingAngleInstant(Math.atan2(fdx, fdz));
     this.startSwing(context);
   }
 
@@ -271,6 +292,9 @@ export class FarmingAbility implements IAbility {
       const t = context.body.translation();
       const facing = context.model?.group.rotation.y ?? 0;
       const bladePos = this.tmpVec.set(t.x + Math.sin(facing) * 0.9, t.y - 0.9, t.z + Math.cos(facing) * 0.9);
+      // An aimed field a few metres off: the earth flies there, not at the feet
+      const fcx = job.gx + FIELD_CELLS / 2, fcz = job.gz + FIELD_CELLS / 2;
+      if ((fcx - t.x) ** 2 + (fcz - t.z) ** 2 > 2.25 + (FIELD_CELLS / 2) ** 2) bladePos.set(fcx, t.y - 0.9, fcz);
       context.particleManager?.emitDirtClods(bladePos, 12);
       audioEngine.at(bladePos).playPlantSeed();
       job.swingsLeft--;
@@ -311,6 +335,14 @@ export class FarmingAbility implements IAbility {
         fields.removeField(field.id);
       }
     }
+  }
+
+  private tooFarPrompt(): FarmInteractionPrompt {
+    return {
+      plotId: '', isField: true, cropType: null, stage: null, waterCount: 0, isWatered: false,
+      canWater: false, canPlant: false, canHarvest: false, growthProgress: 0,
+      shovel: 'blocked', canDig: false, actionText: t('aim.tooFar'), hintText: '',
+    };
   }
 
   private buildShovelPrompt(target: ShovelTarget): FarmInteractionPrompt {

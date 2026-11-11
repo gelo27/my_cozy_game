@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Coins, Zap, Settings2, Pause,
+  Backpack, Hammer, Map as MapIcon, Bike, Sun, Moon, Cloud, CloudRain, CloudLightning, CloudFog, Snowflake, Wind, Coins, Zap, Settings2, Pause,
 } from 'lucide-react';
 import { GameplayHudState, GameplayPrompt } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji, InventoryItem } from '../../inventory/types/InventoryTypes';
 import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
+import { SEASON_LABELS } from '../../world/Seasons';
 import { t, dataName } from '../../i18n/i18n';
 import { worldSettings } from '../../world/WorldSettings';
 import { ItemIcon } from '../ItemIcon';
@@ -18,6 +19,7 @@ const WEATHER_ICON: Record<WeatherType, React.ElementType> = {
   storm: CloudLightning,
   fog: CloudFog,
   snow: Snowflake,
+  blizzard: Wind,
 };
 
 const panel = 'bg-[#fffaf0]/95 text-[#4a3b2a] border border-[#e9dcc3] shadow-[0_6px_20px_rgba(60,40,10,0.18)]';
@@ -92,6 +94,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           <WeatherIcon className="w-4 h-4 text-amber-600" />
           <ClockLabel />
           <span className="text-xs text-[#8a7556] hidden sm:inline">{dataName('weather', hud.weather, WEATHER_LABELS[hud.weather])}</span>
+          <span className="text-xs text-[#8a7556] hidden sm:inline">· {dataName('season', hud.season, SEASON_LABELS[hud.season])} {hud.seasonDay}</span>
         </div>
         <div className={`${panel} rounded-2xl px-3 py-1.5 touch:px-2.5 touch:py-1 flex items-center gap-1.5`}>
           <Coins className="w-4 h-4 text-yellow-500" />

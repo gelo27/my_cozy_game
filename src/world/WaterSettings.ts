@@ -37,8 +37,16 @@ export interface WaterSettings {
   foamColor: number;
   foamAmount: number;
   foamLine: number;
+  /** Shore lines (thin strokes drifting in toward the shore) on / off, and how fast they come. */
   rippleFoam: boolean;
   rippleSpeed: number;
+  /** Shore lines: how many at once, half width (m), how far out they are born (m),
+   *  dash density (pieces per metre of shore) and how much of each line is gap (0..1). */
+  shoreLineCount: number;
+  shoreLineWidth: number;
+  shoreLineReach: number;
+  shoreLineDash: number;
+  shoreLineGap: number;
   /** Rings around the player: true = GPU wave simulation, false = analytic rings (cheapest). */
   rippleSim: boolean;
   /** Simulated area around the player (m, square). */
@@ -55,6 +63,11 @@ export interface WaterSettings {
   rippleSimSlope: number;
   /** Strength of the wake pushed by a moving body. */
   rippleSimWake: number;
+  /** Rain drops ripple the simulated water (only inside the area around the player). */
+  rippleSimRain: boolean;
+  /** Rain: how many drops (×), and how hard each one hits (×). */
+  rippleSimRainAmount: number;
+  rippleSimRainStrength: number;
 }
 
 export const WATER_DEFAULTS: Readonly<WaterSettings> = {
@@ -78,6 +91,11 @@ export const WATER_DEFAULTS: Readonly<WaterSettings> = {
   foamLine: 0.09,
   rippleFoam: true,
   rippleSpeed: 0.22,
+  shoreLineCount: 3,
+  shoreLineWidth: 0.035,
+  shoreLineReach: 2.4,
+  shoreLineDash: 0.4,
+  shoreLineGap: 0.45,
   rippleSim: true,
   rippleSimArea: 16,
   rippleSimSpeed: 0.18,
@@ -86,6 +104,9 @@ export const WATER_DEFAULTS: Readonly<WaterSettings> = {
   rippleSimCrest: 0.035,
   rippleSimSlope: 2.2,
   rippleSimWake: 0.1,
+  rippleSimRain: true,
+  rippleSimRainAmount: 1,
+  rippleSimRainStrength: 1,
 };
 
 const STORAGE_KEY = 'farm.waterSettings.v1';

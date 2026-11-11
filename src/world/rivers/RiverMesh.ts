@@ -36,8 +36,9 @@ const row = (q: RiverSample, v: number): Row => ({ x: q.x, z: q.z, y: q.s, hw: q
  * A waterfall is not a flat step: from the lip the water follows a projectile arc (out by
  * `travel`, down by the drop with t^2), so the curtain bulges out and lands in the plunge pool.
  * Attributes: `uv` = (metres across from the centre, metres along the flow) for flow scrolling;
- * `aRiver` = (foam, alpha, 0..1 across, estuary 0..2) for white water, fades, bank foam and the
- * blend into the sea.
+ * `aRiver` = (foam, alpha, 0..1 across, estuary 0..2) for white water, fades, bank lines and the
+ * blend into the sea; `aFlow` = the flow direction (world XZ), to turn the wave slopes sampled in
+ * (across, along) metres back into world space.
  */
 export function buildRiverGeometry(river: SampledRiver): THREE.BufferGeometry[] {
   const S = river.samples;
@@ -107,6 +108,7 @@ function ribbon(rows: Row[]): THREE.BufferGeometry {
   const pos = new Float32Array(count * 3);
   const uv = new Float32Array(count * 2);
   const attr = new Float32Array(count * 4);
+  const flow = new Float32Array(count * 2);
   let v = 0;
   for (const r of rows) {
     // Left of the flow direction
@@ -123,6 +125,8 @@ function ribbon(rows: Row[]): THREE.BufferGeometry {
       attr[v * 4 + 1] = r.alpha;
       attr[v * 4 + 2] = Math.abs(u) * (half / Math.max(0.3, r.hw));
       attr[v * 4 + 3] = r.mouth;
+      flow[v * 2] = r.tx;
+      flow[v * 2 + 1] = r.tz;
       v++;
     }
   }
@@ -139,6 +143,7 @@ function ribbon(rows: Row[]): THREE.BufferGeometry {
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
   geo.setAttribute('aRiver', new THREE.BufferAttribute(attr, 4));
+  geo.setAttribute('aFlow', new THREE.BufferAttribute(flow, 2));
   geo.setIndex(count > 65535 ? new THREE.Uint32BufferAttribute(index, 1) : new THREE.Uint16BufferAttribute(index, 1));
   geo.computeVertexNormals();
   geo.computeBoundingSphere();

@@ -204,6 +204,90 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     buyPrice: 30,
   },
   {
+    id: 'tulip_purple',
+    name: 'Фіолетові тюльпани',
+    category: 'seeds',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Flower2',
+    color: '#9a2ec4',
+    description: 'Кущик тюльпанів, зірваний на луці. Візьміть у руки й посадіть будь-де на відкритій землі.',
+    isEquippable: true,
+    sellPrice: 2,
+  },
+  {
+    id: 'tulip_white',
+    name: 'Білі тюльпани',
+    category: 'seeds',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Flower2',
+    color: '#e7d8cf',
+    description: 'Кущик тюльпанів, зірваний на луці. Візьміть у руки й посадіть будь-де на відкритій землі.',
+    isEquippable: true,
+    sellPrice: 2,
+  },
+  {
+    id: 'tulip_yellow',
+    name: 'Жовті тюльпани',
+    category: 'seeds',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Flower2',
+    color: '#f6b51e',
+    description: 'Кущик тюльпанів, зірваний на луці. Візьміть у руки й посадіть будь-де на відкритій землі.',
+    isEquippable: true,
+    sellPrice: 2,
+  },
+  {
+    id: 'tulip_red',
+    name: 'Червоні тюльпани',
+    category: 'seeds',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Flower2',
+    color: '#e0391d',
+    description: 'Кущик тюльпанів, зірваний на луці. Візьміть у руки й посадіть будь-де на відкритій землі.',
+    isEquippable: true,
+    sellPrice: 2,
+  },
+  {
+    id: 'pine_cone',
+    name: 'Соснова шишка',
+    category: 'seeds',
+    count: 0,
+    maxStack: 99,
+    iconName: 'TreePine',
+    color: '#7a4f2a',
+    description: 'Шишка зі зрубаної сосни. Візьміть у руки й посадіть на відкритій землі — за кілька хвилин виросте нова сосна.',
+    isEquippable: true,
+    sellPrice: 1,
+  },
+  {
+    id: 'acorn',
+    name: 'Жолудь',
+    category: 'seeds',
+    count: 0,
+    maxStack: 99,
+    iconName: 'TreeDeciduous',
+    color: '#a8742f',
+    description: 'Жолудь зі зрубаного дуба. Візьміть у руки й посадіть на відкритій землі — за кілька хвилин виросте новий дуб.',
+    isEquippable: true,
+    sellPrice: 1,
+  },
+  {
+    id: 'bush_sapling',
+    name: 'Відросток куща',
+    category: 'seeds',
+    count: 0,
+    maxStack: 99,
+    iconName: 'Sprout',
+    color: '#4f9a3a',
+    description: 'Відросток вирубаного куща. Візьміть у руки й посадіть на відкритій землі — скоро виросте новий кущ.',
+    isEquippable: true,
+    sellPrice: 1,
+  },
+  {
     id: 'apple',
     name: 'Яблуко',
     category: 'food',
@@ -498,6 +582,10 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'pumpkin_seed') return '🎃';
   if (item.id === 'apple_sapling') return '🌱';
   if (item.id === 'apple') return '🍎';
+  if (item.id.startsWith('tulip_')) return '🌷';
+  if (item.id === 'acorn') return '🌰';
+  if (item.id === 'pine_cone') return '🌲';
+  if (item.id === 'bush_sapling') return '🌿';
   if (item.id.startsWith('crate_')) return '📦';
   if (item.id === 'crate_wheat') return '📦';
   if (item.id === 'crate_carrot') return '📦';

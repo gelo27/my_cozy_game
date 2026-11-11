@@ -1,5 +1,6 @@
 import type { WeatherType } from './WeatherSystem';
 import { worldSettings } from './WorldSettings';
+import { Season, nowDay, seasonOf, seasonProgressOf } from './Seasons';
 
 /**
  * Automatic weather: a seeded Markov chain over WeatherType with per-state durations in in-game
@@ -9,15 +10,51 @@ import { worldSettings } from './WorldSettings';
  * state to WeatherSystem.setWeather(type, smooth = true), which eases the sky / fog / rain toward it.
  */
 
-/** Next-state weights per state (normalised when rolled; time-of-day modifiers multiply them). */
-const TRANSITIONS: Record<WeatherType, Partial<Record<WeatherType, number>>> = {
+type Row = Partial<Record<WeatherType, number>>;
+
+/**
+ * Next-state weights per state (normalised when rolled; season and time-of-day modifiers multiply
+ * them). Spring, summer and autumn share this table; snow and blizzard rows only lead out of a
+ * snowy spell that started before the season changed.
+ */
+const TRANSITIONS: Record<WeatherType, Row> = {
   clear: { clear: 0.45, cloudy: 0.47, fog: 0.08 },
   cloudy: { clear: 0.38, cloudy: 0.2, rain: 0.34, storm: 0.06, fog: 0.02 },
   rain: { cloudy: 0.55, rain: 0.25, storm: 0.15, clear: 0.05 },
   storm: { rain: 0.75, cloudy: 0.25 },
   fog: { clear: 0.6, cloudy: 0.4 },
-  snow: { cloudy: 0.6, snow: 0.3, clear: 0.1 },
+  snow: { cloudy: 0.6, snow: 0.2, clear: 0.2 },
+  blizzard: { snow: 0.5, cloudy: 0.5 },
 };
+
+/** Winter: frosty clear days, grey overcast, snowfalls and now and then a blizzard; no rain. */
+const WINTER: Record<WeatherType, Row> = {
+  clear: { clear: 0.45, cloudy: 0.4, fog: 0.15 },
+  cloudy: { clear: 0.3, cloudy: 0.2, snow: 0.42, blizzard: 0.05, fog: 0.03 },
+  snow: { cloudy: 0.45, snow: 0.3, blizzard: 0.13, clear: 0.12 },
+  blizzard: { snow: 0.7, cloudy: 0.3 },
+  fog: { clear: 0.5, cloudy: 0.5 },
+  rain: { cloudy: 0.7, snow: 0.3 },
+  storm: { cloudy: 1 },
+};
+
+/** Per-season multipliers on the shared table (summer: sunny with thunderstorms; autumn: wet and foggy). */
+const SEASON_MUL: Record<Season, Row> = {
+  spring: { rain: 1.2, clear: 0.95 },
+  summer: { clear: 1.3, rain: 0.75, storm: 1.4, fog: 0.6 },
+  autumn: { clear: 0.8, rain: 1.25, fog: 1.7, storm: 0.6 },
+  winter: {},
+};
+
+/**
+ * Share of the rain that falls as snow outside winter: the first snow at the end of autumn, the
+ * last at the start of spring (0 the rest of the year).
+ */
+function snowShare(season: Season, progress: number): number {
+  if (season === 'autumn') return Math.max(0, (progress - 0.6) / 0.4) * 0.7;
+  if (season === 'spring') return Math.max(0, (0.3 - progress) / 0.3) * 0.6;
+  return 0;
+}
 
 /** How long each state lasts, in in-game hours [min, max]. */
 const DURATION: Record<WeatherType, [number, number]> = {
@@ -27,9 +64,10 @@ const DURATION: Record<WeatherType, [number, number]> = {
   storm: [0.5, 1.5],
   fog: [1, 2.5],
   snow: [2, 5],
+  blizzard: [0.7, 2],
 };
 
-const TYPES: WeatherType[] = ['clear', 'cloudy', 'rain', 'storm', 'fog', 'snow'];
+const TYPES: WeatherType[] = ['clear', 'cloudy', 'rain', 'storm', 'fog', 'snow', 'blizzard'];
 /** How many states are rolled ahead. */
 const FORECAST_LEN = 4;
 /** Logic tick (real seconds). */
@@ -67,8 +105,6 @@ class Rng {
 export class WeatherDirector {
   /** Off = the weather stays as set by hand (editor / console). */
   public auto = true;
-  /** Snow is out of the chain until seasons exist (it would fall in the middle of summer). */
-  public allowSnow = false;
 
   private readonly rng: Rng;
   private current: WeatherType;
@@ -202,17 +238,33 @@ export class WeatherDirector {
     return this.rng.range(a, b);
   }
 
-  /** Picks the state after `prev`, starting at clock hour `hour` (fog favours mornings, storms afternoons). */
+  /**
+   * Picks the state after `prev`, starting at clock hour `hour` (fog favours mornings, storms
+   * afternoons), with the weights of the season that state starts in.
+   */
   private rollNext(prev: WeatherType, hour: number): WeatherType {
     const h = ((hour % 24) + 24) % 24;
-    const row = TRANSITIONS[prev];
+    // The season when this state begins (the forecast may reach into the next one)
+    let ahead = hour - worldSettings.timeOfDay;
+    if (ahead < 0) ahead += 24;
+    const day = nowDay() + ahead / 24;
+    const season = seasonOf(Math.floor(day));
+    const winter = season === 'winter';
+    const row = (winter ? WINTER : TRANSITIONS)[prev];
+    const mul = SEASON_MUL[season];
+    const share = winter ? 0 : snowShare(season, seasonProgressOf(day));
     let total = 0;
     for (let i = 0; i < TYPES.length; i++) {
       const t = TYPES[i];
-      let w = row[t] ?? 0;
+      let w = (row[t] ?? 0) * (mul[t] ?? 1);
       if (t === 'fog') w *= h >= 3 && h <= 9 ? 3 : 0.25;
       else if (t === 'storm') w *= h >= 13 && h <= 20 ? 1.6 : 0.6;
-      else if (t === 'snow' && !this.allowSnow) w = 0;
+      // Outside winter snow only comes in place of rain (late autumn, early spring)
+      if (!winter) {
+        if (t === 'snow') w = ((row.rain ?? 0) * (mul.rain ?? 1)) * share + (prev === 'snow' ? w * share : 0);
+        else if (t === 'rain') w *= 1 - share;
+        else if (t === 'blizzard') w = 0;
+      }
       this.weights[i] = w;
       total += w;
     }

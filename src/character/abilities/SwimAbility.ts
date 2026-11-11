@@ -12,9 +12,12 @@ import { WaterEffects } from '../../scene/WaterEffects';
 import { WaterParticleSystem } from '../../particles/WaterParticleSystem';
 import { setWaterBody, setWaterLimb } from '../../scene/WaterDetails';
 
-/** Water shallower than this (m, surface to bed) is waded on foot; deeper is swum. */
-const WADE_DEPTH_ENTER = 1.15;
-const WADE_DEPTH_EXIT = 1.0;
+/**
+ * Water shallower than this (m, surface to bed) is waded on foot; deeper is swum. The body is
+ * 1.5 m tall with the waist ~0.85 m above the soles: water over the waist is swum.
+ */
+const WADE_DEPTH_ENTER = 0.88;
+const WADE_DEPTH_EXIT = 0.78;
 /** Within this distance (m) below the resting height the swimmer is caught by the surface. */
 const SURFACE_CAPTURE = 0.55;
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -114,7 +117,12 @@ export class SwimAbility implements IAbility {
     riverWorld.flowAt(pos.x, pos.z, this.flow);
     // Shallows are waded, not swum: the player stands up wherever the water is at most about
     // waist / chest deep (hysteresis so walking along the edge does not flicker)
-    const bed = pos.y <= level + 0.45 ? this.waterDepthUnder(context, pos, level, inCavePool) : Infinity;
+    let bed = pos.y <= level + 0.45 ? this.waterDepthUnder(context, pos, level, inCavePool) : Infinity;
+    // On foot, how deep the feet really are also counts: the ray can catch a stone, a root or the
+    // bank beside the feet and read shallow while the player stands neck deep
+    if (!this.isSwimming && context.ground.isGrounded) {
+      bed = Math.max(bed, level - (pos.y - CAPSULE_HALF_TOTAL));
+    }
     const shallow = bed < (this.isSwimming ? WADE_DEPTH_EXIT : WADE_DEPTH_ENTER);
 
     // 1. Water Bounds Check

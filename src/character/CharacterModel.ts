@@ -937,6 +937,13 @@ export class CharacterModel {
       this.axeSwingProgress = Math.max(0, this.axeSwingProgress - dt * 3.8);
     }
     this.weaponRecoilKick = THREE.MathUtils.lerp(this.weaponRecoilKick, 0, 1.0 - Math.exp(-22.0 * dt));
+    // Nothing is held while swimming or diving: the item in hand is put away until back on foot
+    const handFree = !!state.isSwimming;
+    if (this.weaponPivot.visible === handFree) this.weaponPivot.visible = !handFree;
+    if (handFree) {
+      this.axeSwingProgress = 0;
+      this.wateringProgress = 0;
+    }
     // Slingshot shot: the fork snaps forward and settles back
     if (this.activeWeapon === 15) this.weaponPivot.rotation.x = -this.weaponRecoilKick * 0.35;
     else if (this.weaponPivot.rotation.x !== 0) this.weaponPivot.rotation.x = 0;

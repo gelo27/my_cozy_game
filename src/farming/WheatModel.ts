@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { injectNightLights } from '../world/NightLighting';
+import { injectPickGlow } from '../world/PickGlow';
 import { CropStage } from './types/FarmingTypes';
 
 const WHEAT_URL = `${import.meta.env.BASE_URL}models/wheat.glb`;
@@ -50,7 +51,13 @@ export function createFieldCropMaterial(sway: number, height: number): THREE.Mes
 #endif`
       );
   };
-  mat.customProgramCacheKey = () => 'field-crop-sway';
+  // After the sway lines (both hook begin_vertex): the field the harvest prompt is about glows
+  const compile = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    compile.call(mat, shader, renderer);
+    injectPickGlow(shader, 'area');
+  };
+  mat.customProgramCacheKey = () => 'field-crop-sway-glow2';
   return mat;
 }
 

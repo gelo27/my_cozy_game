@@ -4,9 +4,10 @@ import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
-  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf,
+  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music,
 } from 'lucide-react';
 import { RiverPanel } from './RiverPanel';
+import { MusicPanel } from './MusicPanel';
 import { CavePanel } from './CavePanel';
 import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
@@ -16,6 +17,7 @@ import { WEB_LIMITS, WebParams, webSettings, setWebSetting, resetWebSettings } f
 import { ALGAE_MAX_LINKS, ALGAE_MIN_LINKS, algaeHeight, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
 import { TerrainTileType, TILE_DEFINITIONS } from '../../terrain/types/TerrainTypes';
 import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, WeatherSound } from '../../world/WeatherSystem';
+import { SEASONS, SEASON_LABELS, currentSeason, dayOfSeason, firstDayOf } from '../../world/Seasons';
 import { worldSettings } from '../../world/WorldSettings';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
@@ -23,6 +25,9 @@ import { waterSettings, WaterSettings, saveWaterSettings, resetWaterSettings } f
 import { RIPPLE_SIM_RES } from '../../scene/WaterRippleSim';
 import { vegetationSettings, VegetationSettings, setVegetation, resetVegetationSettings } from '../../world/VegetationSettings';
 import { causticsSettings, applyCausticsSettings, resetCausticsSettings, CausticsSettings } from '../../scene/WaterEffects';
+import { lightShaftSettings, resetLightShaftSettings, saveLightShaftSettings, LightShaftSettings } from '../../world/LightShafts';
+import { cloudShadowSettings, resetCloudShadowSettings, saveCloudShadowSettings, CloudShadowSettings } from '../../world/CloudShadows';
+import { pickGlowSettings, resetPickGlowSettings, savePickGlowSettings, PickGlowSettings } from '../../world/PickGlow';
 
 const ICONS: Record<string, React.ElementType> = {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
@@ -31,7 +36,7 @@ const ICONS: Record<string, React.ElementType> = {
 
 const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції', objects: 'Об’єкти' };
 
-type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'veg' | 'save' | 'debug';
+type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'veg' | 'music' | 'save' | 'debug';
 
 interface EditorUIProps {
   engine: GameEngine;
@@ -76,6 +81,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'atmo', icon: Sun, label: 'Час, погода, вода' },
     { id: 'water', icon: Waves, label: 'Шейдер води' },
     { id: 'veg', icon: Leaf, label: 'Рослинність' },
+    { id: 'music', icon: Music, label: 'Музика' },
     { id: 'save', icon: Save, label: 'Збереження' },
     { id: 'debug', icon: Activity, label: 'Дебаг' },
   ];
@@ -139,6 +145,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
         {tab === 'atmo' && <AtmospherePanel engine={engine} rerender={rerender} />}
         {tab === 'water' && <WaterPanel rerender={rerender} />}
         {tab === 'veg' && <VegetationPanel rerender={rerender} />}
+        {tab === 'music' && <MusicPanel />}
         {tab === 'save' && <SavePanel engine={engine} notify={props.notify} />}
         {tab === 'debug' && <DebugTab {...props} />}
       </div>
@@ -605,6 +612,37 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
           fmt={(v) => (v === 0 ? 'стоїть' : `${v} с`)}
         />
       </Section>
+      <Section title="Пора року">
+        <div className="grid grid-cols-4 gap-1">
+          {SEASONS.map((s) => (
+            <button
+              key={s}
+              className={chip(currentSeason() === s)}
+              onClick={() => set(() => (worldSettings.day = firstDayOf(s)))}
+            >
+              {SEASON_LABELS[s]}
+            </button>
+          ))}
+        </div>
+        <Slider
+          label="Днів у порі року"
+          value={worldSettings.daysPerSeason}
+          min={1}
+          max={28}
+          step={1}
+          onChange={(v) => set(() => (worldSettings.daysPerSeason = v))}
+          fmt={(v) => `${v} дн. (зараз день ${dayOfSeason()})`}
+        />
+        <Slider
+          label="Сніг на землі"
+          value={w.weather.snowCover}
+          min={0}
+          max={1}
+          step={0.05}
+          onChange={(v) => set(() => (w.weather.snowCover = v))}
+          fmt={(v) => `${Math.round(v * 100)}%`}
+        />
+      </Section>
       <Section title="Погода">
         <div className="grid grid-cols-3 gap-1">
           {(Object.keys(WEATHER_LABELS) as WeatherType[]).map((t) => (
@@ -635,6 +673,7 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
         )}
       </Section>
       <WeatherTuner type={w.weather.weather} rerender={rerender} />
+      <CloudShadowTuner rerender={rerender} />
       <BirdVoices engine={engine} rerender={rerender} />
       <Section title="Вода">
         <Slider
@@ -648,7 +687,102 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
         />
       </Section>
       <CausticsTuner rerender={rerender} />
+      <LightShaftTuner rerender={rerender} />
+      <PickGlowTuner rerender={rerender} />
     </>
+  );
+};
+
+/** Fake cloud shadows drifting over the world (saved in this browser). */
+const CloudShadowTuner: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const c = cloudShadowSettings;
+  const set = <K extends keyof CloudShadowSettings>(k: K, v: CloudShadowSettings[K]) => {
+    c[k] = v;
+    saveCloudShadowSettings();
+    rerender();
+  };
+  const sliders: { k: Exclude<keyof CloudShadowSettings, 'enabled'>; label: string; min: number; max: number; step: number; fmt(v: number): string }[] = [
+    { k: 'strength', label: 'Сила тіні', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
+    { k: 'size', label: 'Розмір хмар', min: 40, max: 600, step: 10, fmt: (v) => `${v} м` },
+    { k: 'speed', label: 'Швидкість руху', min: 0, max: 15, step: 0.1, fmt: (v) => `${v.toFixed(1)} м/с` },
+    { k: 'softness', label: 'Мʼякість країв', min: 0.01, max: 0.4, step: 0.01, fmt: (v) => v.toFixed(2) },
+    { k: 'coverBias', label: 'Більше / менше тіней, ніж хмар у небі', min: -0.5, max: 0.5, step: 0.01, fmt: (v) => (v > 0 ? '+' : '') + v.toFixed(2) },
+  ];
+  return (
+    <Section title="Тіні від хмар">
+      <label className="flex items-center gap-2 text-zinc-400">
+        <input type="checkbox" checked={c.enabled} onChange={(e) => set('enabled', e.target.checked)} className="accent-sky-500" />
+        Тіні від хмар на землі (залежать від хмарності погоди)
+      </label>
+      {sliders.map((s) => (
+        <Slider key={s.k} label={s.label} value={c[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(v) => set(s.k, v)} />
+      ))}
+      <button className={chip(false)} onClick={() => (resetCloudShadowSettings(), rerender())}>
+        Скинути
+      </button>
+    </Section>
+  );
+};
+
+/** Glow of the things that can be picked up near the player (saved in this browser). */
+const PickGlowTuner: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const c = pickGlowSettings;
+  const set = <K extends keyof PickGlowSettings>(k: K, v: PickGlowSettings[K]) => {
+    c[k] = v;
+    savePickGlowSettings();
+    rerender();
+  };
+  const sliders: { k: Exclude<keyof PickGlowSettings, 'enabled'>; label: string; min: number; max: number; step: number; fmt(v: number): string }[] = [
+    { k: 'strength', label: 'До білого на піку', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
+    { k: 'speed', label: 'Блимань за секунду', min: 0, max: 3, step: 0.05, fmt: (v) => v.toFixed(2) },
+    { k: 'rim', label: 'Яскравіше по краях (контур)', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
+  ];
+  return (
+    <Section title="Підсвітка того, що можна підібрати">
+      <label className="flex items-center gap-2 text-zinc-400">
+        <input type="checkbox" checked={c.enabled} onChange={(e) => set('enabled', e.target.checked)} className="accent-sky-500" />
+        Світиться те, про що зараз підказка в HUD (тюльпани, стигла грядка)
+      </label>
+      {sliders.map((s) => (
+        <Slider key={s.k} label={s.label} value={c[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(v) => set(s.k, v)} />
+      ))}
+      <button className={chip(false)} onClick={() => (resetPickGlowSettings(), rerender())}>
+        Скинути
+      </button>
+    </Section>
+  );
+};
+
+/** Underwater light shafts (saved in this browser). */
+const LightShaftTuner: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const c = lightShaftSettings;
+  const set = <K extends keyof LightShaftSettings>(k: K, v: LightShaftSettings[K]) => {
+    c[k] = v;
+    saveLightShaftSettings();
+    rerender();
+  };
+  const sliders: { k: Exclude<keyof LightShaftSettings, 'enabled'>; label: string; min: number; max: number; step: number; fmt(v: number): string }[] = [
+    { k: 'strength', label: 'Яскравість', min: 0, max: 1.5, step: 0.01, fmt: (v) => v.toFixed(2) },
+    { k: 'count', label: 'Променів одночасно', min: 1, max: 32, step: 1, fmt: (v) => String(v) },
+    { k: 'width', label: 'Ширина', min: 0.2, max: 3, step: 0.05, fmt: (v) => `${v.toFixed(2)} м` },
+    { k: 'length', label: 'Довжина', min: 3, max: 30, step: 0.5, fmt: (v) => `${v.toFixed(1)} м` },
+    { k: 'radius', label: 'Радіус навколо камери', min: 5, max: 40, step: 1, fmt: (v) => `${v} м` },
+    { k: 'flicker', label: 'Швидкість мерехтіння', min: 0, max: 4, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
+    { k: 'life', label: 'Тривалість променя', min: 1, max: 15, step: 0.5, fmt: (v) => `${v.toFixed(1)} с` },
+  ];
+  return (
+    <Section title="Промені світла під водою">
+      <label className="flex items-center gap-2 text-zinc-400">
+        <input type="checkbox" checked={c.enabled} onChange={(e) => set('enabled', e.target.checked)} className="accent-sky-500" />
+        Промені від сонця під водою (на телефонах — удвічі менше)
+      </label>
+      {sliders.map((s) => (
+        <Slider key={s.k} label={s.label} value={c[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(v) => set(s.k, v)} />
+      ))}
+      <button className={chip(false)} onClick={() => (resetLightShaftSettings(), rerender())}>
+        Скинути
+      </button>
+    </Section>
   );
 };
 
@@ -720,7 +854,12 @@ const WATER_GROUPS: { title: string; sliders: WaterSlider[] }[] = [
     sliders: [
       { k: 'foamAmount', label: 'Кількість', min: 0, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
       { k: 'foamLine', label: 'Лінія берега', min: 0.01, max: 0.6, step: 0.01, fmt: (v) => `${v.toFixed(2)} м` },
-      { k: 'rippleSpeed', label: 'Швидкість смуг', min: 0, max: 1.5, step: 0.01, fmt: (v) => v.toFixed(2) },
+      { k: 'rippleSpeed', label: 'Швидкість ліній біля берега', min: 0, max: 1.5, step: 0.01, fmt: (v) => v.toFixed(2) },
+      { k: 'shoreLineCount', label: 'Ліній одночасно', min: 1, max: 4, step: 1, fmt: (v) => String(v) },
+      { k: 'shoreLineWidth', label: 'Товщина ліній', min: 0.01, max: 0.15, step: 0.005, fmt: (v) => `${Math.round(v * 200)} см` },
+      { k: 'shoreLineReach', label: 'Відстань від берега', min: 0.5, max: 7, step: 0.1, fmt: (v) => `${v.toFixed(1)} м` },
+      { k: 'shoreLineDash', label: 'Щільність штрихів', min: 0.05, max: 2, step: 0.05, fmt: (v) => `${(1 / v).toFixed(1)} м` },
+      { k: 'shoreLineGap', label: 'Розриви', min: 0, max: 0.9, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
     ],
   },
 ];
@@ -732,6 +871,11 @@ const RIPPLE_SIM_SLIDERS: WaterSlider[] = [
   { k: 'rippleSimCrest', label: 'Поріг білого гребеня', min: 0.002, max: 0.08, step: 0.001, fmt: (v) => v.toFixed(3) },
   { k: 'rippleSimSlope', label: 'Нахил (блиск)', min: 0, max: 3, step: 0.05, fmt: (v) => v.toFixed(2) },
   { k: 'rippleSimWake', label: 'Слід за тілом', min: 0, max: 4, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
+];
+
+const RIPPLE_SIM_RAIN_SLIDERS: WaterSlider[] = [
+  { k: 'rippleSimRainAmount', label: 'Кількість крапель', min: 0.1, max: 4, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
+  { k: 'rippleSimRainStrength', label: 'Сила крапель', min: 0.1, max: 4, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
 ];
 
 /** Live look of the sea shader (saved in this browser). */
@@ -781,7 +925,7 @@ const WaterPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
           {g.title === 'Піна' && (
             <label className="flex items-center gap-2 text-zinc-400">
               <input type="checkbox" checked={w.rippleFoam} onChange={(e) => set('rippleFoam', e.target.checked)} className="accent-sky-500" />
-              Смуги піни, що наближаються до берега
+              Лінії, що наближаються до берега (море, річки, озера)
             </label>
           )}
         </Section>
@@ -808,6 +952,14 @@ const WaterPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
           {RIPPLE_SIM_SLIDERS.filter((s) => w.rippleSimCrestOn || s.k !== 'rippleSimCrest').map((s) => (
             <Slider key={s.k} label={s.label} value={w[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(v) => set(s.k, v)} />
           ))}
+          <label className="flex items-center gap-2 text-zinc-400">
+            <input type="checkbox" checked={w.rippleSimRain} onChange={(e) => set('rippleSimRain', e.target.checked)} className="accent-sky-500" />
+            Краплі дощу на воді (лише в області симуляції біля гравця)
+          </label>
+          {w.rippleSimRain &&
+            RIPPLE_SIM_RAIN_SLIDERS.map((s) => (
+              <Slider key={s.k} label={s.label} value={w[s.k]} min={s.min} max={s.max} step={s.step} fmt={s.fmt} onChange={(v) => set(s.k, v)} />
+            ))}
         </div>
       </Section>
       <button className={chip(false)} onClick={() => (resetWaterSettings(), rerender())}>
@@ -837,6 +989,9 @@ const VEG_GROUPS: { title: string; toggle?: [VegBool, string]; note?: string; sl
       { k: 'grassWind', label: 'Вітер', min: 0, max: 3, step: 0.05, fmt: (v) => `×${v.toFixed(2)}` },
       { k: 'grassBaseShade', label: 'Яскравість біля коріння', min: 0.2, max: 1.5, step: 0.01, fmt: f2 },
       { k: 'grassTipShade', label: 'Яскравість кінчиків', min: 0.4, max: 2, step: 0.01, fmt: f2 },
+      { k: 'grassTrail', label: 'Слід у траві (сила)', min: 0, max: 2, step: 0.05, fmt: (v) => (v === 0 ? 'вимк.' : `×${v.toFixed(2)}`) },
+      { k: 'grassTrailRecover', label: 'Трава піднімається за', min: 0.5, max: 15, step: 0.5, fmt: (v) => `${v.toFixed(1)} с` },
+      { k: 'grassBendLight', label: 'Світліше, чим нижче прогнулась', min: 0, max: 1.5, step: 0.01, fmt: (v) => (v === 0 ? 'вимк.' : `+${Math.round(v * 100)}%`) },
     ],
   },
   {

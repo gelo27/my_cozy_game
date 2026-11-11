@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { seedTreeType } from '../gathering/TreeNursery';
+import type { GroundAim, GroundAimHit } from '../gathering/GroundAim';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { CharacterModel, AnimationState } from './CharacterModel';
@@ -205,6 +207,9 @@ export class CharacterController {
   public gatheringAbility!: GatheringAbility;
   /** Holds the player back (spider webs): may change the velocity, returns true if it did. */
   public restraint: ((vel: THREE.Vector3, dt: number) => boolean) | null = null;
+  /** Crosshair-on-the-ground for the shovel and planting (wired by the engine). */
+  public groundAim: GroundAim | null = null;
+  private readonly aimPlayerPos = new THREE.Vector3();
   private readonly restraintVel = new THREE.Vector3();
 
   constructor(
@@ -555,6 +560,18 @@ export class CharacterController {
       const cameraPosition = camera.getPosition();
       const cameraWorldDirection = camera.getWorldDirection();
 
+      // The shovel or tulips in hand: aimed at the ground at once (crosshair, closer camera), like the
+      // slingshot with RMB (the state checks use last frame's, the abilities that set them run below)
+      const held = this.equippedInventoryItem;
+      const groundTool = held === 'shovel' || !!held?.startsWith('tulip_') || !!seedTreeType(held);
+      const isGroundAiming = groundTool && !this.telemetry.isSwimming && !this.telemetry.isClimbing
+        && !this.carryAbility?.isHolding && !this.buildAbility?.isBuildModeActive && !this.stunTimer;
+      let groundAim: GroundAimHit | null = null;
+      if (isGroundAiming && this.groundAim) {
+        const bt = this.body.translation();
+        groundAim = this.groundAim.update(cameraPosition, cameraWorldDirection, this.aimPlayerPos.set(bt.x, bt.y, bt.z));
+      }
+
       // 4. Build Context and execute modular abilities
       const context: CharacterContext = {
         body: this.body,
@@ -588,6 +605,8 @@ export class CharacterController {
         isBuildModeActive: this.buildAbility ? this.buildAbility.isBuildModeActive : false,
         activeWeapon: this.model.activeWeapon,
         isAiming: false,
+        groundAim,
+        isGroundAiming,
         particleManager: this.particleManager,
         model: this.model,
         forestZone: this.forestZone,
@@ -610,8 +629,10 @@ export class CharacterController {
         if (this.restraint(this.restraintVel, dt)) this.body.setLinvel(this.restraintVel, true);
       }
       // Aiming the slingshot: RMB held with it in hand, on foot (not swimming, climbing, carrying or building)
-      context.isAiming = !!move.aim && this.model.activeWeapon === 15 && !context.isSwimming && !context.isClimbing
-        && !context.isHoldingObject && !context.isBuildModeActive && !actionLocked;
+      context.isAiming = (!!move.aim && this.model.activeWeapon === 15 && !context.isSwimming && !context.isClimbing
+        && !context.isHoldingObject && !context.isBuildModeActive && !actionLocked)
+        // Shovel / planting: the aim holds through the dig swing (the camera doesn't jump out and back)
+        || (isGroundAiming && !context.isSwimming && !context.isClimbing);
 
       // 5. Update Locomotion Dust Particles
       if (this.particleManager && CHARACTER_CONFIG.FOOT_DUST_ENABLED) {
@@ -632,8 +653,9 @@ export class CharacterController {
       let targetFacingAngle: number | null = null;
       const isMovingInput = Math.abs(move.forward) > 0.01 || Math.abs(move.right) > 0.01;
 
-      if (context.isAiming) {
-        // Aiming: the body turns with the view, so the shot leaves where the crosshair is
+      if (context.isAiming && this.model.activeWeapon === 15) {
+        // Aiming the slingshot: the body turns with the view, so the shot leaves where the crosshair is.
+        // The shovel / planting aim leaves the body free: it turns to the spot only to act.
         targetFacingAngle = Math.atan2(cameraForward.x, cameraForward.z);
       } else if (context.isClimbing && this.wallClimbAbility) {
         const wallNorm = this.wallClimbAbility.wallNormal;

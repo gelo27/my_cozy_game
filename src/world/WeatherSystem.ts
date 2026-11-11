@@ -5,8 +5,9 @@ import { Precipitation, PRECIP_BOX } from './Precipitation';
 import { SkyDome, SkyParams } from './SkyDome';
 import { riverWorld } from './rivers/RiverWorld';
 import { WeatherDirector } from './WeatherDirector';
+import { currentSeason } from './Seasons';
 
-export type WeatherType = 'clear' | 'cloudy' | 'rain' | 'storm' | 'fog' | 'snow';
+export type WeatherType = 'clear' | 'cloudy' | 'rain' | 'storm' | 'fog' | 'snow' | 'blizzard';
 
 export const WEATHER_LABELS: Record<WeatherType, string> = {
   clear: 'Ясно',
@@ -15,6 +16,7 @@ export const WEATHER_LABELS: Record<WeatherType, string> = {
   storm: 'Гроза',
   fog: 'Туман',
   snow: 'Сніг',
+  blizzard: 'Буран',
 };
 
 export interface WeatherProfile {
@@ -63,6 +65,8 @@ const makeDefaults = (): Record<WeatherType, WeatherProfile> => ({
   storm: mk(0.2, 0.05, 0x8b93a2, 'rain', 1, 1, 1, 0xffffff, 0, snd(1, 0.9, 1, 0, 0.5, 0, 0)),
   fog: mk(0.6, 0.045, 0xf3f3f3, 'none', 0, 1, 0, 0xffffff, 0, snd(1, 0, 0, 0, 0.5, 0, 0, 1)),
   snow: mk(0.7, 0.03, 0xa9e5fe, 'snow', 0.8, 1, 0.35, 0x71d4fe, 1, snd(1, 0.6, 0, 0, 0.5, 0, 0)),
+  // Whiteout: dense pale haze, dim flat light, wind-driven snow and a howling wind
+  blizzard: mk(0.35, 0.085, 0xc9d6e6, 'snow', 1, 1, 0.75, 0xdde6f0, 1, snd(1, 1.3, 0, 0, 0.5, 0, 0)),
 });
 
 /** Live, editable weather profiles (the developer panel mutates these; the weather eases toward them). */
@@ -169,6 +173,16 @@ export class WeatherSystem {
   private readonly precipitation: Precipitation;
   private occlusion: PrecipitationOcclusion | null = null;
   private snowMix = 0;
+  /**
+   * 0..1 how much snow lies on the open ground: builds up over ~1.5 game hours of heavy snow,
+   * melts over ~3 hours after (faster in sunshine, much faster in rain). Read by the terrain,
+   * grass, footsteps and the ambience; costs one uniform each.
+   */
+  public snowCover = 0;
+  /** True while lying snow is melting (meltwater soaks the fields like rain). */
+  public melting = false;
+  /** 0..1 eased blizzard share (the wind howls instead of the snow's hush). */
+  public blizzardMix = 0;
   /** Called when a storm lightning flash starts (thunder sound). */
   public onLightning: (() => void) | null = null;
   /**
@@ -226,6 +240,8 @@ export class WeatherSystem {
   private flash = 0;
   private static readonly _c = new THREE.Color();
   private static readonly _c2 = new THREE.Color();
+  private static readonly GROUND = new THREE.Color(0x4a5a3a);
+  private static readonly SNOW_GROUND = new THREE.Color(0xc4d0e2);
 
   constructor(private readonly scene: THREE.Scene) {
     this.ambient = new THREE.AmbientLight(0xffffff, 0.55);
@@ -260,6 +276,35 @@ export class WeatherSystem {
   }
 
   /** 0..1 how much snow (vs rain) is falling. */
+  /** 0..1 eased cloud cover (what the sky shows now). */
+  public get cloudCover(): number {
+    return this.current.cover;
+  }
+
+  private updateSnowCover(dt: number): void {
+    const hourSec = worldSettings.secondsPerHour > 0 ? worldSettings.secondsPerHour : 60;
+    const falling = this.snowMix * this.current.amount;
+    this.melting = false;
+    if (falling > 0.05) {
+      this.snowCover = Math.min(1, this.snowCover + (dt / (hourSec * 1.5)) * Math.min(1, falling / 0.8));
+    } else if (this.snowCover > 0) {
+      const rain = this.current.amount * (1 - this.snowMix);
+      // Bright sun only counts by day under a thin sky
+      const sun = this.current.light * (1 - this.nightFactor) * (1 - this.current.cover * 0.6);
+      // Melt per game hour: winter keeps its snow (a sunny noon only nibbles at it), spring thaws
+      // it over a day or two, the first snow of autumn and a summer freak fall go within hours
+      let perHour: number;
+      switch (currentSeason()) {
+        case 'winter': perHour = sun * 0.02; break;
+        case 'spring': perHour = 0.025 + sun * 0.08 + rain * 0.8; break;
+        case 'autumn': perHour = 0.25 + sun * 0.4 + rain * 2; break;
+        default: perHour = 0.6 + sun + rain * 3;
+      }
+      this.snowCover = Math.max(0, this.snowCover - (dt * perHour) / hourSec);
+      this.melting = perHour > 0.02 && this.snowCover > 0.02;
+    }
+  }
+
   public get snowAmount(): number {
     return this.snowMix * this.current.amount;
   }
@@ -338,8 +383,10 @@ export class WeatherSystem {
     }
     // Rain turns to snow (and back) gradually instead of in one frame
     if (p.precipitation !== 'none') this.snowMix += ((p.precipitation === 'snow' ? 1 : 0) - this.snowMix) * (1 - Math.exp(-dt * (s ? 0.15 : 2)));
-    this.stormMix += ((this.weather === 'storm' ? 1 : 0) - this.stormMix) * kCloud;
+    this.stormMix += ((this.weather === 'storm' || this.weather === 'blizzard' ? 1 : 0) - this.stormMix) * kCloud;
+    this.blizzardMix += ((this.weather === 'blizzard' ? 1 : 0) - this.blizzardMix) * kCloud;
     this.rainIntensity = cur.amount * (1 - this.snowMix * 0.8);
+    this.updateSnowCover(dt);
 
     // Sun path: rises in the east at 6, sets in the west at 19:30; the night half is the remaining
     // 10.5 h, so phase runs 0..PI over the day and PI..2PI over the night. The moon sits opposite.
@@ -392,6 +439,17 @@ export class WeatherSystem {
     // Sky colour of the hemi light: night blue 0x6a7ab8 -> day 0xe0f2fe, blended
     const hk = THREE.MathUtils.smoothstep(daylight, 0.05, 0.6);
     this.hemi.color.setRGB(0.416 + (0.878 - 0.416) * hk, 0.478 + (0.949 - 0.478) * hk, 0.722 + (0.996 - 0.722) * hk, THREE.SRGBColorSpace);
+    // Snow: a colder, flatter light while it falls (weaker cool sun, more soft fill, a greyer
+    // sky light), and a white ground that bounces light back up under everything
+    const snowing = this.snowMix * Math.min(1, cur.amount * 2);
+    if (snowing > 0.001) {
+      this.sun.color.lerp(WeatherSystem._c.setRGB(0.82, 0.9, 1), snowing * 0.5);
+      this.sun.intensity *= 1 - snowing * 0.25;
+      this.ambient.intensity += 0.1 * snowing * daylight;
+      this.hemi.color.lerp(WeatherSystem._c.setRGB(0.8, 0.84, 0.9), snowing * 0.45);
+    }
+    this.hemi.groundColor.copy(WeatherSystem.GROUND).lerp(WeatherSystem.SNOW_GROUND, this.snowCover * 0.85);
+    this.ambient.intensity += 0.05 * this.snowCover * daylight;
 
     // Sky = time-of-day key colour x weather tint; fog matches the horizon
     this.sampleKeys(SKY_KEYS, t, this.sky).multiply(cur.tint);
@@ -447,7 +505,8 @@ export class WeatherSystem {
     this.skyDome.update(dt, cameraPos, sp);
 
     // Precipitation
-    const bright = (0.3 + daylight * 0.7) * (0.55 + cur.light * 0.45) + this.flash;
+    // (in a blizzard's bright whiteout by day the flakes stay white instead of greying out)
+    const bright = (0.3 + daylight * 0.7) * (0.55 + cur.light * 0.45) + this.flash + this.blizzardMix * daylight * 0.4;
     this.caveMix += (this.caveFactor - this.caveMix) * (1 - Math.exp(-dt * 4));
     if (this.caveMix > 0.001) this.applyCave(this.caveMix);
     // Under water: a dense blue-green fog (darker deeper down and at night), and the sky behind

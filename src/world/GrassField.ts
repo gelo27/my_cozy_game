@@ -5,6 +5,7 @@ import { riverWorld } from './rivers/RiverWorld';
 import { TERRAIN_CHUNK, TERRAIN_CHUNKS, type TerrainSystem } from './TerrainSystem';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
+import { GrassTrail, TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
 
 const N = WORLD_SIZE;
 const V = N + 1;
@@ -46,6 +47,8 @@ function grow(r: Rect, x0: number, z0: number, x1: number, z1: number): void {
  *   hay, boulders — baked by StaticShadows). The shader adds the beach / river-bank rule the
  *   terrain uses, so no blade stands on sand or under water.
  * - The baked static shadows (trees, buildings) darken the blades as they darken the ground.
+ * - Trampling (GrassTrail.ts): the player, pets and the moped push the blades aside; they come
+ *   back up slowly, so a fading trail follows them through the field.
  * - Wind: two noise octaves bend the tips (stronger in storms).
  * - Blades turn to face the camera, and shrink to nothing near the patch edge (no hard border).
  */
@@ -74,7 +77,17 @@ export class GrassField {
     uGrWindK: { value: veg.grassWind },
     uGrShadeA: { value: veg.grassBaseShade },
     uGrShadeB: { value: veg.grassTipShade },
+    uGrBendLight: { value: veg.grassBendLight },
+    uGrTrail: { value: null as THREE.Texture | null },
+    uGrTrailC: { value: new THREE.Vector2() },
+    uGrTrailK: { value: veg.grassTrail },
+    uGrSnow: { value: 0 },
   };
+  /** 0..1 fallen snow (WeatherSystem.snowCover): blades sink into it, frost over and barely sway. */
+  public snowCover = 0;
+  /** Seconds for footprints in the snow to fill back in (short while it snows, long otherwise). */
+  public printFill = 600;
+  private readonly trail = new GrassTrail();
   /** Blades rebuilt this long after the patch / density sliders stop moving (s). */
   private grassRevision = vegetationRevision.grass;
   private rebuildIn = -1;
@@ -99,6 +112,8 @@ export class GrassField {
     this.uniforms.uGrHeight.value = this.heightTex;
     this.uniforms.uGrData.value = this.dataTex;
     this.uniforms.uGrColor.value = terrain.grassLayer;
+    this.uniforms.uGrTrail.value = this.trail.texture;
+    terrain.setSnowTrail(this.trail.texture, this.trail.center);
 
     // The terrain reports exactly what changed; the first update builds everything once
     terrain.onHeightsDirty = (x0, z0, x1, z1) => {
@@ -120,11 +135,34 @@ export class GrassField {
 
   // ---------------------------------------------------------------- per frame
 
-  /** `wind` 0..1 (calm .. storm). */
-  public update(dt: number, camera: THREE.Camera, wind: number): void {
-    this.mesh.visible = this.enabled && veg.grassEnabled;
-    if (!this.mesh.visible) return;
+  /** Call once per frame before update(), then addPusher() for each body walking through the grass. */
+  public clearPushers(): void {
+    this.trail.clearPushers();
+  }
+
+  /** A body at (x, y, z) (y = its lowest point) parting the blades within `radius` m, if it stands on the ground. */
+  public addPusher(x: number, y: number, z: number, radius: number): void {
+    if (veg.grassTrail <= 0 || !this.terrain.isInside(x, z)) return;
+    const g = this.terrain.getHeight(x, z);
+    if (y - g > 0.45 || y - g < -0.6) return; // jumping, or swimming above a sunken meadow
+    this.trail.addPusher(x, z, radius);
+  }
+
+  /** `wind` 0..1 (calm .. storm); `focus`: where the trampling is tracked (the player). */
+  public update(dt: number, camera: THREE.Camera, wind: number, focus?: THREE.Vector3): void {
+    if (!this.enabled || !veg.grassEnabled) {
+      this.mesh.visible = false;
+      return;
+    }
     const u = this.uniforms;
+    // The trail also carves footprints into the snow (terrain), so it runs even with the blades buried
+    if (focus) {
+      this.trail.update(dt, focus, veg.grassTrailRecover, this.printFill);
+      u.uGrTrailC.value.copy(this.trail.center);
+    }
+    // Deep snow buries every blade (see the vertex shader): skip the whole draw
+    this.mesh.visible = this.snowCover < 0.85;
+    u.uGrTrailK.value = veg.grassTrail;
     if (vegetationRevision.grass !== this.grassRevision) {
       this.grassRevision = vegetationRevision.grass;
       this.rebuildIn = 0.3;
@@ -141,9 +179,12 @@ export class GrassField {
     u.uGrWindK.value = veg.grassWind;
     u.uGrShadeA.value = veg.grassBaseShade;
     u.uGrShadeB.value = veg.grassTipShade;
+    u.uGrBendLight.value = veg.grassBendLight;
     u.uGrTime.value += dt;
     u.uGrSea.value = worldSettings.waterLevel;
-    u.uGrWind.value += (0.25 + wind * 0.75 - u.uGrWind.value) * (1 - Math.exp(-dt * 0.5));
+    u.uGrSnow.value = this.snowCover;
+    const windTarget = (0.25 + wind * 0.75) * (1 - this.snowCover * 0.7);
+    u.uGrWind.value += (windTarget - u.uGrWind.value) * (1 - Math.exp(-dt * 0.5));
     // The patch sits a little ahead of the camera, where the view actually looks
     const e = camera.matrixWorld.elements;
     const fx = -e[8], fz = -e[10];
@@ -311,9 +352,14 @@ uniform float uGrSize;
 uniform float uGrHeightK;
 uniform float uGrWidth;
 uniform float uGrWindK;
+uniform sampler2D uGrTrail;
+uniform vec2 uGrTrailC;
+uniform float uGrTrailK;
+uniform float uGrSnow;
 varying vec3 vGrCol;
 varying float vGrTip;
 varying float vGrShade;
+varying float vGrBend;
 float grHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float grNoise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
@@ -344,8 +390,12 @@ float grDens = grD.r * (1.0 - grBeach);
 float grClump = grNoise(grRoot * 0.21) * 0.7 + grNoise(grRoot * 0.73 + 5.3) * 0.3;
 float grH = uGrHeightK * mix(0.5, 1.0, aGrRnd.x) * (0.45 + grClump * 1.0)
   * smoothstep(0.02, 0.95, grDens) * grEdge;
+// Snow: blades sink into it (the short ones vanish), the clumps first poke out where it is thin
+float grSnowK = uGrSnow * smoothstep(-0.2, 0.25, uGrSnow * 1.6 - 0.55 + (grClump - 0.5) * 1.2);
+grH *= clamp(1.0 - grSnowK * 1.25, 0.0, 1.0);
 int grVi = gl_VertexID % 3;
 vGrTip = grVi == 2 ? 1.0 : 0.0;
+vGrBend = 0.0;
 vec3 transformed = vec3(grRoot.x, grY - 0.03, grRoot.y);
 if (grH > 0.03) {
   // Turn to face the camera, with a little random yaw
@@ -363,16 +413,29 @@ if (grH > 0.03) {
     vec2 grBend = grWindDir * (grGust - 0.25) * uGrWind * uGrWindK * 1.3;
     grBend += grDir * (aGrRnd.y - 0.5) * 0.5 + grSide * (aGrRnd.z - 0.5) * 0.4;
     grBend += grWindDir * sin(uGrTime * (2.5 + aGrRnd.x * 2.0) + aGrRnd.y * 6.28) * 0.06 * uGrWind * uGrWindK;
+    // Trampled: pushed away from the feet, lower the closer they were (fades back up on the CPU)
+    vec2 grTrailD = abs(grRoot - uGrTrailC);
+    float grTramp = 0.0;
+    if (uGrTrailK > 0.0 && max(grTrailD.x, grTrailD.y) < ${TRAIL_HALF.toFixed(2)}) {
+      vec2 grPush = texture2D(uGrTrail, grRoot / ${TRAIL_SIZE.toFixed(1)}).rg * (255.0 / 127.0) - (128.0 / 127.0);
+      grBend += grPush * uGrTrailK * 1.6;
+      grTramp = min(length(grPush) * uGrTrailK, 1.0);
+    }
     float grB = length(grBend);
     if (grB > 1.4) grBend *= 1.4 / grB;
     // Keep the blade's length: the more it bends, the lower the tip
     transformed.xz += grBend * grH;
-    transformed.y += grH * (1.0 - 0.35 * min(dot(grBend, grBend), 1.0));
+    float grDrop = min(dot(grBend, grBend), 1.0);
+    transformed.y += grH * (1.0 - 0.35 * grDrop - 0.45 * grTramp);
+    // How low the tip is bent (past the resting lean): lights the tip up, fading toward the root
+    vGrBend = smoothstep(0.04, 0.9, grDrop);
   }
 }
 // The terrain's own grass colour at the root (a coarse mip: the average tone, no speckle)
 vec3 grCol = textureLod(uGrColor, grRoot * 0.5, 3.0).rgb;
-vGrCol = grCol * mix(0.9, 1.1, aGrRnd.z);`
+vGrCol = grCol * mix(0.9, 1.1, aGrRnd.z);
+// Frosted under snow: pale blue-white, the tips the most (per vertex, nothing extra per pixel)
+if (grSnowK > 0.001) vGrCol = mix(vGrCol, vec3(0.6, 0.66, 0.74), min(1.0, grSnowK * 1.8) * (0.45 + 0.5 * vGrTip));`
         );
       injectNightLights(shader, { perVertex: true });
       shader.fragmentShader = shader.fragmentShader
@@ -382,13 +445,15 @@ vGrCol = grCol * mix(0.9, 1.1, aGrRnd.z);`
 varying vec3 vGrCol;
 varying float vGrTip;
 varying float vGrShade;
+varying float vGrBend;
 uniform float uGrShadeA;
-uniform float uGrShadeB;`
+uniform float uGrShadeB;
+uniform float uGrBendLight;`
         )
         // Darker at the base (dense blades shade each other), sunlit and a touch warmer at the tip
         .replace(
           '#include <map_fragment>',
-          'diffuseColor.rgb *= vGrCol * mix(uGrShadeA, uGrShadeB, vGrTip) * mix(vec3(1.0), vec3(1.06, 1.05, 0.9), vGrTip);'
+          'diffuseColor.rgb *= vGrCol * mix(uGrShadeA, uGrShadeB, vGrTip) * mix(vec3(1.0), vec3(1.06, 1.05, 0.9), vGrTip) * (1.0 + uGrBendLight * vGrBend);'
         )
         // Lit like the ground under it (normal straight up), on both faces
         .replace(

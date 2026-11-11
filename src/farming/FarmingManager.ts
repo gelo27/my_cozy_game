@@ -4,6 +4,7 @@ import { CropType, CropState, CROP_DEFINITIONS, CROP_TYPES, FarmInteractionPromp
 import { FarmingMeshGenerator } from './FarmingMeshGenerator';
 import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
+import { music } from '../audio/music/MusicDirector';
 import { FieldManager, FarmField, FieldSaveData, FIELD_CELLS, FIELD_CRATE_YIELD, FIELD_SEED_COST } from './FieldManager';
 import { fieldCropTime } from './WheatModel';
 import { HarvestFlight, FlightItem } from './HarvestFlight';
@@ -43,6 +44,8 @@ export class FarmingManager {
   private animTime: number = 0;
   /** 0..1 from the weather system; rain waters thirsty crops on its own. */
   public rainIntensity = 0;
+  /** Lying snow is melting: the soil looks soaked (meltwater), without watering the crops. */
+  public meltWet = false;
   /** Shovel-dug fields (instanced crops on terrain soil). */
   public readonly fields: FieldManager;
 
@@ -119,7 +122,7 @@ export class FarmingManager {
 
     // Rain replaces manual watering: every field is soaked, exactly as if watered by hand
     const raining = this.rainIntensity > 0.35;
-    this.fields.rainWet = raining;
+    this.fields.rainWet = raining || this.meltWet;
     for (const field of this.fields.getAll()) {
       const crop = field.crop;
       if (!crop) continue;
@@ -203,6 +206,7 @@ export class FarmingManager {
     field.crop = null;
     this.fields.markCropsDirty();
     audioEngine.at(field.center).playHarvest();
+    music.stinger('harvest');
     // A field always returns some seed (2-4), so it can be sown again
     const bonusSeeds = 2 + Math.floor(Math.random() * 3);
     const def = CROP_DEFINITIONS[cropType];

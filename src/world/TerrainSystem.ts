@@ -8,6 +8,7 @@ import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobile
 import { islandHeight } from './IslandGenerator';
 import { riverWorld, GridRect } from './rivers/RiverWorld';
 import { causticsUniforms, CAUSTICS_GLSL, CAUSTICS_TINT } from '../scene/WaterEffects';
+import { TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
 
 const N = WORLD_SIZE; // cells per side (1 m cells)
 const V = N + 1; // vertices per side
@@ -99,7 +100,8 @@ export interface TerrainSaveData {
  * - Heights: (N+1)^2 grid, 1 m spacing, rendered as 64 m chunk meshes sharing one index buffer;
  *   chunks outside the camera frustum (and beyond the far plane) are skipped by three.js.
  * - Surface types: one byte per cell, uploaded to two RGBA weight textures (N x N) that the shader
- *   samples bilinearly, so tile borders blend softly; only the painted rectangle is rewritten.
+ *   samples bilinearly, so tile borders blend softly; only the painted rows are rewritten and
+ *   uploaded. splatB's blue channel is the damp soil of watered fields (setWetness).
  * - Physics: one Rapier heightfield per chunk, so a brush stroke rebuilds only the chunks it touched.
  * - Beyond the island: a sea-bed collider, and invisible walls far out in the open sea.
  */
@@ -119,13 +121,24 @@ export class TerrainSystem {
   private readonly splatA: THREE.DataTexture;
   private readonly splatB: THREE.DataTexture;
   private splatDirty = true;
+  /**
+   * A whole-texture splat upload is queued for this frame's render: partial ranges must not be
+   * added on top of it (three.js would upload only those ranges, and the very first upload
+   * allocates the texture empty).
+   */
+  private splatFullPending = true;
   /** Cell rectangle of tiles changed since the last splat upload. */
   private splatRect = { x0: 0, z0: 0, x1: N - 1, z1: N - 1 };
   private readonly physicsDirtyChunks = new Set<number>();
   private physicsTimer = 0;
   private readonly chunkColliders: (RAPIER.Collider | null)[] = new Array(CHUNKS * CHUNKS).fill(null);
   private body: RAPIER.RigidBody | null = null;
-  private readonly uniforms = { uWaterLevel: { value: worldSettings.waterLevel } };
+  private readonly uniforms = { uWaterLevel: { value: worldSettings.waterLevel }, uRainWet: { value: 0 },
+    uSnowCover: { value: 0 },
+    // Footprints (GrassTrail's blue channel) around the player, and the window's centre
+    uSnowTrail: { value: null as THREE.Texture | null },
+    uSnowTrailC: { value: new THREE.Vector2(1e9, 1e9) },
+  };
   /** Bumped on every height edit so dependants (props, water) can re-snap lazily. */
   public revision = 0;
   /** Bumped whenever a tile changes (grass density follows it). */
@@ -345,6 +358,8 @@ export class TerrainSystem {
   /** Call once per frame: uploads changed chunks / weights; physics rebuilds at most 4x per second. */
   public update(dt: number): void {
     this.uniforms.uWaterLevel.value = worldSettings.waterLevel;
+    // Last frame's render took the queued full upload
+    this.splatFullPending = false;
     if (this.dirtyChunks.size) {
       for (const c of this.dirtyChunks) this.writeChunkGeometry(c);
       this.dirtyChunks.clear();
@@ -559,13 +574,74 @@ export class TerrainSystem {
       for (let x = r.x0; x <= r.x1; x++) {
         const i = z * N + x;
         a.fill(0, i * 4, i * 4 + 4);
-        b.fill(0, i * 4, i * 4 + 4);
+        // B's blue channel is the damp soil (setWetness): only the surface weights are reset
+        b[i * 4] = 0;
+        b[i * 4 + 1] = 0;
         const s = slot[this.tiles[i]];
         if (s) s[0][i * 4 + s[1]] = 255;
       }
     }
+    // Only the changed rows go to the GPU (a brush stroke is a few rows, not the whole 1 MB);
+    // a big rectangle (load, world reset) goes in one full upload
+    const rows = r.z1 - r.z0 + 1;
+    if (this.splatFullPending || rows * (r.x1 - r.x0 + 1) > (N * N) / 4) {
+      this.splatA.clearUpdateRanges();
+      this.splatB.clearUpdateRanges();
+      this.splatFullPending = true;
+    } else {
+      const count = (r.x1 - r.x0 + 1) * 4;
+      for (let z = r.z0; z <= r.z1; z++) {
+        const start = (z * N + r.x0) * 4;
+        this.splatA.addUpdateRange(start, count);
+        this.splatB.addUpdateRange(start, count);
+      }
+    }
     this.splatA.needsUpdate = true;
     this.splatB.needsUpdate = true;
+  }
+
+  /** Rain soaking all bare earth (the dirt layer): 0 dry .. 1 the darkest damp soil. */
+  public setRainWetness(value: number): void {
+    this.uniforms.uRainWet.value = value;
+  }
+
+  /** Fallen snow from the weather (0 bare .. 1 white everywhere); settles in patches first. */
+  public setSnowCover(value: number): void {
+    this.uniforms.uSnowCover.value = value;
+  }
+
+  /** The trail field whose blue channel holds footprints, and its (live) window centre. */
+  public setSnowTrail(texture: THREE.Texture, center: THREE.Vector2): void {
+    this.uniforms.uSnowTrail.value = texture;
+    this.uniforms.uSnowTrailC.value = center;
+  }
+
+  /**
+   * Damp soil (a watered field, rain on the fields): how much darker the ground is over the cell
+   * rectangle `gx..gx+w-1`, `gz..gz+h-1` (world metres), 0..255. Kept in splatB's blue channel and
+   * sampled with the surface weights, so it costs no draw call; only the touched rows upload.
+   */
+  public setWetness(gx: number, gz: number, w: number, h: number, value: number): void {
+    const v = Math.max(0, Math.min(255, Math.round(value)));
+    const b = this.splatB.image.data as Uint8Array;
+    const x0 = Math.max(0, gx + WORLD_HALF);
+    const x1 = Math.min(N - 1, gx + WORLD_HALF + w - 1);
+    if (x1 < x0) return;
+    let changed = false;
+    for (let iz = Math.max(0, gz + WORLD_HALF); iz <= Math.min(N - 1, gz + WORLD_HALF + h - 1); iz++) {
+      let rowChanged = false;
+      for (let ix = x0; ix <= x1; ix++) {
+        const o = (iz * N + ix) * 4 + 2;
+        if (b[o] !== v) {
+          b[o] = v;
+          rowChanged = true;
+        }
+      }
+      if (!rowChanged) continue;
+      changed = true;
+      if (!this.splatFullPending) this.splatB.addUpdateRange((iz * N + x0) * 4, (x1 - x0 + 1) * 4);
+    }
+    if (changed) this.splatB.needsUpdate = true;
   }
 
   private createMaterial(): THREE.MeshLambertMaterial {
@@ -612,6 +688,10 @@ varying float vShade;
 uniform sampler2D tGrass, tDirt, tAsphalt, tCobble, tSand, tSnow, tRock, tSplatA, tSplatB, tRiver;
 uniform float uWorldSize;
 uniform float uWaterLevel;
+uniform float uRainWet;
+uniform float uSnowCover;
+uniform sampler2D uSnowTrail;
+uniform vec2 uSnowTrailC;
 float terrWaterY;
 ${CAUSTICS_GLSL}
 // Rock on steep slopes: triplanar, so it never smears down a cliff the way a top-down (XZ)
@@ -658,11 +738,19 @@ vec3 terrainColor() {
   if (sandW > 0.001) c = mix(c, texture2D(tSand, uv).rgb, sandW);
   float rock = smoothstep(0.8, 0.62, vTerrUpY);
   if (rock > 0.001) c = mix(c, rockTriplanar(0.5), rock);
+  // Damp soil: watered fields, and in the rain every patch of bare earth (the dirt layer) as one
+  // surface; dark wet earth, a little mottled, under the snow
+  float wet = max(texture2D(tSplatB, suv).b, uRainWet * wa.r);
+  if (wet > 0.004) c = mix(c, vec3(0.0123, 0.0052, 0.003), wet * (0.82 + 0.36 * n));
   // Snow: settles last, but never on rocky slopes (weight fades with the rock mask) and melts
   // into slush at the waterline. Drifts (macro noise) are bright, hollows take a cold blue tint,
   // and sparse view-dependent glints twinkle as the camera moves.
-  if (wb.r > 0.001) {
-    float sw = wb.r * (1.0 - rock) * smoothstep(waterY + 0.05, waterY + 0.35, vTerrWorld.y);
+  // Fallen snow from the weather: the drift noise decides where it settles first, so a light
+  // dusting shows as patches that join up as it deepens (no extra texture fetches)
+  // Bare earth (fields, dirt paths) stays dark: the snow melts on tilled soil and trodden tracks
+  float snowW = uSnowCover > 0.001 ? max(wb.r, smoothstep(0.0, 0.3, uSnowCover * 1.6 - 0.55 + n * 1.2) * (1.0 - wa.r)) : wb.r;
+  if (snowW > 0.001) {
+    float sw = snowW * (1.0 - rock) * smoothstep(waterY + 0.05, waterY + 0.35, vTerrWorld.y);
     float drift = clamp(n * 2.2 + 0.5, 0.0, 1.0);
 #ifdef TERRAIN_LITE
     vec3 snow = mix(vec3(0.76, 0.84, 0.94), vec3(1.0, 1.0, 1.02), drift);
@@ -682,6 +770,13 @@ vec3 terrainColor() {
     float glint = step(0.9, h) * step(0.6, tw) * dotM * smoothstep(28.0, 5.0, length(toCam));
     snow += glint * 1.1;
 #endif
+    // Footprints: trodden snow is packed down and sits in shadow (one fetch, only near the player)
+    vec2 stD = abs(vTerrWorld.xz - uSnowTrailC);
+    float stEdge = max(stD.x, stD.y);
+    if (stEdge < ${TRAIL_HALF.toFixed(2)}) {
+      float pr = texture2D(uSnowTrail, vTerrWorld.xz / ${TRAIL_SIZE.toFixed(1)}).b * smoothstep(${TRAIL_HALF.toFixed(2)}, ${(TRAIL_HALF - 3).toFixed(2)}, stEdge);
+      snow = mix(snow, snow * vec3(0.52, 0.6, 0.76), min(1.0, pr * 1.3));
+    }
     c = mix(c, snow, sw);
   }
   // River beds are gravel; everything below the waterline is wet and darker

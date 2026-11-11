@@ -10,6 +10,8 @@ import { audioEngine } from '../../audio/AudioEngine';
 import type { PestSystem, Pest } from '../../gameplay/Pests';
 import { APPLE_SAPLING_ID, AppleOrchard, AppleTreeNode } from '../../gathering/AppleOrchard';
 import { WebField, WEB_REACH } from '../../world/SpiderWebs';
+import { FlowerBeds, tulipItemIndex } from '../../gathering/FlowerBeds';
+import { TreeNursery, seedTreeType } from '../../gathering/TreeNursery';
 
 /** The axe reaches a pest this far past its body (m); a bit more than a tree, they move. */
 const PEST_REACH = 1.9;
@@ -61,6 +63,10 @@ export class GatheringAbility implements IAbility {
   public pests: PestSystem | null = null;
   /** Spider webs the axe cuts (wired by the engine). */
   public webs: WebField | null = null;
+  /** Tulip clumps planted from the hotbar (wired by the engine). */
+  public flowers: FlowerBeds | null = null;
+  /** Pines, oaks and bushes planted from the seeds felled trees drop (wired by the engine). */
+  public nursery: TreeNursery | null = null;
   private readonly facingScratch = new THREE.Vector3();
 
   public setSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager, propTrees: PropTreeField | null = null): void {
@@ -71,8 +77,15 @@ export class GatheringAbility implements IAbility {
   }
 
   public update(dt: number, context: CharacterContext): void {
-    if (!this.enabled || !this.forest || !this.rocks || !this.inventory) {
+    // Swimming / diving: tools are put away (a swing under way is dropped)
+    if (!this.enabled || !this.forest || !this.rocks || !this.inventory || context.isSwimming) {
+      if (context.isSwimming) {
+        this.pendingHit = null;
+        this.swingFacing = null;
+      }
       this.orchard?.hideGhost();
+      this.flowers?.hideGhost();
+      this.nursery?.hideGhost();
       this.currentPrompt = null;
       return;
     }
@@ -126,6 +139,26 @@ export class GatheringAbility implements IAbility {
       this.orchard.hideGhost();
     }
 
+    // Tulips in hand: a ghost clump of their colour shows where they go, E plants them
+    if (this.flowers) {
+      const color = tulipItemIndex(this.inventory.getEquippedItemId());
+      if (color >= 0 && !context.isBuildModeActive && !this.inventory.isInventoryOpen()) {
+        this.updateFlowerPlanting(playerPos, context, color);
+        return;
+      }
+      this.flowers.hideGhost();
+    }
+
+    // A pine cone, an acorn or a bush cutting in hand: a ghost sapling at the crosshair, E plants it
+    if (this.nursery) {
+      const type = seedTreeType(this.inventory.getEquippedItemId());
+      if (type && !context.isBuildModeActive && !this.inventory.isInventoryOpen()) {
+        this.updateTreePlanting(playerPos, context, type);
+        return;
+      }
+      this.nursery.hideGhost();
+    }
+
     const target = this.findTarget(playerPos);
     this.currentPrompt = target ? this.buildPrompt(target, tool) : null;
 
@@ -167,6 +200,88 @@ export class GatheringAbility implements IAbility {
     // The last sapling planted: nothing left in hand
     if (this.inventory!.getItemCount(APPLE_SAPLING_ID) <= 0) {
       orchard.hideGhost();
+      this.inventory!.unequip();
+    }
+  }
+
+  private updateFlowerPlanting(playerPos: THREE.Vector3, context: CharacterContext, color: number): void {
+    const flowers = this.flowers!;
+    const itemId = this.inventory!.getEquippedItemId()!;
+    // Planted only where the crosshair meets the ground (aimed as soon as they are in hand)
+    const aim = context.isGroundAiming ? context.groundAim : null;
+    if (!aim) {
+      flowers.hideGhost();
+      this.currentPrompt = context.isGroundAiming
+        ? { kind: 'tree', title: t('flower.title'), actionText: t('aim.tooFar'), hintText: '', progress: 0, canAct: false }
+        : null;
+      return;
+    }
+    const check = flowers.updateGhost(playerPos, color, aim);
+    const ok = check === 'ok';
+    this.currentPrompt = {
+      kind: 'tree',
+      title: t('flower.title'),
+      actionText: ok ? t('flower.plant') : check === 'tooClose' ? t('flower.tooClose') : check === 'tooFar' ? t('aim.tooFar') : t('flower.badGround'),
+      hintText: '',
+      progress: 0,
+      canAct: ok,
+    };
+    const triggered = context.input.interactJustPressed || context.input.shootJustPressed;
+    if (!ok || !triggered || this.cooldown > 0 || context.model?.isActionLocked()) return;
+    if (!this.inventory!.removeItem(itemId, 1)) return;
+    // Turn to the spot (while aiming the body is free and may face elsewhere)
+    const gp = flowers.ghostPosition;
+    const gdx = gp.x - playerPos.x, gdz = gp.z - playerPos.z;
+    if (gdx * gdx + gdz * gdz > 0.04) context.model?.setFacingAngleInstant(Math.atan2(gdx, gdz));
+    if (!flowers.plantAtGhost()) {
+      this.inventory!.addItem(itemId, 1);
+      return;
+    }
+    context.model?.triggerPickup();
+    this.cooldown = 0.45;
+    // The last clump planted: nothing left in hand
+    if (this.inventory!.getItemCount(itemId) <= 0) {
+      flowers.hideGhost();
+      this.inventory!.unequip();
+    }
+  }
+
+  private updateTreePlanting(playerPos: THREE.Vector3, context: CharacterContext, type: string): void {
+    const nursery = this.nursery!;
+    const itemId = this.inventory!.getEquippedItemId()!;
+    const title = t(type === 'bush' ? 'sapling.bush' : type === 'tree_pine' ? 'sapling.pine' : 'sapling.oak');
+    const aim = context.isGroundAiming ? context.groundAim : null;
+    if (!aim) {
+      nursery.hideGhost();
+      this.currentPrompt = context.isGroundAiming
+        ? { kind: 'tree', title, actionText: t('aim.tooFar'), hintText: '', progress: 0, canAct: false }
+        : null;
+      return;
+    }
+    const check = nursery.updateGhost(playerPos, type, aim);
+    const ok = check === 'ok';
+    this.currentPrompt = {
+      kind: 'tree',
+      title,
+      actionText: ok ? t('sapling.plant') : check === 'tooClose' ? t('sapling.tooClose') : check === 'tooFar' ? t('aim.tooFar') : t('sapling.badGround'),
+      hintText: '',
+      progress: 0,
+      canAct: ok,
+    };
+    const triggered = context.input.interactJustPressed || context.input.shootJustPressed;
+    if (!ok || !triggered || this.cooldown > 0 || context.model?.isActionLocked()) return;
+    if (!this.inventory!.removeItem(itemId, 1)) return;
+    const gp = nursery.ghostPosition;
+    const gdx = gp.x - playerPos.x, gdz = gp.z - playerPos.z;
+    if (gdx * gdx + gdz * gdz > 0.04) context.model?.setFacingAngleInstant(Math.atan2(gdx, gdz));
+    if (!nursery.plantAtGhost(type)) {
+      this.inventory!.addItem(itemId, 1);
+      return;
+    }
+    context.model?.triggerPickup();
+    this.cooldown = 0.6;
+    if (this.inventory!.getItemCount(itemId) <= 0) {
+      nursery.hideGhost();
       this.inventory!.unequip();
     }
   }

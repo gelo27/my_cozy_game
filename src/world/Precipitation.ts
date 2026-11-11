@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { isMobileDevice } from './WorldSettings';
 import { PrecipitationOcclusion } from './PrecipitationOcclusion';
+import { MAX_FAKE_LIGHTS, nightLightUniforms } from './NightLighting';
 
 /** Side of the box of drops that follows the camera (m). */
 export const PRECIP_BOX = 40;
@@ -79,31 +80,51 @@ export class Precipitation {
         uCenter: { value: new THREE.Vector3() },
         uAmount: { value: 0 },
         uSnow: { value: 0 },
+        uStorm: { value: 0 },
         uWind: { value: new THREE.Vector2(1.2, 0.4) },
+        // Integrated on the CPU (distance fallen at base speed, sideways drift), so a change of
+        // speed or wind (rain to snow, a blizzard rising) eases in instead of jolting every flake
+        uFall: { value: 0 },
+        uSpeed: { value: 11 },
+        uDrift: { value: new THREE.Vector2() },
+        uSwirlT: { value: 0 },
         uBright: { value: 1 },
         ...occUniforms(),
+        // Lamps and campfires (NightLighting): flakes and drops near them catch the light
+        uFakeLightPos: nightLightUniforms.uFakeLightPos,
+        uFakeLightColor: nightLightUniforms.uFakeLightColor,
+        uFakeLightCount: nightLightUniforms.uFakeLightCount,
       },
       vertexShader: `
         attribute vec3 offset;
         attribute float seed;
-        uniform float uTime, uAmount, uSnow, uBright;
+        uniform float uTime, uAmount, uSnow, uBright, uStorm;
         uniform vec3 uCenter;
         uniform vec2 uWind;
+        uniform float uFall, uSpeed, uSwirlT;
+        uniform vec2 uDrift;
+        #define MAX_FAKE_LIGHTS ${MAX_FAKE_LIGHTS}
+        uniform vec4 uFakeLightPos[MAX_FAKE_LIGHTS];
+        uniform vec3 uFakeLightColor[MAX_FAKE_LIGHTS];
+        uniform int uFakeLightCount;
         varying vec2 vUv;
         varying float vFade;
+        varying vec3 vLit;
         ${OCCLUSION_GLSL}
         void main() {
           if (seed > uAmount) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-          float speed = mix(11.0, 1.2, uSnow) * (0.85 + seed * 0.3);
-          float fallen = uTime * speed;
-          vec2 drift = uWind * mix(1.0, 0.35, uSnow) * fallen / speed;
+          float speedK = 0.85 + seed * 0.3;
+          float speed = uSpeed * speedK;
+          float fallen = uFall * speedK;
+          vec2 drift = uDrift;
           vec3 p = offset;
           // World-anchored lattice (repeats every box), the camera only picks which repeat is shown
           float bottom = uCenter.y - 9.0;
           p.y = bottom + mod(offset.y - fallen - bottom, ${BOX_HEIGHT.toFixed(1)});
           p.xz += drift;
-          p.x += uSnow * sin(uTime * (0.6 + seed) + seed * 40.0) * 0.5;
-          p.z += uSnow * cos(uTime * (0.5 + seed * 0.8) + seed * 25.0) * 0.4;
+          float swirl = 1.0 + uStorm * 1.5;
+          p.x += uSnow * sin(uSwirlT * (0.6 + seed) + seed * 40.0) * 0.5 * swirl;
+          p.z += uSnow * cos(uSwirlT * (0.5 + seed * 0.8) + seed * 25.0) * 0.4 * swirl;
           p.xz = mod(p.xz - uCenter.xz + ${(PRECIP_BOX / 2).toFixed(1)}, ${PRECIP_BOX.toFixed(1)}) - ${(PRECIP_BOX / 2).toFixed(1)} + uCenter.xz;
 
           vec3 toCam = cameraPosition - p;
@@ -143,12 +164,26 @@ export class Precipitation {
             world = p + side * position.x * width - axis * position.y * len;
           }
           vUv = position.xy + vec2(0.5, 0.0);
-          gl_Position = projectionMatrix * viewMatrix * vec4(world, 1.0);
+          vec4 mv = viewMatrix * vec4(world, 1.0);
+          // Lamp light on the flake: no facing (a flake scatters every way), a soft falloff that
+          // reaches a bit past the lamp's ground pool so a glowing cone of snow hangs around it
+          vLit = vec3(0.0);
+          for (int i = 0; i < MAX_FAKE_LIGHTS; i++) {
+            if (i >= uFakeLightCount) break;
+            vec3 tl = uFakeLightPos[i].xyz - mv.xyz;
+            float r = uFakeLightPos[i].w * 1.2;
+            float d2 = dot(tl, tl);
+            if (d2 >= r * r) continue;
+            float att = 1.0 - d2 / (r * r);
+            vLit += uFakeLightColor[i] * (att * att);
+          }
+          gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: `
         uniform float uSnow, uBright;
         varying vec2 vUv;
         varying float vFade;
+        varying vec3 vLit;
         void main() {
           float a;
           vec3 col;
@@ -163,7 +198,9 @@ export class Precipitation {
           }
           a *= vFade;
           if (a < 0.01) discard;
-          gl_FragColor = vec4(col * uBright, a);
+          // Lit flakes also show more (a dim one turns into a bright speck in the lamp's glow)
+          vec3 lit = vLit * mix(0.9, 2.2, uSnow);
+          gl_FragColor = vec4(col * uBright + lit, min(1.0, a * (1.0 + dot(lit, vec3(0.3)))));
         }`,
     });
     this.drops = new THREE.Mesh(geo, this.dropMat);
@@ -264,7 +301,12 @@ export class Precipitation {
     const visible = amount > 0.02;
     this.drops.visible = visible;
     this.splashes.visible = visible && snow < 0.5;
-    if (!visible) return;
+    if (!visible) {
+      // Nobody sees the lattice now: restart the fall clocks so they never grow past float precision
+      this.dropMat.uniforms.uFall.value = 0;
+      this.dropMat.uniforms.uSwirlT.value = 0;
+      return;
+    }
     // Only the instances that can be visible at this amount are drawn (seeds ascend with the index)
     (this.drops.geometry as THREE.InstancedBufferGeometry).instanceCount = Math.min(this.dropCount, Math.ceil(this.dropCount * amount) + 1);
     this.splashes.geometry.setDrawRange(0, Math.min(this.splashCount, Math.ceil(this.splashCount * amount) + 1));
@@ -275,6 +317,15 @@ export class Precipitation {
     u.uSnow.value = snow;
     u.uBright.value = brightness;
     u.uWind.value.set(0.8 + storm * 2.2, 0.3 + storm * 0.8);
+    u.uStorm.value = storm;
+    // A blizzard (snow + storm wind) drives the flakes faster and almost sideways
+    const speed = 11 + (1.2 * (1 + storm * 1.8) - 11) * snow;
+    const side = 1 + (0.35 + storm * 1.4 - 1) * snow;
+    u.uSpeed.value = speed;
+    u.uFall.value += speed * dt;
+    u.uSwirlT.value += dt * (1 + storm * 1.5);
+    const B = PRECIP_BOX;
+    u.uDrift.value.set((u.uDrift.value.x + u.uWind.value.x * side * dt) % B, (u.uDrift.value.y + u.uWind.value.y * side * dt) % B);
     const s = this.splashMat.uniforms;
     s.uTime.value = u.uTime.value;
     s.uCenter.value.copy(cameraPos);

@@ -1,0 +1,47 @@
+[
+  {
+    "v": 2, "id": "cave_drip", "kind": "motif", "title": "Крапля", "mood": ["cave"],
+    "bpm": 60, "steps": 8, "root": 50, "scale": [0, 2, 3, 5, 7, 9, 10], "gain": 0.7,
+    "parts": {
+      "h": { "i": "handpan", "vol": 0.5 },
+      "p": { "i": "darkpad", "vol": 0.14 }
+    },
+    "pat": {
+      "h1": "0:7:2:6 2:9:2:5 4:10:4:6",
+      "h2": "0:11:2:5 2:9:6:5",
+      "p": "0:0:8:4"
+    },
+    "sections": { "S": { "h": "h1 h2", "p": "p p" } },
+    "form": "S"
+  },
+  {
+    "v": 2, "id": "cave_glimmer", "kind": "motif", "title": "Відблиск", "mood": ["cave"],
+    "bpm": 56, "steps": 8, "root": 50, "scale": [0, 2, 3, 5, 7, 9, 10], "gain": 0.65,
+    "parts": {
+      "g": { "i": "bells", "vol": 0.3 },
+      "p": { "i": "darkpad", "vol": 0.14 }
+    },
+    "pat": {
+      "g1": "0:11:3:5 3:9:1:4 4:7:4:5",
+      "g2": "2:8:6:4",
+      "p": "0:4:8:4"
+    },
+    "sections": { "S": { "g": "g1 g2", "p": "p p" } },
+    "form": "S"
+  },
+  {
+    "v": 2, "id": "cave_echo", "kind": "motif", "title": "Відлуння", "mood": ["cave"],
+    "bpm": 64, "steps": 8, "root": 50, "scale": [0, 2, 3, 5, 7, 9, 10], "gain": 0.7,
+    "parts": {
+      "h": { "i": "harp", "vol": 0.4 },
+      "p": { "i": "darkpad", "vol": 0.12 }
+    },
+    "pat": {
+      "h1": "0:0:1:5 1:4:1:4 2:7:1:5 3:9:1:4 4:11:4:6",
+      "h2": "0:10:8:5",
+      "p": "0:0:8:4"
+    },
+    "sections": { "S": { "h": "h1 h2", "p": "p p" } },
+    "form": "S"
+  }
+]

@@ -10,6 +10,7 @@ import type { GameWorld } from '../engine/GameEngine';
 import type { FieldSaveData } from '../farming/FieldManager';
 import type { ExplorationSaveData } from '../explore/ExplorationManager';
 import type { OrchardSaveData } from '../gathering/AppleOrchard';
+import type { NurserySaveData } from '../gathering/TreeNursery';
 
 export const SAVE_VERSION = 2;
 const KEY_PREFIX = 'cozyfarm.save.';
@@ -24,6 +25,8 @@ export interface WorldSaveData {
   weather: WeatherType;
   /** Automatic weather chain (missing in older saves: rolled fresh). */
   weatherDirector?: WeatherDirectorSave;
+  /** Snow lying on the ground 0..1 (missing in older saves: none). */
+  snowCover?: number;
   props: PropSaveData[];
   /** Forest generation the props came from (missing = before the denser forests). */
   forest?: number;
@@ -34,6 +37,8 @@ export interface WorldSaveData {
   fields?: FieldSaveData[];
   /** Player-planted apple trees and apples lying around (missing in older saves). */
   orchard?: OrchardSaveData;
+  /** Saplings the player planted from cones, acorns and bush cuttings (missing in older saves). */
+  nursery?: NurserySaveData;
   inventory: { items: Record<string, number>; equipped: string | null; hotbar?: (string | null)[]; capacity?: number };
   player: [number, number, number];
   vehicle: { p: [number, number, number]; yaw: number } | null;
@@ -87,11 +92,13 @@ export class SaveSystem {
       timeOfDay: worldSettings.timeOfDay,
       weather: w.weather.weather,
       weatherDirector: w.weather.director.serialize(),
+      snowCover: +w.weather.snowCover.toFixed(3),
       props: w.props.serialize(),
       forest: w.props.forestVersion,
       buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
       fields: w.farmingManager.serializeFields(),
       orchard: w.orchard.serialize(),
+      nursery: w.nursery.serialize(),
       inventory: {
         items,
         equipped: w.inventoryManager.getEquippedItemId(),
@@ -121,6 +128,7 @@ export class SaveSystem {
     w.gameplay.lastSleepNight = data.sleep?.night ?? -1;
     w.weather.setWeather(data.weather);
     w.weather.director.deserialize(data.weather, data.weatherDirector);
+    w.weather.snowCover = Math.min(1, Math.max(0, data.snowCover ?? 0));
     w.terrain.deserialize(data.terrain);
     w.props.deserialize(data.props);
     // Saves from before the millstone existed get one at its usual spot
@@ -144,6 +152,7 @@ export class SaveSystem {
     }
     w.farmingManager.deserializeFields(data.fields ?? []);
     w.orchard.deserialize(data.orchard);
+    w.nursery.deserialize(data.nursery);
 
     const inv = w.inventoryManager;
     for (const item of inv.getItems()) {

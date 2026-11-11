@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { injectNightLights } from './NightLighting';
 import { injectWaterline } from '../scene/WaterDetails';
 import { fieldCropTime } from '../farming/WheatModel';
+import { injectPickGlow } from './PickGlow';
 
 const FLOWERS_URL = `${import.meta.env.BASE_URL}models/flowers.glb`;
 
@@ -32,10 +33,26 @@ export const uFlowerBendCount = (bendStore.__flowerBendCount ??= { value: 0 });
 
 const uTulipColors = { value: TULIP_COLORS.map((hex) => new THREE.Color(hex)) };
 
+export const TULIP_COLOR_COUNT = TULIP_COLORS.length;
+const TAU = Math.PI * 2;
+/**
+ * Petal colour index (0 purple, 1 white, 2 yellow, 3 red) of a clump turned by `yaw`: the colour is
+ * the quarter turn its yaw falls in (the shader reads the same from the instance matrix), so it
+ * needs no per-instance buffer and doesn't tie the clump to any spot.
+ */
+export function tulipColorOfYaw(yaw: number): number {
+  const turn = yaw / TAU;
+  return Math.min(Math.floor((turn - Math.floor(turn)) * 4), 3);
+}
+/** A random yaw that shows `color`, kept off the quarter boundaries (float rounding on the GPU). */
+export function tulipYawFor(color: number): number {
+  return (color + 0.12 + Math.random() * 0.76) * (TAU / 4);
+}
+
 /**
  * Tulip material: vertex colours, wind sway and the push springs, all in the vertex shader. Petals
- * carry only their shading in the vertex colour; the clump's petal colour is picked from a hash of
- * its instance position, so the four colours need no per-instance buffer (and survive PropSystem
+ * carry only their shading in the vertex colour; the clump's petal colour is picked from its yaw in
+ * the instance matrix, so the four colours need no per-instance buffer (and survive PropSystem
  * reshuffling its instance slots).
  */
 function createFlowerMaterial(): THREE.MeshLambertMaterial {
@@ -43,6 +60,8 @@ function createFlowerMaterial(): THREE.MeshLambertMaterial {
   mat.onBeforeCompile = (shader) => {
     injectNightLights(shader);
     injectWaterline(shader);
+    // The clump the E prompt is about glows
+    injectPickGlow(shader, 'instance');
     shader.uniforms.uTime = fieldCropTime;
     shader.uniforms.uTulipColors = uTulipColors;
     shader.uniforms.uFlowerBend = uFlowerBend;
@@ -63,11 +82,10 @@ attribute vec2 aTulip;`
         `#include <color_vertex>
 #ifdef USE_INSTANCING
   if (aTulip.x > 0.5) {
-    // Interleaved-gradient hash of the clump's half-metre cell (no sin(): GPUs lose its precision
-    // on big arguments, which left only two of the four colours)
-    vec2 cell = floor(instanceMatrix[3].xz * 2.0);
-    float hsh = fract(52.9829189 * fract(dot(cell, vec2(0.06711056, 0.00583715))));
-    vColor.rgb *= uTulipColors[int(min(hsh * 4.0, 3.0))];
+    // The clump's yaw picks the colour: which quarter turn it falls in (tulipColorOfYaw)
+    vec3 ax = instanceMatrix[0].xyz;
+    float turn = fract(atan(-ax.z, ax.x) / 6.2831853);
+    vColor.rgb *= uTulipColors[int(min(turn * 4.0, 3.0))];
   }
 #else
   if (aTulip.x > 0.5) vColor.rgb *= uTulipColors[3];
@@ -102,7 +120,7 @@ attribute vec2 aTulip;`
 #endif`
       );
   };
-  mat.customProgramCacheKey = () => 'tulip-clump-2';
+  mat.customProgramCacheKey = () => 'tulip-clump-3-glow2';
   return mat;
 }
 

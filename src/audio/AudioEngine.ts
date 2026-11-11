@@ -75,7 +75,8 @@ class AudioEngine {
       this.master.connect(this.muffle).connect(this.volume).connect(this.ctx.destination);
       for (const ch of ['sfx', 'ambient', 'music', 'sfxDry'] as AudioChannel[]) {
         const g = this.ctx.createGain();
-        g.connect(ch === 'sfxDry' ? this.volume : this.master);
+        // Music is not part of the world: it skips the underwater muffle (the director turns it down instead)
+        g.connect(ch === 'sfxDry' || ch === 'music' ? this.volume : this.master);
         this.channels[ch] = g;
       }
       this.applyVolumes(true);

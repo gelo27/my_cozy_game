@@ -20,6 +20,8 @@ export interface AmbientState {
   breeze: number;
   /** 0..1 quiet muffled hush of foggy weather. */
   fog: number;
+  /** 0..1 snow falling / lying around: the whole outside is low-passed and a little quieter. */
+  snow: number;
   /** True when a roof or big static collider is above the player: rain sounds muffled. */
   underRoof: boolean;
   /** Nearest burning campfire within earshot, or null. */
@@ -149,17 +151,28 @@ export class AmbientAudio {
    * into a panner at the cave mouth. Crossfaded by `portalMix`.
    */
   private outside: { input: GainNode; direct: GainNode; filter: BiquadFilterNode; portal: GainNode; panner: PannerNode } | null = null;
+  /** Snow hush on the direct outside path (one biquad, wide open when there is no snow). */
+  private hush: BiquadFilterNode | null = null;
+  private hushInput: GainNode | null = null;
+  private snowMix = 0;
   private portalMix = 0;
   private portalDist = 0;
   private readonly portalPos = new THREE.Vector3();
 
   private outsideBus(ctx: AudioContext, bus: AudioNode): AudioNode {
     if (this.outside) return this.outside.input;
+    if (this.hushInput) return this.hushInput;
     const panner = audioEngine.createPanner({ x: 0, y: -1000, z: 0 }, PORTAL_REF, PORTAL_RANGE, 'ambient');
     const input = ctx.createGain();
     const direct = ctx.createGain();
     direct.gain.value = 1;
-    input.connect(direct).connect(bus);
+    const hush = ctx.createBiquadFilter();
+    hush.type = 'lowpass';
+    hush.frequency.value = 20000;
+    hush.Q.value = 0.4;
+    this.hush = hush;
+    this.hushInput = input;
+    input.connect(direct).connect(hush).connect(bus);
     if (!panner) return input;
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
@@ -185,6 +198,11 @@ export class AmbientAudio {
     this.roofMix += ((s.underRoof ? 1 : 0) - this.roofMix) * 0.08;
     // Underground the outside comes in through the nearest mouth
     const out = this.outsideBus(ctx, bus);
+    this.snowMix += (s.snow - this.snowMix) * 0.03;
+    if (this.hush) {
+      // 20 kHz (transparent) down to ~1.6 kHz in a thick snowfall, eased on the audio clock
+      this.hush.frequency.setTargetAtTime(20000 * Math.pow(0.08, this.snowMix), t, 0.5);
+    }
     if (s.portal) {
       this.portalPos.copy(s.portal);
       this.portalDist = s.portal.distanceTo(s.listener);
@@ -255,7 +273,7 @@ export class AmbientAudio {
 
     // Wind
     if (s.wind > 0.01 && !this.wind) this.wind = this.startWind(ctx, out);
-    if (this.wind) this.wind.gain.gain.setTargetAtTime(s.wind * 0.07 * (1 - this.roofMix * 0.6), t, 0.5);
+    if (this.wind) this.wind.gain.gain.setTargetAtTime(s.wind * 0.07 * (1 - this.roofMix * 0.6) * (1 - this.snowMix * 0.35), t, 0.5);
 
     // Campfire: the loop only exists while a fire is close enough to hear
     if (s.campfire && s.campfire.distanceToSquared(s.listener) < FIRE_EARSHOT * FIRE_EARSHOT) {

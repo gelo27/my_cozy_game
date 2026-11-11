@@ -3,6 +3,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../../physics/PhysicsWorld';
 import { MovementInput } from '../../input/InputManager';
 import { ParticleManager } from '../../particles/ParticleManager';
+import type { GroundAimHit } from '../../gathering/GroundAim';
 
 export interface GroundInfo {
   isGrounded: boolean;
@@ -45,6 +46,13 @@ export interface CharacterContext {
   isBuildModeActive?: boolean;
   activeWeapon: number; // held tool visual: 0=none, 6=axe, 10=watering can, 11=seeds, 12=pickaxe
   isAiming: boolean;
+  /**
+   * RMB held with the shovel or something plantable in hand: where the crosshair meets the ground
+   * (null when not aiming that way, or the ray misses the ground).
+   */
+  groundAim: GroundAimHit | null;
+  /** RMB aiming with a ground tool (the shovel, tulips), even when the ray misses. */
+  isGroundAiming: boolean;
   particleManager?: ParticleManager;
   model?: any;
   forestZone?: any;

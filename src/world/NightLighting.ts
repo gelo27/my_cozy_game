@@ -3,6 +3,7 @@ import { isMobileDevice } from './WorldSettings';
 import type { PropSystem } from './PropSystem';
 import type { WeatherSystem } from './WeatherSystem';
 import { injectWaterline } from '../scene/WaterDetails';
+import { CLOUD_SHADOW_BEGIN, CLOUD_SHADOW_END, CLOUD_SHADOW_GLSL, cloudShadowUniforms } from './CloudShadows';
 
 /**
  * Cheap night lighting for mobile-friendly scenes.
@@ -24,6 +25,62 @@ export const nightLightUniforms = {
   uFakeLightColor: { value: Array.from({ length: MAX_FAKE_LIGHTS }, () => new THREE.Color(0, 0, 0)) },
   uFakeLightCount: { value: 0 },
 };
+
+/**
+ * Low ground mist (snowfall): a pale layer within a couple of metres of the ground level around
+ * the player, thickening with distance. Lives in the fog chunk of every material that gets the
+ * night lights, so it costs one varying and a few ops per pixel, and nothing while uMist is 0.
+ */
+export const mistUniforms = {
+  uMist: { value: 0 },
+  /** World height of the mist's top (fades out over the 2.5 m below it). */
+  uMistTop: { value: 0 },
+  uMistColor: { value: new THREE.Color(1, 1, 1) },
+};
+
+/** `amount` 0..1, `topY` world height of the layer's top, `color` its tint (the fog's). */
+export function setGroundMist(amount: number, topY: number, color: THREE.Color): void {
+  mistUniforms.uMist.value = amount;
+  mistUniforms.uMistTop.value = topY;
+  mistUniforms.uMistColor.value.copy(color);
+}
+
+function injectGroundMist(shader: PatchableShader): void {
+  if (!shader.vertexShader.includes('#include <fog_vertex>') || !shader.fragmentShader.includes('#include <fog_fragment>')) return;
+  Object.assign(shader.uniforms, mistUniforms);
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>
+#ifdef USE_FOG
+varying float vMistY;
+#endif`)
+    // World height from the view-space position: the view matrix is rigid, so its inverse rotation
+    // is the transpose (no extra uniform, works for instanced and batched meshes alike)
+    .replace(
+      '#include <fog_vertex>',
+      `#include <fog_vertex>
+      #ifdef USE_FOG
+      vMistY = dot(viewMatrix[1].xyz, mvPosition.xyz - viewMatrix[3].xyz);
+      #endif`
+    );
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+#ifdef USE_FOG
+varying float vMistY;
+uniform float uMist;
+uniform float uMistTop;
+uniform vec3 uMistColor;
+#endif`)
+    .replace(
+      '#include <fog_fragment>',
+      `#ifdef USE_FOG
+      if (uMist > 0.001) {
+        float mistK = smoothstep(uMistTop, uMistTop - 2.5, vMistY) * smoothstep(3.0, 30.0, vFogDepth);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, uMistColor, uMist * mistK * 0.6);
+      }
+      #endif
+      #include <fog_fragment>`
+    );
+}
 
 interface PatchableShader {
   uniforms: Record<string, THREE.IUniform>;
@@ -64,6 +121,8 @@ export function injectNightLights(shader: PatchableShader, opts: { perVertex?: b
   if (!shader.fragmentShader.includes('#include <opaque_fragment>') || !shader.vertexShader.includes('#include <project_vertex>')) return;
 
   Object.assign(shader.uniforms, nightLightUniforms);
+  injectCloudShadows(shader);
+  injectGroundMist(shader);
 
   if (opts.perVertex) {
     shader.vertexShader = shader.vertexShader
@@ -87,6 +146,23 @@ varying vec3 vNightLight;${LIGHT_DECL}`)
       `if (uFakeLightCount > 0) outgoingLight += diffuseColor.rgb * fakeNightLight(-vViewPosition, normal);
       #include <opaque_fragment>`
     );
+}
+
+/**
+ * Cloud shadows (CloudShadows.ts) on the direct sun light. Every material that gets the night
+ * lights gets these too, so the whole world sits under the same drifting patches.
+ */
+function injectCloudShadows(shader: PatchableShader): void {
+  const fs = shader.fragmentShader;
+  if (fs.includes('uCsMap') || !fs.includes('#include <lights_fragment_begin>') || !fs.includes('#include <lights_fragment_end>')) return;
+  Object.assign(shader.uniforms, cloudShadowUniforms);
+  shader.fragmentShader = fs
+    .replace('#include <common>', `#include <common>
+${CLOUD_SHADOW_GLSL}`)
+    .replace('#include <lights_fragment_begin>', `${CLOUD_SHADOW_BEGIN}
+#include <lights_fragment_begin>`)
+    .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+${CLOUD_SHADOW_END}`);
 }
 
 let installed = false;

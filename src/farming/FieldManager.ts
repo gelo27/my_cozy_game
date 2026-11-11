@@ -44,10 +44,10 @@ export interface FarmField {
   prevTiles: number[];
   crop: CropState | null;
   indicator: THREE.Sprite;
-  /** Dark damp-soil overlay, built on first watering and freed with the field. */
-  wetMesh: THREE.Mesh | null;
   /** 0..1, eases towards 1 while watered so the soil darkens and dries gradually. */
   wetness: number;
+  /** Damp-soil value last written to the terrain (0..255, -1 = not yet). */
+  wetShown: number;
 }
 
 export type DigBlockReason = 'tile' | 'water' | 'slope' | 'blocked' | 'overlap';
@@ -166,7 +166,8 @@ function rng(seed: number): () => number {
  * CROP_CELL cell, so a farm costs a handful of draw calls and cells out of view or past the fade
  * distance are skipped (far ones dissolve with a dither, see updateVisibility). Instance
  * buffers are rebuilt only when a field is dug, planted, grows a stage or is harvested; the wind sway
- * runs in the vertex shader. The soil itself is the terrain's own dirt splat layer: no extra mesh.
+ * runs in the vertex shader. The soil itself is the terrain's own dirt splat layer and its damp look
+ * a channel of the terrain's splat texture (TerrainSystem.setWetness): no extra mesh or draw call.
  */
 export class FieldManager {
   private readonly fields = new Map<string, FarmField>();
@@ -266,15 +267,6 @@ export class FieldManager {
     warm(wheatProbe, FIELD_CROP_MATERIAL);
     // ...and its distance-dither twin, which every crop's far fields share
     warm(wheatProbe, acquireDistanceDither(FIELD_CROP_MATERIAL, CROP_FADE));
-
-    // Damp-soil overlay: same material setup as createWetMesh (per-field copies share the program)
-    const dampGeo = new THREE.PlaneGeometry(1, 1);
-    dampGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(16).fill(1), 4));
-    const dampProbe = new THREE.Mesh(dampGeo, FieldManager.wetMaterial());
-    dampProbe.name = 'FieldShaderWarmer';
-    dampProbe.visible = false;
-    dampProbe.frustumCulled = false;
-    this.group.add(dampProbe);
   }
 
   public setWorld(terrain: TerrainSystem, physics: PhysicsWorld): void {
@@ -432,8 +424,8 @@ export class FieldManager {
       prevTiles: prevTiles && prevTiles.length === prev.length ? prevTiles : prev,
       crop,
       indicator,
-      wetMesh: null,
       wetness: crop?.isWatered ? 1 : 0,
+      wetShown: -1,
     };
     this.fields.set(field.id, field);
     this.dirty = true;
@@ -452,7 +444,7 @@ export class FieldManager {
       }
     }
     this.group.remove(field.indicator);
-    this.disposeWetMesh(field);
+    this.dryOut(field);
     this.placementCache.delete(id);
     this.fields.delete(id);
     this.dirty = true;
@@ -462,7 +454,7 @@ export class FieldManager {
   public clear(): void {
     for (const f of this.fields.values()) {
       this.group.remove(f.indicator);
-      this.disposeWetMesh(f);
+      this.dryOut(f);
     }
     this.fields.clear();
     this.placementCache.clear();
@@ -544,7 +536,12 @@ export class FieldManager {
 
   /** Bobs the water-drop indicators, pulses the ghost and rebuilds instances when something changed. */
   public update(dt: number, animTime: number): void {
-    this.wetBudget = 1;
+    // Rain darkens all bare earth at once (one uniform), soaking in fast and drying slowly
+    const rain = this.rainWet ? 1 : 0;
+    if (this.rainWetness !== rain) {
+      this.rainWetness = rain > this.rainWetness ? Math.min(1, this.rainWetness + dt * 1.6) : Math.max(0, this.rainWetness - dt * 0.25);
+      this.terrain?.setRainWetness(this.rainWetness * WET_OPACITY);
+    }
     if (this.dirty) {
       this.dirty = false;
       this.rebuildInstances();
@@ -571,109 +568,28 @@ export class FieldManager {
 
   // ---------------------------------------------------------------- damp soil
 
+  /** Rain's soaking of all bare earth, 0..1 (eased; see update). */
+  private rainWetness = 0;
+
   /** Soaks in quickly after watering, dries out slowly once the stage has used the water up. */
-  /**
-   * New damp patches this frame may still build. Rain soaks every field at once; building all their
-   * patches in one frame (terrain sampling, normals, buffers, first upload) was a visible hitch on
-   * a big farm, so they are spread over frames (a patch fades in anyway).
-   */
-  private wetBudget = 0;
-
   private updateWetness(f: FarmField, dt: number): void {
-    const target = f.crop?.isWatered || this.rainWet ? 1 : 0;
-    if (f.wetness === target && (target === 0 || f.wetMesh)) return;
-    if (target > 0 && !f.wetMesh) {
-      if (this.wetBudget <= 0) return; // its turn comes in a later frame
-      this.wetBudget--;
-      f.wetMesh = this.createWetMesh(f);
+    const target = f.crop?.isWatered ? 1 : 0;
+    if (f.wetness !== target) {
+      f.wetness = target > f.wetness ? Math.min(1, f.wetness + dt * 1.6) : Math.max(0, f.wetness - dt * 0.25);
     }
-    f.wetness = target > f.wetness ? Math.min(1, f.wetness + dt * 1.6) : Math.max(0, f.wetness - dt * 0.25);
-    const mesh = f.wetMesh;
-    if (!mesh) return;
-    mesh.visible = f.wetness > 0.01;
-    // Opacity lives in the vertex alpha, so every patch shares one material (one program, no
-    // per-field material state); only fields that are drying or soaking rewrite their 81 alphas
-    const col = mesh.geometry.getAttribute('color') as THREE.BufferAttribute;
-    const arr = col.array as Float32Array;
-    const a = WET_OPACITY * f.wetness;
-    for (let i = 3; i < arr.length; i += 4) arr[i] = a;
-    col.needsUpdate = true;
-  }
-
-  /** A terrain-hugging dark patch with soft edges over the field's soil (one per field, 81 verts). */
-  private createWetMesh(f: FarmField): THREE.Mesh {
-    const geo = new THREE.PlaneGeometry(FIELD_CELLS + 0.6, FIELD_CELLS + 0.6, 8, 8);
-    geo.rotateX(-Math.PI / 2);
-    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
-    const cx = f.gx + HALF;
-    const cz = f.gz + HALF;
-    for (let i = 0; i < pos.count; i++) {
-      const h = this.terrain ? this.terrain.getHeight(cx + pos.getX(i), cz + pos.getZ(i)) : f.center.y;
-      pos.setY(i, h + 0.035);
+    // Written into the terrain's splat texture (a few texels, only when the value changes);
+    // neighbouring watered fields blend into one damp patch there
+    const v = Math.round(WET_OPACITY * f.wetness * 255);
+    if (v !== f.wetShown && this.terrain) {
+      f.wetShown = v;
+      this.terrain.setWetness(f.gx, f.gz, FIELD_CELLS, FIELD_CELLS, v);
     }
-    geo.computeVertexNormals();
-    // RGBA vertex colour: white, alpha = the field's wetness (see updateWetness)
-    const rgba = new Float32Array(pos.count * 4).fill(1);
-    for (let i = 3; i < rgba.length; i += 4) rgba[i] = 0;
-    geo.setAttribute('color', new THREE.BufferAttribute(rgba, 4).setUsage(THREE.DynamicDrawUsage));
-    const mesh = new THREE.Mesh(geo, FieldManager.wetMaterial());
-    mesh.name = `FieldDamp_${f.id}`;
-    mesh.position.set(cx, 0, cz);
-    mesh.renderOrder = 1;
-    mesh.visible = false;
-    this.group.add(mesh);
-    return mesh;
   }
 
-  private disposeWetMesh(f: FarmField): void {
-    if (!f.wetMesh) return;
-    this.group.remove(f.wetMesh);
-    f.wetMesh.geometry.dispose(); // the material and its alpha texture are shared
-    f.wetMesh = null;
-  }
-
-  private static wetMat: THREE.MeshLambertMaterial | null = null;
-
-  /** The one material every damp patch draws with (its opacity comes from the vertex alpha). */
-  private static wetMaterial(): THREE.MeshLambertMaterial {
-    return (this.wetMat ??= new THREE.MeshLambertMaterial({
-      color: 0x1e1009,
-      vertexColors: true,
-      alphaMap: FieldManager.wetAlphaTexture(),
-      transparent: true,
-      depthWrite: false,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-    }));
-  }
-
-  private static wetAlpha: THREE.CanvasTexture | null = null;
-
-  /** Shared soft-edged square mask (with a little mottling so the damp patch isn't flat). */
-  private static wetAlphaTexture(): THREE.CanvasTexture {
-    if (this.wetAlpha) return this.wetAlpha;
-    const S = 64;
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = S;
-    const ctx = canvas.getContext('2d')!;
-    const img = ctx.createImageData(S, S);
-    const rand = rng(1234);
-    for (let y = 0; y < S; y++) {
-      for (let x = 0; x < S; x++) {
-        // Distance to the square's edge, 0 at the border, fading over ~18% of the side
-        const u = Math.min(x, S - 1 - x) / S;
-        const v = Math.min(y, S - 1 - y) / S;
-        const edge = Math.min(1, Math.min(u, v) / 0.18);
-        const a = edge * edge * (3 - 2 * edge) * (0.82 + rand() * 0.18);
-        const o = (y * S + x) * 4;
-        img.data[o] = img.data[o + 1] = img.data[o + 2] = Math.round(a * 255);
-        img.data[o + 3] = 255;
-      }
-    }
-    ctx.putImageData(img, 0, 0);
-    this.wetAlpha = new THREE.CanvasTexture(canvas);
-    return this.wetAlpha;
+  /** The field is gone: its soil is dry again. */
+  private dryOut(f: FarmField): void {
+    if (f.wetShown > 0) this.terrain?.setWetness(f.gx, f.gz, FIELD_CELLS, FIELD_CELLS, 0);
+    f.wetShown = 0;
   }
 
   // ---------------------------------------------------------------- proximity push

@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { Season, currentSeason, dayOfSeason } from '../world/Seasons';
+import type { FlowerBeds } from '../gathering/FlowerBeds';
+import type { PropInstance } from '../world/PropSystem';
 import { CharacterController } from '../character/CharacterController';
 import { InventoryManager } from '../inventory/InventoryManager';
 import { InputManager } from '../input/InputManager';
@@ -55,7 +58,7 @@ function clockLabel(hour: number): string {
 export interface GameplayPrompt {
   text: string;
   key: string;
-  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'explore' | 'mill' | 'sleep';
+  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'explore' | 'mill' | 'sleep' | 'flowers';
   secondary?: { text: string; key: string; action: 'treat' };
 }
 
@@ -65,6 +68,9 @@ export interface GameplayHudState {
   cooking: { recipeId: string; progress: number } | null;
   buff: { label: string; secondsLeft: number } | null;
   weather: WeatherType;
+  season: Season;
+  /** 1-based day within the season. */
+  seasonDay: number;
   isNight: boolean;
   coins: number;
   pets: { name: string; kind: string; affection: number }[];
@@ -98,6 +104,10 @@ export class GameplayManager {
   public readonly slingshot: SlingshotSystem;
   public companion: CompanionNPC | null = null;
   public explore: ExplorePort | null = null;
+  /** Tulip clumps picked by hand with E (wired by the engine). */
+  public flowers: FlowerBeds | null = null;
+  /** The clump the current E prompt would pick (for its glow), null when the prompt is about something else. */
+  public flowerTarget: PropInstance | null = null;
   /** Pets and the companion wait here instead of following (the cave mouth while the player is inside). */
   public anchorOverride: THREE.Vector3 | null = null;
   /** Bumped on any change the HUD should show immediately. */
@@ -336,6 +346,7 @@ export class GameplayManager {
 
     if (isDriving || this.panel) {
       this.setPrompt(null);
+      this.flowerTarget = null;
       if (this.fishing.busy) this.fishing.cancel();
       return;
     }
@@ -353,7 +364,10 @@ export class GameplayManager {
 
     const m = input.movement;
     const ownedByOthers = !!(this.character.farmingAbility?.currentPrompt || this.character.gatheringAbility?.currentPrompt);
-    const equipped = this.inventory.getEquippedItemId();
+    // Swimming / diving: whatever is in hand is put away and can't be used
+    const swimming = this.character.telemetry.isSwimming;
+    if (swimming && this.fishing.busy && this.fishing.state.phase !== 'escaped') this.fishing.cancel();
+    const equipped = swimming ? null : this.inventory.getEquippedItemId();
     const hasRod = equipped === 'fishing_rod';
     const pressed = m.interactJustPressed || (hasRod && m.shootJustPressed);
 
@@ -393,6 +407,8 @@ export class GameplayManager {
   }
 
   private computePrompt(pos: THREE.Vector3, facing: THREE.Vector3, ignoreTools = false): GameplayPrompt | null {
+    // The shovel's probe (ignoreTools) asks without changing what the HUD shows
+    if (!ignoreTools) this.flowerTarget = null;
     if (this.fishing.busy) return null;
     if (!ignoreTools && (this.character.farmingAbility?.currentPrompt || this.character.gatheringAbility?.currentPrompt)) return null;
 
@@ -411,7 +427,7 @@ export class GameplayManager {
     }
 
     // Fixed stations win over pets: pets follow the player and would otherwise hijack every prompt
-    if (this.inventory.getEquippedItemId() === 'fishing_rod' && this.fishing.findCastTarget(pos, facing, this.castTarget)) {
+    if (!this.character.telemetry.isSwimming && this.inventory.getEquippedItemId() === 'fishing_rod' && this.fishing.findCastTarget(pos, facing, this.castTarget)) {
       return { text: t('play.cast'), key: 'E', action: 'fish' };
     }
     if (this.props.findNearest('campfire', pos, 2.6)) return { text: t('play.cook'), key: 'E', action: 'cook' };
@@ -424,6 +440,13 @@ export class GameplayManager {
     const npc = this.companion;
     if (npc && npc.getPosition(this.tmp).distanceTo(pos) < 2.6) {
       return { text: t(npc.following ? 'npc.stay' : 'npc.follow', { name: npc.name }), key: 'E', action: 'npc' };
+    }
+
+    // Tulips stand still: they come before the pets, who follow the player everywhere
+    const clump = this.flowers?.findPickTarget(pos, facing);
+    if (clump) {
+      if (!ignoreTools) this.flowerTarget = clump;
+      return { text: t('flower.pick'), key: 'E', action: 'flowers' };
     }
 
     const pet = this.pets.nearest(pos, 2.2);
@@ -480,8 +503,23 @@ export class GameplayManager {
       this.grindFlour(pos);
     } else if (action === 'sleep') {
       this.trySleep();
+    } else if (action === 'flowers') {
+      this.pickFlowers(pos);
     }
     this.revision++;
+  }
+
+  /** Pulls up the tulip clump in reach (bare hands) and puts it in the backpack. */
+  private pickFlowers(pos: THREE.Vector3): void {
+    const clump = this.flowers?.findPickTarget(pos, this.character.getFacingDirection());
+    if (!clump || this.character.model?.isActionLocked()) return;
+    const dx = clump.position.x - pos.x, dz = clump.position.z - pos.z;
+    if (dx * dx + dz * dz > 1e-3) this.character.model?.setFacingAngleInstant(Math.atan2(dx, dz));
+    const item = this.flowers!.pick(clump.id);
+    if (!item) return;
+    this.inventory.addItem(item, 1);
+    this.character.model?.triggerPickup();
+    this.promptTimer = 0;
   }
 
   private shootSlingshot(pos: THREE.Vector3): void {
@@ -651,6 +689,8 @@ export class GameplayManager {
         ? { label: dataName('item', this.buff.dishId, this.inventory.getItem(this.buff.dishId)?.name ?? ''), secondsLeft: Math.ceil(this.buff.remaining) }
         : null,
       weather: this.weather.weather,
+      season: currentSeason(),
+      seasonDay: dayOfSeason(),
       isNight: this.weather.isNight(),
       coins: this.inventory.getItemCount('coins'),
       pets: this.pets.pets.map((p) => ({ name: p.name, kind: p.kind, affection: Math.round(p.affection) })),

@@ -8,6 +8,7 @@ import { buildChipGeometry, buildRockVariant, rockColors, ROCK_RADIUS, ROCK_VARI
 import { isMobileDevice } from '../world/WorldSettings';
 import { COLLISION_GROUPS } from '../config/constants';
 import { injectNightLights } from '../world/NightLighting';
+import { injectSnowCover } from '../world/SnowCover';
 import { injectWaterline } from '../scene/WaterDetails';
 
 export interface RockNode {
@@ -124,6 +125,7 @@ export class RockField {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', '#include <common>\nvarying float vGlow;')
         .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vColor.rgb * vGlow;');
+      injectSnowCover(shader);
     };
     const instances = Math.max(64, spots.length + 32);
     this.vertexCapacity = 40000;

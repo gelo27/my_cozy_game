@@ -7,6 +7,8 @@ import { loadCropModels } from '../farming/CropModels';
 import { FIELD_CELLS } from '../farming/FieldManager';
 import { hitchLog } from './HitchLog';
 import { loadTreeModels, setFoliageWeatherWind } from '../world/TreeModels';
+import { setSnowCover } from '../world/SnowCover';
+import { Season, firstDayOf } from '../world/Seasons';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { DebugRenderer } from '../physics/DebugRenderer';
 import { InputManager } from '../input/InputManager';
@@ -25,11 +27,14 @@ import type { ExtraLight } from '../world/NightLighting';
 import { CoastAudio, CoastState } from '../audio/CoastAudio';
 import { AmbientAudio } from '../audio/AmbientAudio';
 import { audioEngine } from '../audio/AudioEngine';
+import { music, type MusicWorldState } from '../audio/music/MusicDirector';
 import { caveAudio } from '../audio/CaveAudio';
 import { FootstepAudio, FootSurface } from '../audio/Footsteps';
 import { WheatRustle } from '../audio/WheatRustle';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import type RAPIER from '@dimforge/rapier3d-compat';
+
+const WHITE_MIST = new THREE.Color(0.92, 0.95, 1);
 
 /** Painted terrain tile -> footstep recipe. */
 const TILE_SURFACE: Record<TerrainTileType, FootSurface> = {
@@ -54,6 +59,9 @@ import { CompanionNPC } from '../npc/CompanionNPC';
 import { t } from '../i18n/i18n';
 import { PropTreeField } from '../gathering/PropTreeField';
 import { AppleOrchard } from '../gathering/AppleOrchard';
+import { FlowerBeds } from '../gathering/FlowerBeds';
+import { TreeNursery } from '../gathering/TreeNursery';
+import { GroundAim } from '../gathering/GroundAim';
 import { loadAppleModels } from '../world/AppleTreeModel';
 import { BushSway, FLOWER_SWAY_OPTIONS } from '../world/BushSway';
 import { FallingLeaves } from '../particles/FallingLeaves';
@@ -73,11 +81,14 @@ import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
 import { setRippleCamera } from '../scene/WaterDetails';
 import { waterRippleSim } from '../scene/WaterRippleSim';
+import { updatePickGlow } from '../world/PickGlow';
+import { updateCloudShadows } from '../world/CloudShadows';
+import { LightShafts } from '../world/LightShafts';
 import { RiverSystem } from '../world/rivers/RiverSystem';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { WeatherSystem } from '../world/WeatherSystem';
 import { PropSystem, PropInstance, PROP_GLOW_MATERIALS } from '../world/PropSystem';
-import { NightLighting, installGlobalNightLights } from '../world/NightLighting';
+import { NightLighting, installGlobalNightLights, setGroundMist } from '../world/NightLighting';
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
 import { setAlgaeDaylight } from '../world/AlgaeChains';
 import { setWebLight } from '../world/SpiderWebs';
@@ -153,6 +164,7 @@ export interface GameWorld {
   forest: ForestZone;
   propTrees: PropTreeField;
   orchard: AppleOrchard;
+  nursery: TreeNursery;
   bushSway: BushSway;
   flowerSway: BushSway;
   fallingLeaves: FallingLeaves;
@@ -205,7 +217,14 @@ export class GameEngine {
   /** Surf and gulls along the shores. */
   private readonly coast = new CoastAudio();
   private coastState: CoastState | null = null;
+  /** Reused every frame (no per-frame garbage). */
+  private readonly musicState: MusicWorldState = {
+    timeOfDay: 12, night: 0, weather: 'clear', rain: 0, inCave: false, underwater: false, sleeping: false, threat: 0,
+  };
+  /** Fake god rays while the camera is under water. */
+  private lightShafts: LightShafts | null = null;
   private readonly footsteps = new FootstepAudio();
+  private readonly mistColor = new THREE.Color();
   private readonly wheatRustle = new WheatRustle();
   private prevSwimming = false;
   private prevVelY = 0;
@@ -241,6 +260,33 @@ export class GameEngine {
   private readonly pushTmp = new THREE.Vector3();
   private lastGatherPrompt: unknown = null;
   private lastPlayPrompt: GameplayPrompt | null = null;
+  private readonly glowClump = { x: 0, z: 0, half: 0 };
+  private readonly glowField = { x: 0, z: 0, half: 0 };
+
+  private updatePickGlowTargets(dt: number, editing: boolean): void {
+    const w = this.world;
+    if (!w || editing) {
+      updatePickGlow(dt, null, null);
+      return;
+    }
+    // The clump only while it still stands (it may have just been picked)
+    const c = w.gameplay.prompt?.action === 'flowers' ? w.gameplay.flowerTarget : null;
+    const clump = c && w.props.get(c.id) === c ? this.glowClump : null;
+    if (clump && c) {
+      clump.x = c.position.x;
+      clump.z = c.position.z;
+    }
+    const fp = w.character.farmingAbility?.currentPrompt;
+    const f = fp?.canHarvest && fp.isField ? w.farmingManager.fields.get(fp.plotId) : null;
+    const field = f ? this.glowField : null;
+    if (field && f) {
+      field.x = f.center.x;
+      field.z = f.center.z;
+      // The field's own square (neighbouring fields can touch it, so no margin)
+      field.half = FIELD_CELLS / 2 + 0.02;
+    }
+    updatePickGlow(dt, clump, field);
+  }
 
   private maxPixelRatio = 1;
   private minPixelRatio = 0.75;
@@ -389,6 +435,8 @@ export class GameEngine {
       const water = new WaterSystem(scene);
       water.setTerrain(terrain);
       setRippleCamera(this.camera.camera);
+      this.lightShafts = new LightShafts(scene);
+      waterRippleSim.setGround((x, z) => terrain.getHeight(x, z));
       const rivers = new RiverSystem(scene, terrain);
       const weather = new WeatherSystem(scene);
       weather.onLightning = () => this.ambient.thunder(this.listenerPos, weather.sound.thunder);
@@ -464,6 +512,8 @@ export class GameEngine {
       const fallingLeaves = new FallingLeaves(scene, (x, z) => terrain.getHeight(x, z));
       propTrees.leaves = fallingLeaves;
       propTrees.onWood = (amount) => giveResources([{ itemId: 'wood', amount }]);
+      // A felled tree / cleared bush drops its seed: a cone, an acorn or a cutting to plant again
+      propTrees.onSeed = (itemId, amount) => giveResources([{ itemId, amount }]);
       character.setGatheringSystems(forest, rocks, inventoryManager, propTrees);
       // Player-planted apple trees: not on fields, not in the caves
       const orchard = new AppleOrchard(scene, physics, terrain, particleManager);
@@ -473,6 +523,16 @@ export class GameEngine {
       orchard.onItems = (items) => giveResources(items);
       orchard.isBlocked = (x, z) => !!exploration?.inCave || !!farmingManager.fields.nearest(x, z, 0.9);
       character.gatheringAbility.orchard = orchard;
+      // Tulips: picked by hand (E), planted again from the hotbar (same ground rules as the saplings)
+      const flowerBeds = new FlowerBeds(scene, props, terrain, physics, particleManager, flowerSway);
+      flowerBeds.isBlocked = orchard.isBlocked;
+      character.gatheringAbility.flowers = flowerBeds;
+      // Pines, oaks and bushes planted from those seeds (same ground rules)
+      const nursery = new TreeNursery(scene, props, terrain, physics, particleManager);
+      nursery.isBlocked = orchard.isBlocked;
+      character.gatheringAbility.nursery = nursery;
+      // RMB with the shovel / tulips: aim at the ground with the crosshair, like the slingshot
+      character.groundAim = new GroundAim(terrain);
 
       const vehicle = new VehicleController(physics, scene, new THREE.Vector3(7, 1.2, 2), -Math.PI / 2);
       const mopedSpawn = new THREE.Vector3(2.4, 0, -1.6);
@@ -500,10 +560,12 @@ export class GameEngine {
         weather.director.update(seconds);
         farmingManager.fastForward(seconds);
         orchard.fastForward(seconds);
+        nursery.fastForward(seconds);
       };
       gameplay.onWake = () => this.world?.saves.save(AUTOSAVE_SLOT);
       // Stations, the NPC, finds and a faced pet take E from the shovel
       character.farmingAbility.activityProbe = (pos) => gameplay.hasActivityForShovel(pos);
+      gameplay.flowers = flowerBeds;
 
       // Villager companion: paths come from a physics-sampled grid that resets when anything is built
       const nav = new GridNavigator(physics, () => (buildingManager.revision * 100003 + props.revision) * 7919 + terrain.revision, {
@@ -589,6 +651,7 @@ export class GameEngine {
         forest,
         propTrees,
         orchard,
+        nursery,
         bushSway,
         flowerSway,
         fallingLeaves,
@@ -767,10 +830,13 @@ export class GameEngine {
     w.props.update();
     w.props.updateVisibility(this.camera.camera.position);
     const rainOnWater = w.exploration.inCave ? 0 : w.weather.rainIntensity * (1 - w.weather.snowAmount);
-    w.water.update(dt, this.camera.camera.position, rainOnWater);
+    w.water.update(dt, this.camera.camera.position);
     // Ripple wave simulation around the player (developer toggle; asleep when nothing stirs)
-    waterRippleSim.update(this.renderer, dt);
-    w.rivers.update(dt, w.weather.nightFactor, rainOnWater);
+    waterRippleSim.update(this.renderer, dt, rainOnWater, editing ? this.camera.camera.position : ride ? ride.getPosition() : character.getPosition());
+    w.rivers.update(dt, w.weather.nightFactor);
+    updateCloudShadows(dt, w.weather.sunDir, w.weather.cloudCover, w.weather.nightFactor);
+    // What the HUD prompt is about glows: the tulip clump E picks, the ripe field E harvests
+    this.updatePickGlowTargets(dt, editing);
     if (editing) {
       editor.update(rawDt);
     } else {
@@ -780,10 +846,19 @@ export class GameEngine {
       tpCamera.update(dt, cameraTargetPos, physics, ride ? ride.collider : character.collider);
     }
     w.weather.update(dt, tpCamera.camera.position);
+    this.lightShafts?.update(dt, this.camera.camera, {
+      sunDir: w.weather.sunDir,
+      sunColor: w.weather.sun.color,
+      underwater: w.weather.underwater,
+      night: w.weather.nightFactor,
+      cover: w.weather.cloudCover,
+      cave: Math.max(w.weather.caveFactor, w.exploration.inCave ? 1 : 0),
+    });
     w.nightLighting.setViewportHeight(this.renderer.domElement.height);
     w.lightning.update(dt, tpCamera.camera, this.renderer.domElement.height);
     w.nightLighting.update(dt, tpCamera.camera, editing ? null : ride ? ride.getPosition() : character.getPosition());
     farmingManager.rainIntensity = w.weather.rainIntensity;
+    farmingManager.meltWet = w.weather.melting && !w.exploration.inCave;
     this.updateAudio(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), ride);
 
     hitchLog.mark(4);
@@ -797,6 +872,8 @@ export class GameEngine {
     fields.setRustleEar(earPos.x, earPos.z, !editing);
     bushes.clearPushers();
     flowers.clearPushers();
+    const grassField = w.grass;
+    grassField.clearPushers();
     const algae = w.props.algae;
     algae.clearPushers();
     if (!editing) {
@@ -805,18 +882,21 @@ export class GameEngine {
         fields.addPusher(cp.x, cp.y - 0.9, cp.z, 0.8);
         bushes.addPusher(cp.x, cp.y - 0.9, cp.z, 0.4);
         flowers.addPusher(cp.x, cp.y - 0.9, cp.z, 0.35);
+        if (!isDriving) grassField.addPusher(cp.x, cp.y - 0.9, cp.z, 0.55);
         algae.addPusher(cp.x, cp.y - 0.9, cp.z, 0.35, 1.8);
       }
       moped.getPosition(this.pushTmp);
       fields.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 1.0);
       bushes.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.7);
       flowers.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.7);
+      grassField.addPusher(this.pushTmp.x, this.pushTmp.y, this.pushTmp.z, 0.8);
       const pets = w.gameplay.pets.pets;
       for (let i = 0; i < pets.length; i++) {
         const pp = pets[i].group.position;
         fields.addPusher(pp.x, pp.y, pp.z, 0.55);
         bushes.addPusher(pp.x, pp.y, pp.z, 0.35);
         flowers.addPusher(pp.x, pp.y, pp.z, 0.3);
+        grassField.addPusher(pp.x, pp.y, pp.z, 0.4);
       }
     } else {
       // Editor: the fly camera parts the algae, so the springs can be tried while placing them
@@ -839,9 +919,21 @@ export class GameEngine {
     grass.enabled = !w.exploration.inCave;
     w.propTrees.ambientLeaves = !w.exploration.inCave && !editing;
     const wt = w.weather.weather;
-    w.propTrees.gustsAllowed = wt !== 'rain' && wt !== 'storm' && wt !== 'snow' && w.weather.rainIntensity < 0.05;
+    w.propTrees.gustsAllowed = wt !== 'rain' && wt !== 'storm' && wt !== 'snow' && wt !== 'blizzard' && w.weather.rainIntensity < 0.05;
     setFoliageWeatherWind(w.exploration.inCave ? 0 : w.weather.sound.wind);
-    grass.update(dt, tpCamera.camera, w.weather.sound.wind);
+    w.terrain.setSnowCover(w.weather.snowCover);
+    grass.snowCover = w.weather.snowCover;
+    // Footprints fill in within a minute or two of heavy snowfall, and barely at all once it stops
+    grass.printFill = w.weather.snowAmount > 0.05 ? 50 / w.weather.snowAmount : 1500;
+    setSnowCover(w.exploration.inCave ? 0 : w.weather.snowCover);
+    {
+      // Low mist over the ground while it snows (and a faint one over a white landscape)
+      const pp = character.getPosition();
+      const mist = w.exploration.inCave ? 0 : Math.max(w.weather.snowAmount, w.weather.snowCover * 0.25);
+      this.mistColor.copy(this.scene.fog!.color).lerp(WHITE_MIST, 0.35);
+      setGroundMist(mist, w.terrain.getHeight(pp.x, pp.z) + 1.2, this.mistColor);
+    }
+    grass.update(dt, tpCamera.camera, w.weather.sound.wind, editing ? this.camera.camera.position : ride ? ride.getPosition() : character.getPosition());
     hitchLog.mark(5);
     farmingManager.update(dt);
     farmingManager.fields.updateVisibility(this.camera.camera.position);
@@ -849,6 +941,7 @@ export class GameEngine {
     forest.update(dt);
     w.propTrees.update(dt);
     w.orchard.update(dt, character.getPosition(), tpCamera.camera.position);
+    w.nursery.update(dt, character.getPosition());
     rocks.update(dt, tpCamera.camera.position);
     w.exploration.update(dt, ride ? ride.getPosition() : character.getPosition(), !editing && !isDriving);
     w.wildlife.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), tpCamera.camera, !!w.exploration.inCave);
@@ -1045,10 +1138,22 @@ export class GameEngine {
     const camera = this.camera.camera;
     audioEngine.updateListener(camera);
     const cp = camera.position;
-    audioEngine.setUnderwater(cp.y < riverWorld.waterLevelAt3(cp.x, cp.y, cp.z) || !!w.character.oxygenAbility?.isUnderwater);
+    const underwater = cp.y < riverWorld.waterLevelAt3(cp.x, cp.y, cp.z) || !!w.character.oxygenAbility?.isUnderwater;
+    audioEngine.setUnderwater(underwater);
     this.listenerPos.copy(camera.position);
     if (!audioEngine.context) return;
     caveAudio.update(dt, !!w.exploration.inCave, this.listenerPos);
+    // Soundtrack: time of day and weather pick the track; enemies after the player start the danger loop
+    const ms = this.musicState;
+    ms.timeOfDay = worldSettings.timeOfDay;
+    ms.night = w.weather.nightFactor;
+    ms.weather = w.weather.weather;
+    ms.rain = w.weather.rainIntensity * (1 - w.weather.snowAmount);
+    ms.inCave = !!w.exploration.inCave;
+    ms.underwater = underwater;
+    ms.sleeping = w.gameplay.sleeping;
+    ms.threat = w.gameplay.pests.threatLevel(playerPos);
+    music.update(dt, ms);
 
     // Swimming: entry splash, strokes, lapping, bubbles and the underwater bed
     const tel = w.character.telemetry;
@@ -1162,6 +1267,9 @@ export class GameEngine {
       birdPerches: portal ? this.portalPerches : outdoors ? this.birdPerches : [],
       breeze: snd.breeze * outdoors * (1 - weather.nightFactor * 0.4),
       fog: snd.fog * outdoors,
+      // Falling snow and a white blanket swallow the highs: the outside goes hushed and dull
+      // (a blizzard howls instead: the hush mostly gives way to the wind)
+      snow: Math.max(weather.snowAmount, weather.snowCover * 0.6) * outdoors * (1 - weather.blizzardMix * 0.75),
       night: snd.insects * weather.nightFactor * outdoors * (portal ? 1 : this.landNear),
       underRoof,
       portal,
@@ -1217,7 +1325,9 @@ export class GameEngine {
     if (ud?.surface) return ud.surface;
     if (w.exploration.inCave) return 'stone';
     if (Math.abs(p.y - w.terrain.getHeight(p.x, p.z)) < 0.3) {
-      return TILE_SURFACE[w.terrain.getTile(Math.floor(p.x), Math.floor(p.z))] ?? 'grass';
+      const tile = TILE_SURFACE[w.terrain.getTile(Math.floor(p.x), Math.floor(p.z))] ?? 'grass';
+      // Fallen snow covers the ground once it is more than a dusting (it melts on fields and dirt tracks)
+      return w.weather.snowCover > 0.35 && tile !== 'dirt' && p.y > worldSettings.waterLevel + 0.3 ? 'snow' : tile;
     }
     return 'stone';
   }
@@ -1317,6 +1427,8 @@ export class GameEngine {
         w.character.respawn(new THREE.Vector3(x, (y ?? w.terrain.getHeight(x, z)) + 1.5, z)),
       time: (hour: number) => (worldSettings.timeOfDay = ((hour % 24) + 24) % 24),
       weather: (type: Parameters<WeatherSystem['setWeather']>[0]) => w.weather.setWeather(type),
+      /** Jump to the first day of a season ('spring' | 'summer' | 'autumn' | 'winter'). */
+      season: (s: Season) => (worldSettings.day = firstDayOf(s)),
       /** Rainbow as after a rain (needs daytime; try time(8) or time(17)). */
       rainbow: () => w.weather.devRainbow(),
       /** Automatic weather on/off, and the upcoming states. */

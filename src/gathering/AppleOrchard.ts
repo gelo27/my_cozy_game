@@ -3,7 +3,7 @@ import type RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { TerrainSystem } from '../world/TerrainSystem';
-import { worldSettings } from '../world/WorldSettings';
+import { WORLD_SIZE, worldSettings } from '../world/WorldSettings';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { TREE_MATERIAL } from '../world/TreeModels';
 import { vegetationSettings as veg } from '../world/VegetationSettings';
@@ -13,6 +13,7 @@ import type { ParticleManager } from '../particles/ParticleManager';
 import type { FallingLeaves } from '../particles/FallingLeaves';
 import { audioEngine } from '../audio/AudioEngine';
 import { TREE_FADE_RANGE, acquireDistanceDither } from '../world/LodDither';
+import { LodInstances } from '../world/LodInstances';
 import { PROP_TREE_HITS, type PropTreeField } from './PropTreeField';
 
 export const APPLE_SAPLING_ID = 'apple_sapling';
@@ -27,6 +28,8 @@ const GROWN = 3;
 const REST_SECONDS = 45;
 const BLOOM_SECONDS = 60;
 const FRUIT_SECONDS = 75;
+/** Ripe apples hang this long (s); then the ones left wither away and the tree starts a new round. */
+const RIPE_SECONDS = 240;
 /** Wood a felled tree gives per stage (a sapling comes out in one hit and gives itself back). */
 const WOOD = [0, 2, 4, 6];
 /** Knocks on the trunk that shake the ripe apples down (2 or 3, rolled per crop). */
@@ -121,7 +124,7 @@ export interface AppleTreeNode {
 }
 
 export interface OrchardSaveData {
-  /** Per tree: x, z, rotY, stage, growT, phase index, phaseT, knocksNeeded, hanging mask. */
+  /** Per tree: x, z, rotY, stage, growT, phase index, phaseT, knocksNeeded, hanging mask, knocks done. */
   t: number[][];
   /** Lying apples: x, y, z, seconds they have lain. */
   a?: number[][];
@@ -136,8 +139,10 @@ export type PlantCheck = 'ok' | 'tooClose' | 'badGround';
  * drop them as Rapier balls that bounce and roll; walking over one picks it up. The axe fells the
  * tree.
  *
- * Cost: the whole orchard is four instanced meshes (near trees, far trees, blossom, hanging fruit)
- * plus one for the apples on the ground, rewritten only when something changes; a tree has one
+ * Cost: the whole orchard is a few instanced meshes (near and far trees, the few trees mid LOD
+ * switch, blossom, hanging fruit) plus one for the apples on the ground, rewritten only when
+ * something changes. A tree switching LOD dissolves from one into the other with the forest's
+ * dither crossfade (LodInstances), never pops. A tree has one
  * fixed trunk collider, and apples are bodies only from the moment they fall until picked up.
  */
 export class AppleOrchard {
@@ -149,8 +154,15 @@ export class AppleOrchard {
   public revision = 0;
 
   private models: AppleModels | null = null;
-  private nearMesh: THREE.InstancedMesh | null = null;
-  private farMesh: THREE.InstancedMesh | null = null;
+  /** Near (level 0) / far (level 1) crowns, with the dithered crossfade between them. */
+  private lod: LodInstances | null = null;
+  /** Trees in `lod`, by id. */
+  private readonly drawn = new Map<number, AppleTree>();
+  private readonly seen = new Set<number>();
+  private readonly matrixOf = (id: number, out: THREE.Matrix4): THREE.Matrix4 => {
+    const t = this.drawn.get(id);
+    return t ? this.treeMatrix(t, out) : out.identity();
+  };
   private blossomMesh: THREE.InstancedMesh | null = null;
   private fruitMesh: THREE.InstancedMesh | null = null;
   private looseMesh: THREE.InstancedMesh | null = null;
@@ -295,13 +307,13 @@ export class AppleOrchard {
 
   // ------------------------------------------------------------------ trees
 
-  private addTree(x: number, z: number, rotY: number, stage: number, growT: number, phase: Phase, phaseT: number, knocksNeeded: number, hanging: number): AppleTree {
+  private addTree(x: number, z: number, rotY: number, stage: number, growT: number, phase: Phase, phaseT: number, knocksNeeded: number, hanging: number, knocks = 0): AppleTree {
     const t: AppleTree = {
       id: this.nextId++,
       pos: new THREE.Vector3(x, this.terrain.getHeight(x, z), z),
       rotY, stage, growT, phase, phaseT,
       knocksNeeded: knocksNeeded || this.rollKnocks(),
-      knocks: 0, extId: 0, cut: false, hanging,
+      knocks, extId: 0, cut: false, hanging,
       shown: STAGE_SCALE[stage], detail: false, inView: true,
       wobble: 0, wobbleAmp: 0, axis: new THREE.Vector3(1, 0, 0),
       fall: -1, drops: [], body: null, bodyStage: -1, near: true, dist: 0,
@@ -507,6 +519,7 @@ export class AppleOrchard {
 
     for (let i = this.trees.length - 1; i >= 0; i--) this.updateTree(this.trees[i], dt);
     this.updateLod(dt);
+    this.lod?.step(dt, veg.lodFade, this.matrixOf);
 
     if (this.treesDirty) this.writeTrees();
     if (this.fruitDirty) this.writeFruit();
@@ -558,7 +571,24 @@ export class AppleOrchard {
         this.revision++;
         continue;
       }
-      if (t.phase === 'ripe') return;
+      if (t.phase === 'ripe') {
+        // Not shaken (fully) in time: the apples still hanging wither away, the round starts again.
+        // Not while some are falling (that ends the crop by itself once they land).
+        if (t.drops.length) return;
+        const need = RIPE_SECONDS - t.phaseT;
+        if (left < need) {
+          t.phaseT += left;
+          return;
+        }
+        left -= need;
+        if (!silent && t.hanging && t.detail) this.shedLeaves(t, 10, 0.6);
+        t.phase = 'rest';
+        t.phaseT = 0;
+        t.hanging = 0;
+        t.knocks = 0;
+        this.treesDirty = this.fruitDirty = true;
+        continue;
+      }
       const len = t.phase === 'rest' ? REST_SECONDS : t.phase === 'bloom' ? BLOOM_SECONDS : FRUIT_SECONDS;
       const need = len - t.phaseT;
       if (left < need) {
@@ -579,6 +609,7 @@ export class AppleOrchard {
         t.phase = 'ripe';
         if (!silent) this.shedPetals(t, 36);
         t.hanging = (1 << FRUIT_PER_TREE) - 1;
+        t.phaseT = 0;
         t.knocks = 0;
         t.knocksNeeded = this.rollKnocks();
       }
@@ -634,7 +665,15 @@ export class AppleOrchard {
     const m = this.models;
     if (!m || n <= this.capacity) return;
     const cap = Math.max(8, 1 << Math.ceil(Math.log2(n)));
-    for (const mesh of [this.nearMesh, this.farMesh, this.blossomMesh, this.fruitMesh]) {
+    if (!this.lod) {
+      // Array materials draw by geometry group: give the LOD geometries one covering everything
+      for (const g of [m.near, m.far]) if (!g.groups.length) g.addGroup(0, g.index ? g.index.count : g.getAttribute('position').count, 0);
+      const bounds = new THREE.Sphere(new THREE.Vector3(), WORLD_SIZE);
+      this.lod = new LodInstances(this.group, [m.near, m.far], [TREE_MATERIAL], bounds, 'AppleTrees');
+      // Far crowns dissolve at the view's edge with the forest's distance dither, never pop
+      this.lod.setFarMaterials([acquireDistanceDither(TREE_MATERIAL, TREE_FADE_RANGE)]);
+    }
+    for (const mesh of [this.blossomMesh, this.fruitMesh]) {
       if (mesh) {
         mesh.removeFromParent();
         mesh.dispose();
@@ -648,10 +687,6 @@ export class AppleOrchard {
       this.group.add(mesh);
       return mesh;
     };
-    this.nearMesh = make(m.near, cap, 'AppleTreesNear');
-    this.farMesh = make(m.far, cap, 'AppleTreesFar');
-    // Far crowns dissolve at the view's edge with the forest's distance dither, never pop
-    this.farMesh.material = acquireDistanceDither(TREE_MATERIAL, TREE_FADE_RANGE);
     this.blossomMesh = make(m.blossom, cap, 'AppleBlossom');
     this.fruitMesh = make(m.apple, cap * FRUIT_PER_TREE, 'AppleFruit');
     this.capacity = cap;
@@ -666,6 +701,8 @@ export class AppleOrchard {
     const nd = nearDist();
     const r = TREE_FADE_RANGE.value;
     const viewEnd = r.y + (r.y - r.x) * 0.15 + 1;
+    // A tree whose level flipped back mid-crossfade is put right once its fade is done
+    if (this.lod?.busy) this.treesDirty = true;
     for (const t of this.trees) {
       t.dist = Math.hypot(t.pos.x - this.camera.x, t.pos.z - this.camera.z);
       const near = t.dist < (t.near ? nd + 4 : nd);
@@ -704,25 +741,34 @@ export class AppleOrchard {
 
   private writeTrees(): void {
     this.treesDirty = false;
-    const near = this.nearMesh, far = this.farMesh;
-    if (!near || !far) return;
-    let n = 0, f = 0;
+    const lod = this.lod;
+    if (!lod) return;
     const m = AppleOrchard._m;
     // Past the fade band (plus the shader's per-tree jitter) a tree is fully dissolved
     const r = TREE_FADE_RANGE.value;
     const viewEnd = r.y + (r.y - r.x) * 0.15 + 1;
+    const seen = this.seen;
+    seen.clear();
     for (const t of this.trees) {
       if (t.cut || t.dist > viewEnd) continue;
+      seen.add(t.id);
       this.treeMatrix(t, m);
-      if (t.near) near.setMatrixAt(n++, m);
-      else far.setMatrixAt(f++, m);
+      const level = t.near ? 0 : 1;
+      if (!this.drawn.has(t.id)) {
+        this.drawn.set(t.id, t);
+        lod.add(t.id, m, level);
+      } else if (lod.levelOfId(t.id) !== level) {
+        lod.setLevel(t.id, level, m, veg.lodFade);
+      } else {
+        lod.setMatrix(t.id, m);
+      }
     }
-    near.count = n;
-    far.count = f;
-    near.instanceMatrix.needsUpdate = true;
-    far.instanceMatrix.needsUpdate = true;
-    near.computeBoundingSphere();
-    far.computeBoundingSphere();
+    // Felled, cut, removed or out of view
+    for (const id of this.drawn.keys()) {
+      if (seen.has(id)) continue;
+      lod.remove(id);
+      this.drawn.delete(id);
+    }
   }
 
   /** Apple `i` of tree `t`: world position (centre) and rotation; returns `outPos`. */
@@ -874,6 +920,9 @@ export class AppleOrchard {
         }
       }
     }
+    // Removals in the loop above (expired, fell out of the world) flag looseDirty: the mesh must
+    // drop them too, or a resting apple stays drawn after its body is gone
+    changed ||= this.looseDirty;
     this.looseDirty = false;
     if (!mesh || !changed) return;
     const m = AppleOrchard._m;
@@ -897,6 +946,7 @@ export class AppleOrchard {
         r2(t.pos.x), r2(t.pos.z), r2(t.rotY), t.stage, Math.round(t.growT), PHASES.indexOf(t.phase), Math.round(t.phaseT), t.knocksNeeded,
         // Apples in mid-drop are saved as fallen (they are on the ground list below)
         t.hanging & ~t.drops.reduce((mask, d) => mask | (1 << d.i), 0),
+        t.knocks,
       ]),
       a: this.loose.filter((a) => a.body).map((a) => [r2(a.pos.x), r2(a.pos.y), r2(a.pos.z), Math.round(a.age)]),
     };
@@ -906,10 +956,12 @@ export class AppleOrchard {
     this.clear();
     if (!data) return;
     for (const r of data.t ?? []) {
-      const [x, z, rotY, stage, growT, phase, phaseT, knocks, hanging] = r;
+      const [x, z, rotY, stage, growT, phase, phaseT, knocksNeeded, hanging, knocks] = r;
       const st = THREE.MathUtils.clamp(stage | 0, 0, GROWN);
       const ph = PHASES[phase] ?? 'rest';
-      const t = this.addTree(x, z, rotY, st, growT, ph, phaseT, knocks, hanging);
+      const t = this.addTree(x, z, rotY, st, growT, ph, phaseT, knocksNeeded, hanging, ph === 'ripe' ? Math.max(0, (knocks ?? 0) | 0) : 0);
+      // Never at (or past) the last knock with apples still up: the next one shakes the rest down
+      if (t.knocks >= t.knocksNeeded) t.knocks = t.knocksNeeded - 1;
       if (ph === 'ripe' && !t.hanging) t.phase = 'rest';
       // Older saves hung green apples while ripening: they show only when ripe now
       if (ph === 'fruit') t.hanging = 0;

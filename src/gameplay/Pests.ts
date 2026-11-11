@@ -206,6 +206,9 @@ abstract class Pest implements PestTarget {
   abstract hitPoint(out: THREE.Vector3): THREE.Vector3;
   abstract update(dt: number, player: THREE.Vector3, port: PestPort, env: PestEnv, particles?: ParticleManager): void;
 
+  /** For the music: 0 minding its own business, 1 after the player, 2 attacking right now. */
+  abstract get threat(): number;
+
   public dispose(): void {
     this.group.removeFromParent();
     this.group.traverse((o) => {
@@ -233,6 +236,10 @@ const HEDGE_MATS = {
  */
 export class Hedgehog extends Pest {
   private state: HedgeState = 'wander';
+
+  get threat(): number {
+    return this.state === 'curl' || this.state === 'roll' ? 2 : this.state === 'angry' ? 1 : 0;
+  }
   private readonly walker = new THREE.Group();
   private readonly ball = new THREE.Group();
   private readonly legs: THREE.Mesh[] = [];
@@ -553,6 +560,10 @@ interface Burst {
  */
 export class BabyDragon extends Pest {
   private state: DragonState = 'patrol';
+
+  get threat(): number {
+    return this.state === 'inhale' ? 2 : this.state === 'aggro' ? 1 : 0;
+  }
   private readonly body = new THREE.Group();
   private readonly wings: THREE.Object3D[] = [];
   private readonly jaw: THREE.Mesh;
@@ -993,6 +1004,18 @@ export class PestSystem {
       if (hedge < HEDGEHOGS) this.spawn('hedgehog', player);
       else if (drag < DRAGONS) this.spawn('dragon', player);
     }
+  }
+
+  /** Highest threat (0..2) of the pests within `maxDist` of the player (for the danger music). */
+  public threatLevel(player: THREE.Vector3, maxDist = 35): number {
+    let level = 0;
+    for (const p of this.pests) {
+      const t = p.threat;
+      if (t <= level || p.removed) continue;
+      const dx = p.position.x - player.x, dz = p.position.z - player.z;
+      if (dx * dx + dz * dz <= maxDist * maxDist) level = t;
+    }
+    return level;
   }
 
   /** Nearest pest that is after the player (for the compass / HUD warning). */

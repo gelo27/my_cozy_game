@@ -3,6 +3,7 @@ import { injectNightLights } from '../NightLighting';
 import type { TerrainSystem } from '../TerrainSystem';
 import { riverWorld } from './RiverWorld';
 import { WATER_DETAIL_GLSL, WATER_RIPPLE_GLSL, rippleUniforms } from '../../scene/WaterDetails';
+import { WATER_LIGHT_GLSL, WATER_NORMAL_GLSL, WATER_SURFACE_GLSL, waterSurfaceUniforms } from '../WaterSurface';
 import { buildLakeGeometry, buildRiverGeometry } from './RiverMesh';
 import type { RiverDef, RiverSample, WaterfallInfo } from './RiverTypes';
 
@@ -38,8 +39,8 @@ float rNoise(vec2 p) {
  * Renders the rivers and lakes and keeps the terrain in step with them.
  * - Each river is cut into ~64 m ribbon pieces and each lake is one mesh; they share two
  *   materials, so pieces off screen or past the camera's far plane are culled and cost nothing.
- *   Flowing ripples scroll downstream, bank foam laps the edges, white streaks run down falls and
- *   rapids, and rain rings dot the surface while it rains.
+ *   The water is the sea's (WaterSurface.ts: depth colour, waves, glints, shore lines), its waves
+ *   carried downstream; white streaks run down falls and rapids.
  * - Every waterfall has a ring of churning 3D foam spheres where the water lands, animated
  *   entirely in the vertex shader (no per-frame CPU work) and culled on its own.
  * - Sound: a spatial hash of the river segments finds the nearest point on any river centre line
@@ -54,7 +55,7 @@ export class RiverSystem {
   private readonly meshes = new Map<string, THREE.Object3D[]>();
   private readonly splashMaterial: THREE.MeshLambertMaterial;
   private readonly splashSphere = new THREE.IcosahedronGeometry(1, 1);
-  private readonly uniforms = { uTime: { value: 0 }, uDay: { value: 1 }, uRain: { value: 0 } };
+  private readonly uniforms = { uTime: { value: 0 }, uDay: { value: 1 } };
   private readonly soundGrid = new Map<number, SoundSeg[]>();
   private fallSounds: FallSound[] = [];
 
@@ -103,11 +104,9 @@ export class RiverSystem {
 
   // ---------------------------------------------------------------- frame
 
-  /** `rain` 0..1 draws rain rings on the water. */
-  public update(dt: number, nightFactor: number, rain = 0): void {
+  public update(dt: number, nightFactor: number): void {
     this.uniforms.uTime.value += dt;
     this.uniforms.uDay.value = 1 - nightFactor;
-    this.uniforms.uRain.value = rain;
     this.splashMaterial.emissive.setScalar(0.42 * (1 - nightFactor * 0.85));
   }
 
@@ -272,66 +271,115 @@ export class RiverSystem {
     // the estuary over the sea) pixels are dropped with a screen-space dither instead. Pulled a
     // little toward the camera so it never z-fights the sea plane in the estuary.
     const mat = new THREE.MeshLambertMaterial({
-      color: 0x3a9fc0,
+      color: 0xffffff,
       side: THREE.DoubleSide,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -4,
     });
+    // The lake and river programs differ (attributes, flow), so they must not share one
+    mat.customProgramCacheKey = () => (lake ? 'water-lake' : 'water-river');
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader);
       shader.uniforms.uTime = this.uniforms.uTime;
       shader.uniforms.uDay = this.uniforms.uDay;
-      shader.uniforms.uRain = this.uniforms.uRain;
-      Object.assign(shader.uniforms, rippleUniforms);
+      Object.assign(shader.uniforms, waterSurfaceUniforms, rippleUniforms);
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nattribute vec4 aRiver;\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;\nvarying vec3 vRipW;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRiver = aRiver;\nvRiverUv = uv;\nvRipW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+        .replace(
+          '#include <common>',
+          `#include <common>
+attribute vec4 aRiver;
+${lake ? '' : 'attribute vec2 aFlow;\nvarying vec2 vFlow;'}
+varying vec4 vRiver;
+varying vec2 vRiverUv;
+varying vec3 vRipW;
+varying vec3 vWN;`
+        )
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+vRiver = aRiver;
+vRiverUv = uv;
+${lake ? '' : 'vFlow = aFlow;'}
+vRipW = (modelMatrix * vec4(transformed, 1.0)).xyz;
+vWN = normalize(mat3(modelMatrix) * objectNormal);`
+        );
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>\nvarying vec4 vRiver;\nvarying vec2 vRiverUv;\nvarying vec3 vRipW;\nuniform float uTime;\nuniform float uDay;\nuniform float uRain;\n${NOISE_GLSL}\n${WATER_DETAIL_GLSL}\n${WATER_RIPPLE_GLSL}`)
+        .replace(
+          '#include <common>',
+          `#include <common>
+varying vec4 vRiver;
+varying vec2 vRiverUv;
+varying vec3 vRipW;
+varying vec3 vWN;
+${lake ? '' : 'varying vec2 vFlow;'}
+uniform float uTime;
+uniform float uDay;
+${NOISE_GLSL}
+${WATER_DETAIL_GLSL}
+${WATER_RIPPLE_GLSL}
+${WATER_SURFACE_GLSL}`
+        )
         .replace(
           '#include <map_fragment>',
-          `// Calm flow: stretched ripples drifting downstream (lakes: slow, round ripples that barely move)
-${lake ? 'vec2 fp = vRiverUv * 0.55 + vec2(uTime * 0.05, uTime * 0.03);' : 'vec2 fp = vec2(vRiverUv.x, vRiverUv.y - uTime * 1.3);'}
-float rip = rNoise(fp * vec2(0.9, ${lake ? '0.9' : '0.45'})) * 0.6 + rNoise(fp * vec2(2.3, ${lake ? '2.3' : '1.1'}) + 7.0) * 0.4;
-// White water: fast vertical streaks (only weighted in where foam is set, so speeds never shear)
-vec2 sp = vec2(vRiverUv.x * 2.6, vRiverUv.y * 0.35 - uTime * 3.2);
-float streak = rNoise(sp) * 0.65 + rNoise(sp * 2.7 + 3.1) * 0.35;
-float foam = vRiver.x * smoothstep(0.32, 0.62, streak + vRiver.x * 0.25);
-// Lacy foam where the water laps against the banks
-foam = max(foam, smoothstep(0.82, 1.05, vRiver.z) * smoothstep(0.35, 0.75, rip) * 0.7);
-vec3 water = mix(diffuseColor.rgb, vec3(0.78, 0.93, 0.98), smoothstep(0.55, 0.85, rip) * 0.35);
-// Shallower, lighter water along the banks
-water = mix(water, vec3(0.08, 0.48, 0.46), smoothstep(0.5, 1.0, vRiver.z) * 0.35);
-water *= 0.93 + rip * 0.1;
-// Rain: crisp white rings spreading where drops hit (the same chunk as the sea's)
-float rainRings = wdRainRings(vRiverUv, uTime, uRain);
-// Ripple rings from the swimmer / wader (world space, shared with the sea)
-// (derivatives first: the distance test skips the loop for far pixels)
-float ripAa = length(fwidth(vRipW.xz));
-float ripDist = distance(vRipW, cameraPosition);
-float ripRings = ripDist < 80.0 ? wdRipples(vRipW.xz, ripAa) * (1.0 - smoothstep(45.0, 80.0, ripDist)) : 0.0;
-// Simulated waves (developer toggle): white crests, and a light / shade from their slope
+          `// The same water as the sea (WaterSurface.ts): depth colour from the terrain heights (river
+// beds are carved into the same terrain), normal-map waves, glints and shore lines
+float rDepth = max(vRipW.y - wsBedY(vRipW.xz), 0.0);
+float rDist = distance(vRipW, cameraPosition);
+${lake
+  ? 'vec2 wp = vRiverUv; // lakes: world XZ, the waves just drift like the sea\'s'
+  : 'vec2 wp = vec2(vRiverUv.x, vRiverUv.y - uWsTime * 1.1); // (across, along) metres, carried downstream'}
+float shade, wobble;
+vec2 slope = wsWaves(wp, rDist, shade, wobble);
+${lake ? '' : '// (across, along) back to world XZ\nslope = slope.x * vec2(-vFlow.y, vFlow.x) + slope.y * vFlow;'}
+// Simulated waves around the player (developer toggle)
 float simH;
 vec2 simG;
 wdSimSample(vRipW.xz, simH, simG);
+slope += simG * uWdSimLook.y;
+// Tilt the surface's own normal (flat water: up, like the sea; waterfall curtains lean out)
+wsN = normalize(vWN + vec3(slope.x, 0.0, slope.y));
+vec3 water = wsColour(rDepth, shade);
+
+// White water: fast streaks down falls and rapids (only where foam is set)
+vec2 sp = vec2(vRiverUv.x * 2.6, vRiverUv.y * 0.35 - uTime * 3.2);
+float streak = rNoise(sp) * 0.65 + rNoise(sp * 2.7 + 3.1) * 0.35;
+float foam = vRiver.x * smoothstep(0.32, 0.62, streak + vRiver.x * 0.25);
+
+// Distance to the bank (m): a lake's edge distance, or the channel half width minus the offset
+${lake
+  ? 'float bankD = (1.0 - clamp(vRiver.z, 0.0, 1.0)) * 3.0;'
+  : 'float bankD = vRiver.z > 0.12 ? abs(vRiverUv.x) * (1.0 - vRiver.z) / vRiver.z : 99.0;\n// Channel half width, so the lines from the two banks stay well apart\nfloat halfW = vRiver.z > 0.12 ? abs(vRiverUv.x) / vRiver.z : 99.0;'}
+float bankAa = fwidth(bankD);
+${lake
+  ? 'vec2 dashP = vRiverUv;'
+  : '// Dashes run along each bank and drift with the current\nvec2 dashP = vec2(vRiverUv.y - uTime * 0.25, vRiverUv.x > 0.0 ? 37.0 : 0.0);'}
+water = mix(water, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, max(bankD, 0.0))) * 0.3);
+float shore = wsShoreLines(bankD, dashP, bankAa, 0.0, ${lake ? '99.0' : 'halfW * 0.45 - 0.3'}) * (1.0 - smoothstep(60.0, 140.0, rDist));
+// Where the water touches the land: the sea's thin broken line, from the real depth
+float lineD = rDepth + wobble * 0.02;
+float lineBreak = smoothstep(0.3, 0.5, wdNoise(vRipW.xz * 0.9 + uWsTime * 0.04));
+shore = max(shore, (1.0 - smoothstep(uWsFoam.x * 0.5, uWsFoam.x * 0.5 + fwidth(lineD) * 1.5 + 0.004, lineD)) * mix(0.35, 1.0, lineBreak));
+foam = max(foam, shore * uWsShine.w);
+// Ripple rings from the swimmer / wader (world space, shared with the sea)
+// (derivatives first: the distance test skips the loop for far pixels)
+float ripAa = length(fwidth(vRipW.xz));
+float ripRings = rDist < 80.0 ? wdRipples(vRipW.xz, ripAa) * (1.0 - smoothstep(45.0, 80.0, rDist)) : 0.0;
 float simAa = fwidth(simH);
 ripRings = max(ripRings, wdSimCrest(simH, simAa));
-water *= 1.0 + clamp(dot(simG, vec2(0.45, 0.55)) * uWdSimLook.y, -0.3, 0.3);
-// Estuary: the colour turns into the sea's, a lighter silty plume drifts out past the shore, and
-// a soft band of foam marks where the current meets the waves
+// Estuary: a lighter silty plume drifts out past the shore, and a soft band of foam marks where
+// the current meets the waves (the colour already matches the sea: it is the same water)
 float mouth = vRiver.w;
-float est = min(mouth, 1.0);
+vec2 fp = wp * 0.55;
 float plume = smoothstep(0.3, 1.0, mouth) * (1.0 - smoothstep(1.4, 2.0, mouth)) * smoothstep(0.4, 0.8, rNoise(fp * 0.35 + 11.0));
-water = mix(water, vec3(0.25, 0.65, 0.79), est * 0.6);
-water = mix(water, vec3(0.62, 0.78, 0.72), plume * 0.35);
+water = mix(water, vec3(0.62, 0.78, 0.72), plume * 0.25);
 float meet = smoothstep(0.85, 1.0, mouth) * (1.0 - smoothstep(1.0, 1.35, mouth));
 foam = max(foam, meet * smoothstep(0.5, 0.8, rNoise(vec2(vRiverUv.x * 1.3, vRiverUv.y * 0.6 + uTime * 0.4) + 5.0)) * 0.6);
 foam *= 1.0 - smoothstep(1.3, 1.8, mouth);
-if (uRain > 0.01) foam = max(foam, rainRings * 0.9);
-foam = max(foam, ripRings * 0.85);
-diffuseColor.rgb = mix(water, vec3(0.94, 0.97, 1.0), foam);
-diffuseColor.a = mix(diffuseColor.a, 0.96, foam) * vRiver.y;
+foam = clamp(max(foam, ripRings * 0.85), 0.0, 1.0);
+wsFoam = foam;
+diffuseColor.rgb = mix(water, uWsFoamCol, foam);
+diffuseColor.a = mix(1.0, 0.96, foam) * vRiver.y;
 // Over open water no bank hides the ribbon's sides: feather them out in the estuary, with a
 // ragged noisy edge so the plume has no straight outline
 float edgeNoise = rNoise(vec2(vRiverUv.x * 0.4, vRiverUv.y * 0.25 - uTime * 0.3)) * 0.35;
@@ -343,12 +391,14 @@ float keep = min(diffuseColor.a / 0.96, 1.0);
 if (keep < 0.999 && keep < ign) discard;
 diffuseColor.a = 1.0;`
         )
+        .replace('#include <normal_fragment_maps>', WATER_NORMAL_GLSL)
         // White water scatters light: keeps falls bright even on faces turned from the sun
         // (same scope as map_fragment, so `foam` is still in reach)
         .replace(
           '#include <emissivemap_fragment>',
           '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vec3(0.42, 0.46, 0.5) * foam * vRiver.x * uDay;'
-        );
+        )
+        .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${WATER_LIGHT_GLSL}`);
     };
     return mat;
   }

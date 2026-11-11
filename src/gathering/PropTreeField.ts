@@ -11,6 +11,7 @@ import { CUT_APEX, buildNotchedTree, splitAtCut } from '../world/TreeNotch';
 import { acquireDither, releaseDither, setDitherFade } from '../world/LodDither';
 import type { BushSway } from '../world/BushSway';
 import type { FallingLeaves } from '../particles/FallingLeaves';
+import { SEED_OF_TREE } from './TreeNursery';
 
 /** Placeable prop types that can be chopped with the axe. */
 const CHOPPABLE = new Set(['tree_pine', 'tree_round', 'bush']);
@@ -50,6 +51,12 @@ const LOG_MATERIALS = [
   new THREE.MeshLambertMaterial({ color: 0xe0b26a }),
   new THREE.MeshLambertMaterial({ color: 0xe0b26a }),
 ];
+/** What flies to the player besides the logs: a pine cone, an acorn or a bush cutting. */
+const SEED_LOOKS: Record<string, { geo: THREE.BufferGeometry; mat: THREE.Material }> = {
+  pine_cone: { geo: new THREE.ConeGeometry(0.09, 0.24, 7), mat: new THREE.MeshLambertMaterial({ color: 0x7a4f2a }) },
+  acorn: { geo: new THREE.SphereGeometry(0.08, 8, 6), mat: new THREE.MeshLambertMaterial({ color: 0xa8742f }) },
+  bush_sapling: { geo: new THREE.IcosahedronGeometry(0.12, 0), mat: new THREE.MeshLambertMaterial({ color: 0x4f9a3a }) },
+};
 
 interface FlyingLog {
   mesh: THREE.Mesh;
@@ -58,6 +65,8 @@ interface FlyingLog {
   t: number;
   spin: THREE.Vector3;
   wood: number;
+  /** A seed item instead of wood (the felled tree's cone / acorn / cutting). */
+  item?: string;
 }
 
 /** The cut-off top as a Rapier body: a trunk cylinder plus a ball for the crown. */
@@ -164,6 +173,8 @@ function cutStage(hitsDone: number): number {
  */
 export class PropTreeField {
   public onWood: ((amount: number, at: THREE.Vector3) => void) | null = null;
+  /** A felled tree's / cleared bush's seed reached the player (the engine puts it in the backpack). */
+  public onSeed: ((itemId: string, amount: number) => void) | null = null;
   /** Where the wood logs fly to (the player); without it the wood is given at once. */
   public getCollector: (() => THREE.Vector3) | null = null;
   private readonly states = new Map<number, TreeState>();
@@ -345,6 +356,7 @@ export class PropTreeField {
     this.bushSway?.kick(prop, direction, 1.5);
     this.dyingBushes.set(prop.id, BUSH_TEAR_DELAY);
     this.spawnLogs([centre], BUSH_WOOD, prop.position);
+    this.spawnSeed('bush', centre);
     return true;
   }
 
@@ -484,16 +496,6 @@ export class PropTreeField {
         continue;
       }
 
-      if (now - st.felledAt >= GATHERING_CONFIG.TREE_REGROW_SECONDS * 1000) {
-        if (st.stumpId !== null) this.props.remove(st.stumpId);
-        this.dropVisual(st);
-        st.stumpId = null;
-        st.fall = -1;
-        st.health = PROP_TREE_HITS;
-        st.regrow = 0.001;
-        this.props.setSolid(id, true);
-        this.particles?.emitTreeFoliageLeaves(prop.position.clone().setY(prop.position.y + 1.5), 12);
-      }
     }
   }
 
@@ -594,7 +596,12 @@ export class PropTreeField {
     if (!top) return;
     top.removeFromParent();
     const mesh = top.children[0] as THREE.Mesh;
-    if (mesh.material !== TREE_MATERIAL) releaseDither([mesh.material as THREE.Material]);
+    if (mesh.material !== TREE_MATERIAL) {
+      // The stump was fading with it: back to the plain material before the dither goes to the pool
+      const stump = st.visual!.mesh;
+      if (stump.material === mesh.material) stump.material = TREE_MATERIAL;
+      releaseDither([mesh.material as THREE.Material]);
+    }
     mesh.geometry.dispose();
     st.visual!.top = null;
   }
@@ -709,9 +716,12 @@ export class PropTreeField {
     }
     top.scale.setScalar(prop.scale);
     if (st.fall > f.vanishAt) {
-      // Dissolve with the LOD crossfade's screen-door dither (no shrinking into the ground)
+      // Dissolve with the LOD crossfade's screen-door dither (no shrinking into the ground); the
+      // stump shares the top's material, so both fade out in step
       const mesh = top.children[0] as THREE.Mesh;
       if (mesh.material === TREE_MATERIAL) mesh.material = acquireDither(TREE_MATERIAL, true);
+      const stump = st.visual?.mesh;
+      if (stump && stump.material !== mesh.material) stump.material = mesh.material;
       setDitherFade([mesh.material as THREE.Material], Math.min(1, (st.fall - f.vanishAt) / VANISH_SECONDS));
     }
   }
@@ -760,7 +770,7 @@ export class PropTreeField {
 
   /**
    * The top is gone: wood logs leave from along where it lay and fly to the player (the wood is
-   * given as they arrive), and the regrow timer starts.
+   * given as they arrive); the stump goes with it and the tree is gone, leaving its seed.
    */
   private finishFall(id: number, prop: PropInstance, st: TreeState, now: number, from?: THREE.Vector3[]): void {
     const starts: THREE.Vector3[] = from ? [...from] : [];
@@ -780,16 +790,46 @@ export class PropTreeField {
     this.setPose(id, { axis: st.fallAxis, angle: 0, scale: 0 });
     const wood = id < 0 ? this.external.get(id)?.wood ?? GATHERING_CONFIG.TREE_WOOD_YIELD : GATHERING_CONFIG.TREE_WOOD_YIELD;
     this.spawnLogs(starts.length ? starts : [prop.position.clone().setY(prop.position.y + 1)], wood, prop.position);
+    // A felled tree doesn't regrow: its stump (dissolved together with the top) goes with it
+    if (st.stumpId !== null) this.props.remove(st.stumpId);
+    st.stumpId = null;
+    this.dropVisual(st);
+    this.states.delete(id);
     const ext = this.external.get(id);
     if (ext) {
-      // An outside tree doesn't regrow: its stump goes together with the top, and the owner forgets it
-      if (st.stumpId !== null) this.props.remove(st.stumpId);
-      st.stumpId = null;
-      this.dropVisual(st);
-      this.states.delete(id);
+      // ...and the owner (the orchard) forgets it
       this.external.delete(id);
       ext.onGone();
+      return;
     }
+    // A forest tree is gone for good (removed from the saved world) and drops its seed: the player
+    // can plant a new one
+    const seedFrom = starts.length ? starts[starts.length - 1] : prop.position.clone().setY(prop.position.y + 1);
+    this.spawnSeed(prop.type, seedFrom);
+    this.props.remove(id);
+  }
+
+  /** The tree's seed (cone, acorn, cutting) flies from `from` to the player like the logs. */
+  private spawnSeed(type: string, from: THREE.Vector3): void {
+    const item = SEED_OF_TREE[type];
+    if (!item) return;
+    if (!this.getCollector) {
+      this.onSeed?.(item, 1);
+      return;
+    }
+    const look = SEED_LOOKS[item];
+    const mesh = new THREE.Mesh(look.geo, look.mat);
+    mesh.name = 'TreeSeed';
+    const start = from.clone();
+    start.y += 0.3;
+    mesh.position.copy(start);
+    this.props.group.add(mesh);
+    this.logs.push({
+      mesh, from: start, t: -LOG_COUNT * LOG_STAGGER,
+      spin: new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(10),
+      wood: 0,
+      item,
+    });
   }
 
   /** Wood logs fly from `starts` to the player; the wood is given as they arrive (also used by the orchard). */
@@ -837,6 +877,7 @@ export class PropTreeField {
         l.mesh.removeFromParent();
         this.logs.splice(i, 1);
         if (l.wood > 0) this.onWood?.(l.wood, target.clone());
+        if (l.item) this.onSeed?.(l.item, 1);
       }
     }
   }
