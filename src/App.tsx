@@ -19,6 +19,7 @@ import { promptStore } from './components/promptStore';
 import { GameHUD } from './components/game/GameHUD';
 import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
 import { WorkersPanel } from './components/game/WorkersPanel';
+import { StoragePanel } from './components/game/StoragePanel';
 import { WorldMap } from './components/game/WorldMap';
 import { SavingBadge } from './components/game/SavingBadge';
 import { PauseMenu } from './components/game/PauseMenu';
@@ -287,6 +288,7 @@ export default function App() {
                 {hud?.panel === 'cook' && <CookingPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'shop' && <ShopPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'workers' && <WorkersPanel gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
+                {hud?.panel === 'storage' && <StoragePanel gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
               </>
             )}
           </>

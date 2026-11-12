@@ -21,13 +21,15 @@ import { RECIPES, FISH_IDS, SEA_FISH_IDS, DISH_BUFF, Recipe } from './Recipes';
 import { audioEngine } from '../audio/AudioEngine';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { MAX_WORKERS, WORKER_HIRE_COST, WorkerManager } from '../npc/WorkerManager';
-import { WorkerNPC } from '../npc/WorkerNPC';
+import { CROP_DEFINITIONS, CROP_TYPES } from '../farming/types/FarmingTypes';
+import { DISH_ORDER, WorkerNPC } from '../npc/WorkerNPC';
+import { FarmStorage, STORAGE_CHEST } from '../npc/FarmStorage';
 import { t, dataName, getLang } from '../i18n/i18n';
 
 /** Flour from one crate of wheat at the millstone (3 flour bake one loaf). */
 const FLOUR_PER_CRATE = 3;
 
-export type GameplayPanel = 'cook' | 'shop' | 'workers' | null;
+export type GameplayPanel = 'cook' | 'shop' | 'workers' | 'storage' | null;
 
 /** Coins a pest knocks out of the player's pockets per hit. */
 const HIT_COIN_LOSS = 5;
@@ -62,7 +64,7 @@ function clockLabel(hour: number): string {
 export interface GameplayPrompt {
   text: string;
   key: string;
-  action: 'fish' | 'pet' | 'cook' | 'shop' | 'npc' | 'worker' | 'explore' | 'mill' | 'sleep' | 'flowers';
+  action: 'fish' | 'pet' | 'cook' | 'shop' | 'storage' | 'npc' | 'worker' | 'explore' | 'mill' | 'sleep' | 'flowers';
   secondary?: { text: string; key: string; action: 'treat' };
 }
 
@@ -108,6 +110,8 @@ export class GameplayManager {
   public readonly slingshot: SlingshotSystem;
   public companion: CompanionNPC | null = null;
   public workers: WorkerManager | null = null;
+  /** The storage chests' shared stock (workers' seeds, meals and yield). */
+  public storage: FarmStorage | null = null;
   /** The farmhand the current 'worker' prompt is about. */
   private promptWorker: WorkerNPC | null = null;
   public explore: ExplorePort | null = null;
@@ -457,6 +461,7 @@ export class GameplayManager {
     if (!this.character.telemetry.isSwimming && this.inventory.getEquippedItemId() === 'fishing_rod' && this.fishing.findCastTarget(pos, facing, this.castTarget)) {
       return { text: t('play.cast'), key: 'E', action: 'fish' };
     }
+    if (this.storage && this.props.findNearest(STORAGE_CHEST, pos, 2.2)) return { text: t('storage.open'), key: 'E', action: 'storage' };
     if (this.props.findNearest('campfire', pos, 2.6)) return { text: t('play.cook'), key: 'E', action: 'cook' };
     if (this.props.findNearest('mailbox', pos, 2.4)) return { text: t('play.shop'), key: 'E', action: 'shop' };
     if (this.props.findNearest('millstone', pos, 2.4)) {
@@ -537,7 +542,7 @@ export class GameplayManager {
         this.pets.feed(pet);
         this.onNotify(t('play.petHappy', { name: pet.name, n: Math.round(pet.affection) }), 'success');
       }
-    } else if (action === 'cook' || action === 'shop') {
+    } else if (action === 'cook' || action === 'shop' || action === 'storage') {
       this.openPanel(action);
     } else if (action === 'mill') {
       this.grindFlour(pos);
@@ -642,6 +647,51 @@ export class GameplayManager {
     this.workers.remove(w);
     this.onNotify(t('worker.dismissed', { name: w.name }), 'info');
     this.revision++;
+  }
+
+  // ---------------------------------------------------------------- storage chest
+
+  /** Backpack -> chest (up to `n`); returns how many went in. */
+  public storeItem(itemId: string, n: number): number {
+    const st = this.storage;
+    if (!st) return 0;
+    const have = this.inventory.getItemCount(itemId);
+    const moved = st.put(itemId, Math.min(n, have));
+    if (moved > 0) this.inventory.removeItem(itemId, moved);
+    return moved;
+  }
+
+  /** Chest -> backpack (up to `n`, as much as the stack in the backpack holds). */
+  public takeItem(itemId: string, n: number): number {
+    const st = this.storage;
+    const item = this.inventory.getItem(itemId);
+    if (!st || !item) return 0;
+    const room = item.maxStack - item.count;
+    const moved = Math.min(n, st.count(itemId), room);
+    if (moved <= 0) return 0;
+    st.take(itemId, moved);
+    this.inventory.addItem(itemId, moved);
+    return moved;
+  }
+
+  /** Everything the workers use from the backpack into the chest: cooked dishes and crop seeds. */
+  public storeForWorkers(): number {
+    let n = 0;
+    for (const id of [...DISH_ORDER, ...CROP_TYPES.map((c) => CROP_DEFINITIONS[c].seedItemId)]) {
+      const have = this.inventory.getItemCount(id);
+      if (have > 0) n += this.storeItem(id, have);
+    }
+    return n;
+  }
+
+  /** Everything the workers brought (crops, wood, stone...) into the backpack. */
+  public takeYield(): number {
+    let n = 0;
+    for (const { itemId, amount } of this.storage?.list() ?? []) {
+      const cat = this.inventory.getItem(itemId)?.category;
+      if (cat === 'crops' || cat === 'materials') n += this.takeItem(itemId, amount);
+    }
+    return n;
   }
 
   public openPanel(panel: GameplayPanel): void {

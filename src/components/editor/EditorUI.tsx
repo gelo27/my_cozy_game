@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
-  Flame, Mailbox, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
+  Flame, Mailbox, Package, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
   PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music, Skull, Fish, X,
 } from 'lucide-react';
@@ -32,7 +32,7 @@ import { pickGlowSettings, resetPickGlowSettings, savePickGlowSettings, PickGlow
 
 const ICONS: Record<string, React.ElementType> = {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
-  Flame, Mailbox, Waves, Bug,
+  Flame, Mailbox, Package, Waves, Bug,
 };
 
 const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції', objects: 'Об’єкти' };

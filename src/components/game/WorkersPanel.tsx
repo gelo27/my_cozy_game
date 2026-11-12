@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { Users, Coins, Droplet, Wheat, Sprout, Sparkles, Coffee, BedDouble, UserPlus } from 'lucide-react';
+import { Users, Coins, Droplet, Wheat, Sprout, Sparkles, Coffee, BedDouble, UserPlus, Axe, Pickaxe, Zap, Utensils } from 'lucide-react';
 import { GameplayManager } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { MAX_WORKERS, WORKER_HIRE_COST, WorkerView } from '../../npc/WorkerManager';
-import { TaskKind, WORKER_ROLES, WorkerRole } from '../../npc/TaskBoard';
+import { STOCK_TARGET, TASK_KINDS, TaskKind, WORKER_ROLES, WorkerRole } from '../../npc/TaskBoard';
 import { t, useLang } from '../../i18n/i18n';
 import { TKey } from '../../i18n/en';
 import { Shell } from './ActivityPanels';
@@ -13,6 +13,8 @@ const ROLE_ICON: Record<WorkerRole, React.ElementType> = {
   water: Droplet,
   harvest: Wheat,
   plant: Sprout,
+  chop: Axe,
+  mine: Pickaxe,
   off: Coffee,
 };
 const ROLE_SHORT: Record<WorkerRole, TKey> = {
@@ -20,9 +22,11 @@ const ROLE_SHORT: Record<WorkerRole, TKey> = {
   water: 'workers.role.water',
   harvest: 'workers.role.harvest',
   plant: 'workers.role.plant',
+  chop: 'workers.role.chop',
+  mine: 'workers.role.mine',
   off: 'workers.role.off',
 };
-const JOB_ICON: Record<TaskKind, React.ElementType> = { harvest: Wheat, water: Droplet, plant: Sprout };
+const JOB_ICON: Record<TaskKind, React.ElementType> = { harvest: Wheat, water: Droplet, plant: Sprout, chop: Axe, mine: Pickaxe };
 
 const hex = (c: number) => `#${c.toString(16).padStart(6, '0')}`;
 
@@ -35,7 +39,7 @@ interface CrewState {
 function useWorkers(gameplay: GameplayManager): CrewState & { refresh(): void } {
   const read = (): CrewState => ({
     rows: gameplay.workers?.snapshot() ?? [],
-    jobs: gameplay.workers?.board?.counts() ?? { harvest: 0, water: 0, plant: 0 },
+    jobs: gameplay.workers?.board?.counts() ?? { harvest: 0, water: 0, plant: 0, chop: 0, mine: 0 },
   });
   const [state, setState] = useState(read);
   useEffect(() => {
@@ -50,6 +54,20 @@ function useCoins(inventory: InventoryManager): number {
   useEffect(() => inventory.subscribe(() => setCoins(inventory.getItemCount('coins'))), [inventory]);
   return coins;
 }
+
+/** A small labelled bar: energy or satiety (green, amber below 50, rose below 25). */
+const Meter: React.FC<{ icon: React.ElementType; value: number; title: string }> = ({ icon: Icon, value, title }) => (
+  <div className="flex items-center gap-1 flex-1 max-w-[150px] min-w-0" title={title}>
+    <Icon className="w-3 h-3 shrink-0 text-[#8a7556]" />
+    <div className="h-2 flex-1 rounded-full bg-[#efe4cf] overflow-hidden">
+      <div
+        className={`h-full transition-[width] duration-500 ${value < 25 ? 'bg-rose-400' : value < 50 ? 'bg-amber-400' : 'bg-emerald-500'}`}
+        style={{ width: `${value}%` }}
+      />
+    </div>
+    <span className="text-[10px] font-semibold tabular-nums w-7 text-right">{value}%</span>
+  </div>
+);
 
 export const WorkersPanel: React.FC<{ gameplay: GameplayManager; inventory: InventoryManager; onClose(): void }> = ({ gameplay, inventory, onClose }) => {
   useLang();
@@ -72,7 +90,7 @@ export const WorkersPanel: React.FC<{ gameplay: GameplayManager; inventory: Inve
           {rows.length}/{MAX_WORKERS}
         </span>
         <span className="text-[11px] text-[#8a7556]">{t('workers.jobs')}:</span>
-        {(Object.keys(JOB_ICON) as TaskKind[]).map((k) => {
+        {TASK_KINDS.map((k) => {
           const Icon = JOB_ICON[k];
           return (
             <span key={k} className="flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-[#f3e8d2]">
@@ -109,14 +127,9 @@ export const WorkersPanel: React.FC<{ gameplay: GameplayManager; inventory: Inve
                 <span className="text-[11px] text-[#8a7556] truncate">{w.doing}</span>
               </div>
               <div className="flex items-center gap-2 mt-1">
-                <div className="h-2 flex-1 max-w-[180px] rounded-full bg-[#efe4cf] overflow-hidden" title={t('workers.energy')}>
-                  <div
-                    className={`h-full transition-[width] duration-500 ${w.energy < 25 ? 'bg-rose-400' : w.energy < 50 ? 'bg-amber-400' : 'bg-emerald-500'}`}
-                    style={{ width: `${w.energy}%` }}
-                  />
-                </div>
-                <span className="text-[11px] font-semibold tabular-nums w-9">{w.energy}%</span>
-                <span className="text-[11px] text-[#8a7556] hidden sm:inline">{t('workers.done', { n: w.jobsDone })}</span>
+                <Meter icon={Zap} value={w.energy} title={t('workers.energy')} />
+                <Meter icon={Utensils} value={w.food} title={t('workers.food')} />
+                <span className="text-[11px] text-[#8a7556] hidden sm:inline whitespace-nowrap">{t('workers.done', { n: w.jobsDone })}</span>
                 {!w.hasBed && (
                   <span className="flex items-center gap-0.5 text-[11px] text-rose-600" title={t('workers.noBed')}>
                     <BedDouble className="w-3.5 h-3.5" />
@@ -164,7 +177,7 @@ export const WorkersPanel: React.FC<{ gameplay: GameplayManager; inventory: Inve
         </div>
       ))}
 
-      <div className="text-[11px] text-[#8a7556] text-center leading-snug mt-1">{t('workers.hint')}</div>
+      <div className="text-[11px] text-[#8a7556] text-center leading-snug mt-1">{t('workers.hint', { wood: STOCK_TARGET.wood, stone: STOCK_TARGET.stone })}</div>
     </Shell>
   );
 };

@@ -241,14 +241,23 @@ export class Pet {
   }
 }
 
+/**
+ * Companion pets (the cat and the dog) on or off. While off none are spawned, and the saved pets
+ * are kept as they were (handed back on save) so turning this on again brings them back.
+ */
+export const PETS_ENABLED = false;
+
 /** Owns the player's pets. */
 export class PetSystem {
   public readonly pets: Pet[] = [];
   private time = 0;
+  /** Saved pets held untouched while PETS_ENABLED is off. */
+  private shelved: PetSaveData[] = [];
 
   constructor(private readonly scene: THREE.Scene, private readonly terrain: TerrainSystem, private readonly particles?: ParticleManager) {}
 
   public spawnDefaults(near: THREE.Vector3): void {
+    if (!PETS_ENABLED) return;
     this.add('cat', t('pet.catName'), new THREE.Vector3(near.x + 2, 0, near.z + 1));
     this.add('dog', t('pet.dogName'), new THREE.Vector3(near.x - 2, 0, near.z + 1.5));
   }
@@ -294,6 +303,7 @@ export class PetSystem {
   }
 
   public serialize(): PetSaveData[] {
+    if (!PETS_ENABLED) return this.shelved;
     return this.pets.map((p) => ({
       kind: p.kind,
       name: p.name,
@@ -304,6 +314,10 @@ export class PetSystem {
 
   public deserialize(data: PetSaveData[]): void {
     this.clear();
+    if (!PETS_ENABLED) {
+      this.shelved = data;
+      return;
+    }
     for (const d of data) {
       // Saves can hold pet kinds this version does not know (e.g. from removed features): skip them
       if (!(d.kind in LOOKS)) continue;

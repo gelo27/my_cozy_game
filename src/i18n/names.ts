@@ -182,6 +182,7 @@ export const EN_NAMES = {
     campfire: 'Campfire',
     mailbox: 'Mailbox',
     millstone: 'Millstone',
+    storage_chest: 'Storage chest',
   },
   /** Wallpaper tags are keyed by their Ukrainian source text. */
   tag: {

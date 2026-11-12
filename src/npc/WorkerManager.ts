@@ -6,8 +6,8 @@ import { worldSettings } from '../world/WorldSettings';
 import { t } from '../i18n/i18n';
 import { TKey } from '../i18n/en';
 import { DoorControl } from './NPCAgent';
-import { BedSpot, WorkerActivity, WorkerNPC } from './WorkerNPC';
-import { TaskBoard, WORKER_ROLES, WorkerRole } from './TaskBoard';
+import { BedSpot, CHEST_STANDS, HUNGRY, WorkerActivity, WorkerErrand, WorkerNPC } from './WorkerNPC';
+import { Items, TaskBoard, TaskKind, WORKER_ROLES, WorkerRole } from './TaskBoard';
 
 export const MAX_WORKERS = 10;
 /** Coins a new farmhand costs to hire (the first ones come with the farm). */
@@ -24,6 +24,10 @@ export interface WorkerSaveData {
   pos: [number, number, number];
   home: [number, number, number];
   asleep: boolean;
+  /** Satiety 0..100 (older saves: none, full). */
+  food?: number;
+  /** What it was taking to a chest. */
+  carry?: Items;
   /** Bed it slept in ("pieceId:slot"); it gets the same one back while it stands. */
   bed: string | null;
 }
@@ -34,6 +38,8 @@ export interface WorkerView {
   name: string;
   tint: number;
   energy: number;
+  /** Satiety 0..100. */
+  food: number;
   role: WorkerRole;
   activity: WorkerActivity;
   /** What it is doing, ready to show ("watering a field"). */
@@ -47,6 +53,8 @@ const LOD_NEAR = 30;
 const LOD_MID = 60;
 /** Bed list refresh (s): beds are built and removed rarely. */
 const BED_REFRESH = 4;
+/** "No food in the chests" is said at most this often (ms). */
+const NO_FOOD_NOTICE = 180000;
 
 const TINTS = [0xffd9b0, 0xc8f0c0, 0xf0c8e0, 0xc0d8ff, 0xfff0a0, 0xe0c8ff, 0xb8f0f0, 0xffc8c0, 0xd8d8d8, 0xf8e0c8];
 
@@ -84,6 +92,11 @@ export class WorkerManager {
   /** Time not yet simulated, per worker (LOD). */
   private pending: number[] = [];
   private spotCache = new Map<string, BedSpot>();
+  private noFoodAt = -Infinity;
+  /** Nearest storage chest to a point (set by the engine); null without chests. */
+  public findChest: ((from: THREE.Vector3) => THREE.Vector3 | null) | null = null;
+  /** Messages for the player (hungry workers with nothing to eat). */
+  public onNotify: ((text: string) => void) | null = null;
   private readonly gate = (): boolean => {
     if (this.plannedThisFrame) return false;
     this.plannedThisFrame = true;
@@ -119,6 +132,13 @@ export class WorkerManager {
     w.workCenter = this.workCenter.clone();
     w.board = this.board;
     w.planGate = this.gate;
+    w.findChest = (from) => this.findChest?.(from) ?? null;
+    w.onNoFood = () => {
+      const now = performance.now();
+      if (now - this.noFoodAt < NO_FOOD_NOTICE) return;
+      this.noFoodAt = now;
+      this.onNotify?.(t('worker.noFood', { name: w.name }));
+    };
     this.workers.push(w);
     this.pending.push(0);
     this.bedTimer = 0;
@@ -141,6 +161,7 @@ export class WorkerManager {
     if (this.navResetIn > 0 && --this.navResetIn === 0) {
       this.nav.reset();
       this.spotCache.clear();
+      CHEST_STANDS.clear();
       this.bedTimer = 0;
     }
     this.bedTimer -= dt;
@@ -195,6 +216,8 @@ export class WorkerManager {
         slot: w.slot,
         role: w.role,
         energy: r(w.energy),
+        food: r(w.food),
+        carry: w.carry.length ? w.carry.map((c) => ({ ...c })) : undefined,
         jobsDone: w.jobsDone,
         pos: [r(f.x), r(f.y), r(f.z)],
         home: [r(w.home.x), r(w.home.y), r(w.home.z)],
@@ -214,6 +237,8 @@ export class WorkerManager {
       if (d.asleep) sleepers.push(w);
       w.home.set(...d.home);
       w.energy = THREE.MathUtils.clamp(d.energy, 0, 100);
+      w.food = THREE.MathUtils.clamp(d.food ?? 90, 0, 100);
+      if (Array.isArray(d.carry)) w.restoreCarry(d.carry);
       w.jobsDone = d.jobsDone ?? 0;
       w.setRole(WORKER_ROLES.includes(d.role) ? d.role : 'all');
       w.preferredBed = d.bed;
@@ -234,9 +259,10 @@ export class WorkerManager {
       name: w.name,
       tint: TINTS[w.slot % TINTS.length],
       energy: Math.round(w.energy),
+      food: Math.round(w.food),
       role: w.role,
       activity: w.activity,
-      doing: w.task && w.activity === 'work' ? t(TASK_KEY[w.task.kind]) : t(ACTIVITY_KEY[w.activity]),
+      doing: this.doingText(w),
       jobsDone: w.jobsDone,
       hasBed: !!w.bed,
     }));
@@ -246,10 +272,17 @@ export class WorkerManager {
     return this.workers.find((w) => w.id === id) ?? null;
   }
 
+  /** What it is doing, ready to show ("watering a field", "having a meal"). */
+  public doingText(w: WorkerNPC): string {
+    if (w.errand) return t(ERRAND_KEY[w.errand]);
+    if (w.task && w.activity === 'work') return t(TASK_KEY[w.task.kind]);
+    if (w.activity !== 'sleep' && w.food < HUNGRY) return t('worker.act.hungry', { activity: t(ACTIVITY_KEY[w.activity]) });
+    return t(ACTIVITY_KEY[w.activity]);
+  }
+
   /** "Petro · watering only · energy 72% · watering" */
   public status(w: WorkerNPC): string {
-    const activity = w.task && w.activity === 'work' ? t(TASK_KEY[w.task.kind]) : t(ACTIVITY_KEY[w.activity]);
-    return t('worker.status', { name: w.name, role: t(ROLE_KEY[w.role]), energy: Math.round(w.energy), activity });
+    return t('worker.status', { name: w.name, role: t(ROLE_KEY[w.role]), energy: Math.round(w.energy), activity: this.doingText(w) });
   }
 
   /** Next role in the list (talking to a worker); returns it. */
@@ -365,11 +398,21 @@ const ROLE_KEY: Record<WorkerRole, TKey> = {
   water: 'worker.role.water',
   harvest: 'worker.role.harvest',
   plant: 'worker.role.plant',
+  chop: 'worker.role.chop',
+  mine: 'worker.role.mine',
   off: 'worker.role.off',
 };
 
-const TASK_KEY: Record<'water' | 'harvest' | 'plant', TKey> = {
+const TASK_KEY: Record<TaskKind, TKey> = {
   water: 'worker.task.water',
   harvest: 'worker.task.harvest',
   plant: 'worker.task.plant',
+  chop: 'worker.task.chop',
+  mine: 'worker.task.mine',
+};
+
+const ERRAND_KEY: Record<WorkerErrand, TKey> = {
+  fetch: 'worker.errand.fetch',
+  deliver: 'worker.errand.deliver',
+  eat: 'worker.errand.eat',
 };

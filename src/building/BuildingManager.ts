@@ -15,6 +15,7 @@ import {
   isGlassRoofPiece,
   isSwingDoorPiece,
   isGreenhousePiece,
+  PieceCategory,
 } from './types/BuildingTypes';
 import { GreenhouseBatch } from './GreenhouseBatch';
 import { BUILDING_PIECES, BUILDING_MATERIALS, createPieceMeshGroup, getPieceMeshTemplate, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface, createRoofGeometry, addFarGlassTwins } from './config/BuildingPiecesConfig';
@@ -626,10 +627,30 @@ export class BuildingManager {
   }
 
   /**
+   * Stair flights for navigation: the walkable ends (floor level) of every stair piece. A ramp
+   * rises from the piece's -Z/-Y edge to its +Z/+Y edge (see the stair colliders).
+   */
+  public getStairs(): { bottom: THREE.Vector3; top: THREE.Vector3 }[] {
+    const out = [];
+    for (const piece of this.pieces.values()) {
+      const def = BUILDING_PIECES[piece.type];
+      if (def?.category !== PieceCategory.STAIRS) continue;
+      const d = def.dimensions;
+      out.push({
+        bottom: new THREE.Vector3(0, -d.y / 2, -d.z / 2).applyQuaternion(piece.quaternion).add(piece.position),
+        top: new THREE.Vector3(0, d.y / 2, d.z / 2).applyQuaternion(piece.quaternion).add(piece.position),
+      });
+    }
+    return out;
+  }
+
+  /**
    * Door openings for navigation: floor centre, facing normal and clear half-width between the jambs
    * (matches the frame colliders in rebuildDoorPhysicsCollider).
    */
-  public getDoorOpenings(): { id: string; x: number; y: number; z: number; nx: number; nz: number; half: number; body: RAPIER.RigidBody | null }[] {
+  public getDoorOpenings(): {
+    id: string; x: number; y: number; z: number; nx: number; nz: number; half: number; body: RAPIER.RigidBody | null; swing: number; reach: number;
+  }[] {
     const out = [];
     for (const piece of this.pieces.values()) {
       if (!isSwingDoorPiece(piece.type)) continue;
@@ -646,6 +667,10 @@ export class BuildingManager {
         nz: n.z,
         half,
         body: piece.staticBody ?? null,
+        // Swing multiplier 1 puts the open leaves on the door's -Z side (see rebuildDoorPhysicsCollider)
+        swing: piece.isOpen ? -(piece.lastSwingMultiplier || 1) : 0,
+        // Leaf length: one leaf spans the opening, a double door's two leaves half of it each
+        reach: piece.type === BuildingPieceType.WOOD_DOOR_DOUBLE ? half : half * 2,
       });
     }
     return out;

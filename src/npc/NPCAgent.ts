@@ -22,6 +22,8 @@ const NPC_FILTER = 0xffff & ~COLLISION_GROUPS.CHARACTER;
 
 /** Re-plan when the goal moved this far from the last planned one (m)... */
 const REPLAN_MOVE = 1.2;
+/** Searches in a row allowed to return nothing while looking for the way to another floor. */
+const SEARCH_TRIES = 40;
 /** ...but not more often than this (s). */
 const REPLAN_MIN_INTERVAL = 0.35;
 
@@ -44,6 +46,10 @@ export class NPCAgent {
   public planGate: (() => boolean) | null = null;
   /** A* node budget per search (smaller for agents that only make short trips). */
   protected planNodes = 2500;
+  /** Physics cell samples per search (uncached ground); fewer = cheaper searches, more of them partial. */
+  protected planSamples = 160;
+  /** A partial plan is continued this long after it was made (s), walking it meanwhile. */
+  protected partialRetry = 0.05;
 
   protected readonly body: RAPIER.RigidBody;
   protected readonly collider: RAPIER.Collider;
@@ -53,6 +59,7 @@ export class NPCAgent {
   protected path: PathPoint[] = [];
   protected pathIndex = 0;
   protected stuckTime = 0;
+  private searchTries = 0;
   protected speed = 0;
   /** Doors it opened itself, closed again once everyone has walked away. */
   private openedDoors = new Map<string, NavDoor>();
@@ -62,6 +69,10 @@ export class NPCAgent {
   private partial = false;
   private vy = 0;
   private grounded = false;
+  /** Drawn height of the body: eases up over steps instead of popping (null = not placed yet). */
+  private visualY: number | null = null;
+  /** Walking speed the animation sees: smoothed, so a one-frame snag doesn't flick it to idle. */
+  private animSpeed = 0;
 
   protected static readonly _v = new THREE.Vector3();
   private static readonly _feet = new THREE.Vector3();
@@ -138,7 +149,8 @@ export class NPCAgent {
 
     // Standing on the ground with nowhere to go: no controller query (most of a crowd, most of the time)
     if (targetSpeed === 0 && this.speed === 0 && this.grounded && this.stuckTime === 0) {
-      this.model.group.position.set(pos.x, pos.y, pos.z);
+      this.model.group.position.set(pos.x, this.smoothY(pos.y, dt), pos.z);
+      this.animSpeed = 0;
       this.animate(dt, 0, look ? Math.atan2(look.x - pos.x, look.z - pos.z) : null);
       return;
     }
@@ -178,8 +190,20 @@ export class NPCAgent {
     if (moved > 0.002) faceAngle = Math.atan2(m.x, m.z);
     else if (look) faceAngle = Math.atan2(look.x - pos.x, look.z - pos.z);
 
-    this.model.group.position.set(pos.x + m.x, pos.y + m.y, pos.z + m.z);
-    this.animate(dt, hs, faceAngle);
+    this.model.group.position.set(pos.x + m.x, this.smoothY(pos.y + m.y, dt), pos.z + m.z);
+    // Blocked for a frame at a corner or a step: keeps the walk going instead of a hitch to idle
+    this.animSpeed += (hs - this.animSpeed) * Math.min(1, dt * (hs > this.animSpeed ? 14 : 10));
+    this.animate(dt, this.animSpeed, faceAngle);
+  }
+
+  /**
+   * The drawn height follows the body, but climbs a step (autostep, a curb, the lifted retry)
+   * over a few frames: no little hop. Going down and big changes (teleports) follow at once.
+   */
+  private smoothY(y: number, dt: number): number {
+    const v = this.visualY;
+    this.visualY = v === null || y < v || y - v > 0.6 ? y : v + (y - v) * Math.min(1, dt * 12);
+    return this.visualY;
   }
 
   /** Plays the standing / walking clips for horizontal speed `hs`. */
@@ -213,11 +237,14 @@ export class NPCAgent {
       this.replanTimer = REPLAN_MIN_INTERVAL;
       this.lastGoal.copy(goal);
       const feet = NPCAgent._feet.set(pos.x, pos.y - NPC_FEET, pos.z);
-      this.path = this.nav.findPath(feet, goal, this.planNodes);
+      this.path = this.nav.findPath(feet, goal, this.planNodes, this.planSamples);
       this.pathIndex = 0;
       // Partial (budget hit): walk it now, finish planning a few frames later...
       this.partial = this.nav.lastPartial;
-      if (this.partial) {
+      if (this.partial && this.path.length === 0 && this.nav.lastSearching && ++this.searchTries <= SEARCH_TRIES) {
+        // Goal on another floor, no way up found yet: stand and keep searching for a moment
+        this.replanTimer = this.partialRetry;
+      } else if (this.partial) {
         const end = this.path[this.path.length - 1];
         if (!end || Math.hypot(end.x - feet.x, end.z - feet.z) < 1.5) {
           // ...unless it got nowhere: the goal is unreachable (on furniture, across water), and
@@ -225,15 +252,17 @@ export class NPCAgent {
           this.partial = false;
           this.replanTimer = 2;
         } else {
-          this.replanTimer = 0.05;
+          this.replanTimer = this.partialRetry;
         }
       }
+      if (this.path.length) this.searchTries = 0;
       this.updateDebugLine(feet);
     }
     if (this.pathIndex >= this.path.length) return null;
 
     let wp = this.path[this.pathIndex];
-    while (Math.hypot(wp.x - pos.x, wp.z - pos.z) < 0.35) {
+    // Door waypoints are hit closely: turning early would cut into an open leaf next to the opening
+    while (Math.hypot(wp.x - pos.x, wp.z - pos.z) < (wp.door ? 0.15 : 0.35)) {
       this.pathIndex++;
       if (this.pathIndex >= this.path.length) return null;
       wp = this.path[this.pathIndex];
@@ -247,6 +276,7 @@ export class NPCAgent {
     this.pathIndex = 0;
     this.partial = false;
     this.stuckTime = 0;
+    this.searchTries = 0;
     this.lastGoal.set(Infinity, 0, Infinity);
   }
 
@@ -272,6 +302,7 @@ export class NPCAgent {
     this.body.setTranslation({ x: p.x, y: p.y + NPC_FEET + 0.05, z: p.z }, true);
     this.body.setNextKinematicTranslation({ x: p.x, y: p.y + NPC_FEET + 0.05, z: p.z });
     this.model.group.position.set(p.x, p.y + NPC_FEET + 0.05, p.z);
+    this.visualY = null;
     this.clearPath();
     this.vy = 0;
   }

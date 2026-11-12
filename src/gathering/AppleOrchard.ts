@@ -105,6 +105,8 @@ interface LooseApple {
   from: THREE.Vector3;
   /** Close enough to the camera to be drawn. */
   vis: boolean;
+  /** Picked up by a farmhand: hops to it and is handed over there (null: the player). */
+  to?: { pos: () => THREE.Vector3; sink: (n: number) => void } | null;
 }
 
 export interface AppleTreeNode {
@@ -359,6 +361,57 @@ export class AppleOrchard {
     if (t.body) this.physics.removeRigidBody(t.body);
     t.body = null;
     t.bodyStage = -1;
+  }
+
+  /** Grown apple trees with ripe apples still hanging (farmhands' harvest jobs). */
+  public forEachRipe(fn: (id: number, pos: THREE.Vector3, trunkRadius: number) => void): void {
+    const tr = this.models?.trunkRadius ?? 0.4;
+    for (const t of this.trees) {
+      if (t.stage === GROWN && !t.cut && t.fall < 0 && t.phase === 'ripe' && t.hanging !== 0) fn(t.id, t.pos, tr * STAGE_SCALE[t.stage]);
+    }
+  }
+
+  /** A farmhand at an apple tree: 'knock' it now, 'wait' for apples still falling, 'done' when none hang. */
+  public knockState(id: number): 'knock' | 'wait' | 'done' {
+    const t = this.byId(id);
+    if (!t || t.cut || t.fall >= 0 || t.stage !== GROWN || t.phase !== 'ripe' || !t.hanging) return t?.drops.length ? 'wait' : 'done';
+    return t.drops.length ? 'wait' : 'knock';
+  }
+
+  /** Nearest apple lying on the ground (not flying) within `radius` of `center`, measured from `from`. */
+  public nearestFallen(center: THREE.Vector3, radius: number, from: THREE.Vector3): THREE.Vector3 | null {
+    let best: THREE.Vector3 | null = null;
+    let bestD = Infinity;
+    for (const a of this.loose) {
+      if (a.fly >= 0 || a.age < PICKUP_DELAY || !a.body) continue;
+      if ((a.pos.x - center.x) ** 2 + (a.pos.z - center.z) ** 2 > radius * radius) continue;
+      const d = (a.pos.x - from.x) ** 2 + (a.pos.z - from.z) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = a.pos;
+      }
+    }
+    return best ? best.clone() : null;
+  }
+
+  /**
+   * A farmhand picks up the apples lying within `radius` of `center`: they hop to it (`to`) and
+   * reach `sink` one by one. Returns how many were picked up.
+   */
+  public gatherFallen(center: THREE.Vector3, radius: number, to: () => THREE.Vector3, sink: (n: number) => void): number {
+    let n = 0;
+    for (const a of this.loose) {
+      if (a.fly >= 0 || a.age < PICKUP_DELAY || !a.body) continue;
+      if ((a.pos.x - center.x) ** 2 + (a.pos.z - center.z) ** 2 > radius * radius) continue;
+      this.physics.removeRigidBody(a.body);
+      a.body = null;
+      a.fly = 0;
+      a.from.copy(a.pos);
+      a.to = { pos: to, sink };
+      n++;
+    }
+    if (n) this.looseDirty = true;
+    return n;
   }
 
   /** Nearest standing apple tree whose trunk is within `reach` of `point`. */
@@ -874,14 +927,19 @@ export class AppleOrchard {
         // Hopping into the player
         a.fly += dt;
         const k = Math.min(1, a.fly / PICKUP_FLIGHT);
-        a.pos.lerpVectors(a.from, AppleOrchard._v.set(player.x, player.y + 0.2, player.z), k * k);
+        const dest = a.to ? a.to.pos() : player;
+        a.pos.lerpVectors(a.from, AppleOrchard._v.set(dest.x, dest.y + 0.2, dest.z), k * k);
         a.pos.y += Math.sin(Math.PI * k) * 0.35;
         changed = true;
         if (k >= 1) {
           this.loose.splice(i, 1);
-          this.pendingApples++;
-          this.pendingTimer = 0.5;
-          audioEngine.at(player).playApplePickup();
+          if (a.to) {
+            a.to.sink(1);
+          } else {
+            this.pendingApples++;
+            this.pendingTimer = 0.5;
+          }
+          audioEngine.at(dest).playApplePickup();
         }
         continue;
       }

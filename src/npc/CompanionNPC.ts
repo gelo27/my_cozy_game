@@ -9,6 +9,8 @@ export type { DoorControl } from './NPCAgent';
 const STOP_DIST = 2.0;
 /** Beyond this distance, or when stuck for long, it catches up like game companions do (m). */
 const TELEPORT_DIST = 45;
+/** Height difference that means the player stands on another floor, not just up a slope (m). */
+const FLOOR_GAP = 1.2;
 
 /**
  * A villager who can follow the player (E toggles follow / stay). Movement comes from NPCAgent;
@@ -33,7 +35,10 @@ export class CompanionNPC extends NPCAgent {
     const pos = this.getPosition(NPCAgent._v);
     const dx = player.x - pos.x;
     const dz = player.z - pos.z;
-    const dist = Math.hypot(dx, dz);
+    const flat = Math.hypot(dx, dz);
+    // On another floor (upstairs above us) the player is far however close they look from above
+    const otherFloor = Math.abs(player.y - NPC_FEET - (pos.y - NPC_FEET)) > FLOOR_GAP;
+    const dist = otherFloor ? Math.max(flat, STOP_DIST + 1) : flat;
     let goal: THREE.Vector3 | null = null;
     let speed = 0;
 
@@ -43,8 +48,14 @@ export class CompanionNPC extends NPCAgent {
         return;
       }
       if (dist > STOP_DIST) {
-        // Aim a little short of the player, on the side we come from, so we don't walk into them
-        goal = CompanionNPC._goal.set(player.x - (dx / dist) * 1.4, player.y - NPC_FEET, player.z - (dz / dist) * 1.4);
+        if (otherFloor || flat < 0.5) {
+          // Another floor: head for the player's own spot (a point short of them could miss the
+          // upper floor's edge and land on the ground below); the stop distance halts us on arrival
+          goal = CompanionNPC._goal.set(player.x, player.y - NPC_FEET, player.z);
+        } else {
+          // Aim a little short of the player, on the side we come from, so we don't walk into them
+          goal = CompanionNPC._goal.set(player.x - (dx / flat) * 1.4, player.y - NPC_FEET, player.z - (dz / flat) * 1.4);
+        }
         speed = dist > 7 ? NPC_RUN : NPC_WALK;
       }
     }

@@ -171,7 +171,12 @@ function cutStage(hitsDone: number): number {
  * Trees stay instanced: hits, the fall and regrowth are drawn through PropSystem.setPose, so a forest
  * costs nothing extra until a tree is touched. Wood goes straight into the backpack on the fall.
  */
+/** Receives what a farmhand's felling yields. */
+export type ItemSink = (items: { itemId: string; amount: number }[]) => void;
+
 export class PropTreeField {
+  /** Trees a farmhand is felling: prop id -> where the wood goes. */
+  private readonly sinks = new Map<number, ItemSink>();
   public onWood: ((amount: number, at: THREE.Vector3) => void) | null = null;
   /** A felled tree's / cleared bush's seed reached the player (the engine puts it in the backpack). */
   public onSeed: ((itemId: string, amount: number) => void) | null = null;
@@ -298,10 +303,39 @@ export class PropTreeField {
     };
   }
 
-  /** One axe hit. Returns true when the tree fell. */
-  public hit(node: PropTreeNode, direction: THREE.Vector3): boolean {
+  /**
+   * Standing forest trees (pines and oaks, not bushes or orchard trees) between `minR` and `maxR`
+   * of x, z: what farmhands may fell.
+   */
+  public forEachStandingTree(x: number, z: number, minR: number, maxR: number, fn: (propId: number, pos: THREE.Vector3, radius: number) => void): void {
+    this.props.forEachNear(x, z, maxR, (p) => {
+      if (p.type !== 'tree_pine' && p.type !== 'tree_round') return;
+      const st = this.states.get(p.id);
+      if (st && (st.fall >= 0 || st.stumpId !== null)) return;
+      const d = Math.hypot(p.position.x - x, p.position.z - z);
+      if (d < minR || d > maxR) return;
+      fn(p.id, p.position, trunkRadius(p.type) * p.scale);
+    });
+  }
+
+  /** The hit target for a standing prop tree by id (null when it is gone or falling). */
+  public nodeOf(propId: number): PropTreeNode | null {
+    const p = this.props.get(propId);
+    if (!p || (p.type !== 'tree_pine' && p.type !== 'tree_round')) return null;
+    const st = this.states.get(propId);
+    if (st && st.fall >= 0) return null;
+    return { propId, position: p.position.clone(), radius: trunkRadius(p.type) * p.scale, health: st ? st.health : PROP_TREE_HITS, maxHealth: PROP_TREE_HITS };
+  }
+
+  /**
+   * One axe hit. Returns true when the tree fell. `sink` (a farmhand's swing) gets the wood and the
+   * seed when the top is gone instead of them flying to the player.
+   */
+  public hit(node: PropTreeNode, direction: THREE.Vector3, sink?: ItemSink): boolean {
     const prop = this.getProp(node.propId);
     if (!prop) return false;
+    if (sink && prop.type !== 'bush') this.sinks.set(node.propId, sink);
+    else if (!sink) this.sinks.delete(node.propId);
     if (prop.type === 'bush') return this.hitBush(prop, direction);
     let st = this.states.get(node.propId);
     if (!st) {
@@ -789,7 +823,15 @@ export class PropTreeField {
     st.fall = FALL_SECONDS;
     this.setPose(id, { axis: st.fallAxis, angle: 0, scale: 0 });
     const wood = id < 0 ? this.external.get(id)?.wood ?? GATHERING_CONFIG.TREE_WOOD_YIELD : GATHERING_CONFIG.TREE_WOOD_YIELD;
-    this.spawnLogs(starts.length ? starts : [prop.position.clone().setY(prop.position.y + 1)], wood, prop.position);
+    const sink = this.sinks.get(id);
+    this.sinks.delete(id);
+    if (sink) {
+      // A farmhand felled it: the wood (and the seed) go into its arms, not to the player
+      const seed = id >= 0 ? SEED_OF_TREE[prop.type] : undefined;
+      sink(seed ? [{ itemId: 'wood', amount: wood }, { itemId: seed, amount: 1 }] : [{ itemId: 'wood', amount: wood }]);
+    } else {
+      this.spawnLogs(starts.length ? starts : [prop.position.clone().setY(prop.position.y + 1)], wood, prop.position);
+    }
     // A felled tree doesn't regrow: its stump (dissolved together with the top) goes with it
     if (st.stumpId !== null) this.props.remove(st.stumpId);
     st.stumpId = null;
@@ -805,7 +847,7 @@ export class PropTreeField {
     // A forest tree is gone for good (removed from the saved world) and drops its seed: the player
     // can plant a new one
     const seedFrom = starts.length ? starts[starts.length - 1] : prop.position.clone().setY(prop.position.y + 1);
-    this.spawnSeed(prop.type, seedFrom);
+    if (!sink) this.spawnSeed(prop.type, seedFrom);
     this.props.remove(id);
   }
 

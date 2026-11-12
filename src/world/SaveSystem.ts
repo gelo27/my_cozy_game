@@ -12,6 +12,7 @@ import type { ExplorationSaveData } from '../explore/ExplorationManager';
 import type { OrchardSaveData } from '../gathering/AppleOrchard';
 import type { NurserySaveData } from '../gathering/TreeNursery';
 import type { WorkerSaveData } from '../npc/WorkerManager';
+import { STORAGE_CHEST, STORAGE_CHEST_SPOT } from '../npc/FarmStorage';
 
 export const SAVE_VERSION = 2;
 const KEY_PREFIX = 'cozyfarm.save.';
@@ -49,6 +50,8 @@ export interface WorldSaveData {
   pets: PetSaveData[];
   /** Farmhands (missing in older saves: the starting crew stays). */
   workers?: WorkerSaveData[];
+  /** The farm storage chests' shared stock. */
+  storage?: Record<string, number>;
   /** Days passed (missing in older saves: 0). */
   day?: number;
   /** Sleep and respawn: the bed slept in last and that night's index. */
@@ -114,6 +117,7 @@ export class SaveSystem {
       boat: { p: w.boat.getPosition().toArray() as [number, number, number], yaw: w.boat.getYaw() },
       pets: w.gameplay.pets.serialize(),
       workers: w.gameplay.workers?.serialize(),
+      storage: w.gameplay.storage?.serialize(),
       day: worldSettings.day,
       sleep: {
         bed: w.gameplay.respawnBed ? (w.gameplay.respawnBed.toArray().map((v) => +v.toFixed(2)) as [number, number, number]) : null,
@@ -137,6 +141,8 @@ export class SaveSystem {
     w.props.deserialize(data.props);
     // Saves from before the millstone existed get one at its usual spot
     w.props.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);
+    // ...and a storage chest for the farmhands
+    w.props.ensureStation(STORAGE_CHEST, STORAGE_CHEST_SPOT.x, STORAGE_CHEST_SPOT.z, Math.PI);
     // A save from the old 128 m world now sits in the island's centre: grow nature around it
     w.props.forestVersion = data.forest ?? 0;
     if (w.terrain.expandedFromLegacy) {
@@ -182,6 +188,7 @@ export class SaveSystem {
     if (data.moped) w.moped.place(new THREE.Vector3(...data.moped.p), data.moped.yaw);
     if (data.boat) w.boat.place(new THREE.Vector3(...data.boat.p), data.boat.yaw);
     if (data.pets?.length) w.gameplay.pets.deserialize(data.pets);
+    w.gameplay.storage?.deserialize(data.storage);
     if (data.workers && w.gameplay.workers) w.gameplay.workers.deserialize(data.workers);
   }
 

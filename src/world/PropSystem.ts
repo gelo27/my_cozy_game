@@ -1,3 +1,4 @@
+import { STORAGE_CHEST, STORAGE_CHEST_SPOT } from '../npc/FarmStorage';
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -432,6 +433,18 @@ export const PROP_DEFS: PropDef[] = [
     },
   },
   {
+    // Farm storage chest: workers bring the harvest, wood and stone here and take seeds and meals
+    id: 'storage_chest', name: 'Скриня-склад', icon: 'Package', category: 'stations',
+    collider: { kind: 'box', w: 1.3, h: 0.85, d: 0.8 },
+    build: (b) => {
+      b.box(M.wood, 1.2, 0.55, 0.72, 0, 0.3, 0);
+      b.box(M.darkWood, 1.26, 0.22, 0.78, 0, 0.68, 0); // lid
+      for (const x of [-0.5, 0.5]) b.box(M.metal, 0.07, 0.8, 0.8, x, 0.42, 0); // iron bands
+      b.box(M.metal, 0.16, 0.16, 0.05, 0, 0.55, 0.39); // lock plate
+      for (const x of [-0.5, 0.5]) for (const z of [-0.3, 0.3]) b.box(M.darkWood, 0.12, 0.06, 0.12, x, 0.03, z); // feet
+    },
+  },
+  {
     id: 'mailbox', name: 'Поштова скринька', icon: 'Mailbox', category: 'decor',
     build: (b) => {
       b.box(M.darkWood, 0.1, 1.0, 0.1, 0, 0.5, 0);
@@ -507,6 +520,12 @@ export class PropSystem {
   private terrainRevision = -1;
   /** Bumped on any add/remove/move so UIs can refresh their lists. */
   public revision = 0;
+  /**
+   * Navigation: solid props added / removed / moved since the navigator last looked (it forgets
+   * only the cells around them), and a revision for bulk changes that drop its whole cache.
+   */
+  public solidRevision = 0;
+  private navEdits: { x: number; y: number; z: number; r: number }[] = [];
 
   private static readonly _m = new THREE.Matrix4();
   private static readonly _q = new THREE.Quaternion();
@@ -961,6 +980,7 @@ export class PropSystem {
     this.props.set(id, prop);
     this.attach(prop, batch);
     this.createBody(prop, batch.def);
+    this.noteSolid(prop);
     this.revision++;
     return id;
   }
@@ -973,6 +993,7 @@ export class PropSystem {
     this.webs.remove(id);
     const body = this.bodies.get(id);
     if (body) this.physics.removeRigidBody(body);
+    this.noteSolid(prop);
     this.bodies.delete(id);
     this.poses.delete(id);
     this.transient.delete(id);
@@ -1012,11 +1033,35 @@ export class PropSystem {
       const def = PROP_DEF_MAP.get(prop.type);
       if (def) this.createBody(prop, def);
     }
+    this.noteSolid(prop);
+  }
+
+  /** A solid prop changed at its spot: the navigator re-checks the ground around it. */
+  private noteSolid(prop: PropInstance): void {
+    const c = PROP_DEF_MAP.get(prop.type)?.collider;
+    if (!c) return;
+    // Bulk changes (loading, clearing): cheaper to drop the whole navigation cache
+    if (this.navEdits.length >= 64) {
+      this.navEdits.length = 0;
+      this.solidRevision++;
+      return;
+    }
+    const size = c.kind === 'cyl' ? c.r : Math.hypot(c.w, c.d) / 2;
+    this.navEdits.push({ x: prop.position.x, y: prop.position.y, z: prop.position.z, r: size * prop.scale + 0.8 });
+  }
+
+  /** Solid-prop changes since the last call (the navigator forgets the cells around them). */
+  public drainNavEdits(): { x: number; y: number; z: number; r: number }[] {
+    if (!this.navEdits.length) return [];
+    const e = this.navEdits;
+    this.navEdits = [];
+    return e;
   }
 
   public setTransform(id: number, position: THREE.Vector3, rotationY: number, scale: number, tilt?: [number, number]): void {
     const prop = this.props.get(id);
     if (!prop) return;
+    this.noteSolid(prop);
     prop.position.copy(position);
     prop.rotationY = rotationY;
     prop.scale = scale;
@@ -1045,6 +1090,7 @@ export class PropSystem {
     const body = this.bodies.get(id);
     if (body) this.physics.removeRigidBody(body);
     this.createBody(prop, batch.def);
+    this.noteSolid(prop);
     this.revision++;
   }
 
@@ -1356,6 +1402,7 @@ export class PropSystem {
     this.add('well', -6, 10, 0, 1);
     this.add('mailbox', 3, 5, -Math.PI / 2, 1);
     this.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);
+    this.ensureStation(STORAGE_CHEST, STORAGE_CHEST_SPOT.x, STORAGE_CHEST_SPOT.z, Math.PI);
     this.add('lamp', 9, 12, 0, 1);
     this.add('hay', -3, 20, 0.4, 1);
     for (let i = 0; i < 5; i++) this.add('fence', 18 + i * 2, 24, 0, 1);

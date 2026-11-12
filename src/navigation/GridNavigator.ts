@@ -12,7 +12,8 @@ import { PhysicsWorld } from '../physics/PhysicsWorld';
  *   fence, closed door). Results are cached and the cache is dropped when the world revision changes
  *   (building placed/removed/door toggled, props moved), so new houses are respected instantly;
  * - cells are keyed by the floor level they were sampled from, so ground and upper floors coexist;
- * - neighbours connect only within a step height (stairs work, cliffs and walls don't), with no
+ * - neighbours connect only within a step height, or a steeper rise when a probe between them finds a
+ *   continuous ramp (45° stair colliders), so stairs work while cliffs, ledges and walls don't; no
  *   corner cutting.
  *
  * Search, cheapest first (most open-world requests never reach A*):
@@ -24,10 +25,12 @@ import { PhysicsWorld } from '../physics/PhysicsWorld';
  *    agents walk straight lines instead of grid zigzags.
  *
  * Doors: a 0.84 m doorway is narrower than two grid cells, so cell centres rarely fit through it. Cells
- * inside a door opening are tested on the doorway's centre line with the door's own colliders
- * ignored, which makes doorways walkable whether the door is open or closed. After smoothing, every
- * crossing gets a waypoint in front of and behind the door (tagged with the door) so agents walk
- * straight through the middle and know which door to open.
+ * inside a door opening, within DOOR_BAND of its plane, are tested on the doorway's centre line with
+ * the door's own colliders ignored, which makes doorways walkable whether the door is open or closed;
+ * cells further out see the real door, open leaves included. Every crossing gets a waypoint in front
+ * of and behind the door (tagged with the door; beyond the leaf tips on the side they swing to) so
+ * agents walk straight through the middle and know which door to open. The waypoints go in before
+ * smoothing and are never skipped, so the legs to and from them are checked like the rest.
  *
  * Cost control: cached cells are free, only new physics samples cost (~30 us each). Each findPath
  * call may take at most `sampleBudget` new samples; when it runs out the search returns the best
@@ -46,6 +49,13 @@ export interface NavConfig {
   minFloorY: () => number;
   /** Door openings, re-read when the revision changes. */
   doors?: () => NavDoor[];
+  /**
+   * Stair flights (their two walkable ends), re-read when the revision changes. Searches for a goal
+   * on another floor head for the stairs instead of the spot right under / over the goal.
+   */
+  stairs?: () => NavStairs[];
+  /** Small world edits since the last call: only the cells around them are forgotten. */
+  edits?: () => { x: number; y: number; z: number; r: number }[];
 }
 
 export interface NavDoor {
@@ -61,6 +71,15 @@ export interface NavDoor {
   half: number;
   /** Body holding the frame and leaf colliders (ignored when testing doorway cells). */
   body: RAPIER.RigidBody | null;
+  /** Side of the door plane (sign along the normal) that its open leaves stand on; 0 or unset when closed. */
+  swing?: number;
+  /** How far open leaves reach out from the door plane (m). */
+  reach?: number;
+}
+
+export interface NavStairs {
+  bottom: { x: number; y: number; z: number };
+  top: { x: number; y: number; z: number };
 }
 
 /** A path waypoint; `door` is set on the points just before and after a doorway. */
@@ -84,6 +103,16 @@ interface Node {
 }
 
 const SQRT2 = Math.SQRT2;
+/** Steepest rise between neighbouring cells on a ramp (45° stairs: 0.5 m per cell, plus slack). */
+const MAX_SLOPE_STEP = 0.62;
+/**
+ * Cells this close to a door plane are tested on the doorway centre line without the door
+ * colliders: half a wall thickness plus the clearance radius and a little slack. Beyond it cells
+ * see the real door, so an open leaf (standing out up to 0.9 m) blocks like any other obstacle.
+ */
+const DOOR_BAND = 0.4;
+/** Within this (m) of a goal on another floor, a partial search stops short instead of walking under it. */
+const SEARCH_NEAR = 6;
 const DIRS: [number, number, number][] = [
   [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
   [1, 1, SQRT2], [1, -1, SQRT2], [-1, 1, SQRT2], [-1, -1, SQRT2],
@@ -91,6 +120,8 @@ const DIRS: [number, number, number][] = [
 
 export class GridNavigator {
   private cells = new Map<number, Cell>();
+  /** Steep cell-to-cell climbs already checked for a continuous ramp (edge key → ok). */
+  private slopes = new Map<number, boolean>();
   private revision = -1;
   private readonly ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
   private readonly box: RAPIER.Cuboid;
@@ -101,8 +132,14 @@ export class GridNavigator {
   public samples = 0;
   /** True when the last findPath stopped early (budget) and returned a partial path. */
   public lastPartial = false;
+  /**
+   * With lastPartial: the goal is on another floor and the search ran out of budget before it found
+   * that floor, so no path was returned; calling again continues with a warmer cache.
+   */
+  public lastSearching = false;
   private sampleLimit = Infinity;
   private doors: NavDoor[] = [];
+  private stairs: NavStairs[] = [];
 
   constructor(
     private readonly physics: PhysicsWorld,
@@ -116,7 +153,14 @@ export class GridNavigator {
   /** Forgets every cached cell (e.g. a save was loaded: cells sampled meanwhile saw a half-built world). */
   public reset(): void {
     this.cells.clear();
+    this.slopes.clear();
     this.revision = -1;
+  }
+
+  /** A door opened or closed: re-read the openings (which side the leaves stand on) and resample around it. */
+  public doorToggled(p: THREE.Vector3): void {
+    this.doors = this.cfg.doors?.() ?? [];
+    this.invalidateAround(p, 2.5);
   }
 
   /** Forget cells around a point (e.g. when an agent got stuck on something the cache missed). */
@@ -129,6 +173,7 @@ export class GridNavigator {
         for (let lv = -3; lv <= 3; lv++) this.cells.delete(this.key(cx + dx, cz + dz, this.level(p.y) + lv));
       }
     }
+    this.slopes.clear();
   }
 
   /**
@@ -138,6 +183,7 @@ export class GridNavigator {
   public findPath(start: THREE.Vector3, goal: THREE.Vector3, maxNodes = 2500, sampleBudget = 160): PathPoint[] {
     this.checkRevision();
     this.lastPartial = false;
+    this.lastSearching = false;
     this.sampleLimit = this.samples + sampleBudget;
     try {
       return this.plan(start, goal, maxNodes);
@@ -147,14 +193,58 @@ export class GridNavigator {
   }
 
   private plan(start: THREE.Vector3, goal: THREE.Vector3, maxNodes: number): PathPoint[] {
-    const path = this.planRaw(start, goal, maxNodes);
-    return this.doors.length ? this.throughDoors(start, path) : path;
+    const s = this.snap(start.x, start.z, start.y);
+    if (!s) {
+      // Pressed against a wall: the agent's own cell fails the clearance test, step off it first
+      const free = this.nearestWalkable(start, 2);
+      if (!free) return [];
+      const off = new THREE.Vector3(free.x, free.y, free.z) as PathPoint;
+      return [off, ...this.plan(off, goal, maxNodes)];
+    }
+    let g = this.snap(goal.x, goal.z, goal.y);
+    if (!g) g = this.nearestWalkable(goal);
+    if (!g) return [];
+    const goalPt = new THREE.Vector3(g.x, g.y, g.z) as PathPoint;
+
+    // 1. Straight line (the common case in open terrain). Through a doorway it bends to the door
+    //    waypoints, so the legs to and from them must be clear too (an open leaf in the way)
+    if (this.lineWalkable(start.x, start.z, s.y, g.x, g.z, false, g.y)) {
+      const pts = this.withDoorPoints(start.x, start.z, s.y, [goalPt]);
+      if (pts.length === 1 || this.legsClear(start.x, start.z, s.y, pts)) return pts;
+    }
+
+    // 2. A*
+    const nodes = this.astar(s, g, maxNodes);
+    if (nodes.length === 0) return [];
+
+    // 3. String pulling. Door waypoints go in first and are never skipped, so every leg to and
+    //    from a doorway is checked like any other (open leaves stand right next to the opening)
+    const raw = nodes.map((n) => new THREE.Vector3(this.toWorld(n.cx), n.y, this.toWorld(n.cz)) as PathPoint);
+    const pts = this.withDoorPoints(start.x, start.z, s.y, raw);
+    const out: PathPoint[] = [];
+    let ax = start.x, az = start.z, ay = s.y;
+    let i = 0;
+    while (i < pts.length) {
+      let last = i;
+      while (last < pts.length - 1 && !pts[last].door) last++;
+      let j = last;
+      // Smoothing checks only cells A* already sampled, so it never spends extra queries
+      while (j > i && !this.lineWalkable(ax, az, ay, pts[j].x, pts[j].z, true, pts[j].y)) j--;
+      out.push(pts[j]);
+      // A doorway pair: straight through to the waypoint on the far side
+      if (pts[j].door && pts[j + 1]?.door === pts[j].door) out.push(pts[++j]);
+      ax = pts[j].x;
+      az = pts[j].z;
+      ay = pts[j].y;
+      i = j + 1;
+    }
+    return out;
   }
 
-  /** Inserts centred waypoints at every doorway the path crosses. */
-  private throughDoors(start: THREE.Vector3, path: PathPoint[]): PathPoint[] {
+  /** Inserts a waypoint pair (in front of and behind the door, on its centre line) at every doorway crossed. */
+  private withDoorPoints(ax: number, az: number, ay: number, path: PathPoint[]): PathPoint[] {
+    if (!this.doors.length) return path;
     const out: PathPoint[] = [];
-    let ax = start.x, az = start.z, ay = start.y;
     for (const p of path) {
       for (const d of this.doors) {
         if (Math.abs(d.y - ay) > 1.5 && Math.abs(d.y - p.y) > 1.5) continue;
@@ -166,10 +256,7 @@ export class GridNavigator {
         const lx = ax + (p.x - ax) * t - d.x, lz = az + (p.z - az) * t - d.z;
         if (Math.abs(lx * d.nz - lz * d.nx) > d.half + 0.6) continue;
         const side = Math.sign(sa);
-        const before: PathPoint = new THREE.Vector3(d.x + d.nx * 0.7 * side, d.y, d.z + d.nz * 0.7 * side);
-        const after: PathPoint = new THREE.Vector3(d.x - d.nx * 0.7 * side, d.y, d.z - d.nz * 0.7 * side);
-        before.door = after.door = d;
-        out.push(before, after);
+        out.push(this.doorPoint(d, side), this.doorPoint(d, -side));
       }
       out.push(p);
       ax = p.x;
@@ -179,42 +266,25 @@ export class GridNavigator {
     return out;
   }
 
-  private planRaw(start: THREE.Vector3, goal: THREE.Vector3, maxNodes: number): PathPoint[] {
-    const s = this.snap(start.x, start.z, start.y);
-    if (!s) {
-      // Pressed against a wall: the agent's own cell fails the clearance test, step off it first
-      const free = this.nearestWalkable(start, 2);
-      if (!free) return [];
-      const off = new THREE.Vector3(free.x, free.y, free.z) as PathPoint;
-      return [off, ...this.planRaw(off, goal, maxNodes)];
+  /** Waypoint on a door centre line; on the side its open leaves stand on, beyond their tips. */
+  private doorPoint(d: NavDoor, side: number): PathPoint {
+    const off = d.swing && side === d.swing ? (d.reach ?? 0.9) + this.cfg.radius + 0.25 : 0.7;
+    const p: PathPoint = new THREE.Vector3(d.x + d.nx * off * side, d.y, d.z + d.nz * off * side);
+    p.door = d;
+    return p;
+  }
+
+  /** Every leg of a waypoint list is walkable, except the straight passages through doorways. */
+  private legsClear(ax: number, az: number, ay: number, pts: PathPoint[]): boolean {
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const through = i > 0 && p.door && pts[i - 1].door === p.door;
+      if (!through && !this.lineWalkable(ax, az, ay, p.x, p.z, false, p.y)) return false;
+      ax = p.x;
+      az = p.z;
+      ay = p.y;
     }
-    let g = this.snap(goal.x, goal.z, goal.y);
-    if (!g) g = this.nearestWalkable(goal);
-    if (!g) return [];
-
-    // 1. Straight line (the common case in open terrain)
-    if (this.lineWalkable(start.x, start.z, s.y, g.x, g.z)) return [new THREE.Vector3(g.x, g.y, g.z) as PathPoint];
-
-    // 2. A*
-    const nodes = this.astar(s, g, maxNodes);
-    if (nodes.length === 0) return [];
-
-    // 3. String pulling
-    const pts = nodes.map((n) => new THREE.Vector3(this.toWorld(n.cx), n.y, this.toWorld(n.cz)));
-    const out: THREE.Vector3[] = [];
-    let ax = start.x, az = start.z, ay = s.y;
-    let i = 0;
-    while (i < pts.length) {
-      let j = pts.length - 1;
-      // Smoothing checks only cells A* already sampled, so it never spends extra queries
-      while (j > i && !this.lineWalkable(ax, az, ay, pts[j].x, pts[j].z, true)) j--;
-      out.push(pts[j]);
-      ax = pts[j].x;
-      az = pts[j].z;
-      ay = pts[j].y;
-      i = j + 1;
-    }
-    return out;
+    return true;
   }
 
   /** Walkable floor at (x, z) for an agent standing near height y, or null. */
@@ -245,8 +315,12 @@ export class GridNavigator {
     return null;
   }
 
-  /** True when an agent can walk the straight segment (floor everywhere, no walls, small steps only). */
-  public lineWalkable(ax: number, az: number, ay: number, bx: number, bz: number, cachedOnly = false): boolean {
+  /**
+   * True when an agent can walk the straight segment (floor everywhere, no walls, small steps only).
+   * With `by`, the walk must also end at that height: otherwise a goal upstairs would count as
+   * reached by walking along the ground floor right under it.
+   */
+  public lineWalkable(ax: number, az: number, ay: number, bx: number, bz: number, cachedOnly = false, by?: number): boolean {
     const dx = bx - ax;
     const dz = bz - az;
     const len = Math.hypot(dx, dz);
@@ -261,15 +335,20 @@ export class GridNavigator {
       if (cx === lastCx && cz === lastCz) continue;
       // Moving diagonally between cells: both side cells must be open too (no clipping corners)
       if (!Number.isNaN(lastCx) && cx !== lastCx && cz !== lastCz) {
-        if (!this.passable(this.sample(cx, lastCz, y, cachedOnly), y) || !this.passable(this.sample(lastCx, cz, y, cachedOnly), y)) return false;
+        if (
+          !this.passable(this.sample(cx, lastCz, y, cachedOnly), y, lastCx, lastCz, cx, lastCz, cachedOnly) ||
+          !this.passable(this.sample(lastCx, cz, y, cachedOnly), y, lastCx, lastCz, lastCx, cz, cachedOnly)
+        ) return false;
       }
       const c = this.sample(cx, cz, y, cachedOnly);
-      if (!this.passable(c, y)) return false;
+      const fx = Number.isNaN(lastCx) ? this.toCell(ax) : lastCx;
+      const fz = Number.isNaN(lastCz) ? this.toCell(az) : lastCz;
+      if (!this.passable(c, y, fx, fz, cx, cz, cachedOnly)) return false;
       y = c.y;
       lastCx = cx;
       lastCz = cz;
     }
-    return true;
+    return by === undefined || Math.abs(y - by) < 0.6;
   }
 
   // ------------------------------------------------------------------ A*
@@ -286,16 +365,45 @@ export class GridNavigator {
 
     const nodes = new Map<number, Node>();
     const heap: Node[] = [];
-    const h = (cx: number, cz: number) => {
-      const dx = Math.abs(cx - gcx), dz = Math.abs(cz - gcz);
-      return (dx + dz + (SQRT2 - 2) * Math.min(dx, dz)) * 1.001; // octile, tie-break toward goal
+    // Octile distance, but at least the cells a climb to the goal's height takes (a ramp rises at
+    // most MAX_SLOPE_STEP per cell): right under a bed upstairs is not right next to it
+    const cell = this.cfg.cell;
+    const oct = (ax: number, az: number, bx: number, bz: number) => {
+      const dx = Math.abs(ax - bx), dz = Math.abs(az - bz);
+      return dx + dz + (SQRT2 - 2) * Math.min(dx, dz);
     };
-    const start: Node = { key: this.key(scx, scz, this.level(s.y)), cx: scx, cz: scz, y: s.y, g: 0, f: h(scx, scz), parent: null, closed: false, heapIndex: -1 };
+    const offFloor = (y: number) => Math.abs(y - g.y) >= 1.2;
+    // Stairs with an end near the start's or goal's height (only searched when they differ)
+    const flights = offFloor(s.y) ? this.stairs : [];
+    const h = (cx: number, cz: number, y: number) => {
+      let est = Math.max(oct(cx, cz, gcx, gcz), Math.abs(y - g.y) / MAX_SLOPE_STEP);
+      if (flights.length && offFloor(y)) {
+        // On another floor than the goal: the way there leads over a flight of stairs that starts
+        // on this floor, so estimate via the best such flight (not admissible, but it sends the
+        // search straight to the stairs instead of flooding the floor under the goal)
+        let via = Infinity;
+        for (const f of flights) {
+          for (const [a, b] of [[f.bottom, f.top], [f.top, f.bottom]]) {
+            if (Math.abs(a.y - y) > 1.2) continue;
+            const v = oct(cx, cz, a.x / cell, a.z / cell) + oct(a.x / cell, a.z / cell, b.x / cell, b.z / cell) + oct(b.x / cell, b.z / cell, gcx, gcz);
+            if (v < via) via = v;
+          }
+        }
+        if (via < Infinity) est = Math.max(est, via);
+      }
+      return est * 1.001; // tie-break toward goal
+    };
+    const start: Node = { key: this.key(scx, scz, this.level(s.y)), cx: scx, cz: scz, y: s.y, g: 0, f: h(scx, scz, s.y), parent: null, closed: false, heapIndex: -1 };
     nodes.set(start.key, start);
     this.push(heap, start);
+    // Closest node overall, and closest on the goal's own floor (a partial path should end there)
     let best = start;
     let bestH = start.f;
+    let bestOnFloor: Node | null = offFloor(s.y) ? null : start;
+    let bestOnFloorH = start.f;
     let expanded = 0;
+    // Stopped for new physics samples (a cold cache: calling again gets further), not for nodes
+    let coldStop = false;
 
     while (heap.length > 0) {
       const cur = this.pop(heap);
@@ -306,8 +414,13 @@ export class GridNavigator {
         bestH = ch;
         best = cur;
       }
+      if (!offFloor(cur.y) && (!bestOnFloor || ch < bestOnFloorH)) {
+        bestOnFloorH = ch;
+        bestOnFloor = cur;
+      }
       if (++expanded > maxNodes || this.samples >= this.sampleLimit) {
         this.lastPartial = true;
+        coldStop = this.samples >= this.sampleLimit;
         break;
       }
 
@@ -315,28 +428,38 @@ export class GridNavigator {
         const nx = cur.cx + dx, nz = cur.cz + dz;
         if (nx < minX || nx > maxX || nz < minZ || nz > maxZ) continue;
         const c = this.sample(nx, nz, cur.y);
-        if (!this.passable(c, cur.y)) continue;
+        if (!this.passable(c, cur.y, cur.cx, cur.cz, nx, nz)) continue;
         if (dx !== 0 && dz !== 0) {
-          if (!this.passable(this.sample(cur.cx + dx, cur.cz, cur.y), cur.y)) continue;
-          if (!this.passable(this.sample(cur.cx, cur.cz + dz, cur.y), cur.y)) continue;
+          if (!this.passable(this.sample(cur.cx + dx, cur.cz, cur.y), cur.y, cur.cx, cur.cz, cur.cx + dx, cur.cz)) continue;
+          if (!this.passable(this.sample(cur.cx, cur.cz + dz, cur.y), cur.y, cur.cx, cur.cz, cur.cx, cur.cz + dz)) continue;
         }
         const key = this.key(nx, nz, this.level(c.y));
         // Slight penalty for climbing keeps paths on flat ground when it's equally short
         const ng = cur.g + cost + Math.abs(c.y - cur.y) * 0.5;
         let n = nodes.get(key);
         if (!n) {
-          n = { key, cx: nx, cz: nz, y: c.y, g: ng, f: ng + h(nx, nz), parent: cur, closed: false, heapIndex: -1 };
+          n = { key, cx: nx, cz: nz, y: c.y, g: ng, f: ng + h(nx, nz, c.y), parent: cur, closed: false, heapIndex: -1 };
           nodes.set(key, n);
           this.push(heap, n);
         } else if (!n.closed && ng < n.g) {
           n.g = ng;
-          n.f = ng + h(nx, nz);
+          n.f = ng + h(nx, nz, n.y);
           n.parent = cur;
           this.up(heap, n.heapIndex);
         }
       }
     }
-    // Budget spent or goal unreachable: go as close as we got
+    // Budget spent or goal unreachable: go as close as we got, on the goal's floor if we got there
+    if (bestOnFloor) return bestOnFloor === start ? [] : this.unwind(bestOnFloor);
+    // Sample budget spent before the search found a way up (or down) to the goal's floor. From
+    // afar, head for the closest node anyway (it nears the house). Close by, that node may be
+    // right under / over the goal and lead nowhere: walk nothing yet and let the agent search on
+    // (the cells sampled so far stay cached). Out of nodes instead, a retry would end the same
+    // way: walk to the closest node (towards the stairs, by the heuristic) and plan from there
+    if (coldStop && Math.hypot(best.cx - gcx, best.cz - gcz) * this.cfg.cell < SEARCH_NEAR) {
+      this.lastSearching = true;
+      return [];
+    }
     return best === start ? [] : this.unwind(best);
   }
 
@@ -395,10 +518,38 @@ export class GridNavigator {
 
   // ------------------------------------------------------------------ sampling
 
-  private passable(c: Cell, fromY: number): boolean {
+  /**
+   * Can an agent step from cell (fx, fz) at height fromY onto cell c at (tx, tz)?
+   * Steps up to maxStepUp always pass. A steeper rise (a 45° stair ramp climbs 0.5 m per 0.5 m cell)
+   * passes only when the floor halfway between the cells sits halfway up, i.e. it is a continuous
+   * slope rather than a ledge; that costs one extra ray per such edge, cached.
+   */
+  private passable(c: Cell, fromY: number, fx: number, fz: number, tx: number, tz: number, cachedOnly = false): boolean {
     if (!c.walkable) return false;
     const dy = c.y - fromY;
-    return dy <= this.cfg.maxStepUp && dy >= -this.cfg.maxDrop;
+    if (dy < -this.cfg.maxDrop) return false;
+    if (dy <= this.cfg.maxStepUp) return true;
+    if (dy > MAX_SLOPE_STEP) return false;
+    return this.continuousSlope(fx, fz, fromY, tx, tz, c.y, cachedOnly);
+  }
+
+  private continuousSlope(fx: number, fz: number, fy: number, tx: number, tz: number, ty: number, cachedOnly: boolean): boolean {
+    const key = this.key(fx, fz, this.level(fy)) * 9 + (tx - fx + 1) * 3 + (tz - fz + 1);
+    const known = this.slopes.get(key);
+    if (known !== undefined) return known;
+    if (cachedOnly) return false;
+    const world = this.physics.world;
+    if (!world) return false;
+    this.samples++;
+    const top = ty + 0.3;
+    this.ray.origin.x = this.toWorld((fx + tx) / 2);
+    this.ray.origin.y = top;
+    this.ray.origin.z = this.toWorld((fz + tz) / 2);
+    const hit = world.castRay(this.ray, ty - fy + 0.6, true, this.flags);
+    const mid = (fy + ty) / 2;
+    const ok = !!hit && hit.timeOfImpact > 0.01 && Math.abs(top - hit.timeOfImpact - mid) < 0.15;
+    this.slopes.set(key, ok);
+    return ok;
   }
 
   private static readonly UNKNOWN: Cell = { walkable: false, y: 0 };
@@ -424,7 +575,7 @@ export class GridNavigator {
       const rx = x - d.x, rz = z - d.z;
       const across = rx * d.nx + rz * d.nz;
       const along = rx * d.nz - rz * d.nx;
-      if (Math.abs(across) > 0.6 || Math.abs(along) > d.half) continue;
+      if (Math.abs(across) > DOOR_BAND || Math.abs(along) > d.half) continue;
       const lim = Math.max(0, d.half - this.cfg.radius - 0.02);
       const a = Math.max(-lim, Math.min(lim, along));
       x = d.x + d.nz * a + d.nx * across;
@@ -459,9 +610,18 @@ export class GridNavigator {
     if (r !== this.revision || this.cells.size > 60000) {
       this.revision = r;
       this.cells.clear();
+      this.slopes.clear();
       this.doors = this.cfg.doors?.() ?? [];
+      this.stairs = this.cfg.stairs?.() ?? [];
+      this.cfg.edits?.();
+      return;
     }
+    // Small world edits (a tree felled, a prop placed) only forget the cells around them
+    const edits = this.cfg.edits?.();
+    if (edits) for (const e of edits) this.invalidateAround(GridNavigator._e.set(e.x, e.y, e.z), e.r);
   }
+
+  private static readonly _e = new THREE.Vector3();
 
   private toCell(v: number): number {
     return Math.floor(v / this.cfg.cell);

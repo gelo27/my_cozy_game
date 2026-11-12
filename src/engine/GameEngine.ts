@@ -59,7 +59,8 @@ import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
 import { GridNavigator } from '../navigation/GridNavigator';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { MAX_WORKERS, WorkerManager } from '../npc/WorkerManager';
-import { TaskBoard } from '../npc/TaskBoard';
+import { TaskBoard, WorkerRole } from '../npc/TaskBoard';
+import { FarmStorage, STORAGE_CHEST } from '../npc/FarmStorage';
 import { t } from '../i18n/i18n';
 import { PropTreeField } from '../gathering/PropTreeField';
 import { AppleOrchard } from '../gathering/AppleOrchard';
@@ -576,7 +577,8 @@ export class GameEngine {
       gameplay.flowers = flowerBeds;
 
       // Villager companion: paths come from a physics-sampled grid that resets when anything is built
-      const nav = new GridNavigator(physics, () => (buildingManager.revision * 100003 + props.revision) * 7919 + terrain.revision, {
+      // Props changing one at a time (a felled tree, a placed lamp) only forget the cells around them
+      const nav = new GridNavigator(physics, () => (buildingManager.revision * 100003 + props.solidRevision) * 7919 + terrain.revision, {
         cell: 0.5,
         radius: 0.28,
         height: 1.5, // the character capsule is 1.5 m tall
@@ -584,8 +586,10 @@ export class GameEngine {
         maxDrop: 1.2,
         minFloorY: () => worldSettings.waterLevel - 0.25,
         doors: () => buildingManager.getDoorOpenings(),
+        stairs: () => buildingManager.getStairs(),
+        edits: () => props.drainNavEdits(),
       });
-      buildingManager.onDoorToggled = (piece) => nav.invalidateAround(piece.position, 2.5);
+      buildingManager.onDoorToggled = (piece) => nav.doorToggled(piece.position);
       const npcSpawn = new THREE.Vector3(-4, 0, 7);
       npcSpawn.y = terrain.getHeight(npcSpawn.x, npcSpawn.z);
       const doorControl = {
@@ -593,18 +597,50 @@ export class GameEngine {
         toggle: (id: string, from: THREE.Vector3) => buildingManager.toggleDoor(id, from),
       };
       gameplay.companion = new CompanionNPC(physics, scene, nav, npcSpawn, t('npc.name'), doorControl);
-      // Farmhands with energy and a daily routine; in work hours they take jobs from the fields
-      // (harvest, watering, sowing with seeds from the player's inventory)
+      // Farm storage: every storage chest opens onto one shared stock (chest spots cached per prop revision)
+      let chestRev = -1;
+      let chestAt = -Infinity;
+      let chestSpots: THREE.Vector3[] = [];
+      const storage = new FarmStorage(() => {
+        // Props change often (felled trees, webs): look again at most every 2 s
+        const now = performance.now();
+        if (props.revision !== chestRev && now - chestAt > 2000) {
+          chestRev = props.revision;
+          chestAt = now;
+          chestSpots = props.list().filter((p) => p.type === STORAGE_CHEST).map((p) => p.position.clone());
+        }
+        return chestSpots;
+      });
+      gameplay.storage = storage;
+      // Farmhands with energy, hunger and a daily routine; in work hours they take jobs from the
+      // fields, the forest and the quarry, with seeds and meals from the storage chests
       const taskBoard = new TaskBoard(
         farmingManager,
         {
-          count: (id) => inventoryManager.getItemCount(id),
-          take: (id, n) => inventoryManager.removeItem(id, n),
-          give: (items) => giveResources(items),
+          count: (id) => storage.count(id),
+          take: (id, n) => storage.take(id, n),
+          put: (items) => {
+            if (!storage.hasChest) {
+              giveResources(items);
+              return;
+            }
+            // A full stack spills into the backpack rather than vanishing
+            const spill = items.map(({ itemId, amount }) => ({ itemId, amount: amount - storage.put(itemId, amount) })).filter((i) => i.amount > 0);
+            if (spill.length) giveResources(spill);
+          },
+          get hasChest() {
+            return storage.hasChest;
+          },
         },
-        () => farmingManager.rainIntensity > 0.35
+        () => farmingManager.rainIntensity > 0.35,
+        () => workers.workCenter
       );
+      taskBoard.trees = propTrees;
+      taskBoard.rocks = rocks;
+      taskBoard.orchard = orchard;
       const workers = new WorkerManager(physics, scene, nav, doorControl, () => buildingManager.getAllPieces(), (x, z) => terrain.getHeight(x, z), taskBoard, new THREE.Vector3(npcSpawn.x + 6, npcSpawn.y, npcSpawn.z + 5));
+      workers.findChest = (from) => storage.nearestChest(from);
+      workers.onNotify = (text) => callbacks.onNotify(text, 'warning');
       for (let i = 0; i < 3; i++) workers.spawn(new THREE.Vector3(npcSpawn.x + 2 + i * 1.6, 0, npcSpawn.z + 2.5));
       gameplay.workers = workers;
       exploration = new ExplorationManager(scene, physics, terrain, props, rocks, inventoryManager, gameplay, weather, nightLighting, particleManager);
@@ -1506,10 +1542,17 @@ export class GameEngine {
         w.gameplay.companion?.setDebug(on);
         w.gameplay.workers?.setDebug(on);
       },
+      /** Storage chest stock: `dev.storage.list()`, `dev.storage.put('dish_bread', 5)`. */
+      storage: {
+        list: () => w.gameplay.storage?.list(),
+        put: (id: string, n = 1) => w.gameplay.storage?.put(id, n),
+      },
       /** Farmhands: `dev.workers.list()`, `dev.workers.hire(n)` near the player (up to MAX_WORKERS). */
       workers: {
         list: () =>
-          w.gameplay.workers?.workers.map((x) => ({ name: x.name, role: x.role, energy: Math.round(x.energy), activity: x.activity, task: x.task?.key ?? null, done: x.jobsDone, bed: x.bed?.key ?? null })),
+          w.gameplay.workers?.workers.map((x) => ({ name: x.name, role: x.role, energy: Math.round(x.energy), food: Math.round(x.food), activity: x.activity, errand: x.errand, task: x.task?.key ?? null, carry: x.carry.map((c) => `${c.itemId}x${c.amount}`).join(','), done: x.jobsDone, bed: x.bed?.key ?? null })),
+        food: (v: number) => w.gameplay.workers?.workers.forEach((x) => (x.food = v)),
+        role: (role: WorkerRole) => w.gameplay.workers?.workers.forEach((x) => x.setRole(role)),
         jobs: () => w.gameplay.workers?.board?.counts(),
         hire: (n = 1) => {
           let hired = 0;

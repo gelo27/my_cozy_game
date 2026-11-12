@@ -198,8 +198,23 @@ export class RockField {
     return best;
   }
 
-  /** Applies one pickaxe hit. Returns true when the rock broke. */
-  public hit(rock: RockNode, strikeDirection: THREE.Vector3): boolean {
+  /** Intact rocks within `radius` of x, z (what farmhands may mine). */
+  public forEachIntactNear(x: number, z: number, radius: number, fn: (rock: RockNode) => void): void {
+    for (const r of this.rocks) {
+      if (r.isDepleted) continue;
+      if (Math.hypot(r.position.x - x, r.position.z - z) <= radius) fn(r);
+    }
+  }
+
+  public byId(id: number): RockNode | null {
+    return this.rocks.find((r) => r.id === id) ?? null;
+  }
+
+  /**
+   * Applies one pickaxe hit. Returns true when the rock broke. `sink` (a farmhand's swing) gets the
+   * drops instead of the player.
+   */
+  public hit(rock: RockNode, strikeDirection: THREE.Vector3, sink?: (drops: { itemId: string; amount: number }[]) => void): boolean {
     if (rock.isDepleted) return false;
     rock.health -= 1;
     rock.shake = 1;
@@ -232,7 +247,7 @@ export class RockField {
       return false;
     }
 
-    this.breakRock(rock);
+    this.breakRock(rock, sink);
     return true;
   }
 
@@ -526,7 +541,7 @@ export class RockField {
     rock.body = body;
   }
 
-  private breakRock(rock: RockNode): void {
+  private breakRock(rock: RockNode, sink?: (drops: { itemId: string; amount: number }[]) => void): void {
     rock.isDepleted = true;
     this.syncRock(rock);
     rock.regrowAt = performance.now() + GATHERING_CONFIG.ROCK_REGROW_SECONDS * 1000;
@@ -539,7 +554,8 @@ export class RockField {
     this.crumble(rock);
 
     const drops = ROCK_TYPES[rock.kind].drops.map((drop) => ({ itemId: drop.itemId, amount: rollDrop(drop) }));
-    this.onMined?.(drops, rock.position.clone());
+    if (sink) sink(drops);
+    else this.onMined?.(drops, rock.position.clone());
   }
 
   private regrowRock(rock: RockNode): void {
