@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { CHARACTER_CONFIG } from '../config/constants';
+import { createTool, loadToolModel, type ToolModelId } from './ToolModels';
 import { FarmingMeshGenerator } from '../farming/FarmingMeshGenerator';
 
 export interface AnimationState {
@@ -66,6 +67,12 @@ const LOCOMOTION_FADE = 0.2;
 const SWIM_FADE = 0.35;
 const ONE_SHOT_FADE = 0.08;
 const AXE_SWING_DURATION = 0.6;
+/** Name of a modelled tool under the weapon pivot (its grip). */
+const TOOL_GRIP_NAME = 'ToolGrip';
+/** Weapon ids (activeWeapon) drawn with a model of their own. */
+const MODELLED_TOOLS: Partial<Record<number, ToolModelId>> = { 6: 'axe', 12: 'pickaxe' };
+/** Wrist tip (rad) through the CHOP / MINE clip: the head comes down level with the fist on the strike. */
+const TOOL_SWING_TILT = 0.6;
 const MINE_SWING_DURATION = 0.7;
 /** JUMP_START skips its crouch (physics already launched the body) and plays the push-off at 1x. */
 const JUMP_START_SKIP = 0.12;
@@ -695,6 +702,23 @@ export class CharacterModel {
 
   private buildHeldItem(): void {
 
+    const toolId = MODELLED_TOOLS[this.activeWeapon];
+    if (toolId) {
+      const tool = createTool(toolId);
+      if (tool) {
+        tool.name = TOOL_GRIP_NAME;
+        this.weaponPivot.add(tool);
+        return;
+      }
+      // Until the model is in: the built-in one below, swapped for the model once it loads
+      const weapon = this.activeWeapon;
+      loadToolModel(toolId).then((model) => {
+        if (!model) return;
+        this.heldItemCache.delete(`${weapon}:`);
+        if (this.activeWeapon === weapon) this.reapplyEquippedWeapon();
+      });
+    }
+
     if (this.activeWeapon === 6) {
       // Woodcutter's Axe
       const axeGroup = new THREE.Group();
@@ -943,6 +967,15 @@ export class CharacterModel {
     if (handFree) {
       this.axeSwingProgress = 0;
       this.wateringProgress = 0;
+    }
+    // The axe / pickaxe sticks out forward from the fist; through a swing the wrist tips the head down along the arm
+    if (MODELLED_TOOLS[this.activeWeapon]) {
+      const grip = this.weaponPivot.getObjectByName(TOOL_GRIP_NAME);
+      if (grip) {
+        const swinging = this.isPlayingOneShot(this.activeWeapon === 6 ? 'CHOP' : 'MINE');
+        const tilt = swinging ? TOOL_SWING_TILT : 0;
+        grip.rotation.z += (tilt - grip.rotation.z) * (1 - Math.exp(-14 * dt));
+      }
     }
     // Slingshot shot: the fork snaps forward and settles back
     if (this.activeWeapon === 15) this.weaponPivot.rotation.x = -this.weaponRecoilKick * 0.35;

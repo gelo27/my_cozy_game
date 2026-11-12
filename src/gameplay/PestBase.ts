@@ -101,6 +101,8 @@ export abstract class Pest implements PestTarget {
   /** Unique per session (the developer panel lists and removes pests by it). */
   public readonly id = nextPestId++;
   public removed = false;
+  /** Beaten and playing its death (seconds it lasts, 0 while alive); `removed` once it is over. */
+  public dying = 0;
   /** Put down by hand in the developer editor (kept when the natural ones are re-rolled). */
   public placed = false;
   /** Where this one lives (decides when it is simulated: cave pests only while the player is underground). */
@@ -201,14 +203,24 @@ export abstract class Pest implements PestTarget {
     critterSounds.hurt(at, this.kind);
     particles?.emitJumpDust(at);
     if (this.health <= 0) {
-      critterSounds.poof(at);
-      particles?.emitBuildPuff(at, false, 26);
+      const dying = this.onDefeated();
+      if (dying <= 0) {
+        critterSounds.poof(at);
+        particles?.emitBuildPuff(at, false, 26);
+      }
       port.defeated(this.kind, at);
-      this.removed = true;
+      // A pest with a death of its own plays it out and sets `removed` itself
+      if (dying > 0) this.dying = dying;
+      else this.removed = true;
       return true;
     }
     this.onHurt(from);
     return true;
+  }
+
+  /** Seconds (s) of a death animation it plays before going; 0 vanishes in a puff at once. */
+  protected onDefeated(): number {
+    return 0;
   }
 
   /** Reaction to a hit that did not beat it. */

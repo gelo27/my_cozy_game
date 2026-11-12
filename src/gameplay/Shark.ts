@@ -6,6 +6,7 @@ import { ParticleManager } from '../particles/ParticleManager';
 import { critterSounds } from './CritterSounds';
 import { emitWaterRipple } from '../scene/WaterDetails';
 import { Pest, PestEnv, PestPort, angleTo, turn } from './PestBase';
+import { SharkRig, getSharkAsset } from './SharkModel';
 
 /** Open water a shark needs under it (m from the surface to the bed). */
 export const SHARK_MIN_DEPTH = 2.4;
@@ -50,6 +51,12 @@ function finGeometry(points: [number, number][]): THREE.BufferGeometry {
 const tmpDir = new THREE.Vector3();
 const tmpP = new THREE.Vector3();
 const SWIM_OFFSETS = [0, 0.5, -0.5, 1.1, -1.1, 1.8, -1.8, Math.PI];
+/** Body capsules (distance along the body, radius) of the built-in body and of the rigged model. */
+const BODY_CAPSULES = [[1.1, 0.55], [-0.2, 0.6], [-1.5, 0.42]];
+const RIG_CAPSULES = [[0.95, 0.5], [-0.5, 0.55], [-1.9, 0.38]];
+/** Sinking after the death roll (m/s) and how long it sinks before it is gone (s). */
+const DEAD_SINK = 0.5;
+const DEAD_SINK_TIME = 1.6;
 
 /**
  * A reef shark. It cruises the open sea with its fin cutting the surface; once the player swims
@@ -84,6 +91,12 @@ export class Shark extends Pest {
   public wakeSpeed = 0;
   private rippleTimer = 0;
   private bowTimer = 0;
+  /** The rigged model once it has loaded (until then the built-in body swims). */
+  private rig: SharkRig | null = null;
+  /** Turn bend fed to the rig: -1 hard right .. 1 hard left. */
+  private bend = 0;
+  private biteBoost = 0;
+  private dieTime = 0;
 
   constructor(x: number, y: number, z: number, terrain: TerrainSystem) {
     super('shark', x, z, terrain, 1.6, 6);
@@ -92,7 +105,22 @@ export class Shark extends Pest {
     this.wander.copy(this.position);
     this.buildModel();
     this.group.rotation.order = 'YXZ';
+    this.attachRig();
     this.pickSeaWander(30);
+  }
+
+  /** Swaps the built-in body for the rigged model when it is loaded. */
+  private attachRig(): void {
+    const a = getSharkAsset();
+    if (!a || this.rig) return;
+    this.rig = new SharkRig(a);
+    this.group.remove(this.body);
+    this.group.add(this.rig.root);
+  }
+
+  /** Dorsal fin tip over the body's centre (m). */
+  private get finTop(): number {
+    return this.rig ? this.rig.finTop : 1.3;
   }
 
   private buildModel(): void {
@@ -187,6 +215,11 @@ export class Shark extends Pest {
     this.group.add(this.body);
   }
 
+  public dispose(): void {
+    this.rig?.dispose();
+    super.dispose();
+  }
+
   public hitPoint(out: THREE.Vector3): THREE.Vector3 {
     return out.copy(this.position);
   }
@@ -200,7 +233,8 @@ export class Shark extends Pest {
     const c = Math.cos(this.pitch);
     const dx = Math.sin(this.heading) * c, dy = Math.sin(this.pitch), dz = Math.cos(this.heading) * c;
     const tail = this.tail.rotation.y + this.rear.rotation.y;
-    for (const [along, r] of [[1.1, 0.55], [-0.2, 0.6], [-1.5, 0.42]]) {
+    const caps = this.rig ? RIG_CAPSULES : BODY_CAPSULES;
+    for (const [along, r] of caps) {
       // The tail end swings with the stroke
       const sway = along < 0 ? Math.sin(tail) * -along * 0.6 : 0;
       add(p.x + dx * along + dz * sway, p.y + dy * along - 0.55, p.z + dz * along - dx * sway, r, 1.1);
@@ -208,6 +242,7 @@ export class Shark extends Pest {
   }
 
   get threat(): number {
+    if (this.dying > 0) return 0;
     return this.state === 'charge' ? 2 : this.state === 'circle' ? 1 : 0;
   }
 
@@ -220,6 +255,45 @@ export class Shark extends Pest {
     this.state = 'retreat';
     this.timer = 2.5;
     this.emote.show('angry', 1);
+    this.rig?.playHurt();
+  }
+
+  protected onDefeated(): number {
+    this.wakeSpeed = 0;
+    this.dieTime = 0;
+    const roll = this.rig ? this.rig.playDeath() : 1.2;
+    return roll + DEAD_SINK_TIME;
+  }
+
+  /** Belly up, drifting to a stop, then sinking away in a puff. */
+  private updateDying(dt: number, particles?: ParticleManager): void {
+    const pos = this.position;
+    this.dieTime += dt;
+    this.speed *= Math.exp(-dt * 1.5);
+    const sx = Math.sin(this.heading), sz = Math.cos(this.heading);
+    if (seaDepthAt(this.terrain, pos.x + sx * 2, pos.z + sz * 2) >= SHARK_MIN_DEPTH) {
+      pos.x += sx * this.speed * dt;
+      pos.z += sz * this.speed * dt;
+    }
+    const sinkFrom = this.dying - DEAD_SINK_TIME;
+    if (this.dieTime > sinkFrom) {
+      const bed = worldSettings.waterLevel - Math.max(0, seaDepthAt(this.terrain, pos.x, pos.z)) + 0.7;
+      pos.y = Math.max(bed, pos.y - DEAD_SINK * dt);
+    }
+    this.pitch *= Math.exp(-dt * 3);
+    // The rig's death clip rolls it over; the built-in body rolls as a whole
+    const wantRoll = this.rig ? 0 : Math.PI * Math.min(1, this.dieTime / sinkFrom);
+    this.roll += (wantRoll - this.roll) * Math.min(1, dt * 4);
+    this.group.rotation.set(-this.pitch, this.heading, this.roll);
+    this.rig?.tick(dt);
+    this.emote.update(dt);
+    this.applyWobble(dt);
+    if (this.dieTime >= this.dying) {
+      const at = this.hitPoint(tmpP);
+      critterSounds.poof(at);
+      particles?.emitBuildPuff(at, false, 26);
+      this.removed = true;
+    }
   }
 
   /** Surface / bed limits of the body centre at (x, z). */
@@ -251,6 +325,11 @@ export class Shark extends Pest {
     const dist = Math.hypot(dx, dz);
     this.group.visible = dist < 120;
     this.wakeSpeed = 0;
+    if (!this.rig) this.attachRig();
+    if (this.dying > 0) {
+      if (dt > 0) this.updateDying(dt, particles);
+      return;
+    }
     if (dist > 90 && this.state === 'cruise') return;
     if (dt <= 0) return;
     this.time += dt;
@@ -314,6 +393,8 @@ export class Shark extends Pest {
         jaw = 1;
         if (!this.bit && dist3 < 1.75) {
           this.bit = true;
+          this.rig?.playBite();
+          this.biteBoost = 1;
           critterSounds.sharkBite(pos);
           if (port.hurt(pos, 9, 'shark')) particles?.emitBuildPuff(tmpP.copy(pos).lerp(player, 0.5), false, 10);
           // A bite at the surface throws up a splash ring
@@ -401,8 +482,14 @@ export class Shark extends Pest {
     this.rear.rotation.y = Math.sin(this.phase) * amp;
     this.tail.rotation.y = Math.sin(this.phase - 1.1) * amp * 2.6;
     this.fins[0].rotation.x = this.fins[1].rotation.x = Math.sin(this.phase * 0.5) * 0.08 + this.pitch * 0.6;
-    this.jawOpen += (jaw - this.jawOpen) * Math.min(1, dt * 10);
+    // The bite clip snaps the jaw itself: the held-open pose lets go fast as it starts
+    this.biteBoost = Math.max(0, this.biteBoost - dt * 2);
+    if (this.biteBoost > 0) jaw = 0;
+    this.jawOpen += (jaw - this.jawOpen) * Math.min(1, dt * (this.biteBoost > 0 ? 25 : 10));
     this.jaw.rotation.x = this.jawOpen * 0.55;
+    // Heading climbing = turning left (towards +X while facing +Z)
+    this.bend += (THREE.MathUtils.clamp(yawRate / 1.6, -1, 1) - this.bend) * Math.min(1, dt * 4);
+    this.rig?.update(dt, this.speed, this.bend, this.jawOpen);
     this.emote.sprite.position.set(0, 1.6, 0);
     this.applyWobble(dt);
     this.surfaceWake(dt);
@@ -415,8 +502,8 @@ export class Shark extends Pest {
   private surfaceWake(dt: number): void {
     const pos = this.position;
     const sea = worldSettings.waterLevel;
-    // The fin reaches ~1.4 m above the body's centre, the back ~0.6 m
-    const finDepth = sea - (pos.y + 1.3);
+    // The fin reaches `finTop` above the body's centre, the back ~0.42 of that
+    const finDepth = sea - (pos.y + this.finTop);
     this.wakeSpeed = 0;
     if (finDepth > 0 || this.speed < 0.3) return;
     const sx = Math.sin(this.heading), sz = Math.cos(this.heading);
@@ -429,7 +516,7 @@ export class Shark extends Pest {
       emitWaterRipple(this.wakeAt.x, this.wakeAt.z, Math.min(1, 0.3 + this.speed * 0.06), 1.1 + this.speed * 0.2, undefined, vx, vz);
     }
     // The back breaking the surface: a broad bow wave off the head
-    const backOut = pos.y + 0.55 > sea - 0.1;
+    const backOut = pos.y + this.finTop * 0.42 > sea - 0.1;
     this.bowTimer -= dt;
     if (backOut && this.bowTimer <= 0 && this.speed > 1.5) {
       this.bowTimer = 0.35;
