@@ -8,9 +8,11 @@
   "steps": 16,
   "root": 55,
   "scale": [0, 2, 3, 5, 7, 9, 10],
-  "gain": 0.78,
+  "gain": 1.32,
+  "space": "hall",
+  "wet": 0.4,
   "parts": {
-    "m": { "i": "handpan", "vol": 0.46 },
+    "m": { "i": "handpan", "vol": 0.46, "tone": { "decay": 1.3, "bright": 0.85 } },
     "c": { "i": "harp", "oct": -1, "vol": 0.26 },
     "d": { "i": "darkpad", "oct": -1, "vol": 0.15 },
     "g": { "i": "bells", "vol": 0.14 }

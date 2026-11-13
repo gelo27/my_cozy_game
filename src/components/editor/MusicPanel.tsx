@@ -4,8 +4,9 @@ import { WEATHER_LABELS, type WeatherType } from '../../world/WeatherSystem';
 import { chip, Section } from './EditorWidgets';
 
 const MODE_LABELS: Record<string, string> = { ambient: 'Звичайна', cave: 'Печера', danger: 'Небезпека', sleep: 'Сон' };
+const SPACE_LABELS: Record<string, string> = { room: 'Кімната', hall: 'Зала', field: 'Відкрите поле', cave: 'Печера' };
 const SLOT_LABELS: Record<TimeSlot, string> = { day: 'День', evening: 'Вечір', night: 'Ніч' };
-const KIND_LABELS: Record<string, string> = { track: 'Треки', loop: 'Лупи', motif: 'Мотиви печери', stinger: 'Джингли' };
+const KIND_LABELS: Record<string, string> = { track: 'Треки', loop: 'Тривога' };
 const PLACE_LABELS = { cave: 'Печера', danger: 'Помітили', attack: 'Атака' } as const;
 
 const time = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -46,9 +47,12 @@ export const MusicPanel: React.FC = () => {
         {row('Час доби / погода', `${info.slot ? SLOT_LABELS[info.slot] : '—'} · ${info.weather ? WEATHER_LABELS[info.weather as WeatherType] ?? info.weather : '—'}`)}
         {row('Трек', info.track ? `${songs.find((s) => s.id === info.track!.id)?.title ?? info.track.id} · ще ${time(info.track.left)}` : '—')}
         {info.mode === 'ambient' && !info.track && row('Тиша ще', `${info.silence} с`)}
-        {info.motif && row('Мотив', info.motif)}
-        {info.danger && row('Луп', 'небезпека')}
-        {info.oneShots.length > 0 && row('Джингл', info.oneShots.join(', '))}
+        {row('Простір', info.space ? SPACE_LABELS[info.space] ?? info.space : '—')}
+        {info.danger &&
+          row(
+            'Тривога',
+            info.danger.attack ? 'атака' : info.danger.chase ? 'погоня' : `загубили слід · ще ${info.danger.hold} с`
+          )}
         {v && row('Голоси (зараз / пік / ліміт)', `${v.now} / ${v.peak} / ${v.limit}`)}
         {v && row('Обрізано лімітом', v.stolen)}
         {row('Семпли в RAM', `${info.sampleKB} КБ`)}
@@ -91,7 +95,7 @@ export const MusicPanel: React.FC = () => {
         </div>
       </Section>
 
-      {(['track', 'loop', 'motif', 'stinger'] as const).map((kind) => {
+      {(['track', 'loop'] as const).map((kind) => {
         const list = songs.filter((s) => s.kind === kind);
         if (!list.length) return null;
         return (
@@ -102,7 +106,7 @@ export const MusicPanel: React.FC = () => {
                   ▶
                 </button>
                 <div className="flex-1 min-w-0">
-                  <div className={`truncate ${info.track?.id === s.id || info.motif === s.id || info.oneShots.includes(s.id) ? 'text-sky-300' : 'text-zinc-200'}`}>{s.title}</div>
+                  <div className={`truncate ${info.track?.id === s.id || (s.kind === 'loop' && !!info.danger) ? 'text-sky-300' : 'text-zinc-200'}`}>{s.title}</div>
                   <div className="text-[10px] text-zinc-500 truncate">
                     {time(s.seconds)} · {s.mood.join(', ') || 'без тегів'}
                   </div>

@@ -16,7 +16,6 @@ import { CharacterController } from '../character/CharacterController';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
-import { music } from '../audio/music/MusicDirector';
 import { t, dataName } from '../i18n/i18n';
 import { buildLandmark, LandmarkAnchors } from './Landmarks';
 import { STRUCTURE_MATERIALS } from './StructureBuilder';
@@ -536,7 +535,6 @@ export class ExplorationManager {
     const loot = LOOT[chest.id];
     this.markChestOpened(chest.id, false);
     audioEngine.at(chest.pos).playHarvest();
-    music.stinger('chest');
     const items = loot.items ?? [];
     items.forEach(({ itemId, amount }) => this.inventory.addItem(itemId, amount));
     let head: string;

@@ -8,11 +8,13 @@
   "steps": 12,
   "root": 52,
   "scale": [0, 2, 3, 5, 7, 9, 10],
-  "gain": 0.8,
+  "gain": 1.41,
+  "space": "hall",
+  "wet": 0.36,
   "parts": {
     "m": { "i": "harp", "vol": 0.5 },
     "w": { "i": "marimba", "vol": 0.2 },
-    "b": { "i": "bass", "oct": -1, "vol": 0.36 },
+    "b": { "i": "upright", "oct": -1, "vol": 0.48 },
     "d": { "i": "darkpad", "vol": 0.15 }
   },
   "pat": {

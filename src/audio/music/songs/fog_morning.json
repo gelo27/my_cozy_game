@@ -8,11 +8,13 @@
   "steps": 16,
   "root": 55,
   "scale": [0, 2, 4, 6, 7, 9, 11],
-  "gain": 0.8,
+  "gain": 0.96,
+  "space": "field",
+  "wet": 0.32,
   "parts": {
-    "m": { "i": "bells", "vol": 0.34 },
+    "m": { "i": "flute", "vol": 0.36, "tone": { "vib": 9 } },
     "c": { "i": "handpan", "vol": 0.36 },
-    "p": { "i": "pad", "oct": -1, "vol": 0.14 }
+    "p": { "i": "strings", "oct": -1, "vol": 0.11 }
   },
   "pat": {
     "a1": "0:9:8:6 8:11:8:5",

@@ -20,7 +20,7 @@ import {
 import { GreenhouseBatch } from './GreenhouseBatch';
 import { BUILDING_PIECES, BUILDING_MATERIALS, createPieceMeshGroup, getPieceMeshTemplate, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface, createRoofGeometry, addFarGlassTwins } from './config/BuildingPiecesConfig';
 import { ProceduralRoofGenerator, ProceduralRoofConfig } from './ProceduralRoofSystem';
-import { PhysicsWorld } from '../physics/PhysicsWorld';
+import { PhysicsWorld, NPC_GHOST_COLLIDERS } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
@@ -723,6 +723,7 @@ export class BuildingManager {
         for (let i = num - 1; i >= 0; i--) {
           const c = piece.staticBody.collider(i);
           if (c && c.isValid()) {
+            NPC_GHOST_COLLIDERS.delete(c.handle);
             this.physics.world.removeCollider(c, false);
           }
         }
@@ -774,6 +775,7 @@ export class BuildingManager {
             .setRotation({ x: openQuat.x, y: openQuat.y, z: openQuat.z, w: openQuat.w })
             .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
           piece.staticCollider = this.physics.world.createCollider(desc, piece.staticBody);
+          NPC_GHOST_COLLIDERS.add(piece.staticCollider.handle);
         } else {
           const desc = this.physics.rapier.ColliderDesc.cuboid(0.43, 1.12, 0.03)
             .setTranslation(0, -0.355, 0)
@@ -814,6 +816,7 @@ export class BuildingManager {
             .setRotation({ x: openQuat.x, y: openQuat.y, z: openQuat.z, w: openQuat.w })
             .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
           piece.staticCollider = this.physics.world.createCollider(desc, piece.staticBody);
+          NPC_GHOST_COLLIDERS.add(piece.staticCollider.handle);
         } else {
           const desc = this.physics.rapier.ColliderDesc.cuboid(0.42, 0.94, 0.03)
             .setTranslation(0, -0.06, 0)
@@ -856,6 +859,7 @@ export class BuildingManager {
             .setRotation({ x: openQuat.x, y: openQuat.y, z: openQuat.z, w: openQuat.w })
             .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
           piece.staticCollider = this.physics.world.createCollider(desc, piece.staticBody);
+          NPC_GHOST_COLLIDERS.add(piece.staticCollider.handle);
         } else {
           const desc = this.physics.rapier.ColliderDesc.cuboid(0.46, 0.94, 0.03)
             .setTranslation(0, -0.06, 0)
@@ -896,7 +900,7 @@ export class BuildingManager {
             .setTranslation(-0.90, -0.06, offsetZ)
             .setRotation({ x: leftQuat.x, y: leftQuat.y, z: leftQuat.z, w: leftQuat.w })
             .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-          this.physics.world.createCollider(leftDesc, piece.staticBody);
+          NPC_GHOST_COLLIDERS.add(this.physics.world.createCollider(leftDesc, piece.staticBody).handle);
 
           const rightQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rightRotY);
           const rightDesc = this.physics.rapier.ColliderDesc.cuboid(0.45, 0.94, 0.03)
@@ -904,6 +908,7 @@ export class BuildingManager {
             .setRotation({ x: rightQuat.x, y: rightQuat.y, z: rightQuat.z, w: rightQuat.w })
             .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
           piece.staticCollider = this.physics.world.createCollider(rightDesc, piece.staticBody);
+          NPC_GHOST_COLLIDERS.add(piece.staticCollider.handle);
         } else {
           const desc = this.physics.rapier.ColliderDesc.cuboid(0.90, 0.94, 0.03)
             .setTranslation(0, -0.06, 0)

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { PhysicsWorld } from '../physics/PhysicsWorld';
+import { PhysicsWorld, NPC_GHOST_COLLIDERS } from '../physics/PhysicsWorld';
 
 /**
  * Pathfinding for agents in an open, player-buildable world.
@@ -123,6 +123,8 @@ export class GridNavigator {
   /** Steep cell-to-cell climbs already checked for a continuous ramp (edge key → ok). */
   private slopes = new Map<number, boolean>();
   private revision = -1;
+  /** Open door leaves are no obstacle for villagers (they walk through them). */
+  private readonly solid = (c: RAPIER.Collider): boolean => !NPC_GHOST_COLLIDERS.has(c.handle);
   private readonly ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
   private readonly box: RAPIER.Cuboid;
   private readonly identity = { x: 0, y: 0, z: 0, w: 1 };
@@ -268,7 +270,8 @@ export class GridNavigator {
 
   /** Waypoint on a door centre line; on the side its open leaves stand on, beyond their tips. */
   private doorPoint(d: NavDoor, side: number): PathPoint {
-    const off = d.swing && side === d.swing ? (d.reach ?? 0.9) + this.cfg.radius + 0.25 : 0.7;
+    // Open leaves need no berth: villagers walk through them (NPC_GHOST_COLLIDERS)
+    const off = 0.7;
     const p: PathPoint = new THREE.Vector3(d.x + d.nx * off * side, d.y, d.z + d.nz * off * side);
     p.door = d;
     return p;
@@ -545,7 +548,7 @@ export class GridNavigator {
     this.ray.origin.x = this.toWorld((fx + tx) / 2);
     this.ray.origin.y = top;
     this.ray.origin.z = this.toWorld((fz + tz) / 2);
-    const hit = world.castRay(this.ray, ty - fy + 0.6, true, this.flags);
+    const hit = world.castRay(this.ray, ty - fy + 0.6, true, this.flags, undefined, undefined, undefined, this.solid);
     const mid = (fy + ty) / 2;
     const ok = !!hit && hit.timeOfImpact > 0.01 && Math.abs(top - hit.timeOfImpact - mid) < 0.15;
     this.slopes.set(key, ok);
@@ -587,7 +590,7 @@ export class GridNavigator {
     this.ray.origin.x = x;
     this.ray.origin.y = top;
     this.ray.origin.z = z;
-    const hit = world.castRay(this.ray, this.cfg.maxStepUp + 0.6 + this.cfg.maxDrop + 3, true, this.flags, undefined, undefined, exclude);
+    const hit = world.castRay(this.ray, this.cfg.maxStepUp + 0.6 + this.cfg.maxDrop + 3, true, this.flags, undefined, undefined, exclude, this.solid);
     if (!hit) return { walkable: false, y: refY };
     const y = top - hit.timeOfImpact;
     // Started inside something (wall, trunk): not a floor
@@ -600,7 +603,8 @@ export class GridNavigator {
       this.flags,
       undefined,
       undefined,
-      exclude
+      exclude,
+      this.solid
     );
     return { walkable: !blocker, y };
   }

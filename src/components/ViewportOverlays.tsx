@@ -4,7 +4,7 @@ import { ToastMessage } from '../hooks/useToast';
 
 export const ToastPill: React.FC<{ toast: ToastMessage }> = ({ toast }) => (
   <div
-    className={`fixed top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl text-xs font-semibold shadow-2xl border animate-in fade-in slide-in-from-top-2 duration-200 flex items-center gap-2 pointer-events-none ${
+    className={`fixed top-[86px] left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl text-xs font-semibold shadow-2xl border animate-in fade-in slide-in-from-top-2 duration-200 flex items-center gap-2 pointer-events-none ${
       toast.type === 'success'
         ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/60 shadow-emerald-950/50'
         : toast.type === 'warn'

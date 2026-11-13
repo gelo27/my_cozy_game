@@ -200,7 +200,7 @@ export default function App() {
               />
             ) : (
               <>
-                <ViewportHUD isWireframe={isWireframe} telemetry={character?.telemetry} camera={engine?.camera ?? null} />
+                <ViewportHUD isWireframe={isWireframe} hideHearts={isBuildingUI} telemetry={character?.telemetry} camera={engine?.camera ?? null} />
                 <ControlsOverlay inputManager={engine?.input ?? null} telemetry={character?.telemetry} />
 
                 <GameHUD
@@ -216,6 +216,8 @@ export default function App() {
                   onPause={() => setPaused(true)}
                   onOpenWorkers={world.gameplay.workers ? () => world.gameplay.openPanel(world.gameplay.panel === 'workers' ? null : 'workers') : undefined}
                   onAction={(a) => world.gameplay.runAction(a)}
+                  onFishHold={(d) => world.gameplay.setFishHold(d)}
+                  onFishDepth={(n) => world.gameplay.fishing.adjustDepth(n)}
                 />
 
                 {buildingTelemetry && (

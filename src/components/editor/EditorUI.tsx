@@ -13,6 +13,7 @@ import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool } from '../../editor/EditorController';
 import { PEST_KINDS, PestKind } from '../../gameplay/Pests';
+import { lockOnSettings } from '../../gameplay/LockOn';
 import { PROP_DEFS, PROP_DEF_MAP, PropCategory } from '../../world/PropSystem';
 import { WEB_LIMITS, WebParams, webSettings, setWebSetting, resetWebSettings } from '../../world/SpiderWebs';
 import { ALGAE_MAX_LINKS, ALGAE_MIN_LINKS, algaeHeight, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
@@ -1457,6 +1458,31 @@ const DebugTab: React.FC<EditorUIProps> = ({ engine, stats, isWireframe, onToggl
         >
           <Crosshair className="w-3.5 h-3.5" /> Перенести гравця під камеру
         </button>
+        <button
+          className={chip(lockOnSettings.enabled)}
+          onClick={() => {
+            lockOnSettings.set(!lockOnSettings.enabled);
+            force((n) => n + 1);
+          }}
+        >
+          <Crosshair className="w-3.5 h-3.5" /> Прив’язка камери до ворога: {lockOnSettings.enabled ? 'увімк.' : 'вимк.'}
+        </button>
+        <button
+          className={chip(lockOnSettings.enabled && lockOnSettings.auto)}
+          disabled={!lockOnSettings.enabled}
+          onClick={() => {
+            lockOnSettings.setAuto(!lockOnSettings.auto);
+            force((n) => n + 1);
+          }}
+        >
+          <Crosshair className="w-3.5 h-3.5" /> Автоприв’язка: {lockOnSettings.auto ? 'увімк.' : 'вимк.'}
+        </button>
+        <p className="text-zinc-500">
+          Автоприв’язка: ворог ближче 8 м захоплюється сам; камера відпускає його, коли він переможений або ви відбігли далі 13 м.
+        </p>
+        <p className="text-zinc-500">
+          Tab або середня кнопка миші — захопити ворога перед камерою чи відпустити. Різкий рух мишею вбік — наступний ворог з того боку.
+        </p>
       </Section>
     </>
   );

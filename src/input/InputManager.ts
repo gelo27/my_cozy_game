@@ -33,6 +33,8 @@ export interface MovementInput {
   paintToggleJustPressed: boolean;
   terrainToggleJustPressed: boolean;
   inventoryToggleJustPressed: boolean;
+  /** Tab or the middle mouse button: lock onto an enemy / let go. */
+  lockOnJustPressed: boolean;
   buildSelectSlot?: number;
   mouseNDC?: THREE.Vector2;
   isPointerLocked?: boolean;
@@ -76,6 +78,7 @@ export class InputManager {
     paintToggleJustPressed: false,
     terrainToggleJustPressed: false,
     inventoryToggleJustPressed: false,
+    lockOnJustPressed: false,
     mouseNDC: new THREE.Vector2(0, 0),
     isPointerLocked: false,
     isDragging: false,
@@ -101,6 +104,7 @@ export class InputManager {
   public startedOnUI: boolean = false;
   private mouseBuildPlaceJustPressed: boolean = false;
   private mouseBuildDemolishJustPressed: boolean = false;
+  private middleClicked = false;
 
   private keys: Record<string, boolean> = {};
   private previousKeys: Record<string, boolean> = {};
@@ -139,9 +143,13 @@ export class InputManager {
   }
 
   private handleKeyDown = (e: KeyboardEvent) => {
-    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+    const tag = (e.target as HTMLElement | null)?.tagName;
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    if (['Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code) && !typing) {
       e.preventDefault();
     }
+    // Tab moves focus between form fields as usual; it only locks on in the game
+    if (e.code === 'Tab' && typing) return;
     this.keys[e.code] = true;
   };
 
@@ -164,7 +172,11 @@ export class InputManager {
     this.isDragging = false;
     this.mouseDownTime = performance.now();
 
-    if (e.button === 0) {
+    if (e.button === 1) {
+      // Middle button: target lock (and no browser auto-scroll)
+      e.preventDefault();
+      this.middleClicked = true;
+    } else if (e.button === 0) {
       this.isMouseDown = true;
     } else if (e.button === 2) {
       this.isRightMouseDown = true;
@@ -518,6 +530,7 @@ export class InputManager {
       paintToggleJustPressed,
       terrainToggleJustPressed,
       inventoryToggleJustPressed,
+      lockOnJustPressed: (!!this.keys['Tab'] && !this.previousKeys['Tab']) || this.middleClicked,
       buildSelectSlot,
       mouseNDC: this.mouseNDC.clone(),
       isPointerLocked: this.isPointerLocked,
@@ -541,6 +554,7 @@ export class InputManager {
     this.touchState.buildSelectSlot = undefined;
     this.mouseBuildPlaceJustPressed = false;
     this.mouseBuildDemolishJustPressed = false;
+    this.middleClicked = false;
 
     // Store previous key states for single-frame trigger detection
     this.previousKeys = { ...this.keys };

@@ -42,6 +42,25 @@ export class ThirdPersonCamera {
   public isAiming: boolean = false;
   public isBuilding: boolean = false;
   public currentSideOffset: number = 0;
+  /** Locked-on enemy to keep in frame (set every frame by the engine; null when free). */
+  public lockAt: THREE.Vector3 | null = null;
+  /**
+   * A scripted view (fishing): the camera blends smoothly from its orbit into it and back out.
+   * Read every frame, so it may move.
+   */
+  public shot: { pos: THREE.Vector3; look: THREE.Vector3 } | null = null;
+  private shotBlend = 0;
+  /** Where the orbit camera itself is and looks (before any scripted view): a shot can end on it. */
+  public readonly orbitPos = new THREE.Vector3();
+  public readonly orbitLook = new THREE.Vector3();
+  private readonly shotPos = new THREE.Vector3();
+  private readonly shotLook = new THREE.Vector3();
+  private readonly _orbitQ = new THREE.Quaternion();
+  private readonly _shotQ = new THREE.Quaternion();
+  private readonly _shotM = new THREE.Matrix4();
+  private lockShift = 0;
+  /** Extra camera distance while locked (keeps the player clear of the lens, frames a far enemy). */
+  private lockPull = 0;
 
   // Helper getters for compatibility
   public get yaw(): number {
@@ -66,6 +85,11 @@ export class ThirdPersonCamera {
     this.currentFocusPoint.set(0, 1.2, 0);
     this.currentCameraPos.copy(this.camera.position);
     this.currentLookAt.copy(this.currentFocusPoint);
+  }
+
+  /** The yaw turn (rad) a horizontal mouse move of `deltaX` px would give. */
+  public yawFromMouse(deltaX: number): number {
+    return -deltaX * this.sensitivity * userSettings.sensitivity;
   }
 
   public handleMouseInput(deltaX: number, deltaY: number): void {
@@ -176,6 +200,26 @@ export class ThirdPersonCamera {
     const fovDecayAlpha = 1.0 - Math.exp(-22.0 * dt);
     this.recoilFovOffset = THREE.MathUtils.lerp(this.recoilFovOffset, 0, fovDecayAlpha);
 
+    // 0b. Target lock: swing round behind the player so the enemy stays in front of both
+    const lock = this.lockAt;
+    let lockDx = 0;
+    let lockDz = 0;
+    if (lock) {
+      lockDx = lock.x - characterPosition.x;
+      lockDz = lock.z - characterPosition.z;
+      const flat = Math.hypot(lockDx, lockDz);
+      const k = 1.0 - Math.exp(-7 * dt);
+      if (flat > 0.6) {
+        const want = Math.atan2(-lockDx, -lockDz);
+        const d = Math.atan2(Math.sin(want - this.targetYaw), Math.cos(want - this.targetYaw));
+        this.targetYaw += d * k;
+      }
+      // Look down at an enemy below, up at one above; mouse Y still nudges it
+      const dy = lock.y - (characterPosition.y + this.heightOffset);
+      const wantPitch = THREE.MathUtils.clamp(0.3 - Math.atan2(dy, Math.max(flat, 2.5)) * 0.7, -0.35, 0.9);
+      this.targetPitch += (wantPitch - this.targetPitch) * (1.0 - Math.exp(-2.5 * dt));
+    }
+
     // 1. Smoothly interpolate base angles (Yaw & Pitch)
     const rotAlpha = 1.0 - Math.exp(-CAMERA_CONFIG.ROTATION_SMOOTH_SPEED * dt);
     
@@ -201,6 +245,9 @@ export class ThirdPersonCamera {
     } else {
       if (this.isHoldingObject) {
         targetSideOffset = 1.0;
+      } else if (lock) {
+        // Over the shoulder, so a close enemy isn't hidden behind the player's back
+        targetSideOffset = 0.75;
       }
       this.targetFov = CAMERA_CONFIG.FOV;
     }
@@ -210,6 +257,20 @@ export class ThirdPersonCamera {
 
     if (Math.abs(this.currentSideOffset) > 0.001) {
       this.targetFocusPoint.addScaledVector(this.getRightVector(), this.currentSideOffset);
+    }
+    // Locked: frame a point between the player and the enemy (at most 2.5 m towards it)
+    const lockFlat = Math.hypot(lockDx, lockDz);
+    // Less of a slide for a far enemy: the player (who matters more then) stays near mid-frame
+    const lockShift = lock ? Math.min(2.5, lockFlat * 0.3) * THREE.MathUtils.clamp(1 - (lockFlat - 7) * 0.1, 0.35, 1) : 0;
+    this.lockShift += (lockShift - this.lockShift) * (1.0 - Math.exp(-5 * dt));
+    // The focus slides towards the enemy, so the camera backs off as much (the player keeps their
+    // usual distance from the lens) and a bit more as the enemy gets farther, to frame them both
+    const lockPull = lock ? lockShift + THREE.MathUtils.clamp((lockFlat - 5) * 0.2, 0, 2.5) : 0;
+    this.lockPull += (lockPull - this.lockPull) * (1.0 - Math.exp(-4 * dt));
+    if (this.lockShift > 0.01 && (lockDx !== 0 || lockDz !== 0)) {
+      const l = Math.hypot(lockDx, lockDz);
+      this.targetFocusPoint.x += (lockDx / l) * this.lockShift;
+      this.targetFocusPoint.z += (lockDz / l) * this.lockShift;
     }
 
     // Exponential smoothing for focus tracking
@@ -242,7 +303,7 @@ export class ThirdPersonCamera {
 
     // 4. Raycast from character focus point to ideal camera position to prevent wall clipping
     let targetDistBase = this.targetDistance + targetZoomOffset + this.recoilDepthOffset;
-    targetDistBase = THREE.MathUtils.clamp(targetDistBase, this.minDistance, this.maxDistance + 1.0);
+    targetDistBase = THREE.MathUtils.clamp(targetDistBase, this.minDistance, this.maxDistance + 1.0) + this.lockPull;
     
     let maxAllowedDistance = targetDistBase;
 
@@ -307,6 +368,27 @@ export class ThirdPersonCamera {
     const effectiveDistance = Math.min(maxAllowedDistance, this.currentDistance + this.recoilDepthOffset);
     this.camera.position.copy(this.currentFocusPoint).addScaledVector(orbitOffset, effectiveDistance);
     this.camera.lookAt(this.currentFocusPoint);
+    this.orbitPos.copy(this.camera.position);
+    this.orbitLook.copy(this.currentFocusPoint);
+
+    // 6b. Scripted view: ease in (and back out) over about a second
+    if (this.shot) {
+      this.shotPos.copy(this.shot.pos);
+      this.shotLook.copy(this.shot.look);
+    }
+    this.shotBlend += ((this.shot ? 1 : 0) - this.shotBlend) * (1.0 - Math.exp(-2.6 * dt));
+    if (this.shotBlend < 0.001) this.shotBlend = 0;
+    if (this.shotBlend > 0) {
+      const b = this.shotBlend;
+      const w = b * b * (3 - 2 * b);
+      // Orientations are slerped, not the look points: lerping those can carry the look point
+      // through the camera and flip the view round
+      this._orbitQ.copy(this.camera.quaternion);
+      this._shotM.lookAt(this.shotPos, this.shotLook, this.camera.up);
+      this._shotQ.setFromRotationMatrix(this._shotM);
+      this.camera.position.lerp(this.shotPos, w);
+      this.camera.quaternion.slerpQuaternions(this._orbitQ, this._shotQ, w);
+    }
 
     // Apply GTA 5 cinematic camera roll tilt
     this.camera.rotation.z += this.recoilRollOffset;

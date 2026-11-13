@@ -594,6 +594,8 @@ export class AlgaeField {
   private readonly pushers = new Float32Array(MAX_PUSHERS * 5);
   private readonly lastPushers = new Float32Array(MAX_PUSHERS * 5);
   private pusherCount = 0;
+  /** A joint held by a fishing hook (grab): pulled towards (x, y, z). */
+  private held: { rec: AlgaeRec; joint: number; x: number; y: number; z: number; pull: number } | null = null;
   private lastPusherCount = 0;
   /** Unstepped time (s): the chains step at a fixed rate (Verlet needs a steady step). */
   private accumulator = 0;
@@ -659,6 +661,84 @@ export class AlgaeField {
     return best;
   }
 
+  /**
+   * Hooks a stalk: the joint nearest to (x, y, z) within `radius` (m) becomes held, so a line
+   * can pull it (setGrabTarget) and read where it really is (grabPoint). The stalk is simulated
+   * while held and bends towards the pull, its root staying put. False when no joint is in reach.
+   */
+  public grab(x: number, y: number, z: number, radius: number, out: THREE.Vector3): boolean {
+    this.releaseGrab();
+    let best = radius * radius;
+    let hit: AlgaeRec | null = null;
+    let joint = 0;
+    for (const r of this.recs.values()) {
+      const pp = r.prop.position;
+      const hx = pp.x - x, hz = pp.z - z;
+      // Cheap reject: the whole stalk is far away
+      const reach = radius + r.height;
+      if (hx * hx + hz * hz > reach * reach || y < pp.y - radius || y > pp.y + r.height + radius) continue;
+      const ch = r.sim >= 0 ? this.chains[r.sim] : null;
+      const links = r.batch?.links ?? 0;
+      const joints = ch ? ch.joints : links + 2;
+      for (let k = 1; k < joints; k++) {
+        let jx = pp.x, jy: number, jz = pp.z;
+        if (ch) {
+          jx = ch.p[k * 3];
+          jy = ch.p[k * 3 + 1];
+          jz = ch.p[k * 3 + 2];
+        } else {
+          jy = pp.y + (parts && k <= links ? k * parts.linkH * r.prop.scale : r.height);
+        }
+        const dx = jx - x, dy = jy - y, dz = jz - z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < best) {
+          best = d2;
+          hit = r;
+          joint = k;
+          out.set(jx, jy, jz);
+        }
+      }
+    }
+    if (!hit) return false;
+    if (hit.sim < 0) this.simulate(hit);
+    if (hit.sim < 0) return false; // no free simulation row
+    const ch = this.chains[hit.sim]!;
+    joint = Math.min(joint, ch.joints - 1);
+    this.held = { rec: hit, joint, x: out.x, y: out.y, z: out.z, pull: 0 };
+    return true;
+  }
+
+  /**
+   * Where the held joint is pulled to and how hard (0..1 of the way per constraint pass). The
+   * links keep their lengths, so the stalk bends and tautens towards it rather than stretching.
+   */
+  public setGrabTarget(x: number, y: number, z: number, pull: number): void {
+    const h = this.held;
+    if (!h) return;
+    h.x = x;
+    h.y = y;
+    h.z = z;
+    h.pull = THREE.MathUtils.clamp(pull, 0, 1);
+  }
+
+  /** The held joint's position now; false once nothing is held (the stalk went away). */
+  public grabPoint(out: THREE.Vector3): boolean {
+    const h = this.held;
+    if (!h || h.rec.sim < 0 || !this.recs.has(h.rec.prop.id)) {
+      this.held = null;
+      return false;
+    }
+    const ch = this.chains[h.rec.sim]!;
+    const i = h.joint * 3;
+    out.set(ch.p[i], ch.p[i + 1], ch.p[i + 2]);
+    return true;
+  }
+
+  /** Lets the held stalk go: it swings back up on its own. */
+  public releaseGrab(): void {
+    this.held = null;
+  }
+
   public clearPushers(): void {
     this.lastPushers.set(this.pushers);
     this.lastPusherCount = this.pusherCount;
@@ -702,7 +782,7 @@ export class AlgaeField {
         const ch = this.active[c];
         this.upload(ch, alpha);
         ch.quiet += dt;
-        if (ch.quiet > SLEEP_AFTER && this.atRest(ch)) this.release(ch.rec);
+        if (ch.quiet > SLEEP_AFTER && this.held?.rec !== ch.rec && this.atRest(ch)) this.release(ch.rec);
       }
       simTexture.needsUpdate = true;
     }
@@ -781,6 +861,7 @@ export class AlgaeField {
   /** Stops simulating a stalk: it goes back to the shader's rest pose. */
   private release(r: AlgaeRec): void {
     if (r.sim < 0) return;
+    if (this.held?.rec === r) this.held = null;
     const ch = this.chains[r.sim]!;
     this.chains[r.sim] = null;
     const i = this.active.indexOf(ch);
@@ -893,6 +974,15 @@ export class AlgaeField {
             p[i + 2] += mz * FRICTION;
           }
         }
+      }
+      // A hook holding a joint pulls it (soft, so the links below win and the stalk bends)
+      const held = this.held;
+      if (held && held.rec === ch.rec && held.pull > 0) {
+        const i = held.joint * 3;
+        p[i] += (held.x - p[i]) * held.pull;
+        p[i + 1] += (held.y - p[i + 1]) * held.pull;
+        p[i + 2] += (held.z - p[i + 2]) * held.pull;
+        touched = true;
       }
       // Link lengths, root pinned (the joint above it takes the whole fix)
       p[0] = root.x;

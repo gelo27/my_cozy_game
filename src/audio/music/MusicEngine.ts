@@ -1,4 +1,4 @@
-import { PATCHES } from './patches';
+import { getPatch } from './patches';
 import type { CompiledSong } from './SongFormat';
 import type { InstrumentBank } from './InstrumentBank';
 
@@ -39,25 +39,31 @@ export class VoicePool {
 
   public play(owner: SongPlayer, patchName: string, midi: number, t: number, dur: number, vel: number, out: AudioNode): void {
     const ctx = this.ctx;
-    const patch = PATCHES[patchName];
+    const patch = getPatch(patchName);
     if (!patch) return;
     const f = 440 * Math.pow(2, (midi - 69) / 12);
     const s = this.bank.pick(patchName, f);
     if (!s) return;
     const now = ctx.currentTime;
     if (this.voices.length >= this.limit) this.voices = this.voices.filter((v) => v.end > now);
-    while (this.voices.length >= this.limit) {
-      // Steal the sounding voice closest to its end (a fading tail, not a note just struck);
-      // only if every voice is still queued, the oldest one
-      let k = 0;
-      for (let i = 1; i < this.voices.length; i++) {
-        const v = this.voices[i], b = this.voices[k];
-        const vOn = v.start <= now, bOn = b.start <= now;
-        if ((vOn && !bOn) || (vOn === bOn && (vOn ? v.end < b.end : v.start < b.start))) k = i;
+    // The cap is on notes sounding together when this one starts, not on notes queued ahead (a
+    // phone's long lookahead queues many that cost nothing yet)
+    let sounding = 0;
+    for (;;) {
+      let k = -1;
+      sounding = 0;
+      for (let i = 0; i < this.voices.length; i++) {
+        const v = this.voices[i];
+        if (v.start > t || v.end <= t) continue;
+        sounding++;
+        if (k < 0 || v.end < this.voices[k].end) k = i;
       }
-      this.release(this.voices.splice(k, 1)[0], now, 0.015);
+      if (sounding < this.limit) break;
+      // Steal the one closest to its end at that moment (a fading tail, not a note just struck)
+      this.release(this.voices.splice(k, 1)[0], Math.max(now, t), 0.015);
       this.stolen++;
     }
+    this.peak = Math.max(this.peak, sounding + 1);
 
     // A little human timing, force and tuning: dead-even notes are what make synthesis sound machine-made
     t = Math.max(now, t + (Math.random() - 0.5) * 0.018);
@@ -69,6 +75,11 @@ export class VoicePool {
     let end: number;
     if (patch.loop) {
       src.loop = true;
+      // Sustained instruments play their onset once, then hold on the seamless loop after it
+      if (s.loopStart > 0) {
+        src.loopStart = s.loopStart;
+        src.loopEnd = s.buffer.duration;
+      }
       const atk = patch.attack ?? 0.5, rel = patch.release ?? 1;
       g.gain.setValueAtTime(0, t);
       g.gain.linearRampToValueAtTime(vel, t + atk);
@@ -83,7 +94,6 @@ export class VoicePool {
     src.start(t);
     src.stop(end);
     this.voices.push({ src, gain: g, start: t, end, owner });
-    this.peak = Math.max(this.peak, this.voices.length);
   }
 
   /** Silences a player's voices (already sounding ones fade, queued ones never start). */
@@ -115,6 +125,10 @@ export class VoicePool {
 export class SongPlayer {
   public readonly out: GainNode;
   private readonly layers = new Map<string, GainNode>();
+  /** Where each layer is heading: a silent layer schedules no notes (no voices spent on it). */
+  private readonly layerTarget = new Map<string, number>();
+  /** Per part: its layer's name, or null. */
+  private readonly partLayer: (string | null)[];
   private readonly partBus: AudioNode[];
   private step = 0;
   private nextTime = 0;
@@ -134,6 +148,7 @@ export class SongPlayer {
     layerLevels: Readonly<Record<string, number>>
   ) {
     this.out = ctx.createGain();
+    this.partLayer = song.parts.map((p) => p.layer);
     this.out.connect(dest);
     this.partBus = song.parts.map((p) => {
       let target: AudioNode = this.out;
@@ -144,10 +159,11 @@ export class SongPlayer {
           lg.gain.value = layerLevels[p.layer] ?? 0;
           lg.connect(this.out);
           this.layers.set(p.layer, lg);
+          this.layerTarget.set(p.layer, lg.gain.value);
         }
         target = lg;
       }
-      const pan = PATCHES[p.patch]?.pan ?? 0;
+      const pan = getPatch(p.patch)?.pan ?? 0;
       if (pan === 0 || !ctx.createStereoPanner) return target;
       const sp = ctx.createStereoPanner();
       sp.pan.value = pan;
@@ -171,7 +187,9 @@ export class SongPlayer {
 
   public setLayer(name: string, value: number, tc: number): void {
     const lg = this.layers.get(name);
-    if (lg) lg.gain.setTargetAtTime(value, this.ctx.currentTime, tc);
+    if (!lg) return;
+    lg.gain.setTargetAtTime(value, this.ctx.currentTime, tc);
+    this.layerTarget.set(name, value);
   }
 
   /** Seconds left until the end (play-once) or Infinity (loop). */
@@ -185,7 +203,7 @@ export class SongPlayer {
     if (this.stopAtStep >= 0 || this.done) return;
     const next = this.song.sectionStarts.find((s) => s > this.step);
     // A loop wraps to step 0 instead of reaching `total`
-    this.stopAtStep = next ?? (this.loop ? 0 : this.song.total);
+    this.stopAtStep = next ?? (this.loop ? this.song.loopStep : this.song.total);
     this.stopFade = fade;
   }
 
@@ -199,6 +217,13 @@ export class SongPlayer {
     g.linearRampToValueAtTime(0, now + seconds);
     this.pool.stopOwner(this, seconds / 3);
     window.setTimeout(() => this.out.disconnect(), (seconds + 1) * 1000);
+  }
+
+  /** A part on a layer that is (nearly) silent and staying so. */
+  private muted(part: number): boolean {
+    const name = this.partLayer[part];
+    if (!name) return false;
+    return (this.layerTarget.get(name) ?? 0) < 0.01 && this.layers.get(name)!.gain.value < 0.04;
   }
 
   public schedule(horizon: number): void {
@@ -218,11 +243,14 @@ export class SongPlayer {
         this.finishedAt = Infinity;
         return;
       }
-      for (const n of song.table[this.step]) this.pool.play(this, n.patch, n.midi, this.nextTime, n.len * song.stepDur, n.vel, this.partBus[n.part]);
+      for (const n of song.table[this.step]) {
+        if (this.muted(n.part)) continue;
+        this.pool.play(this, n.patch, n.midi, this.nextTime, n.len * song.stepDur, n.vel, this.partBus[n.part]);
+      }
       this.nextTime += song.stepDur;
       this.step++;
       if (this.step >= song.total) {
-        if (this.loop) this.step = 0;
+        if (this.loop) this.step = song.loopStep;
         else {
           // Let the last notes ring before calling it done
           this.finishedAt = this.nextTime + 2.5;

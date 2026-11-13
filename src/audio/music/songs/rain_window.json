@@ -8,7 +8,9 @@
   "steps": 16,
   "root": 46,
   "scale": [0, 2, 4, 5, 7, 9, 11],
-  "gain": 0.8,
+  "gain": 0.59,
+  "space": "room",
+  "wet": 0.3,
   "parts": {
     "m": { "i": "marimba", "vol": 0.42 },
     "c": { "i": "pluck", "vol": 0.26 },
@@ -57,13 +59,7 @@
       "p": "p>-4 p>-3 p>-5 p>-2 p>-6 p>-3 p p",
       "g": "- dr - - dr - - dr"
     },
-    "O": {
-      "m": "o1 o2",
-      "c": "c>-4 c",
-      "b": "b>-4 bs",
-      "p": "p>-4 p",
-      "g": "dr -"
-    }
+    "O": { "m": "o1 o2", "c": "c>-4 c", "b": "b>-4 bs", "p": "p>-4 p", "g": "dr -" }
   },
   "form": "I A B A B O"
 }

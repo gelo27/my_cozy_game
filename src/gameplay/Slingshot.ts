@@ -135,7 +135,7 @@ export class SlingshotSystem {
       if (pest && (wall < 0 || hitOut.t <= wall)) {
         pos.addScaledVector(dir, hitOut.t);
         // Knocked along the pebble's path
-        this.pests.damage(pest, 1, tmpFrom.copy(pos).addScaledVector(dir, -1));
+        this.pests.damage(pest, 1, tmpFrom.copy(pos).addScaledVector(dir, -1), 'pebble');
         this.retire(p);
         continue;
       }

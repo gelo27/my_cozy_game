@@ -298,51 +298,24 @@ const RECIPES: Record<Kind, (r: () => number, i: number) => Float32Array> = {
 const WARM_ORDER: Kind[] = ['swing', 'chop', 'chopFatal', 'mine', 'fall', 'impact', 'rockBreak', 'split', 'mineCrystal'];
 
 /**
- * Rendered buffers for one context. `warmStep` renders a single variant (a few ms, a few tens on a
- * phone), so the whole bank is built in small idle slices instead of one hitch; anything asked for
- * before that is rendered on the spot (one variant).
+ * Renders variant `index` of `kind` (pure: no audio context, so it also runs in the sound-render
+ * worker). Peak-normalised, with a short fade-out.
  */
-export class TreeSoundBank {
-  private readonly cache = new Map<Kind, AudioBuffer[]>();
-
-  constructor(private readonly ctx: BaseAudioContext) {}
-
-  public get(kind: Kind): AudioBuffer {
-    const list = this.cache.get(kind);
-    if (!list || list.length === 0) return this.render(kind);
-    return list[(Math.random() * list.length) | 0];
-  }
-
-  /** Renders the next missing variant; false once everything is ready. */
-  public warmStep(): boolean {
-    for (const k of WARM_ORDER) {
-      if ((this.cache.get(k)?.length ?? 0) < VARIANTS[k]) {
-        this.render(k);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private render(kind: Kind): AudioBuffer {
-    let list = this.cache.get(kind);
-    if (!list) this.cache.set(kind, (list = []));
-    const i = list.length;
-    SR = RATE[kind] ?? 22050;
-    const data = RECIPES[kind](rng(0x9e37 + i * 7919 + kind.length * 104729), i);
-    // Normalise: every variant peaks at the same level; the caller sets the loudness
-    let peak = 0;
-    for (let j = 0; j < data.length; j++) peak = Math.max(peak, Math.abs(data[j]));
-    const g = peak > 0 ? 0.95 / peak : 1;
-    // Short fade-out so a cut tail never clicks
-    const fade = Math.min(data.length, sec(0.01));
-    for (let j = data.length - fade; j < data.length; j++) data[j] *= (data.length - j) / fade;
-    for (let j = 0; j < data.length; j++) data[j] *= g;
-    const buf = this.ctx.createBuffer(1, data.length, SR);
-    buf.copyToChannel(data, 0);
-    if (i < VARIANTS[kind]) list.push(buf);
-    return buf;
-  }
+export function renderTreeSound(kind: Kind, index: number): { data: Float32Array; rate: number } {
+  SR = RATE[kind] ?? 22050;
+  const data = RECIPES[kind](rng(0x9e37 + index * 7919 + kind.length * 104729), index);
+  // Normalise: every variant peaks at the same level; the caller sets the loudness
+  let peak = 0;
+  for (let j = 0; j < data.length; j++) peak = Math.max(peak, Math.abs(data[j]));
+  const g = peak > 0 ? 0.95 / peak : 1;
+  // Short fade-out so a cut tail never clicks
+  const fade = Math.min(data.length, sec(0.01));
+  for (let j = data.length - fade; j < data.length; j++) data[j] *= (data.length - j) / fade;
+  for (let j = 0; j < data.length; j++) data[j] *= g;
+  return { data, rate: SR };
 }
 
 export type TreeSoundKind = Kind;
+/** Variants per kind, and the order they are rendered in ahead of time. */
+export const TREE_VARIANTS = VARIANTS;
+export const TREE_WARM_ORDER = WARM_ORDER;

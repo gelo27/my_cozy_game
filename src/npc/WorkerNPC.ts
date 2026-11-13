@@ -370,7 +370,9 @@ export class WorkerNPC extends NPCAgent {
       // the target (a standing spot on the floor), not the aim (a chest, a crop: not at feet level)
       const sameFloor = Math.abs(this.target.y - feet.y) < SAME_FLOOR;
       const d = sameFloor ? Math.hypot(aim.x - feet.x, aim.z - feet.z) : Infinity;
-      const arrived = d < this.reach || (this.pathDone && d < this.reach + 1.2 && this.stuckTime > 0.3);
+      // Stuck close by also counts, unless a wall stands in between (it would sleep / work through it)
+      const arrived =
+        d < this.reach || (this.pathDone && d < this.reach + 1.2 && this.stuckTime > 0.3 && this.lineClear(feet, this.target));
       this.routeTime += dt;
       // Standing with no route left while still far: there is no way there
       this.noRouteTime = this.pathDone && !arrived && this.speed < 0.1 ? this.noRouteTime + dt : 0;

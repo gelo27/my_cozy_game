@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { PhysicsWorld } from '../physics/PhysicsWorld';
+import { PhysicsWorld, NPC_GHOST_COLLIDERS } from '../physics/PhysicsWorld';
 import { CharacterModel } from '../character/CharacterModel';
 import { CHARACTER_CONFIG, COLLISION_GROUPS } from '../config/constants';
 import { GridNavigator, NavDoor, PathPoint } from '../navigation/GridNavigator';
@@ -16,7 +16,8 @@ export const NPC_WALK = 4.2;
 export const NPC_RUN = 6.6;
 /** Colliders of every villager: they walk through each other instead of jamming in a crowd. */
 const NPC_COLLIDERS = new Set<number>();
-const notNpc = (c: RAPIER.Collider): boolean => !NPC_COLLIDERS.has(c.handle);
+// ...and through open door leaves (see NPC_GHOST_COLLIDERS)
+const notNpc = (c: RAPIER.Collider): boolean => !NPC_COLLIDERS.has(c.handle) && !NPC_GHOST_COLLIDERS.has(c.handle);
 /** Everything but the player: villagers never block or shove the player, nor the other way round. */
 const NPC_FILTER = 0xffff & ~COLLISION_GROUPS.CHARACTER;
 
@@ -35,6 +36,11 @@ const REPLAN_MIN_INTERVAL = 0.35;
  * changed) and re-plans. Subclasses decide where to go (`drive`).
  */
 export class NPCAgent {
+  /**
+   * Set by the engine: one of this villager's feet planted (from the walk / run clip, like the
+   * player's). The engine culls by distance before asking for the ground (`groundUnder`).
+   */
+  public static onFootstep: ((intensity: number, agent: NPCAgent) => void) | null = null;
   public readonly model: CharacterModel;
   public readonly name: string;
   /** Debug: draws the current path when enabled. */
@@ -90,6 +96,7 @@ export class NPCAgent {
     this.name = name;
     this.model = new CharacterModel(color);
     scene.add(this.model.group);
+    this.model.onFootstep = (intensity) => NPCAgent.onFootstep?.(intensity, this);
 
     const rapier = physics.rapier;
     this.body = physics.world.createRigidBody(
@@ -298,6 +305,32 @@ export class NPCAgent {
   }
 
   /** Moves the capsule onto a ground point (feet level) at once. */
+  private static readonly _ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 });
+  /**
+   * Nothing solid between two floor points, tested at waist height (above a bed or a step, below a
+   * door's header): a spot behind a wall is not one it got to.
+   */
+  protected lineClear(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): boolean {
+    const r = NPCAgent._ray;
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    const len = Math.hypot(dx, dy, dz);
+    if (len < 0.05) return true;
+    r.origin.x = a.x; r.origin.y = a.y + 1.0; r.origin.z = a.z;
+    r.dir.x = dx / len; r.dir.y = dy / len; r.dir.z = dz / len;
+    const hit = this.physics.world.castRay(r, len, true, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, this.moveGroups, undefined, undefined, notNpc);
+    return !hit;
+  }
+
+  /** What the agent stands on (one short ray down; for footstep surfaces), or null. */
+  public groundUnder(): RAPIER.Collider | null {
+    const r = NPCAgent._ray;
+    const t = this.body.translation();
+    r.origin.x = t.x; r.origin.y = t.y - NPC_FEET + 0.3; r.origin.z = t.z;
+    r.dir.x = 0; r.dir.y = -1; r.dir.z = 0;
+    const hit = this.physics.world.castRay(r, 0.8, true, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, this.moveGroups, undefined, undefined, notNpc);
+    return hit ? hit.collider : null;
+  }
+
   protected placeAt(p: { x: number; y: number; z: number }): void {
     this.body.setTranslation({ x: p.x, y: p.y + NPC_FEET + 0.05, z: p.z }, true);
     this.body.setNextKinematicTranslation({ x: p.x, y: p.y + NPC_FEET + 0.05, z: p.z });

@@ -1,9 +1,10 @@
-import { PATCHES } from './patches';
-import { synthesize, type SynthRequest, type SynthResult } from './synth';
+import { getPatch } from './patches';
+import { synthesize, type SpaceName, type SynthRequest, type SynthResult } from './synth';
 
 interface BankSample {
   buffer: AudioBuffer;
   rootFreq: number;
+  loopStart: number;
 }
 
 /**
@@ -59,7 +60,7 @@ export class InstrumentBank {
   public ensure(patches: readonly string[], inUse: ReadonlySet<string>): Promise<void> {
     const now = performance.now();
     for (const p of patches) this.lastUse.set(p, now);
-    const missing = patches.filter((p) => !this.samples.has(p) && !this.pending.has(p) && PATCHES[p]);
+    const missing = patches.filter((p) => !this.samples.has(p) && !this.pending.has(p) && getPatch(p));
     const waits = patches.map((p) => this.pending.get(p)).filter((p): p is Promise<void> => !!p);
     if (missing.length) {
       const job = this.render(missing).then(() => {
@@ -72,9 +73,9 @@ export class InstrumentBank {
     return Promise.all(waits).then(() => undefined);
   }
 
-  /** Stereo reverb impulse at the context's rate (rendered alongside nothing else). */
-  public async impulse(): Promise<AudioBuffer> {
-    const res = await this.run({ patches: [], sr: this.sampleRate, irSr: this.ctx.sampleRate });
+  /** Stereo reverb impulse for a space, at the context's rate (rendered alongside nothing else). */
+  public async impulse(space: SpaceName = 'hall'): Promise<AudioBuffer> {
+    const res = await this.run({ patches: [], sr: this.sampleRate, irSr: this.ctx.sampleRate, space });
     const ir = res.ir!;
     const buf = this.ctx.createBuffer(2, ir[0].length, this.ctx.sampleRate);
     buf.copyToChannel(ir[0] as Float32Array<ArrayBuffer>, 0);
@@ -83,13 +84,13 @@ export class InstrumentBank {
   }
 
   private async render(names: string[]): Promise<void> {
-    const res = await this.run({ patches: names.map((name) => ({ name, synth: PATCHES[name].synth })), sr: this.sampleRate });
+    const res = await this.run({ patches: names.map((name) => ({ name, synth: getPatch(name)!.synth })), sr: this.sampleRate });
     this.lastRenderMs = res.ms;
     for (const s of res.samples) {
       const buf = this.ctx.createBuffer(1, s.data.length, s.sr);
       buf.copyToChannel(s.data as Float32Array<ArrayBuffer>, 0);
       const list = this.samples.get(s.patch) ?? [];
-      list.push({ buffer: buf, rootFreq: s.rootFreq });
+      list.push({ buffer: buf, rootFreq: s.rootFreq, loopStart: s.loopStart });
       this.samples.set(s.patch, list);
       this.bytes.set(s.patch, (this.bytes.get(s.patch) ?? 0) + s.data.length * 4);
     }

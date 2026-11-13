@@ -4,6 +4,7 @@ import { coastRadius } from '../world/IslandGenerator';
 import { ParticleManager } from '../particles/ParticleManager';
 import { makeBlobShadow } from './Emotes';
 import { critterSounds } from './CritterSounds';
+import type { HitWeapon } from './HitFeedback';
 import { worldSettings } from '../world/WorldSettings';
 import { waterLevelAt, riverWorld } from '../world/rivers/RiverWorld';
 import { Shark, SHARK_MIN_DEPTH, seaDepthAt } from './Shark';
@@ -1163,8 +1164,8 @@ export class PestSystem {
   }
 
   /** Hits a pest for the player (axe, pebble). */
-  public damage(pest: Pest, amount: number, from: THREE.Vector3): boolean {
-    return !!this.port && pest.damage(amount, from, this.port, this.particles);
+  public damage(pest: Pest, amount: number, from: THREE.Vector3, weapon: HitWeapon = 'melee'): boolean {
+    return !!this.port && pest.damage(amount, from, this.port, this.particles, weapon);
   }
 
   public clear(): void {

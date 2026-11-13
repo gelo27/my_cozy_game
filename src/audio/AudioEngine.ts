@@ -1,4 +1,6 @@
-import { TreeSoundBank, type TreeSoundKind } from './TreeSounds';
+import type { TreeSoundKind } from './TreeSounds';
+import type { FoleySoundKind } from './FoleySounds';
+import { TreeSoundBank, FoleySoundBank } from './SfxRender';
 import * as THREE from 'three';
 import { isMobileDevice } from '../world/WorldSettings';
 import { userSettings, onUserSettingsChange } from '../config/userSettings';
@@ -83,6 +85,7 @@ class AudioEngine {
       onUserSettingsChange(() => this.applyVolumes());
       // Woodcutting sounds are pre-rendered in small idle slices, well before the first chop
       setTimeout(() => this.warmTreeSounds(), 2000);
+      setTimeout(() => this.warmFoleySounds(), 3500);
     }
   }
 
@@ -287,25 +290,51 @@ class AudioEngine {
     return buf;
   }
 
-  /** Destination for the sound being built: a world panner after at(), else the flat bus. */
-  private output(): AudioNode {
+  /**
+   * World panners reused by one-shot sounds: each is lent for PANNER_HOLD seconds (longer than any
+   * one-shot) and then free again. Creating an HRTF panner per sound costs its setup every time;
+   * an idle pooled one with nothing playing into it is not processed.
+   */
+  private readonly panners: { p: PannerNode; busyUntil: number }[] = [];
+  private static readonly PANNER_POOL = 10;
+  private static readonly PANNER_HOLD = 2.6;
+
+  private lendPanner(pos: SoundPos, ref: number): PannerNode | null {
+    const ctx = this.ctx!;
+    const t = ctx.currentTime;
+    let v = this.panners.find((x) => x.busyUntil <= t);
+    if (!v) {
+      if (this.panners.length < AudioEngine.PANNER_POOL) {
+        const p = this.createPanner(pos, ref);
+        if (!p) return null;
+        this.panners.push((v = { p, busyUntil: 0 }));
+      } else {
+        // A burst of sounds: one extra panner, freed after its sound
+        const p = this.createPanner(pos, ref);
+        if (p) setTimeout(() => p.disconnect(), 4000);
+        return p;
+      }
+    }
+    v.busyUntil = t + AudioEngine.PANNER_HOLD;
+    v.p.refDistance = ref;
+    v.p.maxDistance = ref * 12;
+    this.setPannerPos(v.p, pos);
+    return v.p;
+  }
+
+  /**
+   * Destination for the sound being built: a world panner after at(), else the flat bus. Null when
+   * the at() position is out of earshot: the caller then builds nothing at all.
+   */
+  private output(): AudioNode | null {
     const pos = this.pendingPos;
     this.pendingPos = null;
     if (pos && this.ctx) {
-      // Out of earshot: play into a muted node instead of building a panner chain
       const dx = pos.x - this.listenerPos.x, dy = pos.y - this.listenerPos.y, dz = pos.z - this.listenerPos.z;
       const max = this.pendingRef * 12;
-      if (dx * dx + dy * dy + dz * dz > max * max) {
-        const mute = this.ctx.createGain();
-        mute.gain.value = 0;
-        return mute;
-      }
-      const p = this.createPanner(pos, this.pendingRef);
-      if (p) {
-        // Let the panner be collected once the sound has finished
-        setTimeout(() => p.disconnect(), 4000);
-        return p;
-      }
+      if (dx * dx + dy * dy + dz * dz > max * max) return null;
+      const p = this.lendPanner(pos, this.pendingRef);
+      if (p) return p;
     }
     return this.channels.sfx ?? this.master ?? this.ctx!.destination;
   }
@@ -315,6 +344,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -343,6 +373,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -375,6 +406,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     
@@ -408,6 +440,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -464,19 +497,12 @@ class AudioEngine {
   }
 
   private treeBank: TreeSoundBank | null = null;
-  private treeWarm = false;
 
-  /** Renders the woodcutting sounds one variant per idle slice once audio is running. */
+  /** Has the woodcutting / mining sounds rendered in the sound worker, well before the first chop. */
   private warmTreeSounds(): void {
-    if (this.treeWarm || !this.ctx) return;
-    this.treeWarm = true;
+    if (!this.ctx) return;
     if (!this.treeBank) this.treeBank = new TreeSoundBank(this.ctx);
-    const idle: (cb: () => void) => void =
-      typeof requestIdleCallback === 'function' ? (cb) => requestIdleCallback(cb, { timeout: 1500 }) : (cb) => setTimeout(cb, 120);
-    const step = () => {
-      if (this.treeBank?.warmStep()) setTimeout(() => idle(step), 150);
-    };
-    idle(step);
+    this.treeBank.warm();
   }
 
   /** One pre-rendered woodcutting sound: a single buffer source and gain (cheap on phones). */
@@ -495,6 +521,36 @@ class AudioEngine {
     src.start(t);
   }
 
+  private foley: FoleySoundBank | null = null;
+
+  /** Door, watering, shovel and thunder buffers (null before the first user gesture). */
+  public foleyBank(): FoleySoundBank | null {
+    if (!this.ctx) return null;
+    if (!this.foley) this.foley = new FoleySoundBank(this.ctx);
+    this.foley.warm();
+    return this.foley;
+  }
+
+  /** Has the foley sounds rendered in the sound worker. */
+  private warmFoleySounds(): void {
+    this.foleyBank();
+  }
+
+  /** One pre-rendered foley sound: a single buffer source and gain. */
+  private playFoley(kind: FoleySoundKind, gain: number, pitchJitter: number, delay = 0): void {
+    const s = this.begin();
+    if (!s) return;
+    const { ctx, out, t } = s;
+    const bank = this.foleyBank()!;
+    const src = ctx.createBufferSource();
+    src.buffer = bank.get(kind);
+    src.playbackRate.value = 1 + (Math.random() * 2 - 1) * pitchJitter;
+    const g = ctx.createGain();
+    g.gain.value = gain * (0.85 + Math.random() * 0.15);
+    src.connect(g).connect(out);
+    src.start(t + delay);
+  }
+
   /**
    * Valheim hammer construction thud (satisfying heavy wood or stone placement sound)
    */
@@ -503,6 +559,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
 
@@ -542,45 +599,11 @@ class AudioEngine {
   }
 
   /**
-   * Wooden door opening / closing squeak & latch thud
+   * A wooden door: opening is the latch clicking and the hinge creaking as it swings; closing is a
+   * short creak, the slam against the frame, the latch snapping in and the leaf rattling still.
    */
   public playDoorToggle(isOpen: boolean = true) {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
-    const out = this.output();
-
-    const t = this.ctx.currentTime;
-
-    // 1. Hinge creak/squeak pitch sweep
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(isOpen ? 180 : 320, t);
-    osc.frequency.exponentialRampToValueAtTime(isOpen ? 380 : 120, t + 0.18);
-
-    gain.gain.setValueAtTime(0.18, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
-
-    osc.connect(gain);
-    gain.connect(out);
-    osc.start(t);
-    osc.stop(t + 0.24);
-
-    // 2. Heavy latch / frame thud
-    const subOsc = this.ctx.createOscillator();
-    const subGain = this.ctx.createGain();
-    subOsc.type = 'triangle';
-    subOsc.frequency.setValueAtTime(isOpen ? 120 : 200, t + 0.05);
-    subOsc.frequency.exponentialRampToValueAtTime(40, t + 0.2);
-
-    subGain.gain.setValueAtTime(0.35, t + 0.05);
-    subGain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
-
-    subOsc.connect(subGain);
-    subGain.connect(out);
-    subOsc.start(t + 0.05);
-    subOsc.stop(t + 0.25);
+    this.playFoley(isOpen ? 'doorOpen' : 'doorClose', isOpen ? 0.3 : 0.75, 0.05);
   }
 
   /**
@@ -591,6 +614,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -616,6 +640,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -641,6 +666,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -666,6 +692,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
 
@@ -713,6 +740,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -731,51 +759,21 @@ class AudioEngine {
   }
 
   /**
-   * Trickling water spray sound for Heartopia watering can
+   * The watering can over a bed (timed to the 2 s WATER clip): the water shifting as the can tips,
+   * the rose head's patter on soil and leaves with puddles bubbling, then the last drips.
    */
   public playWatering() {
-    if (!this.ctx) this.init();
-    if (!this.ctx) return;
-    if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
-    const out = this.output();
+    this.playFoley('water', 0.32, 0.04);
+  }
 
-    const t = this.ctx.currentTime;
-    const duration = 0.45;
+  /** The spade going into the soil, prying and tossing the earth aside (at the blade's impact). */
+  public playShovelDig() {
+    this.playFoley('shovelDig', 0.6, 0.06);
+  }
 
-    // Filtered pinkish noise for water droplets
-    const noiseBuffer = this.noiseBuffer(duration, false, 0.7);
-    const noise = this.ctx.createBufferSource();
-    noise.buffer = noiseBuffer;
-
-    const bandpass = this.ctx.createBiquadFilter();
-    bandpass.type = 'bandpass';
-    bandpass.frequency.setValueAtTime(2200, t);
-    bandpass.frequency.linearRampToValueAtTime(1600, t + duration);
-    bandpass.Q.setValueAtTime(3.0, t);
-
-    const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.01, t);
-    gain.gain.linearRampToValueAtTime(0.25, t + 0.08);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
-
-    noise.connect(bandpass);
-    bandpass.connect(gain);
-    gain.connect(out);
-    noise.start(t);
-    noise.stop(t + duration);
-
-    // Subtle harmonic droplet chirp
-    const osc = this.ctx.createOscillator();
-    const oscGain = this.ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(1400, t);
-    osc.frequency.exponentialRampToValueAtTime(900, t + 0.25);
-    oscGain.gain.setValueAtTime(0.12, t);
-    oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-    osc.connect(oscGain);
-    oscGain.connect(out);
-    osc.start(t);
-    osc.stop(t + 0.26);
+  /** The back of the spade patting a finished or refilled bed flat (`delay` s: after the last toss). */
+  public playShovelPat(delay = 0) {
+    this.playFoley('shovelPat', 0.5, 0.05, delay);
   }
 
   /**
@@ -786,6 +784,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -832,7 +831,7 @@ class AudioEngine {
       osc.type = 'sine';
       gain.gain.setValueAtTime(0.0001, t);
       osc.connect(gain);
-      gain.connect(this.output());
+      gain.connect(this.output() ?? this.channels.sfx ?? this.ctx.destination);
       osc.start(t);
       this.holdOsc = osc;
       this.holdGain = gain;
@@ -853,6 +852,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
     const ctx = this.ctx;
     const t = ctx.currentTime;
     const k = Math.min(1, Math.max(0.15, intensity));
@@ -882,6 +882,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
     const ctx = this.ctx;
     const t = ctx.currentTime;
     const snap = ctx.createBufferSource();
@@ -924,7 +925,8 @@ class AudioEngine {
       return null;
     }
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
-    return { ctx: this.ctx, out: this.output(), t: this.ctx.currentTime };
+    const out = this.output();
+    return out ? { ctx: this.ctx, out, t: this.ctx.currentTime } : null;
   }
 
   /**
@@ -1016,6 +1018,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
     const t = this.ctx.currentTime;
     const k = Math.max(0.15, Math.min(1, intensity));
     const osc = this.ctx.createOscillator();
@@ -1039,6 +1042,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
@@ -1060,6 +1064,7 @@ class AudioEngine {
     if (!this.ctx) return;
     if (this.ctx.state === 'suspended' && !document.hidden && !this.paused) this.ctx.resume();
     const out = this.output();
+    if (!out) return;
 
     const t = this.ctx.currentTime;
     const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6 major chord

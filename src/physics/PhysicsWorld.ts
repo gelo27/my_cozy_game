@@ -369,3 +369,10 @@ export class PhysicsWorld {
     }
   }
 }
+
+/**
+ * Colliders villagers walk through but the player does not: open door leaves. A swung-open leaf
+ * stands across the walkway beside the doorway and NPCs would circle around it; most games simply
+ * let NPCs pass through it. Read by the NPC movement filter and the navigator's samples.
+ */
+export const NPC_GHOST_COLLIDERS = new Set<number>();

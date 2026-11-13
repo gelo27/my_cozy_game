@@ -8,7 +8,9 @@
   "steps": 16,
   "root": 50,
   "scale": [0, 2, 4, 5, 7, 9, 11],
-  "gain": 0.9,
+  "gain": 0.31,
+  "space": "field",
+  "wet": 0.22,
   "parts": {
     "k": { "i": "kalimba", "vol": 0.55 },
     "h": { "i": "pluck", "vol": 0.32 },

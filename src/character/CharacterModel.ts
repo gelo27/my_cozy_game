@@ -122,6 +122,8 @@ export class CharacterModel {
 
   // Weapon / tool mount attachment pivot
   public weaponPivot: THREE.Group;
+  /** Marks the fishing rod's tip (attached while the rod is in hand). */
+  private readonly rodTip = new THREE.Object3D();
 
   private currentFacingAngle: number = 0;
 
@@ -814,6 +816,9 @@ export class CharacterModel {
       reel.rotation.z = Math.PI / 2;
       reel.position.set(0.03, 0.02, 0.0);
       rod.add(reel);
+      // The tip of the pole (its top end after the tilt): the fishing line starts here
+      this.rodTip.position.set(0, 0.55 + 0.75 * Math.cos(0.75), 0.25 + 0.75 * Math.sin(0.75));
+      rod.add(this.rodTip);
       this.weaponPivot.add(rod);
     } else if (this.activeWeapon === 15) {
       // Slingshot: a forked hazel stick with a leather band (shared geometry is tiny, built once and cached)
@@ -1103,6 +1108,14 @@ export class CharacterModel {
       const parentQ = bone.parent.getWorldQuaternion(CharacterModel._parentQ);
       bone.quaternion.premultiply(parentQ).premultiply(world).premultiply(parentQ.invert());
     }
+  }
+
+  /** The fishing rod's tip in world space; false when the rod is not in hand. */
+  public getRodTip(out: THREE.Vector3): boolean {
+    if (this.rodTip.parent?.parent !== this.weaponPivot || !this.weaponPivot.visible) return false;
+    this.rodTip.updateWorldMatrix(true, false);
+    out.setFromMatrixPosition(this.rodTip.matrixWorld);
+    return true;
   }
 
   public setFacingAngleInstant(angle: number): void {

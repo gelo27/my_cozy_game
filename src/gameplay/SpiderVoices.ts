@@ -5,11 +5,7 @@ import { audioEngine } from '../audio/AudioEngine';
  * kind, the first time it is needed) and then only played back: one buffer source and one panner
  * per voice, no oscillator / filter graphs per call, and a cap on how many play at once.
  *
- * To keep them from sounding like a synthesizer, they are built the way animal calls are: a
- * pulsed source with jitter and shimmer (the pitch and the loudness of each pulse wander a little,
- * every other pulse is weaker: a rough, creaky voice), mixed with breath noise, shaped by gliding
- * formant resonances, rasped by an irregular stridulation, and given the early reflections of a
- * rocky room.
+ * The sounds are built from layers, as creature designers build big bugs (see the note below).
  */
 
 export type SpiderVoice = 'scream' | 'attack' | 'idle' | 'step';
@@ -29,13 +25,16 @@ interface Pos { x: number; y: number; z: number }
 
 /** Small deterministic random (variants differ, every session sounds the same). */
 function rng(seed: number): () => number {
-  let s = seed >>> 0 || 1;
-  return () => {
+  // Hash the seed first: neighbouring small seeds would otherwise start out almost alike
+  let s = (Math.imul(seed ^ 0x5bd1e995, 0x9e3779b1) ^ (seed << 16)) >>> 0 || 1;
+  const next = () => {
     s ^= s << 13;
     s ^= s >>> 17;
     s ^= s << 5;
     return (s >>> 0) / 4294967296;
   };
+  for (let i = 0; i < 4; i++) next();
+  return next;
 }
 
 /** RBJ biquad, coefficients re-set as often as the caller likes (time-varying formants). */
@@ -108,97 +107,167 @@ function finish(d: Float32Array, sr: number, peak: number, room = 0.22): void {
   }
 }
 
-interface CallShape {
-  dur: number;
-  /** Pitch of the pulses (Hz) over 0..1 of the call. */
-  f0(t: number): number;
-  /** Formant centres (Hz) over the call. */
-  formants(t: number): [number, number, number];
-  /** Breath noise share 0..1. */
-  breath: number;
-  /** Stridulation rate (Hz): the rasp. */
-  rasp: number;
-  /** Loudness envelope over 0..1. */
-  env(t: number): number;
-  drive: number;
+/*
+ * Big-bug voices are not voices: there is no throat, so no clear pitch and no vowel (a pitched,
+ * formant-shaped call sounds like a crow's caw). They are built from layers instead.
+ *
+ * The scream follows the giant-spider recipe of big fantasy films: a high, wet squealing screech
+ * (the classic source is a squeezed rubber toy full of liquid: squeaks breaking up into bubbles),
+ * with almost no low end, under a long, rough, alligator-like hiss. Clicks of the mandibles start it.
+ */
+
+/** Sample range [from, to) of a layer that starts at `t0` and lasts `dur`, clipped to the buffer. */
+function span(d: Float32Array, sr: number, t0: number, dur: number): [number, number] {
+  const o = Math.max(0, Math.floor(t0 * sr));
+  return [o, Math.min(d.length, o + Math.floor(dur * sr))];
 }
 
-/** A pulsed, rasped, formant-shaped call: the scream and the attack snarl. */
-function renderCall(sr: number, seed: number, c: CallShape): Float32Array {
-  const r = rng(seed);
-  const n = Math.floor(c.dur * sr);
-  const out = new Float32Array(n);
-  const f1 = new Biquad(sr), f2 = new Biquad(sr), f3 = new Biquad(sr);
-  const hp = new Biquad(sr).set('hp', 320, 0.7);
-  const pitchJit = wander(r, 25, sr);
-  const ampJit = wander(r, 40, sr);
-  const raspJit = wander(r, 9, sr);
-  let phase = 0, pulse = 0, pulseGain = 1, raspPhase = 0;
+/**
+ * Wet squeal: a squeezed, liquid-filled rubber squeak. A narrow, slightly distorted tone whose pitch
+ * jitters fast and jumps as the squeeze catches and slips, choked now and then by the liquid.
+ */
+function wetSqueal(
+  d: Float32Array, sr: number, r: () => number,
+  o: { t0: number; dur: number; f: (t: number) => number; env: (t: number) => number; gain: number }
+): void {
+  const [i0, i1] = span(d, sr, o.t0, o.dur);
+  const n = i1 - i0;
+  const fast = wander(r, 38, sr), slow = wander(r, 7, sr);
+  const hp = new Biquad(sr).set('hp', 700, 0.7);
+  let ph = 0, jump = 1, nextJump = 0, choke = 1, chokeTarget = 1, nextChoke = 0;
   for (let i = 0; i < n; i++) {
     const t = i / n;
-    if ((i & 31) === 0) {
-      const [a, b, cc] = c.formants(t);
-      f1.set('bp', a, 4.5);
-      f2.set('bp', b, 6);
-      f3.set('bp', cc, 8);
+    // The squeeze catches and slips: the pitch hops by a few semitones every 30-90 ms
+    if (i >= nextJump) {
+      nextJump = i + Math.floor(sr * (0.03 + r() * 0.06));
+      jump = Math.pow(2, ((r() - 0.5) * 5) / 12);
     }
-    // Pulse source with jitter; each new pulse draws its own loudness (shimmer), every other one weaker
-    const f = c.f0(t) * (1 + pitchJit() * 0.045);
-    phase += f / sr;
-    if (phase >= 1) {
-      phase -= 1;
-      pulse++;
-      pulseGain = (pulse & 1 ? 0.55 + r() * 0.25 : 0.9 + r() * 0.2) * (1 + ampJit() * 0.2);
+    // Liquid in the way: the squeal gutters and comes back
+    if (i >= nextChoke) {
+      nextChoke = i + Math.floor(sr * (0.02 + r() * 0.05));
+      chokeTarget = r() < 0.25 ? 0.15 + r() * 0.3 : 0.8 + r() * 0.2;
     }
-    const g = phase < 0.32 ? Math.sin((Math.PI * phase) / 0.32) ** 2 * pulseGain : 0;
-    const noise = r() * 2 - 1;
-    // Breath: always a little, more inside each pulse
-    const src = g * (1 - c.breath) + noise * c.breath * (0.35 + g * 0.9);
-    // Formants in parallel (F1 strongest)
-    let v = f1.run(src) * 1.0 + f2.run(src) * 0.75 + f3.run(src) * 0.45;
-    // Stridulation: an irregular rasp chopping the sound
-    raspPhase += (c.rasp * (1 + raspJit() * 0.3)) / sr;
-    const rp = raspPhase % 1;
-    v *= 0.55 + 0.45 * (rp < 0.5 ? 1 : Math.exp(-(rp - 0.5) * 12));
-    out[i] = hp.run(v) * c.env(t) * c.drive;
+    choke += (chokeTarget - choke) * 0.004;
+    const f = o.f(t) * jump * (1 + fast() * 0.06 + slow() * 0.05);
+    ph += f / sr;
+    // A pinched rubbery tone: a sine pushed into distortion (odd overtones), edged with noise
+    const x = Math.tanh(Math.sin(2 * Math.PI * ph) * 2.6) + (r() * 2 - 1) * 0.18;
+    d[i0 + i] += hp.run(x) * choke * o.env(t) * o.gain;
   }
-  return out;
 }
 
+/** Bubbles: tiny rising "blups" of liquid, `density` a second (the wetness of the screech). */
+function gurgle(d: Float32Array, sr: number, r: () => number, t0: number, dur: number, density: number, env: (t: number) => number, gain: number): void {
+  const [i0, i1] = span(d, sr, t0, dur);
+  let i = i0;
+  while (i < i1) {
+    i += Math.floor((sr / density) * (0.2 + r() * 1.6));
+    if (i >= i1) break;
+    const f0 = 500 + r() * 1300, rise = 0.3 + r() * 0.6, tau = 0.006 + r() * 0.014;
+    const len = Math.min(d.length - i, Math.floor(tau * 5 * sr));
+    const g = gain * (0.4 + r() * 0.6) * env((i - i0) / (i1 - i0));
+    let ph = 0;
+    for (let k = 0; k < len; k++) {
+      const tt = k / sr;
+      ph += (f0 * (1 + rise * (1 - Math.exp(-tt / tau)))) / sr;
+      d[i + k] += Math.sin(2 * Math.PI * ph) * Math.exp(-tt / tau) * g;
+    }
+  }
+}
+
+/**
+ * Hiss: air forced out. `bright` 1 is the thin spiracle hiss; lower is the throatier hiss of a big
+ * reptile. `flutter` (Hz) shakes it like an alligator's rough exhale.
+ */
+function hiss(d: Float32Array, sr: number, r: () => number, t0: number, dur: number, env: (t: number) => number, gain: number, bright = 1, flutter = 0): void {
+  const [i0, i1] = span(d, sr, t0, dur);
+  const n = i1 - i0;
+  const hp = new Biquad(sr).set('hp', 1400 * bright, 0.7);
+  const bp = new Biquad(sr).set('bp', 4600 * bright, 0.9);
+  const rough = wander(r, 70, sr), flJit = wander(r, 5, sr);
+  let fl = 0;
+  for (let i = 0; i < n; i++) {
+    const x = r() * 2 - 1;
+    const v = hp.run(x) * 0.6 + bp.run(x) * 0.9;
+    let a = 0.8 + rough() * 0.25;
+    if (flutter > 0) {
+      fl += (flutter * (1 + flJit() * 0.3)) / sr;
+      a *= 0.6 + 0.4 * Math.abs(Math.sin(Math.PI * fl));
+    }
+    d[i0 + i] += v * a * env(i / n) * gain;
+  }
+}
+
+/** Creaking rattle: dark noise chopped into uneven ticks 25-45 times a second (a low, dry growl). */
+function rattle(d: Float32Array, sr: number, r: () => number, t0: number, dur: number, rate: number, env: (t: number) => number, gain: number): void {
+  const [i0, i1] = span(d, sr, t0, dur);
+  const n = i1 - i0;
+  const lp = new Biquad(sr).set('lp', 750, 0.9);
+  const hp = new Biquad(sr).set('hp', 110, 0.7);
+  const body = new Biquad(sr).set('bp', 300 + r() * 120, 3);
+  const jit = wander(r, 12, sr);
+  let ph = 0, tick = 0;
+  for (let i = 0; i < n; i++) {
+    ph += (rate * (1 + jit() * 0.35)) / sr;
+    if (ph >= 1) {
+      ph -= 1;
+      tick = 0.5 + r() * 0.5;
+    }
+    tick *= 0.9965;
+    const x = hp.run(lp.run(r() * 2 - 1));
+    d[i0 + i] += (x + body.run(x) * 1.5) * tick * env(i / n) * gain * 2.5;
+  }
+}
+
+/** A burst of mandible clicks (chittering) between `t0` and `t0 + dur`. */
+function chitter(d: Float32Array, sr: number, r: () => number, t0: number, dur: number, gap: number, gain: number): void {
+  const base = 2400 + r() * 2000;
+  for (let t = t0; t < t0 + dur; t += gap * (0.55 + r() * 0.9)) addClick(d, sr, t, r, base * (0.8 + r() * 0.4), gain * (0.6 + r() * 0.4));
+}
+
+const attackRelease = (a: number, relFrom: number, curve = 1.4) => (t: number) =>
+  Math.min(1, t / a) * (t < relFrom ? 1 : Math.max(0, 1 - (t - relFrom) / (1 - relFrom)) ** curve);
+
+/**
+ * Spotting the player: the mandibles click, a high wet squealing screech breaks out of a long,
+ * rough reptile hiss that outlasts it.
+ */
 function renderScream(sr: number, seed: number): Float32Array {
   const r = rng(seed * 7 + 1);
-  const peakAt = 0.12 + r() * 0.08;
-  const top = 360 + r() * 90;
-  const d = renderCall(sr, seed, {
-    dur: 0.95 + r() * 0.3,
-    f0: (t) => (t < peakAt ? 220 + (top - 220) * (t / peakAt) : top - (top - 150) * Math.pow((t - peakAt) / (1 - peakAt), 0.8)),
-    formants: (t) => [950 + 500 * Math.sin(Math.PI * Math.min(1, t * 1.6)), 2500 + 600 * (1 - t), 4300 + 300 * Math.sin(t * 9)],
-    breath: 0.42,
-    rasp: 46 + r() * 16,
-    env: (t) => Math.min(1, t / 0.03) * (t < 0.6 ? 1 + 0.15 * Math.sin(t * 70) : Math.max(0, 1 - (t - 0.6) / 0.4) ** 1.4),
-    drive: 2.2,
+  const dur = 1.3 + r() * 0.4;
+  const d = new Float32Array(Math.floor(dur * sr));
+  const peakAt = 0.12 + r() * 0.1;
+  const lo = 1500 + r() * 300, top = 2700 + r() * 700, end = 1700 + r() * 300;
+  const sq = dur * (0.55 + r() * 0.15);
+  chitter(d, sr, r, 0, 0.1, 0.015, 0.8);
+  wetSqueal(d, sr, r, {
+    t0: 0.06,
+    dur: sq,
+    f: (t) => (t < peakAt ? lo + (top - lo) * (t / peakAt) : top - (top - end) * Math.pow((t - peakAt) / (1 - peakAt), 0.8)),
+    env: attackRelease(0.04, 0.6, 1.3),
+    gain: 0.75,
   });
-  finish(d, sr, 0.85, 0.3);
+  gurgle(d, sr, r, 0.08, sq + 0.15, 55, attackRelease(0.1, 0.5), 0.35);
+  // The hiss swells under the squeal and carries on after it, fading slowly
+  hiss(d, sr, r, 0.03, dur - 0.03, (t) => Math.min(1, t / 0.12) * (t < 0.45 ? 0.75 + t : Math.max(0, 1 - (t - 0.45) / 0.55) ** 1.3 * 1.2), 0.75, 0.42, 21 + r() * 6);
+  finish(d, sr, 0.42, 0.3);
   return d;
 }
 
+/** Lunging / biting: a fang snap, a hard hiss and a short wet squeal. */
 function renderAttack(sr: number, seed: number): Float32Array {
   const r = rng(seed * 13 + 3);
-  const top = 480 + r() * 120;
-  const d = renderCall(sr, seed + 99, {
-    dur: 0.38 + r() * 0.12,
-    f0: (t) => (t < 0.25 ? 300 + (top - 300) * (t / 0.25) : top - (top - 230) * ((t - 0.25) / 0.75)),
-    formants: (t) => [1300 - 300 * t, 3100 - 500 * t, 4800],
-    breath: 0.55,
-    rasp: 70 + r() * 20,
-    env: (t) => Math.min(1, t / 0.01) * Math.max(0, 1 - t) ** 1.2,
-    drive: 3.2,
-  });
+  const dur = 0.45 + r() * 0.15;
+  const d = new Float32Array(Math.floor(dur * sr));
+  const top = 2800 + r() * 700;
+  wetSqueal(d, sr, r, { t0: 0.015, dur: dur * 0.55, f: (t) => top - 700 * t, env: attackRelease(0.01, 0.4, 1.2), gain: 0.65 });
+  gurgle(d, sr, r, 0.02, dur * 0.6, 70, attackRelease(0.02, 0.4), 0.3);
+  hiss(d, sr, r, 0, dur, attackRelease(0.008, 0.2, 1.5), 1, 0.5, 26);
   // A hard transient at the snap of the fangs
   const n = Math.floor(sr * 0.012);
   const bp = new Biquad(sr).set('bp', 3600, 2);
   for (let i = 0; i < n; i++) d[i] += bp.run(r() * 2 - 1) * Math.exp(-i / (n * 0.25)) * 1.5;
-  finish(d, sr, 0.9, 0.25);
+  finish(d, sr, 0.45, 0.25);
   return d;
 }
 
@@ -232,13 +301,10 @@ function renderIdle(sr: number, seed: number): Float32Array {
     }
     t += 0.12 + r() * 0.25;
   }
-  // A slow breath under it
-  const lp = new Biquad(sr).set('lp', 2200, 0.7);
-  const hp = new Biquad(sr).set('hp', 500, 0.7);
-  for (let i = 0; i < d.length; i++) {
-    const x = i / d.length;
-    d[i] += hp.run(lp.run(r() * 2 - 1)) * Math.sin(Math.PI * x) ** 2 * 0.12;
-  }
+  // A slow hiss and a faint creak under it
+  hiss(d, sr, r, 0, dur, (x) => Math.sin(Math.PI * x) ** 2, 0.1, 0.8);
+  rattle(d, sr, r, dur * 0.2, dur * 0.6, 26, (x) => Math.sin(Math.PI * x) ** 2, 0.25);
+  gurgle(d, sr, r, dur * 0.3, dur * 0.4, 8, (x) => Math.sin(Math.PI * x), 0.12);
   finish(d, sr, 0.5, 0.35);
   return d;
 }

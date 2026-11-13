@@ -193,6 +193,7 @@ const tAvoid = new THREE.Vector3();
 const tWet = new THREE.Vector3();
 const tFwd = new THREE.Vector3();
 const tPrevUp = new THREE.Vector3();
+const tFace = new THREE.Vector3();
 const tMat = new THREE.Matrix4();
 const tQuat = new THREE.Quaternion();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -381,6 +382,8 @@ export class Spider extends Pest {
     if (tangent(tA, this.up)) this.vel.copy(tA).multiplyScalar(4);
     this.state = 'dazed';
     this.timer = 0.9;
+    // No pounce the moment the daze wears off (it used to leap straight back through the player)
+    this.cooldown = Math.max(this.cooldown, 1.7);
   }
 
   // ---------------------------------------------------------------- surfaces
@@ -410,6 +413,12 @@ export class Spider extends Pest {
   private wet(p: THREE.Vector3, n: THREE.Vector3): boolean {
     tWet.copy(p).addScaledVector(n, RIDE * this.scale);
     return waterAbove(tWet) > tWet.y;
+  }
+
+  /** Cosine between the heading and the way to `target`, in the surface plane (1 straight ahead, -1 behind). */
+  private facing(target: THREE.Vector3): number {
+    tFace.subVectors(target, this.position);
+    return tangent(tFace, this.up) ? this.fwd.dot(tFace) : 1;
   }
 
   /** Turns the heading towards `dir` (world) within the surface plane, at most `rate`·dt. */
@@ -499,10 +508,19 @@ export class Spider extends Pest {
     this.hitPoint(tOrigin);
     tDir.copy(this.vel).divideScalar(sp || 1);
     const t = sp > 1e-3 ? env.cast(tOrigin, tDir, len + RIDE * s, tN) : -1;
-    if (tOrigin.distanceTo(tB.copy(player).setY(player.y - 0.3)) < 1.0 + 0.3 * s && this.bite <= 0) {
-      if (port.hurt(pos, 7, 'spider')) this.bite = 1;
-      this.vel.x *= -0.3;
-      this.vel.z *= -0.3;
+    if (tOrigin.distanceTo(tB.copy(player).setY(player.y - 0.3)) < 1.0 + 0.3 * s) {
+      if (this.bite <= 0 && port.hurt(pos, 7, 'spider')) this.bite = 1;
+      // Bounces off the player's body (whether the bite landed or not): never flies through them
+      tC.set(tOrigin.x - player.x, 0, tOrigin.z - player.z);
+      const l = tC.length();
+      if (l > 1e-3) {
+        tC.divideScalar(l);
+        const into = this.vel.x * tC.x + this.vel.z * tC.z;
+        if (into < 1.5) {
+          this.vel.x += tC.x * (1.5 - into);
+          this.vel.z += tC.z * (1.5 - into);
+        }
+      }
     }
     if (t >= 0) {
       tC.copy(tOrigin).addScaledVector(tDir, t);
@@ -818,7 +836,10 @@ export class Spider extends Pest {
         want = dist > 1.0 * s + 0.5 ? 4.6 : 0;
         const body = this.hitPoint(tC);
         const reach = body.distanceTo(tA.copy(player).setY(player.y - 0.3));
-        if (this.bite <= 0 && this.cooldown <= 0 && reach < 1.3) {
+        // The fangs are at the front: it bites or pounces only once it faces the player (close
+        // up it stands and turns on the spot first)
+        const ahead = this.facing(player);
+        if (this.bite <= 0 && this.cooldown <= 0 && reach < 1.3 && ahead > 0.75) {
           // Bite
           this.bite = 1;
           this.cooldown = 1.3;
@@ -830,9 +851,9 @@ export class Spider extends Pest {
           this.cooldown = 2.5;
           this.startFlight();
           this.playVoice('attack');
-        } else if (sees && this.cooldown <= 0 && this.up.y > 0.4 && dist > 2.6 && dist < 6 && Math.abs(dy) < 1.8) {
-          // Pounce
-          const hs = Math.min(9, flat / 0.5);
+        } else if (sees && this.cooldown <= 0 && this.up.y > 0.4 && dist > 2.6 && dist < 6 && Math.abs(dy) < 1.8 && ahead > 0.85) {
+          // Pounce: lands just in front of the player (its legs reach them), not on top of them
+          const hs = Math.min(9, Math.max(0, flat - (0.8 + 0.4 * s)) / 0.5);
           this.vel.set((dx / flat) * hs, 4.2 + dy * 1.5, (dz / flat) * hs);
           this.cooldown = 2.2;
           this.startFlight();
@@ -905,6 +926,17 @@ export class Spider extends Pest {
       // Up follows the rock's normal smoothly (the mesh's triangles are faceted)
       this.up.lerp(this.upTarget, Math.min(1, dt * 10)).normalize();
       tangent(this.fwd, this.up) || (this.fwd.set(1, 0, 0), tangent(this.fwd, this.up));
+    }
+    // The player's body is solid to a crawling spider: shoved out of it, never walks through
+    if (this.state !== 'leap' && this.up.y > 0.5 && Math.abs(player.y - 0.9 - this.position.y) < 1.4) {
+      const minR = 0.6 * this.scale + 0.3;
+      const ox = this.position.x - player.x, oz = this.position.z - player.z;
+      const d = Math.hypot(ox, oz);
+      if (d < minR) {
+        const k = d > 1e-3 ? (minR - d) / d : 0;
+        this.position.x += d > 1e-3 ? ox * k : this.fwd.x * -minR;
+        this.position.z += d > 1e-3 ? oz * k : this.fwd.z * -minR;
+      }
     }
     this.orient(this.state === 'leap' ? Math.min(1, dt * 5) : Math.min(1, dt * 14));
 

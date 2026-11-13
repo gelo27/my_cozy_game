@@ -8,9 +8,11 @@
   "steps": 16,
   "root": 48,
   "scale": [0, 2, 4, 6, 7, 9, 11],
-  "gain": 0.8,
+  "gain": 0.50,
+  "space": "hall",
+  "wet": 0.36,
   "parts": {
-    "k": { "i": "kalimba", "vol": 0.42 },
+    "k": { "i": "kalimba", "vol": 0.42, "tone": { "bright": 0.8, "decay": 1.4 } },
     "h": { "i": "handpan", "vol": 0.42 },
     "p": { "i": "pad", "vol": 0.1 },
     "d": { "i": "darkpad", "vol": 0.12 },

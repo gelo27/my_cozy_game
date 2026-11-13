@@ -296,7 +296,7 @@ export class FarmingAbility implements IAbility {
       const fcx = job.gx + FIELD_CELLS / 2, fcz = job.gz + FIELD_CELLS / 2;
       if ((fcx - t.x) ** 2 + (fcz - t.z) ** 2 > 2.25 + (FIELD_CELLS / 2) ** 2) bladePos.set(fcx, t.y - 0.9, fcz);
       context.particleManager?.emitDirtClods(bladePos, 12);
-      audioEngine.at(bladePos).playPlantSeed();
+      audioEngine.at(bladePos).playShovelDig();
       job.swingsLeft--;
       if (job.swingsLeft <= 0) this.finishShovelJob();
     }
@@ -323,7 +323,7 @@ export class FarmingAbility implements IAbility {
       if (field) {
         fields.onDug?.(field);
         farming.puffField(field, 8);
-        audioEngine.at(field.center).playBuildPlace(true);
+        audioEngine.at(field.center).playShovelPat(0.42);
       }
     } else if (job.kind === 'uproot' && job.fieldId) {
       farming.uproot(job.fieldId, this.give);
@@ -331,7 +331,7 @@ export class FarmingAbility implements IAbility {
       const field = fields.get(job.fieldId);
       if (field && !field.crop) {
         farming.puffField(field, 6);
-        audioEngine.at(field.center).playBuildPlace(true);
+        audioEngine.at(field.center).playShovelPat(0.42);
         fields.removeField(field.id);
       }
     }

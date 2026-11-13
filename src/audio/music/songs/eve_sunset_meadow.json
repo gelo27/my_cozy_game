@@ -8,12 +8,14 @@
   "steps": 16,
   "root": 50,
   "scale": [0, 2, 4, 5, 7, 9, 11],
-  "gain": 0.82,
+  "gain": 0.85,
+  "space": "field",
+  "wet": 0.26,
   "parts": {
-    "m": { "i": "harp", "vol": 0.52 },
+    "m": { "i": "harp", "vol": 0.52, "tone": { "bright": 1.2 } },
     "c": { "i": "pluck", "vol": 0.24 },
     "b": { "i": "bass", "oct": -1, "vol": 0.4 },
-    "p": { "i": "pad", "vol": 0.13 },
+    "p": { "i": "strings", "vol": 0.1, "oct": -1 },
     "g": { "i": "bells", "layer": "night", "vol": 0.18 }
   },
   "pat": {

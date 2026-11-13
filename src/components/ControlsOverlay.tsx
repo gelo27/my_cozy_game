@@ -162,7 +162,7 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, 
           </div>
 
           {/* Action cluster, kept above the hotbar */}
-          <div className="pointer-events-auto absolute bottom-20 right-3 short:bottom-3 short:right-2 grid grid-cols-2 gap-2 items-end select-none">
+          <div className="pointer-events-auto absolute bottom-20 right-3 short:bottom-3 short:right-2 [html[data-fishing]_&]:hidden grid grid-cols-2 gap-2 items-end select-none">
             <button
               onTouchStart={tap('interactJustPressed')}
               onTouchEnd={release('interactHeld')}

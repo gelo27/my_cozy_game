@@ -665,6 +665,10 @@ export class CharacterController {
       } else if (this.gatheringAbility?.swingFacing != null && !isMovingInput) {
         // Chopping / mining: keep facing the tree or rock being struck (like the pickaxe always did)
         targetFacingAngle = this.gatheringAbility.swingFacing;
+      } else if (this.lockFacing !== null && !isMovingInput && !context.isSwimming && !context.isHoldingObject) {
+        // Locked onto an enemy: standing still the player turns to face it (moving, they face where
+        // they run; an axe swing still turns them to the enemy, since the camera looks at it)
+        targetFacingAngle = this.lockFacing;
       } else if (this.model.activeWeapon === 6 && this.model.axeSwingProgress > 0) {
         // Face where the camera looks while swinging the axe
         targetFacingAngle = Math.atan2(cameraForward.x, cameraForward.z);
@@ -742,6 +746,9 @@ export class CharacterController {
 
   /** Seconds the player stays knocked back without control. */
   public stunTimer = 0;
+
+  /** Yaw towards the locked-on enemy (set by the engine each frame; null when not locked). */
+  public lockFacing: number | null = null;
 
   /** Throws the player away from a hit (horizontal direction `dir`) and stuns them briefly. */
   public knockback(dir: THREE.Vector3, power: number, stunSeconds = 0.5): void {

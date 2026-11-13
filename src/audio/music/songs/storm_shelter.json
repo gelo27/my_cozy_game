@@ -8,10 +8,12 @@
   "steps": 16,
   "root": 45,
   "scale": [0, 2, 3, 5, 7, 9, 10],
-  "gain": 0.75,
+  "gain": 0.98,
+  "space": "room",
+  "wet": 0.32,
   "parts": {
-    "m": { "i": "handpan", "vol": 0.42 },
-    "c": { "i": "harp", "vol": 0.24 },
+    "m": { "i": "cello", "vol": 0.34, "oct": -1 },
+    "c": { "i": "felt", "vol": 0.26, "oct": 1 },
     "d": { "i": "darkpad", "vol": 0.18 },
     "b": { "i": "bass", "oct": -1, "vol": 0.28 }
   },

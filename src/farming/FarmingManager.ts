@@ -4,7 +4,6 @@ import { CropType, CropState, CROP_DEFINITIONS, CROP_TYPES, FarmInteractionPromp
 import { FarmingMeshGenerator } from './FarmingMeshGenerator';
 import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
-import { music } from '../audio/music/MusicDirector';
 import { FieldManager, FarmField, FieldSaveData, FIELD_CELLS, FIELD_CRATE_YIELD, FIELD_SEED_COST } from './FieldManager';
 import { fieldCropTime } from './WheatModel';
 import { HarvestFlight, FlightItem } from './HarvestFlight';
@@ -208,7 +207,6 @@ export class FarmingManager {
     field.crop = null;
     this.fields.markCropsDirty();
     audioEngine.at(field.center).playHarvest();
-    music.stinger('harvest');
     // A field always returns some seed (2-4), so it can be sown again
     const bonusSeeds = 2 + Math.floor(Math.random() * 3);
     const def = CROP_DEFINITIONS[cropType];

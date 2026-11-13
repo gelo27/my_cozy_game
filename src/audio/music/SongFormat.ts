@@ -10,7 +10,10 @@
  * section's longest one.
  */
 
-export type SongKind = 'track' | 'stinger' | 'loop' | 'motif';
+import { tonedName, type Tone } from './patches';
+import type { SpaceName } from './synth';
+
+export type SongKind = 'track' | 'loop';
 
 export interface SongPartDef {
   /** Patch name (see patches.ts). */
@@ -20,6 +23,8 @@ export interface SongPartDef {
   vol?: number;
   /** Octave shift. */
   oct?: number;
+  /** This song's colour of the instrument (brighter, longer...): see Tone in patches.ts. */
+  tone?: Tone;
 }
 
 export interface SongJson {
@@ -27,7 +32,7 @@ export interface SongJson {
   id: string;
   kind: SongKind;
   title?: string;
-  /** Where the director may pick it: time slots, weather types, 'cave', 'danger', or an event id for stingers. */
+  /** Where the director may pick it: time slots, weather types, or 'danger'. */
   mood?: string[];
   bpm: number;
   /** Steps per bar (16 for 4/4 in sixteenths, 12 for 3/4 or 6/8). */
@@ -37,10 +42,15 @@ export interface SongJson {
   scale: number[];
   /** Overall level of this song (default 1). */
   gain?: number;
+  /** Reverb space (default hall) and how much of it (default 0.25). */
+  space?: SpaceName;
+  wet?: number;
   parts: Record<string, SongPartDef>;
   pat: Record<string, string>;
   sections: Record<string, Record<string, string>>;
   form: string;
+  /** Loops: the section of the form the loop returns to (default the first), so an intro plays once. */
+  loop?: string;
 }
 
 export interface NoteEvent {
@@ -58,6 +68,8 @@ export interface CompiledSong {
   title: string;
   mood: readonly string[];
   gain: number;
+  space: SpaceName;
+  wet: number;
   stepDur: number;
   steps: number;
   total: number;
@@ -66,6 +78,8 @@ export interface CompiledSong {
   parts: { patch: string; layer: string | null }[];
   /** Step index where each section of the form starts (first is 0). */
   sectionStarts: number[];
+  /** Step a loop returns to after its last step. */
+  loopStep: number;
   /** Every patch the song needs. */
   patches: string[];
   /** Length in seconds. */
@@ -92,7 +106,8 @@ export function compileSong(song: SongJson): CompiledSong {
     );
   }
   const partIds = Object.keys(song.parts);
-  const parts = partIds.map((id) => ({ patch: song.parts[id].i, layer: song.parts[id].layer ?? null }));
+  const patchOf = (id: string) => tonedName(song.parts[id].i, song.parts[id].tone);
+  const parts = partIds.map((id) => ({ patch: patchOf(id), layer: song.parts[id].layer ?? null }));
 
   const expand = (seq: string): ({ pat: string; tr: number } | null)[] => {
     const bars: ({ pat: string; tr: number } | null)[] = [];
@@ -140,7 +155,7 @@ export function compileSong(song: SongJson): CompiledSong {
         for (const n of pats.get(bar.pat)!) {
           table[(bar0 + b) * song.steps + n.st].push({
             part: pi,
-            patch: def.i,
+            patch: parts[pi].patch,
             midi: degToMidi(n.dg + bar.tr) + 12 * (def.oct ?? 0),
             len: n.len,
             vel: n.vel * (def.vol ?? 1),
@@ -157,12 +172,15 @@ export function compileSong(song: SongJson): CompiledSong {
     title: song.title ?? song.id,
     mood: song.mood ?? [],
     gain: song.gain ?? 1,
+    space: song.space ?? 'hall',
+    wet: song.wet ?? 0.25,
     stepDur,
     steps: song.steps,
     total,
     table,
     parts,
     sectionStarts,
+    loopStep: song.loop && form.includes(song.loop) ? sectionStarts[form.indexOf(song.loop)] : 0,
     patches: [...new Set(parts.map((p) => p.patch))],
     duration: total * stepDur,
   };

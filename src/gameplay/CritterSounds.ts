@@ -130,6 +130,41 @@ export const critterSounds = {
       noise(ctx, out, t, 0.08, 0.16, 1800, 1);
     }, 5);
   },
+  /**
+   * The player's blow landing: a sharp transient crack, a mid smack, a body thump pitched to the
+   * creature's size, all through a soft clipper for crunch. The finishing blow adds a deep boom.
+   */
+  impact(pos: Pos, kind: 'hedgehog' | 'dragon' | 'shark' | 'spider', weapon: 'melee' | 'pebble', kill: boolean): void {
+    voice(pos, kill ? 0.8 : 0.4, (ctx, out, t) => {
+      const v = 0.92 + Math.random() * 0.16;
+      const body = (kind === 'shark' ? 0.6 : kind === 'dragon' ? 0.85 : kind === 'spider' ? 1.1 : 1.25) * v;
+      const melee = weapon === 'melee';
+      // Crunch: everything runs through a tanh clipper, then trims back down
+      const shaper = ctx.createWaveShaper();
+      const curve = new Float32Array(1024);
+      for (let i = 0; i < curve.length; i++) curve[i] = Math.tanh(((i / (curve.length - 1)) * 2 - 1) * 2.6);
+      shaper.curve = curve;
+      const trim = ctx.createGain();
+      trim.gain.value = melee ? 0.55 : 0.4;
+      shaper.connect(trim).connect(out);
+      // 1. Transient crack (the "tick" the ear locks onto)
+      noise(ctx, shaper, t, 0.02, 0.9, 4200 * v, 0.7, 'highpass');
+      // 2. Smack: flesh / shell slap
+      noise(ctx, shaper, t, melee ? 0.08 : 0.05, melee ? 0.75 : 0.5, (melee ? 1300 : 2400) * v, 1.1, 'bandpass', melee ? 500 : 1200);
+      // 3. Body thump: a fast pitch drop
+      tone(ctx, shaper, t, 'sine', 190 * body, 48 * body, melee ? 0.16 : 0.1, melee ? 0.8 : 0.45);
+      if (melee) {
+        // The blade biting in: a short gritty slice
+        noise(ctx, shaper, t + 0.004, 0.06, 0.3, 3200 * v, 3, 'bandpass', 1800);
+      }
+      if (kill) {
+        // Finishing blow: deep boom and a dull tail
+        tone(ctx, out, t, 'sine', 110 * body, 34, 0.45, 0.5);
+        noise(ctx, out, t + 0.01, 0.5, 0.35, 900, 0.7, 'lowpass', 90);
+        tone(ctx, out, t + 0.03, 'triangle', 900 * v, 1500 * v, 0.12, 0.05);
+      }
+    }, 6);
+  },
   /** A beaten pest vanishes in a puff. */
   poof(pos: Pos): void {
     voice(pos, 0.7, (ctx, out, t) => {

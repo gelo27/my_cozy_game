@@ -2,12 +2,15 @@ import React, { useEffect, useState } from 'react';
 import { CharacterTelemetry } from '../character/CharacterController';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { ZeldaOxygenWheel } from './ZeldaOxygenWheel';
+import { PlayerHearts } from './PlayerHearts';
 
 interface ViewportHUDProps {
   isWireframe: boolean;
   telemetry?: CharacterTelemetry;
   camera?: ThirdPersonCamera | null;
   maxSlope?: number;
+  /** Build / paint toolbars take the top centre: the hearts step aside. */
+  hideHearts?: boolean;
 }
 
 /**
@@ -42,9 +45,10 @@ const AimReticle: React.FC<{ telemetry?: CharacterTelemetry }> = ({ telemetry })
   );
 };
 
-export const ViewportHUD: React.FC<ViewportHUDProps> = ({ telemetry, camera }) => (
+export const ViewportHUD: React.FC<ViewportHUDProps> = ({ telemetry, camera, hideHearts }) => (
   <div id="viewport-tactical-hud" className="absolute inset-0 pointer-events-none select-none z-20 overflow-hidden">
     <AimReticle telemetry={telemetry} />
+    {!hideHearts && <PlayerHearts />}
     <ZeldaOxygenWheel telemetry={telemetry} camera={camera} />
   </div>
 );

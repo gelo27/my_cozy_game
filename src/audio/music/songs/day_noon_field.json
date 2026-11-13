@@ -8,9 +8,11 @@
   "steps": 16,
   "root": 55,
   "scale": [0, 2, 4, 5, 7, 9, 11],
-  "gain": 0.85,
+  "gain": 0.37,
+  "space": "field",
+  "wet": 0.2,
   "parts": {
-    "m": { "i": "marimba", "vol": 0.55 },
+    "m": { "i": "marimba", "vol": 0.55, "tone": { "bright": 1.25 } },
     "k": { "i": "kalimba", "vol": 0.32 },
     "c": { "i": "pluck", "vol": 0.28 },
     "b": { "i": "bass", "oct": -1, "vol": 0.48 },

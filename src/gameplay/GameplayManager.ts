@@ -12,6 +12,10 @@ import { PetSystem, Pet } from './PetSystem';
 import type RAPIER from '@dimforge/rapier3d-compat';
 import { PestSystem, PestKind, PestEnv } from './Pests';
 import { SlingshotSystem } from './Slingshot';
+import { LockOnSystem } from './LockOn';
+import { hitFx } from './HitFeedback';
+import { playerHealth } from './PlayerHealth';
+import { EnemyHealthBars } from './EnemyHealthBars';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { BuildingPieceType, BuiltPiece } from '../building/types/BuildingTypes';
@@ -35,6 +39,8 @@ export type GameplayPanel = 'cook' | 'shop' | 'workers' | 'storage' | null;
 const HIT_COIN_LOSS = 5;
 /** Coins for beating a pest. */
 const PEST_REWARD: Record<PestKind, number> = { hedgehog: 6, dragon: 15, shark: 20, spider: 8 };
+/** Half-hearts each pest's blow takes. */
+const PEST_HEART_DAMAGE = { hedgehog: 1, dragon: 2, shark: 2, spider: 1 } as const;
 const PEST_HIT_MSG = { hedgehog: 'pest.hitHedgehog', dragon: 'pest.hitDragon', shark: 'pest.hitShark', spider: 'pest.hitSpider' } as const;
 const PEST_DEFEAT_MSG = { hedgehog: 'pest.defeatedHedgehog', dragon: 'pest.defeatedDragon', shark: 'pest.defeatedShark', spider: 'pest.defeatedSpider' } as const;
 
@@ -108,6 +114,10 @@ export class GameplayManager {
   public readonly pets: PetSystem;
   public readonly pests: PestSystem;
   public readonly slingshot: SlingshotSystem;
+  /** Camera lock onto an enemy in a fight (Tab / middle mouse). */
+  public readonly lockOn: LockOnSystem;
+  /** Thin bars over enemies that were hit or are targeted. */
+  public readonly healthBars: EnemyHealthBars;
   public companion: CompanionNPC | null = null;
   public workers: WorkerManager | null = null;
   /** The storage chests' shared stock (workers' seeds, meals and yield). */
@@ -129,7 +139,12 @@ export class GameplayManager {
   private baseSpeeds: { walk: number; sprint: number } | null = null;
   private promptTimer = 0;
   private readonly rodTip = new THREE.Vector3();
-  private readonly castTarget = new THREE.Vector3();
+  private readonly castDir = new THREE.Vector3();
+  /** The on-screen fishing button is held (touch). */
+  private fishTouchHold = false;
+  /** The cast button was released since the last fishing trip. */
+  private fishArmed = true;
+  private fishTapPending = false;
   private readonly tmp = new THREE.Vector3();
   private lastPlayerPos = new THREE.Vector3();
   private invulnerable = 0;
@@ -152,6 +167,8 @@ export class GameplayManager {
   public onTimeSkip: (seconds: number) => void = () => {};
   /** After waking (autosave). */
   public onWake: () => void = () => {};
+  /** Out of hearts: the engine takes the player back to their bed. */
+  public onFaint: () => void = () => {};
 
   public onNotify: (text: string, type?: 'success' | 'info' | 'warning') => void = () => {};
 
@@ -164,7 +181,8 @@ export class GameplayManager {
     terrain: ConstructorParameters<typeof FishingSystem>[1],
     private readonly particles?: ConstructorParameters<typeof PetSystem>[2]
   ) {
-    this.fishing = new FishingSystem(scene, terrain);
+    this.fishing = new FishingSystem(scene, terrain, particles);
+    this.fishing.algae = props.algae;
     this.pets = new PetSystem(scene, terrain, particles);
     this.pests = new PestSystem(scene, terrain, particles);
     this.pests.port = {
@@ -178,6 +196,9 @@ export class GameplayManager {
       playerSwimming: () => !!this.character.swimAbility?.isSwimming,
     };
     this.slingshot = new SlingshotSystem(scene, this.pests, particles);
+    this.lockOn = new LockOnSystem(scene, this.pests);
+    hitFx.init(scene);
+    this.healthBars = new EnemyHealthBars(scene, this.pests);
   }
 
   /**
@@ -311,6 +332,7 @@ export class GameplayManager {
         this.updateBuff(seconds);
       }
       this.lastSleepNight = s.night;
+      playerHealth.refill();
       this.respawnBed = s.bed;
       this.revision++;
     }
@@ -346,8 +368,17 @@ export class GameplayManager {
     critterSounds.ouch();
     const lost = Math.min(HIT_COIN_LOSS, this.inventory.getItemCount('coins'));
     if (lost > 0) this.inventory.removeItem('coins', lost);
-    this.onNotify(t(PEST_HIT_MSG[kind], { n: lost }), 'warning');
     this.revision++;
+    // Sharks and dragon fire take a whole heart, the small pests half of one
+    if (playerHealth.damage(PEST_HEART_DAMAGE[kind])) {
+      this.onNotify(t('health.fainted'), 'warning');
+      // A moment to see the last heart go before the screen fades
+      window.setTimeout(() => {
+        playerHealth.refill();
+        this.onFaint();
+      }, 700);
+      this.invulnerable = 3;
+    } else this.onNotify(t(PEST_HIT_MSG[kind], { n: lost }), 'warning');
     return true;
   }
 
@@ -364,28 +395,23 @@ export class GameplayManager {
     this.updateBuff(dt);
     this.updateCooking(dt);
     this.invulnerable -= dt;
+    if (!this.sleep) playerHealth.update(dt);
     this.updateSleep(dt);
     this.pests.update(dt, pos, !isDriving && !this.sleep, !!this.explore?.inCave);
     this.slingshot.update(dt);
     if (this.sleep) return;
 
-    // Rod tip ~ above the right hand, in front of the player
     const facing = this.character.getFacingDirection();
-    this.rodTip.copy(pos).addScaledVector(facing, 0.9);
-    this.rodTip.y += 1.9;
-    this.fishing.update(dt, this.rodTip, this.weather.rainIntensity);
-
     if (isDriving || this.panel) {
       this.setPrompt(null);
       this.flowerTarget = null;
       if (this.fishing.busy) this.fishing.cancel();
+      this.updateFishing(dt, pos, facing, input, false);
       return;
     }
 
-    // Moving away cancels a cast
-    if (this.fishing.busy && moving && this.fishing.state.phase !== 'reel' && this.fishing.state.phase !== 'caught') {
-      if (this.fishing.state.phase !== 'escaped') this.fishing.cancel();
-    }
+    // Walking off ends the fishing (the landed fish still goes into the backpack)
+    if (this.fishing.busy && moving && this.fishing.state.phase !== 'caught') this.fishing.cancel();
 
     this.promptTimer -= dt;
     if (this.promptTimer <= 0) {
@@ -397,10 +423,9 @@ export class GameplayManager {
     const ownedByOthers = !!(this.character.farmingAbility?.currentPrompt || this.character.gatheringAbility?.currentPrompt);
     // Swimming / diving: whatever is in hand is put away and can't be used
     const swimming = this.character.telemetry.isSwimming;
-    if (swimming && this.fishing.busy && this.fishing.state.phase !== 'escaped') this.fishing.cancel();
+    if (swimming && this.fishing.busy) this.fishing.cancel();
     const equipped = swimming ? null : this.inventory.getEquippedItemId();
-    const hasRod = equipped === 'fishing_rod';
-    const pressed = m.interactJustPressed || (hasRod && m.shootJustPressed);
+    const pressed = m.interactJustPressed;
 
     // Slingshot: LMB / the touch tool button always shoots; E shoots when nothing here wants it
     if (equipped === 'slingshot' && !this.inventory.isInventoryOpen() && !this.character.buildAbility?.isBuildModeActive) {
@@ -410,12 +435,66 @@ export class GameplayManager {
       }
     }
 
-    if (this.fishing.busy && pressed) {
-      this.pressFishing();
-      return;
-    }
+    if (this.updateFishing(dt, pos, facing, input, equipped === 'fishing_rod')) return;
     if (keysG && this.prompt?.secondary) this.runAction('treat');
     if (pressed && this.prompt && !ownedByOthers) this.runAction(this.prompt.action);
+  }
+
+  /** The touch fishing button (hold to cast / reel). */
+  public setFishHold(down: boolean): void {
+    // A press is remembered until the next frame: quick taps shorter than a frame still count
+    if (down && !this.fishTouchHold) this.fishTapPending = true;
+    this.fishTouchHold = down;
+  }
+
+  /**
+   * Hold LMB / E / the touch button to charge a cast (the circle on the water shows where it goes),
+   * release to cast, hold again to reel in. True while fishing owns the input.
+   */
+  private updateFishing(dt: number, pos: THREE.Vector3, facing: THREE.Vector3, input: InputManager, hasRod: boolean): boolean {
+    const m = input.movement;
+    const blocked = !hasRod || this.inventory.isInventoryOpen() || !!this.character.buildAbility?.isBuildModeActive;
+    const hold = !blocked && (m.shoot || m.interact || this.fishTouchHold);
+    const tap = !blocked && (m.shootJustPressed || m.interactJustPressed || this.fishTapPending);
+    this.fishTapPending = false;
+    // A new cast needs the button let go first (so the hold that landed a fish doesn't recast)
+    if (!hold) this.fishArmed = true;
+
+    // Casts go where the camera looks
+    this.aim(this.castDir);
+    this.castDir.y = 0;
+    if (this.castDir.lengthSq() < 1e-4) this.castDir.copy(facing);
+    this.castDir.normalize();
+
+    const f = this.fishing;
+    // Charging starts as soon as the held button points at water (turning to the water while holding works too)
+    const wantsCast = m.shoot || this.fishTouchHold || (m.interact && this.prompt?.action === 'fish');
+    if (!f.busy && !blocked && this.fishArmed && wantsCast && f.canAim(pos, this.castDir)) {
+      this.fishArmed = false;
+      f.beginAim();
+    }
+    if (f.busy) this.fishArmed = false;
+    // Aiming: the angler turns to the cast
+    if (f.state.phase === 'aim') this.character.model?.setFacingAngleInstant(Math.atan2(this.castDir.x, this.castDir.z));
+
+    if (!this.character.model?.getRodTip(this.rodTip)) {
+      this.rodTip.copy(pos).addScaledVector(this.character.getFacingDirection(), 0.9);
+      this.rodTip.y += 1.9;
+    }
+    const ev = f.update(dt, { player: pos, rodTip: this.rodTip, aimDir: this.castDir, hold, tap, rain: this.weather.rainIntensity });
+    // (the rod's own sounds play in the fishing system); phones also feel the line
+    if (ev) haptic(ev.type === 'bite' ? [40, 40, 90] : ev.type === 'escape' ? 160 : ev.type === 'snag' ? [30, 30, 30] : ev.type === 'caught' ? 50 : ev.type === 'unsnag' ? 25 : 0);
+    if (ev?.type === 'noWater') this.onNotify(t('fishing.noWater'), 'info');
+    else if (ev?.type === 'escape') this.onNotify(t('fishing.escaped'), 'warning');
+    else if (ev?.type === 'snag') this.onNotify(t(ev.lostFish ? 'fishing.snagLost' : 'fishing.snagged'), 'warning');
+    else if (ev?.type === 'caught') {
+      this.inventory.addItem(ev.fishId, 1);
+      const item = this.inventory.getItem(ev.fishId);
+      audioEngine.playHarvest();
+      this.onNotify(t('play.caught', { name: dataName('item', ev.fishId, item?.name ?? ev.fishId) }), 'success');
+      this.revision++;
+    }
+    return f.busy;
   }
 
   /**
@@ -458,7 +537,7 @@ export class GameplayManager {
     }
 
     // Fixed stations win over pets: pets follow the player and would otherwise hijack every prompt
-    if (!this.character.telemetry.isSwimming && this.inventory.getEquippedItemId() === 'fishing_rod' && this.fishing.findCastTarget(pos, facing, this.castTarget)) {
+    if (!this.character.telemetry.isSwimming && this.inventory.getEquippedItemId() === 'fishing_rod' && this.fishing.canAim(pos, facing)) {
       return { text: t('play.cast'), key: 'E', action: 'fish' };
     }
     if (this.storage && this.props.findNearest(STORAGE_CHEST, pos, 2.2)) return { text: t('storage.open'), key: 'E', action: 'storage' };
@@ -510,14 +589,8 @@ export class GameplayManager {
   /** Also used by the on-screen buttons. */
   public runAction(action: GameplayPrompt['action'] | 'treat'): void {
     const pos = this.character.getPosition();
-    if (action === 'fish' && this.fishing.busy) {
-      this.pressFishing();
-    } else if (action === 'fish') {
-      const facing = this.character.getFacingDirection();
-      if (this.fishing.findCastTarget(pos, facing, this.castTarget)) {
-        this.fishing.cast(this.rodTip, this.castTarget);
-        audioEngine.playBuildSelect();
-      }
+    if (action === 'fish') {
+      // Fishing is driven by holding (LMB / E / the touch button, see updateFishing)
     } else if (action === 'explore') {
       this.explore?.interact();
       this.promptTimer = 0;
@@ -596,17 +669,6 @@ export class GameplayManager {
     this.character.model?.triggerJumpSquash();
     this.onNotify(t('play.milled', { n: FLOUR_PER_CRATE, name: dataName('item', 'flour', 'Борошно') }), 'success');
     this.promptTimer = 0;
-  }
-
-  private pressFishing(): void {
-    const fishId = this.fishing.press();
-    if (fishId) {
-      this.inventory.addItem(fishId, 1);
-      const item = this.inventory.getItem(fishId);
-      audioEngine.playHarvest();
-      this.onNotify(t('play.caught', { name: dataName('item', fishId, item?.name ?? fishId) }), 'success');
-    }
-    this.revision++;
   }
 
   public recipeName(recipeId: string): string {
@@ -838,6 +900,18 @@ export class GameplayManager {
 
   public dispose(): void {
     this.slingshot.dispose();
+    this.lockOn.dispose();
+    this.healthBars.dispose();
     this.tmp.set(0, 0, 0);
+  }
+}
+
+/** A short vibration on phones that support it (no-op elsewhere). */
+function haptic(pattern: number | number[]): void {
+  if (pattern === 0 || typeof navigator === 'undefined' || !('vibrate' in navigator)) return;
+  try {
+    navigator.vibrate(pattern);
+  } catch {
+    /* blocked (no user gesture yet): skip */
   }
 }

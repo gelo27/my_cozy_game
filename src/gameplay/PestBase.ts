@@ -5,6 +5,7 @@ import { waterLevelAt } from '../world/rivers/RiverWorld';
 import { ParticleManager } from '../particles/ParticleManager';
 import { EmoteBubble, emoteMaterial } from './Emotes';
 import { critterSounds } from './CritterSounds';
+import { hitFx, type HitWeapon } from './HitFeedback';
 
 /*
  * The common ground of every enemy: the world queries, what they can do to the player, and the
@@ -121,6 +122,8 @@ export abstract class Pest implements PestTarget {
   private sightTimer = Math.random() * SIGHT_INTERVAL;
   /** 1 right after a hit, decays: a squash-and-stretch wobble (no per-pest material clones). */
   private wobble = 0;
+  /** When the player last hit it (performance.now() seconds; the health bar shows for a while after). */
+  public hurtAt = -1e9;
   /** Hit by the player recently: skips the calm-down and comes back angry. */
   protected provoked = false;
 
@@ -194,12 +197,15 @@ export abstract class Pest implements PestTarget {
   }
 
   /** Struck by the player's axe or a pebble from `from`. Returns false when it was already beaten. */
-  public damage(amount: number, from: THREE.Vector3, port: PestPort, particles?: ParticleManager): boolean {
+  public damage(amount: number, from: THREE.Vector3, port: PestPort, particles?: ParticleManager, weapon: HitWeapon = 'melee'): boolean {
     if (!this.alive) return false;
     this.health -= amount;
     this.wobble = 1;
     this.provoked = true;
+    this.hurtAt = performance.now() / 1000;
     const at = this.hitPoint(tmpB);
+    // White flash, hit-stop slow-mo, impact star and sparks, the crunchy impact sound
+    hitFx.strike(this, this.group, at, from, this.kind, weapon, this.health <= 0);
     critterSounds.hurt(at, this.kind);
     particles?.emitJumpDust(at);
     if (this.health <= 0) {
@@ -229,8 +235,10 @@ export abstract class Pest implements PestTarget {
   /** Squash-and-stretch after a hit. */
   protected applyWobble(dt: number): void {
     if (this.wobble <= 0) return;
-    this.wobble = Math.max(0, this.wobble - dt * 3);
-    const k = Math.sin(this.wobble * 22) * 0.18 * this.wobble;
+    this.wobble = Math.max(0, this.wobble - dt * 2.6);
+    // Starts squashed by the blow (held through the hit-stop), then springs back and jiggles out
+    const w = this.wobble;
+    const k = Math.sin((1 - w) * 24 + 1.2) * 0.3 * w * w;
     this.group.scale.set(1 + k, 1 - k, 1 + k);
   }
 
@@ -242,6 +250,7 @@ export abstract class Pest implements PestTarget {
   abstract get threat(): number;
 
   public dispose(): void {
+    hitFx.forget(this);
     this.group.removeFromParent();
     this.group.traverse((o) => {
       const m = o as THREE.Mesh;

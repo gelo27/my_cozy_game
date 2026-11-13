@@ -38,6 +38,9 @@ import type RAPIER from '@dimforge/rapier3d-compat';
 
 const WHITE_MIST = new THREE.Color(0.92, 0.95, 1);
 
+/** Villagers' footsteps are only played this close to the listener (m). */
+const NPC_STEP_RANGE = 26;
+
 /** Painted terrain tile -> footstep recipe. */
 const TILE_SURFACE: Record<TerrainTileType, FootSurface> = {
   [TerrainTileType.GRASS]: 'grass',
@@ -58,6 +61,7 @@ function floorSurface(wallpaperId: string): FootSurface {
 import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
 import { GridNavigator } from '../navigation/GridNavigator';
 import { CompanionNPC } from '../npc/CompanionNPC';
+import { NPCAgent } from '../npc/NPCAgent';
 import { MAX_WORKERS, WorkerManager } from '../npc/WorkerManager';
 import { TaskBoard, WorkerRole } from '../npc/TaskBoard';
 import { FarmStorage, STORAGE_CHEST } from '../npc/FarmStorage';
@@ -100,6 +104,8 @@ import { setWebLight } from '../world/SpiderWebs';
 import { setGlassLight } from '../scene/GlassMatcap';
 import { VIEW_DISTANCE, isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState, GameplayPrompt } from '../gameplay/GameplayManager';
+import { lockOnSettings } from '../gameplay/LockOn';
+import { hitFx } from '../gameplay/HitFeedback';
 import { EditorController } from '../editor/EditorController';
 import { ExplorationManager } from '../explore/ExplorationManager';
 
@@ -259,6 +265,7 @@ export class GameEngine {
   private riverSound: { position: THREE.Vector3; loud: number } | null = null;
   private readonly fallSounds: import('../world/rivers/RiverSystem').FallSound[] = [];
   private readonly listenerPos = new THREE.Vector3();
+  private readonly npcFeet = new THREE.Vector3();
 
   // Adaptive resolution: drops the pixel ratio when frames run long, restores it when there is headroom
   private lastFarmPrompt = '';
@@ -481,6 +488,7 @@ export class GameEngine {
       character.setWaterSystems(waterEffects, waterParticles);
       character.setBuildingSystems(buildingManager, previewGhostRenderer);
       character.onFootstep = (intensity, point, collider) => this.playFootstep(intensity, point, collider);
+      NPCAgent.onFootstep = (intensity, agent) => this.playNpcFootstep(intensity, agent);
       character.setFarmingSystems(farmingManager, inventoryManager);
 
       const giveResources = (items: { itemId: string; amount: number }[]) => {
@@ -572,6 +580,7 @@ export class GameEngine {
         nursery.fastForward(seconds);
       };
       gameplay.onWake = () => this.world?.saves.save(AUTOSAVE_SLOT);
+      gameplay.onFaint = () => this.respawnPlayer();
       // Stations, the NPC, finds and a faced pet take E from the shovel
       character.farmingAbility.activityProbe = (pos) => gameplay.hasActivityForShovel(pos);
       gameplay.flowers = flowerBeds;
@@ -840,7 +849,11 @@ export class GameEngine {
     const editing = this.mode === 'editor';
 
     const rawDt = Math.min(this.clock.getDelta(), 0.05);
-    const dt = rawDt * worldSettings.timeScale;
+    // Hit-stop: a blow on an enemy slows the world for a moment (the flash and sparks run on real time)
+    hitFx.update(rawDt);
+    const dt = rawDt * worldSettings.timeScale * (editing ? 1 : hitFx.timeScale(rawDt));
+    hitFx.onKick = (s) =>
+      tpCamera.applyRecoil(0.012 * s, (Math.random() - 0.5) * 0.02 * s, 0, (Math.random() - 0.5) * 0.035 * s, 1.6 * s);
 
     inputManager.update();
 
@@ -848,6 +861,21 @@ export class GameEngine {
     const isDraggingWall = character.buildAbility?.wallSelectionSystem?.isDragging ?? false;
     const isPaintingMode = character.buildAbility?.isPaintingModeActive ?? false;
     const isPaintingWithLMB = isPaintingMode && inputManager.isMouseDown;
+    // Target lock (Tab / middle mouse): while locked, sideways mouse flicks switch enemies
+    const lockOn = w.gameplay.lockOn;
+    if (!editing && inputManager.movement.lockOnJustPressed && lockOnSettings.enabled) {
+      lockOn.toggle(character.getPosition(), tpCamera.getForwardVector());
+    }
+    if (!editing && lockOn.locked && mouseDelta.x !== 0) {
+      lockOn.flick(mouseDelta.x, character.getPosition(), tpCamera.getRightVector());
+      mouseDelta.x = 0;
+    }
+    // Float in the water: the mouse turns the underwater view around it, not the orbit camera
+    if (!editing && w.gameplay.fishing.wantsLook) {
+      if (mouseDelta.x !== 0) w.gameplay.fishing.rotateView(tpCamera.yawFromMouse(mouseDelta.x));
+      mouseDelta.x = 0;
+      mouseDelta.y = 0;
+    }
     if (!editing && !isDraggingWall && !isPaintingWithLMB && (mouseDelta.x !== 0 || mouseDelta.y !== 0)) {
       tpCamera.handleMouseInput(mouseDelta.x, mouseDelta.y);
       vehicle.notifyMouseLook();
@@ -855,7 +883,8 @@ export class GameEngine {
       w.boat.notifyMouseLook();
     }
     const mouseScroll = inputManager.consumeMouseScroll();
-    if (mouseScroll !== 0 && !editing) tpCamera.handleZoom(mouseScroll);
+    // Float in the water: the wheel raises / lowers the hook instead of zooming
+    if (mouseScroll !== 0 && !editing && !w.gameplay.fishing.adjustDepth(Math.sign(mouseScroll))) tpCamera.handleZoom(mouseScroll);
 
     // Vehicle forces are applied before the physics step; one interact press enters one vehicle
     const truckDriving = !editing && vehicle.update(dt, inputManager, tpCamera, character);
@@ -864,6 +893,13 @@ export class GameEngine {
       !editing && !truckDriving && !mopedDriving && w.boat.update(dt, inputManager, tpCamera, character, !vehicle.isPlayerNear && !moped.isPlayerNear);
     const isDriving = truckDriving || mopedDriving || boatDriving;
     const ride = truckDriving ? vehicle : mopedDriving ? moped : boatDriving ? w.boat : null;
+    {
+      const pos = character.getPosition();
+      const canLock = !editing && !isDriving && !w.gameplay.sleeping && !character.telemetry.isBuildModeActive && !isPaintingMode;
+      lockOn.update(dt, pos, tpCamera.getForwardVector(), canLock);
+      tpCamera.lockAt = lockOn.locked ? lockOn.aim : null;
+      character.lockFacing = lockOn.facingFrom(pos);
+    }
 
     hitchLog.mark(1);
     const pStart = performance.now();
@@ -902,7 +938,7 @@ export class GameEngine {
     const rainOnWater = w.exploration.inCave ? 0 : w.weather.rainIntensity * (1 - w.weather.snowAmount);
     w.water.update(dt, this.camera.camera.position);
     // Ripple wave simulation around the player (developer toggle; asleep when nothing stirs)
-    waterRippleSim.update(this.renderer, dt, rainOnWater, editing ? this.camera.camera.position : ride ? ride.getPosition() : character.getPosition());
+    waterRippleSim.update(this.renderer, dt, rainOnWater, editing ? this.camera.camera.position : ride ? ride.getPosition() : w.gameplay.fishing.rippleFocus ?? character.getPosition());
     w.rivers.update(dt, w.weather.nightFactor);
     updateCloudShadows(dt, w.weather.sunDir, w.weather.cloudCover, w.weather.nightFactor);
     // What the HUD prompt is about glows: the tulip clump E picks, the ripe field E harvests
@@ -913,7 +949,16 @@ export class GameEngine {
       tpCamera.isHoldingObject = character.telemetry.isHoldingObject;
       tpCamera.isBuilding = character.telemetry.isBuildModeActive || isPaintingMode;
       const cameraTargetPos = ride ? ride.getPosition() : character.getPosition();
+      // Fishing takes the camera along the cast and under the water by the float
+      const fishing = w.gameplay.fishing;
+      if (fishing.cameraYawRequest !== null) {
+        tpCamera.yaw = fishing.cameraYawRequest;
+        fishing.cameraYawRequest = null;
+      }
+      fishing.exitView ??= { pos: tpCamera.orbitPos, look: tpCamera.orbitLook };
+      tpCamera.shot = fishing.cameraShot;
       tpCamera.update(dt, cameraTargetPos, physics, ride ? ride.collider : character.collider);
+      w.gameplay.healthBars.update(rawDt, tpCamera.camera, w.gameplay.lockOn.target);
     }
     w.weather.update(dt, tpCamera.camera.position);
     this.lightShafts?.update(dt, this.camera.camera, {
@@ -955,6 +1000,9 @@ export class GameEngine {
         if (!isDriving) grassField.addPusher(cp.x, cp.y - 0.9, cp.z, 0.55);
         algae.addPusher(cp.x, cp.y - 0.9, cp.z, 0.35, 1.8);
       }
+      // The fishing hook (and a snag tugging at a stalk)
+      const hook = w.gameplay.fishing.algaeTouch;
+      if (hook) algae.addPusher(hook.x, hook.y - 0.1, hook.z, 0.08, 0.2);
       // Sharks swimming through the algae part it (two nearest the camera: 3 capsules each)
       for (const shark of w.gameplay.pests.sharksNear(this.camera.camera.position, 45, 2, this.sharkTmp)) {
         shark.bodyCapsules((x, y, z, r, h) => algae.addPusher(x, y, z, r, h));
@@ -1077,8 +1125,8 @@ export class GameEngine {
     // Throttled UI pushes
     this.hudTimer -= rawDt;
     const hudKey = w.gameplay.hudKey;
-    // The reel minigame marker moves continuously: stream it while active
-    if (w.gameplay.fishing.state.phase === 'reel' && this.frameCount % 2 === 0) callbacks.onGameplayHud(w.gameplay.getHudState());
+    // The cast charge bar fills continuously: stream it while aiming
+    if ((w.gameplay.fishing.state.phase === 'aim' || w.gameplay.fishing.state.snagged || w.gameplay.fishing.state.phase === 'hooked') && this.frameCount % 3 === 0) callbacks.onGameplayHud(w.gameplay.getHudState());
     if (this.hudTimer <= 0 || hudKey !== this.lastHudKey) {
       // Each push re-renders the whole React tree (hundreds of KB of garbage on a phone): the
       // periodic refresh (buff / cooking timers, pet affection) only goes out when something changed
@@ -1434,6 +1482,23 @@ export class GameEngine {
     const wet = exposed ? weather.rainIntensity * (1 - weather.snowAmount) : 0;
     this.footsteps.step(surface, intensity, wet);
     this.coast.duck(intensity);
+  }
+
+  /**
+   * A villager's footstep: only within earshot (checked before any physics query), then one short
+   * ray for what they stand on and the same surfaces and rain layer as the player's steps.
+   */
+  private playNpcFootstep(intensity: number, agent: NPCAgent): void {
+    const w = this.world;
+    if (!w || this.paused || this.mode !== 'play' || !audioEngine.context) return;
+    const feet = agent.getFeet(this.npcFeet);
+    if (feet.distanceToSquared(this.listenerPos) > NPC_STEP_RANGE * NPC_STEP_RANGE) return;
+    const ground = agent.groundUnder();
+    const surface = this.surfaceUnder(feet, ground);
+    const weather = w.weather;
+    const exposed = !w.exploration.inCave && !weather.isSheltered(feet) && !(ground as unknown as { userData?: { pieceId?: string } } | null)?.userData?.pieceId;
+    const wet = exposed ? weather.rainIntensity * (1 - weather.snowAmount) : 0;
+    this.footsteps.stepAt(surface, intensity * 0.85, wet, feet);
   }
 
   /** Brings the scooter to the player (V key / HUD button). Not underground or while riding. */

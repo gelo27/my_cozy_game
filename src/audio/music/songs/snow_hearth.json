@@ -8,12 +8,14 @@
   "steps": 16,
   "root": 51,
   "scale": [0, 2, 4, 5, 7, 9, 11],
-  "gain": 0.82,
+  "gain": 0.94,
+  "space": "room",
+  "wet": 0.28,
   "parts": {
-    "m": { "i": "marimba", "vol": 0.48 },
-    "c": { "i": "harp", "vol": 0.28 },
-    "b": { "i": "bass", "oct": -1, "vol": 0.4 },
-    "p": { "i": "pad", "vol": 0.13 }
+    "m": { "i": "felt", "vol": 0.5 },
+    "c": { "i": "harp", "vol": 0.26, "tone": { "bright": 0.75 } },
+    "b": { "i": "upright", "oct": -1, "vol": 0.5 },
+    "p": { "i": "strings", "vol": 0.1 }
   },
   "pat": {
     "a1": "0:9:4:6 4:11:4:6 8:14:6:7 14:13:2:5",
