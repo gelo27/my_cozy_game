@@ -957,6 +957,10 @@ export class GameEngine {
       }
       fishing.exitView ??= { pos: tpCamera.orbitPos, look: tpCamera.orbitLook };
       tpCamera.shot = fishing.cameraShot;
+      // The camera stays above the water until the player dives (in a cave only its pools count:
+      // dry tunnels lie below sea level)
+      tpCamera.waterSurface ??= (x, y, z) => (this.world?.exploration.inCave ? riverWorld.caveLevelAt(x, y, z) : riverWorld.waterLevelAt3(x, y, z));
+      tpCamera.allowUnderwater = !!character.oxygenAbility?.isUnderwater && !ride;
       tpCamera.update(dt, cameraTargetPos, physics, ride ? ride.collider : character.collider);
       w.gameplay.healthBars.update(rawDt, tpCamera.camera, w.gameplay.lockOn.target);
     }

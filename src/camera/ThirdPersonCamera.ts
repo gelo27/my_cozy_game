@@ -50,6 +50,17 @@ export class ThirdPersonCamera {
    */
   public shot: { pos: THREE.Vector3; look: THREE.Vector3 } | null = null;
   private shotBlend = 0;
+  /**
+   * Water surface at a camera point (NaN = no water there). While the player is not under water
+   * the orbit camera rides on this surface instead of dipping below it.
+   */
+  public waterSurface: ((x: number, y: number, z: number) => number) | null = null;
+  /** The player has dived: the camera may follow them under (set every frame by the engine). */
+  public allowUnderwater = false;
+  /** 1 = the camera is kept above the water, 0 = free to go under; eased so diving / surfacing glide. */
+  private waterGate = 1;
+  /** How far above the surface the camera stays, so the near plane never cuts the waterline. */
+  private readonly waterMargin = 0.35;
   /** Where the orbit camera itself is and looks (before any scripted view): a shot can end on it. */
   public readonly orbitPos = new THREE.Vector3();
   public readonly orbitLook = new THREE.Vector3();
@@ -278,12 +289,37 @@ export class ThirdPersonCamera {
     this.currentFocusPoint.lerp(this.targetFocusPoint, posAlpha);
 
     // 3. Compute effective angles including dynamic recoil spring offsets
-    const effectivePitch = THREE.MathUtils.clamp(
+    let effectivePitch = THREE.MathUtils.clamp(
       this.currentPitch + this.recoilPitchOffset,
       CAMERA_CONFIG.PITCH_MIN,
       CAMERA_CONFIG.PITCH_MAX
     );
     const effectiveYaw = this.currentYaw + this.recoilYawOffset;
+
+    // 3b. The water surface is a soft floor until the player dives: the orbit may not tip below it,
+    // so the camera glides along the surface at its usual distance (the pitch the mouse asked for
+    // comes back as soon as the camera is free again, or the player dives)
+    this.waterGate += ((this.allowUnderwater ? 0 : 1) - this.waterGate) * (1.0 - Math.exp(-(this.allowUnderwater ? 5 : 3) * dt));
+    // Mirrored under water: the surface becomes a ceiling, so a diver's camera never pops out of it
+    if (this.waterSurface) {
+      const f = this.currentFocusPoint;
+      const d = THREE.MathUtils.clamp(this.targetDistance + this.lockPull, this.minDistance, this.maxDistance + 1.0);
+      const reach = d * Math.cos(effectivePitch);
+      const sx = f.x + Math.sin(effectiveYaw) * reach;
+      const sz = f.z + Math.cos(effectiveYaw) * reach;
+      const surf = this.waterSurface(sx, f.y, sz);
+      if (!Number.isNaN(surf)) {
+        const g = this.waterGate;
+        if (g > 0.001) {
+          const floor = Math.asin(THREE.MathUtils.clamp((surf + this.waterMargin - f.y) / d, -1, 1));
+          if (floor > effectivePitch) effectivePitch += (Math.min(floor, CAMERA_CONFIG.PITCH_MAX) - effectivePitch) * g;
+        }
+        if (g < 0.999) {
+          const ceil = Math.asin(THREE.MathUtils.clamp((surf - this.waterMargin - f.y) / d, -1, 1));
+          if (ceil < effectivePitch) effectivePitch += (Math.max(ceil, CAMERA_CONFIG.PITCH_MIN) - effectivePitch) * (1 - g);
+        }
+      }
+    }
 
     const cosPitch = Math.cos(effectivePitch);
     const sinPitch = Math.sin(effectivePitch);
@@ -367,6 +403,17 @@ export class ThirdPersonCamera {
     // 6. Direct spherical camera placement with instant punchy depth recoil
     const effectiveDistance = Math.min(maxAllowedDistance, this.currentDistance + this.recoilDepthOffset);
     this.camera.position.copy(this.currentFocusPoint).addScaledVector(orbitOffset, effectiveDistance);
+    // 6a. Safety: never through the surface (waves, a pulled-in boom) — above it until the player
+    // dives, below it while they are under
+    if (this.waterSurface) {
+      const p = this.camera.position;
+      const surf = this.waterSurface(p.x, p.y, p.z);
+      if (!Number.isNaN(surf)) {
+        const g = this.waterGate;
+        if (p.y < surf + this.waterMargin) p.y += (surf + this.waterMargin - p.y) * g;
+        if (p.y > surf - this.waterMargin) p.y += (surf - this.waterMargin - p.y) * (1 - g);
+      }
+    }
     this.camera.lookAt(this.currentFocusPoint);
     this.orbitPos.copy(this.camera.position);
     this.orbitLook.copy(this.currentFocusPoint);
