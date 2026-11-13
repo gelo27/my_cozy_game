@@ -596,6 +596,9 @@ export class AlgaeField {
   private pusherCount = 0;
   /** A joint held by a fishing hook (grab): pulled towards (x, y, z). */
   private held: { rec: AlgaeRec; joint: number; x: number; y: number; z: number; pull: number } | null = null;
+  /** The held joint where it is DRAWN (link lengths exact, before the current sway), set in upload. */
+  private readonly heldDrawn = new THREE.Vector3();
+  private heldDrawnOk = false;
   private lastPusherCount = 0;
   /** Unstepped time (s): the chains step at a fixed rate (Verlet needs a steady step). */
   private accumulator = 0;
@@ -705,6 +708,7 @@ export class AlgaeField {
     const ch = this.chains[hit.sim]!;
     joint = Math.min(joint, ch.joints - 1);
     this.held = { rec: hit, joint, x: out.x, y: out.y, z: out.z, pull: 0 };
+    this.heldDrawnOk = false;
     return true;
   }
 
@@ -729,14 +733,29 @@ export class AlgaeField {
       return false;
     }
     const ch = this.chains[h.rec.sim]!;
-    const i = h.joint * 3;
-    out.set(ch.p[i], ch.p[i + 1], ch.p[i + 2]);
+    if (this.heldDrawnOk) out.copy(this.heldDrawn);
+    else {
+      const i = h.joint * 3;
+      out.set(ch.p[i], ch.p[i + 1], ch.p[i + 2]);
+    }
+    // Plus the slow current sway the shader adds (same formula), so the point sits on the stalk
+    // exactly as it is seen
+    const r = h.rec;
+    const pp = r.prop.position;
+    const t = uAlgTime.value;
+    const ph = pp.x * 0.73 + pp.z * 0.41;
+    const amp = 0.05 * r.height;
+    const e = r.height > 0 ? ch.rest[Math.min(h.joint, ch.joints - 1)] / r.height : 1;
+    const e2 = e * e;
+    out.x += (Math.sin(t * 0.7 + ph) + 0.25 * Math.sin(t * 1.3 + ph * 2.3)) * amp * e2;
+    out.z += Math.cos(t * 0.55 + ph * 1.3) * amp * e2;
     return true;
   }
 
   /** Lets the held stalk go: it swings back up on its own. */
   public releaseGrab(): void {
     this.held = null;
+    this.heldDrawnOk = false;
   }
 
   public clearPushers(): void {
@@ -1041,6 +1060,7 @@ export class AlgaeField {
     const root = ch.rec.prop.position;
     const base = ch.rec.sim * MAX_JOINTS * 4;
     simData[base] = simData[base + 1] = simData[base + 2] = 0;
+    const heldJoint = this.held?.rec === ch.rec ? this.held.joint : -1;
     let ax = root.x;
     let ay = root.y;
     let az = root.z;
@@ -1063,6 +1083,10 @@ export class AlgaeField {
       lx = bx;
       ly = by;
       lz = bz;
+      if (k === heldJoint) {
+        this.heldDrawn.set(ax, ay, az);
+        this.heldDrawnOk = true;
+      }
       const o = base + k * 4;
       simData[o] = ax - root.x;
       simData[o + 1] = ay - root.y - rest[k];

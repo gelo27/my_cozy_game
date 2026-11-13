@@ -204,6 +204,9 @@ export class FishingSystem {
   private snagNeed = 6;
   /** 0..1: how hard the last clicks yanked the snag (decays). */
   private snagTug = 0;
+  /** Line tension on a snag 0..1 (held reel and clicks), eased. */
+  private snagTension = 0;
+  private snagTaut = false;
   /** Where the held joint was when the hook caught (the stalk is pulled from there). */
   private readonly snagRest = new THREE.Vector3();
   /** The bite's glide: 0..1, and the hook and the fish where the bite started. */
@@ -398,14 +401,15 @@ export class FishingSystem {
           toFloat.sub(this.snagRest);
           const len = toFloat.length() || 1;
           toFloat.divideScalar(len);
-          const reach = Math.min(len, 0.2 + this.snagTug * 0.9 + s.snagProgress * 0.25);
+          const T = this.snagTension;
+          const reach = Math.min(len, 0.1 + T * 0.8 + s.snagProgress * 0.3);
           this.tmp2.copy(this.snagRest).addScaledVector(toFloat, reach);
-          this.algae.setGrabTarget(this.tmp2.x, this.tmp2.y, this.tmp2.z, 0.06 + this.snagTug * 0.3);
+          this.algae.setGrabTarget(this.tmp2.x, this.tmp2.y, this.tmp2.z, 0.08 + T * 0.5);
           pin = this.hookPin.copy(this.snagPoint);
         }
       }
       // The float tips over with the pull: the reel's speed, more with a fish fighting on it
-      const pullT = s.snagged ? 0.45 + this.snagTug * 0.55 : s.phase === 'hooked' ? (s.reeling ? 0.95 : 0.55) : s.reeling ? Math.min(0.8, this.baitSpeed / 5) : 0;
+      const pullT = s.snagged ? 0.35 + this.snagTension * 0.65 : s.phase === 'hooked' ? (s.reeling ? 0.95 : 0.55) : s.reeling ? Math.min(0.8, this.baitSpeed / 5) : 0;
       this.line.pull += (pullT - this.line.pull) * (1 - Math.exp(-dt * 5));
       this.line.update(dt, inp.rodTip, this.bobber, pin, s.phase === 'wait' || s.phase === 'hooked');
       if (s.phase === 'hooked' && this.hooked) this.placeFish();
@@ -516,25 +520,43 @@ export class FishingSystem {
         s.snagProgress = Math.max(0, s.snagProgress - dt * SNAG_DECAY);
       }
       this.reelHoldT = 0;
-      // The rod pulls against the snag: each tug drags the float towards the angler until the
-      // leader runs taut from its keel down to the stalk, and under the water a little; between
-      // tugs the weed draws it back over the snag. The main line stays tight to the rod.
-      const T = this.snagTug;
+      // Tension on the snag: holding the reel keeps the line tight, each click yanks it harder
+      const want = Math.max(this.snagTug, inp.hold ? 0.6 : 0);
+      this.snagTension += (want - this.snagTension) * (1 - Math.exp(-dt * (want > this.snagTension ? 14 : 3)));
+      const T = this.snagTension;
+      // The rod drags the float towards the angler and under; the leader (fixed length) ties its
+      // keel to the hook on the stalk, so the float is held back on a taut diagonal while the stalk
+      // bends towards it (see the pin in update). Slack, the weed draws it back over the snag.
       const a = this.snagRest;
       const ax = inp.player.x - a.x, az = inp.player.z - a.z;
       const al = Math.hypot(ax, az) || 1;
+      const ux = ax / al, uz = az / al;
       const w0 = this.sample(this.bobber.x, this.bobber.z);
-      const ty = w0.level - (0.02 + T * 0.13);
-      const dy = ty - 0.1 - a.y; // keel above the stalk
-      const reach = this.leaderLen * (0.55 + 0.42 * T);
-      const h = Math.sqrt(Math.max(0, reach * reach - dy * dy));
-      const bx = a.x + (ax / al) * h, bz = a.z + (az / al) * h;
-      const kk = 1 - Math.exp(-dt * (T > 0.05 ? 14 : 4));
+      const L = this.leaderLen;
+      const restH = L * 0.35;
+      const pullH = restH + T * (0.6 + L * 0.9);
+      let ty = w0.level - (0.015 + T * 0.14);
+      let bx = a.x + ux * pullH, bz = a.z + uz * pullH;
+      // Leader constraint against where the hooked joint really is now
+      const J = this.snagPoint;
+      const kdx = bx - J.x, kdz = bz - J.z;
+      const kdy = ty - 0.1 - J.y;
+      const kd = Math.hypot(kdx, kdy, kdz);
+      if (kd > L * 0.99) {
+        // Taut: the float can go no farther than the leader; the pull drags it a little deeper
+        const k = (L * 0.99) / kd;
+        bx = J.x + kdx * k;
+        bz = J.z + kdz * k;
+        ty = Math.max(ty - (kd - L) * 0.15, J.y + 0.1 + kdy * k - 0.05);
+        this.snagTaut = true;
+      } else this.snagTaut = false;
+      const kk = 1 - Math.exp(-dt * (T > 0.05 ? 12 : 3));
       this.bobber.x += (bx - this.bobber.x) * kk;
       this.bobber.z += (bz - this.bobber.z) * kk;
-      this.bobber.y += (ty - this.bobber.y) * (1 - Math.exp(-dt * 16));
+      this.bobber.y += (ty - this.bobber.y) * (1 - Math.exp(-dt * 14));
       this.baitSpeed = 0;
-      this.lineLen = inp.rodTip.distanceTo(this.bobber) * (1.005 + (1 - T) * 0.02);
+      // Main line tight to the rod while pulled, a touch of sag when let go
+      this.lineLen = inp.rodTip.distanceTo(this.bobber) * (1.003 + (1 - T) * 0.025);
       this.line.setLength(this.lineLen);
       if (s.snagProgress >= 1) return this.unsnag();
       return null;
@@ -919,6 +941,7 @@ export class FishingSystem {
     s.nibble = false;
     this.snagNeed = SNAG_CLICKS_MIN + Math.floor(Math.random() * (SNAG_CLICKS_MAX - SNAG_CLICKS_MIN + 1));
     this.snagTug = 0;
+    this.snagTension = 0;
     // Hooked onto the joint itself (the algae holds it from now on)
     this.snagRest.copy(this.algaePoint);
     this.snagPoint.copy(this.algaePoint);
