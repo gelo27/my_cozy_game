@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Season, currentSeason, dayOfSeason } from '../world/Seasons';
+import { Season, currentSeason } from '../world/Seasons';
 import type { FlowerBeds } from '../gathering/FlowerBeds';
 import type { PropInstance } from '../world/PropSystem';
 import { CharacterController } from '../character/CharacterController';
@@ -84,7 +84,7 @@ export interface GameplayHudState {
   buff: { label: string; secondsLeft: number } | null;
   weather: WeatherType;
   season: Season;
-  /** 1-based day within the season. */
+  /** 1-based day since the world began (the season no longer changes with days). */
   seasonDay: number;
   isNight: boolean;
   coins: number;
@@ -942,7 +942,7 @@ export class GameplayManager {
         : null,
       weather: this.weather.weather,
       season: currentSeason(),
-      seasonDay: dayOfSeason(),
+      seasonDay: worldSettings.day + 1,
       isNight: this.weather.isNight(),
       coins: this.inventory.getItemCount('coins'),
       pets: this.pets.pets.map((p) => ({ name: p.name, kind: p.kind, affection: Math.round(p.affection) })),

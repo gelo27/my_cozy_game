@@ -1,6 +1,6 @@
 import type { WeatherType } from './WeatherSystem';
 import { worldSettings } from './WorldSettings';
-import { Season, nowDay, seasonOf, seasonProgressOf } from './Seasons';
+import { Season, currentSeason } from './Seasons';
 
 /**
  * Automatic weather: a seeded Markov chain over WeatherType with per-state durations in in-game
@@ -45,16 +45,6 @@ const SEASON_MUL: Record<Season, Row> = {
   autumn: { clear: 0.8, rain: 1.25, fog: 1.7, storm: 0.6 },
   winter: {},
 };
-
-/**
- * Share of the rain that falls as snow outside winter: the first snow at the end of autumn, the
- * last at the start of spring (0 the rest of the year).
- */
-function snowShare(season: Season, progress: number): number {
-  if (season === 'autumn') return Math.max(0, (progress - 0.6) / 0.4) * 0.7;
-  if (season === 'spring') return Math.max(0, (0.3 - progress) / 0.3) * 0.6;
-  return 0;
-}
 
 /** How long each state lasts, in in-game hours [min, max]. */
 const DURATION: Record<WeatherType, [number, number]> = {
@@ -240,31 +230,23 @@ export class WeatherDirector {
 
   /**
    * Picks the state after `prev`, starting at clock hour `hour` (fog favours mornings, storms
-   * afternoons), with the weights of the season that state starts in.
+   * afternoons), with the season's weights.
    */
   private rollNext(prev: WeatherType, hour: number): WeatherType {
     const h = ((hour % 24) + 24) % 24;
-    // The season when this state begins (the forecast may reach into the next one)
-    let ahead = hour - worldSettings.timeOfDay;
-    if (ahead < 0) ahead += 24;
-    const day = nowDay() + ahead / 24;
-    const season = seasonOf(Math.floor(day));
+    // The season is fixed (it does not change by itself), so the whole forecast shares it
+    const season = currentSeason();
     const winter = season === 'winter';
     const row = (winter ? WINTER : TRANSITIONS)[prev];
     const mul = SEASON_MUL[season];
-    const share = winter ? 0 : snowShare(season, seasonProgressOf(day));
     let total = 0;
     for (let i = 0; i < TYPES.length; i++) {
       const t = TYPES[i];
       let w = (row[t] ?? 0) * (mul[t] ?? 1);
       if (t === 'fog') w *= h >= 3 && h <= 9 ? 3 : 0.25;
       else if (t === 'storm') w *= h >= 13 && h <= 20 ? 1.6 : 0.6;
-      // Outside winter snow only comes in place of rain (late autumn, early spring)
-      if (!winter) {
-        if (t === 'snow') w = ((row.rain ?? 0) * (mul.rain ?? 1)) * share + (prev === 'snow' ? w * share : 0);
-        else if (t === 'rain') w *= 1 - share;
-        else if (t === 'blizzard') w = 0;
-      }
+      // No snow outside winter (a snowy spell left from winter melts into the shared table's exits)
+      if (!winter && (t === 'snow' || t === 'blizzard')) w = 0;
       this.weights[i] = w;
       total += w;
     }

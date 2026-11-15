@@ -19,7 +19,7 @@ import { WEB_LIMITS, WebParams, webSettings, setWebSetting, resetWebSettings } f
 import { ALGAE_MAX_LINKS, ALGAE_MIN_LINKS, algaeHeight, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
 import { TerrainTileType, TILE_DEFINITIONS } from '../../terrain/types/TerrainTypes';
 import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, WeatherSound } from '../../world/WeatherSystem';
-import { SEASONS, SEASON_LABELS, currentSeason, dayOfSeason, firstDayOf } from '../../world/Seasons';
+import { SEASONS, SEASON_LABELS, currentSeason } from '../../world/Seasons';
 import { worldSettings } from '../../world/WorldSettings';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
@@ -751,21 +751,12 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
             <button
               key={s}
               className={chip(currentSeason() === s)}
-              onClick={() => set(() => (worldSettings.day = firstDayOf(s)))}
+              onClick={() => set(() => (worldSettings.season = s))}
             >
               {SEASON_LABELS[s]}
             </button>
           ))}
         </div>
-        <Slider
-          label="Днів у порі року"
-          value={worldSettings.daysPerSeason}
-          min={1}
-          max={28}
-          step={1}
-          onChange={(v) => set(() => (worldSettings.daysPerSeason = v))}
-          fmt={(v) => `${v} дн. (зараз день ${dayOfSeason()})`}
-        />
         <Slider
           label="Сніг на землі"
           value={w.weather.snowCover}

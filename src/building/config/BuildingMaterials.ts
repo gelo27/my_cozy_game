@@ -121,6 +121,27 @@ export const GREENHOUSE_GLASS_FAR = createGlassMaterial({ color: 0xc4dcd8, side:
 /** Window / door glass seen from afar: the blue-grey the tinted pane reads as over a dark room. */
 export const WINDOW_GLASS_FAR = createGlassMaterial({ color: 0x93b4cc, dither: 'far' });
 
+/** Warm lamp light seen through a pane at night, full strength (the levels scale it). */
+const ROOM_GLOW = new THREE.Color(1.0, 0.62, 0.26);
+
+/**
+ * Window / door glass by how lit the room behind it is: [unlit, dim, bright]. The lit ones differ
+ * only in a uniform, so they share the unlit glass's shader programs; a pane swaps material only
+ * when its room's light changes (see WindowGlow).
+ */
+export const WINDOW_GLASS_LEVELS = {
+  near: [
+    BUILDING_MATERIALS.windowGlass,
+    createGlassMaterial({ color: 0xa9cff5, opacity: 0.5, dither: 'near', glow: ROOM_GLOW.clone().multiplyScalar(0.3) }),
+    createGlassMaterial({ color: 0xa9cff5, opacity: 0.5, dither: 'near', glow: ROOM_GLOW.clone().multiplyScalar(0.6) }),
+  ],
+  far: [
+    WINDOW_GLASS_FAR,
+    createGlassMaterial({ color: 0x93b4cc, dither: 'far', glow: ROOM_GLOW.clone().multiplyScalar(0.3) }),
+    createGlassMaterial({ color: 0x93b4cc, dither: 'far', glow: ROOM_GLOW.clone().multiplyScalar(0.6) }),
+  ],
+};
+
 /** Near (blended) glass material -> its opaque far twin. */
 const FAR_GLASS = new Map<THREE.Material, THREE.Material>([
   [BUILDING_MATERIALS.greenhouseGlass, GREENHOUSE_GLASS_FAR],

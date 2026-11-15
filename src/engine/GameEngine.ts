@@ -10,7 +10,7 @@ import { FIELD_CELLS } from '../farming/FieldManager';
 import { hitchLog } from './HitchLog';
 import { loadTreeModels, setFoliageWeatherWind } from '../world/TreeModels';
 import { setSnowCover } from '../world/SnowCover';
-import { Season, firstDayOf } from '../world/Seasons';
+import type { Season } from '../world/Seasons';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { DebugRenderer } from '../physics/DebugRenderer';
 import { InputManager } from '../input/InputManager';
@@ -85,6 +85,7 @@ import { BoatController } from '../vehicle/BoatController';
 import { buildLighthousePier } from '../world/Pier';
 import { WildlifeSystem } from '../wildlife/WildlifeSystem';
 import { StaticShadows } from '../world/StaticShadows';
+import { InteriorLighting, interiorSettings } from '../world/InteriorLighting';
 import { GrassField } from '../world/GrassField';
 import { LightningStrikes } from '../world/Lightning';
 import { fireFx } from '../world/FlameField';
@@ -103,7 +104,8 @@ import { NightLighting, installGlobalNightLights, setGroundMist } from '../world
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
 import { setAlgaeDaylight } from '../world/AlgaeChains';
 import { setWebLight } from '../world/SpiderWebs';
-import { setGlassLight } from '../scene/GlassMatcap';
+import { setGlassLight, setGlassNight } from '../scene/GlassMatcap';
+import { WindowGlow } from '../building/WindowGlow';
 import { VIEW_DISTANCE, isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState, GameplayPrompt } from '../gameplay/GameplayManager';
 import { lockOnSettings } from '../gameplay/LockOn';
@@ -189,6 +191,8 @@ export interface GameWorld {
   boat: BoatController;
   wildlife: WildlifeSystem;
   shadows: StaticShadows;
+  interiors: InteriorLighting;
+  windowGlow: WindowGlow;
   grass: GrassField;
   lightning: LightningStrikes;
   exploration: ExplorationManager;
@@ -682,6 +686,8 @@ export class GameEngine {
       const wildlife = new WildlifeSystem(scene, terrain, props, weather);
       const shadows = new StaticShadows(terrain, props, forest, rocks, propTrees, buildingManager);
       shadows.orchard = orchard;
+      const interiors = new InteriorLighting(physics, buildingManager);
+      const windowGlow = new WindowGlow(buildingManager);
       const grass = new GrassField(scene, terrain);
       shadows.grass = grass;
       // Storm bolts that land near the player: a warning, then the strike, flash and thunder
@@ -740,6 +746,8 @@ export class GameEngine {
         boat,
         wildlife,
         shadows,
+        interiors,
+        windowGlow,
         grass,
         lightning,
         exploration,
@@ -1077,6 +1085,8 @@ export class GameEngine {
         ? 0.25
         : (1 - w.weather.nightFactor * 0.82) * (1 - w.weather.cloudCover * 0.25) * (1 - w.weather.rainIntensity * 0.15)
     );
+    // Lamp-lit rooms show through their windows at night (WindowGlow picks which panes)
+    setGlassNight(w.exploration.inCave ? 0 : w.weather.nightFactor);
     webs.update(dt, this.camera.camera);
     bushes.update(dt);
     flowers.update(dt);
@@ -1112,6 +1122,8 @@ export class GameEngine {
     w.exploration.update(dt, ride ? ride.getPosition() : character.getPosition(), !editing && !isDriving);
     w.wildlife.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), tpCamera.camera, !!w.exploration.inCave);
     w.shadows.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
+    w.windowGlow.update(dt);
+    w.interiors.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
     tpCamera.drawZoom = editing ? 0 : w.gameplay.slingshot.isDrawing ? w.gameplay.slingshot.power : 0;
 
@@ -1615,7 +1627,7 @@ export class GameEngine {
       time: (hour: number) => (worldSettings.timeOfDay = ((hour % 24) + 24) % 24),
       weather: (type: Parameters<WeatherSystem['setWeather']>[0]) => w.weather.setWeather(type),
       /** Jump to the first day of a season ('spring' | 'summer' | 'autumn' | 'winter'). */
-      season: (s: Season) => (worldSettings.day = firstDayOf(s)),
+      season: (s: Season) => (worldSettings.season = s),
       /** Rainbow as after a rain (needs daytime; try time(8) or time(17)). */
       rainbow: () => w.weather.devRainbow(),
       /** Automatic weather on/off, and the upcoming states. */
@@ -1662,6 +1674,11 @@ export class GameEngine {
       /** Wildlife: `dev.wild.stats`, `dev.wild.enabled = false` to measure its cost. */
       wild: w.wildlife,
       shadows: w.shadows,
+      /** Interior daylight: `dev.interiors.stats`, `interiorSettings` via `dev.interiorSettings`. */
+      interiors: w.interiors,
+      /** Lamp-lit window glass: `dev.windowGlow.stats`. */
+      windowGlow: w.windowGlow,
+      interiorSettings,
       grass: w.grass,
     };
   }

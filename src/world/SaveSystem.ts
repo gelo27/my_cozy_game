@@ -6,6 +6,7 @@ import { PetSaveData } from '../gameplay/PetSystem';
 import { WeatherType } from './WeatherSystem';
 import type { WeatherDirectorSave } from './WeatherDirector';
 import { worldSettings } from './WorldSettings';
+import { SEASONS, Season, legacySeasonOf } from './Seasons';
 import type { GameWorld } from '../engine/GameEngine';
 import type { FieldSaveData } from '../farming/FieldManager';
 import type { ExplorationSaveData } from '../explore/ExplorationManager';
@@ -54,6 +55,8 @@ export interface WorldSaveData {
   storage?: Record<string, number>;
   /** Days passed (missing in older saves: 0). */
   day?: number;
+  /** Fixed season; saves from before it follow their day counter (legacySeasonOf) */
+  season?: Season;
   /** Sleep and respawn: the bed slept in last and that night's index. */
   sleep?: { bed: [number, number, number] | null; night: number };
 }
@@ -119,6 +122,7 @@ export class SaveSystem {
       workers: w.gameplay.workers?.serialize(),
       storage: w.gameplay.storage?.serialize(),
       day: worldSettings.day,
+      season: worldSettings.season,
       sleep: {
         bed: w.gameplay.respawnBed ? (w.gameplay.respawnBed.toArray().map((v) => +v.toFixed(2)) as [number, number, number]) : null,
         night: w.gameplay.lastSleepNight,
@@ -132,6 +136,7 @@ export class SaveSystem {
     worldSettings.waterLevel = data.waterLevel;
     worldSettings.timeOfDay = data.timeOfDay;
     worldSettings.day = data.day ?? 0;
+    worldSettings.season = data.season && SEASONS.includes(data.season) ? data.season : legacySeasonOf(worldSettings.day);
     w.gameplay.respawnBed = data.sleep?.bed ? new THREE.Vector3(...data.sleep.bed) : null;
     w.gameplay.lastSleepNight = data.sleep?.night ?? -1;
     w.weather.setWeather(data.weather);

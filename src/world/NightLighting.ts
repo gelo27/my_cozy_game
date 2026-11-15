@@ -5,6 +5,7 @@ import type { PropSystem } from './PropSystem';
 import type { WeatherSystem } from './WeatherSystem';
 import { injectWaterline } from '../scene/WaterDetails';
 import { CLOUD_SHADOW_BEGIN, CLOUD_SHADOW_END, CLOUD_SHADOW_GLSL, cloudShadowUniforms } from './CloudShadows';
+import { injectInteriorShade } from './InteriorLighting';
 
 /**
  * Cheap night lighting for mobile-friendly scenes.
@@ -201,6 +202,9 @@ export function injectNightLights(shader: PatchableShader, opts: { perVertex?: b
   Object.assign(shader.uniforms, nightLightUniforms);
   injectCloudShadows(shader);
   injectGroundMist(shader);
+  // Daylight dimmed inside houses (per-pixel materials only: the per-vertex ones are the terrain,
+  // which lies under the floors, and phone foliage)
+  if (!opts.perVertex) injectInteriorShade(shader);
 
   if (opts.perVertex) {
     shader.vertexShader = shader.vertexShader
@@ -328,6 +332,8 @@ export class NightLighting {
   private readonly sphere = new THREE.Sphere();
   /** 0..1 darkness forced regardless of the clock (inside caves): lights and the player lantern come on. */
   public forcedDark = 0;
+  /** The soft glow around the player at night. Off for now; set true to bring it back. */
+  public playerLantern = false;
   private time = 0;
 
   private readonly halos: THREE.Points;
@@ -518,7 +524,7 @@ export class NightLighting {
       } else u.uFakeLightBoxMin.value[n].w = 0;
       n++;
     }
-    if (playerPos && n < MAX_FAKE_LIGHTS) {
+    if (this.playerLantern && playerPos && n < MAX_FAKE_LIGHTS) {
       // Soft lantern glow around the player so the night stays playable away from lamps
       v.set(playerPos.x, playerPos.y + 1.4, playerPos.z).applyMatrix4(view);
       u.uFakeLightPos.value[n].set(v.x, v.y, v.z, 5.5 + this.forcedDark * 3.5);

@@ -66,15 +66,30 @@ export function setGlassLight(light: number): void {
   GLASS_LIGHT.value = light;
 }
 
+/** 0 by day, 1 at night: how much the lit-window glow shows. Shared by every glass shader. */
+const GLASS_NIGHT = { value: 0 };
+
+/** Night amount for the window glow (0 day .. 1 night). Called every frame. */
+export function setGlassNight(night: number): void {
+  GLASS_NIGHT.value = night;
+}
+
 export type GlassDither = 'near' | 'far' | 'none';
 
-/** Hooks daylight, Fresnel alpha (transparent glass) and optionally the near/far dither into a matcap material. */
-export function installGlassShader(mat: THREE.MeshMatcapMaterial, dither: GlassDither = 'none'): void {
+/**
+ * Hooks daylight, Fresnel alpha (transparent glass) and optionally the near/far dither into a matcap material.
+ * `glow` is the warm light of a lamp-lit room behind the pane, added at night. Every glass material
+ * runs the same code (black glow for the rest), so the lit variants share the compiled programs.
+ */
+export function installGlassShader(mat: THREE.MeshMatcapMaterial, dither: GlassDither = 'none', glow?: THREE.Color): void {
   const fresnel = mat.transparent;
+  const glowU = { value: glow ? glow.clone() : new THREE.Color(0, 0, 0) };
   mat.customProgramCacheKey = () => `glass-${dither}-${fresnel ? 'f' : 'o'}`;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uGlassLight = GLASS_LIGHT;
-    let pars = 'uniform float uGlassLight;';
+    shader.uniforms.uGlassNight = GLASS_NIGHT;
+    shader.uniforms.uGlassGlow = glowU;
+    let pars = 'uniform float uGlassLight;\nuniform float uGlassNight;\nuniform vec3 uGlassGlow;';
     if (dither !== 'none') {
       shader.uniforms.uGlassNear = { value: GLASS_DITHER_NEAR };
       shader.uniforms.uGlassFar = { value: GLASS_DITHER_FAR };
@@ -110,7 +125,7 @@ float glassBayer4(vec2 p) {
       )
       .replace(
       '#include <opaque_fragment>',
-      `outgoingLight *= uGlassLight;
+      `outgoingLight = outgoingLight * uGlassLight + uGlassGlow * uGlassNight;
 ${fresnel ? '// Grazing angles reflect more and let less through: thicker towards the rim\ndiffuseColor.a = mix(diffuseColor.a, min(1.0, diffuseColor.a * 2.6), pow(min(1.0, length(uv - 0.5) * 2.0), 3.0));' : ''}
 #include <opaque_fragment>`
     );
@@ -123,6 +138,8 @@ export function createGlassMaterial(params: {
   opacity?: number;
   side?: THREE.Side;
   dither?: GlassDither;
+  /** Warm glow of a lit room behind the pane (night only) */
+  glow?: THREE.Color;
 }): THREE.MeshMatcapMaterial {
   const transparent = params.opacity !== undefined;
   const mat = new THREE.MeshMatcapMaterial({
@@ -133,6 +150,6 @@ export function createGlassMaterial(params: {
     depthWrite: !transparent,
     side: params.side ?? THREE.FrontSide,
   });
-  installGlassShader(mat, params.dither);
+  installGlassShader(mat, params.dither, params.glow);
   return mat;
 }

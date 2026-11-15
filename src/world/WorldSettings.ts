@@ -1,3 +1,5 @@
+import type { Season } from './Seasons';
+
 /**
  * Mutable world-wide settings shared by gameplay systems (swimming, fishing, weather...).
  * Editors write here; systems read every frame, so there is no event plumbing to keep in sync.
@@ -18,8 +20,8 @@ export const worldSettings = {
   timeOfDay: 9,
   /** Days passed since the world began (the clock wrapping past midnight adds one). */
   day: 0,
-  /** In-game days in each season (spring, summer, autumn, winter; see Seasons.ts). */
-  daysPerSeason: 7,
+  /** The season; it does not change by itself as days pass (see Seasons.ts). */
+  season: 'spring' as Season,
   /** Real seconds per in-game hour; 0 freezes the clock. */
   secondsPerHour: 60,
   /** Global simulation speed for the editor (0 = paused). */
