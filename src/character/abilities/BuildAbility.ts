@@ -1,28 +1,27 @@
 import { t, localName } from '../../i18n/i18n';
+import type { TKey } from '../../i18n/en';
 import * as THREE from 'three';
+import { cutawayRayStart } from '../../building/BuildCutaway';
 import { IAbility, CharacterContext } from './IAbility';
-import { BuildingPieceType, BuildingTelemetry, SnapResult, isSwingDoorPiece } from '../../building/types/BuildingTypes';
+import { BuildingPieceType, BuildingTelemetry, BuiltPiece, SnapResult, isSwingDoorPiece, isProceduralRoofPiece, isGlassRoofPiece, isSolidWallPiece } from '../../building/types/BuildingTypes';
+import { isOutlineTile } from '../../building/FloorOutlineWalls';
+import { RoofStyle } from '../../building/ProceduralRoofSystem';
 import { BUILDING_PIECES } from '../../building/config/BuildingPiecesConfig';
 import { BuildingManager } from '../../building/BuildingManager';
 import { SnapSystem } from '../../building/SnapSystem';
 import { PreviewGhostRenderer } from '../../building/PreviewGhostRenderer';
-import { WallSelectionSystem } from '../../building/WallSelectionSystem';
+import { PieceSelectionSystem } from '../../building/PieceSelectionSystem';
 import { audioEngine } from '../../audio/AudioEngine';
 import { WallCellHitInfo, PaintingToolMode } from '../../building/WallPaintingSystem';
 
 const PIECE_TYPES_ORDER: BuildingPieceType[] = [
   BuildingPieceType.WOOD_FLOOR_2X2,
-  BuildingPieceType.WOOD_FLOOR_1X1,
   BuildingPieceType.STONE_FOUNDATION_2X2,
   BuildingPieceType.WOOD_WALL_2X3,
-  BuildingPieceType.WOOD_WALL_1X3,
-  BuildingPieceType.WOOD_WALL_1X2,
   BuildingPieceType.WOOD_WALL_2X1,
-  BuildingPieceType.WOOD_WALL_1X1,
   BuildingPieceType.WOOD_WALL_WINDOW_1X2,
   BuildingPieceType.WOOD_WALL_WINDOW_1X1_5,
   BuildingPieceType.WOOD_WALL_WINDOW_2X2,
-  BuildingPieceType.WOOD_WALL_WINDOW_2X4,
   BuildingPieceType.WOOD_STAIRS_2X2,
   BuildingPieceType.ROOF_GABLE_2X2,
   BuildingPieceType.ROOF_HIP_2X2,
@@ -46,6 +45,12 @@ export class BuildAbility implements IAbility {
   public name = 'BuildAbility';
   public enabled = true;
 
+  private static readonly _raycaster = new THREE.Raycaster();
+  private static readonly _cutOrigin = new THREE.Vector3();
+  /** Spatial lookup handed to SnapSystem so it skips pieces far from the aimed point */
+  private readonly queryNearbyPieces = (center: THREE.Vector3, radius: number) =>
+    this.buildingManager ? this.buildingManager.getPiecesTouchingRadius(center, radius) : [];
+
   public isBuildModeActive: boolean = false;
   public isPaintingModeActive: boolean = false;
   public activeWallpaperId: string = 'wainscot_white_wood';
@@ -63,10 +68,14 @@ export class BuildAbility implements IAbility {
   public buildingManager: BuildingManager | null = null;
   public snapSystem: SnapSystem = new SnapSystem();
   public ghostRenderer: PreviewGhostRenderer | null = null;
-  public wallSelectionSystem: WallSelectionSystem | null = null;
+  public pieceSelectionSystem: PieceSelectionSystem | null = null;
 
   public currentSnapResult: SnapResult | null = null;
   public aimedPieceId: string | null = null;
+  /** Shows the outcome of the [U] house-roof hotkey (wired by the HUD) */
+  public onHouseRoofMessage: ((ok: boolean, message: string) => void) | null = null;
+  private houseRoofKeyHeld = false;
+  private floorWallsKeyHeld = false;
 
   private wasSnappedPrevious: boolean = false;
   private rotationStep: number = Math.PI / 2; // 90 degrees snap step
@@ -76,13 +85,13 @@ export class BuildAbility implements IAbility {
   public setBuildingSystems(
     manager: BuildingManager,
     ghostRenderer: PreviewGhostRenderer,
-    wallSelectionSystem?: WallSelectionSystem
+    pieceSelectionSystem?: PieceSelectionSystem
   ): void {
     this.buildingManager = manager;
     this.ghostRenderer = ghostRenderer;
-    this.wallSelectionSystem = wallSelectionSystem || new WallSelectionSystem(manager.scene, manager);
-    if (this.wallSelectionSystem) {
-      this.wallSelectionSystem.setBuildingManager(manager);
+    this.pieceSelectionSystem = pieceSelectionSystem || new PieceSelectionSystem(manager.scene, manager);
+    if (this.pieceSelectionSystem) {
+      this.pieceSelectionSystem.setBuildingManager(manager);
     }
   }
 
@@ -94,8 +103,8 @@ export class BuildAbility implements IAbility {
     if (this.ghostRenderer) {
       this.ghostRenderer.setVisible(this.isBuildModeActive && this.currentPieceType !== null);
     }
-    if (!this.isBuildModeActive && this.wallSelectionSystem) {
-      this.wallSelectionSystem.deselect();
+    if (!this.isBuildModeActive && this.pieceSelectionSystem) {
+      this.pieceSelectionSystem.deselect();
     }
     audioEngine.playBuildSelect();
     return this.isBuildModeActive;
@@ -108,7 +117,7 @@ export class BuildAbility implements IAbility {
         this.isBuildModeActive = false;
         this.ghostRenderer?.setVisible(false);
       }
-      this.wallSelectionSystem?.deselect();
+      this.pieceSelectionSystem?.deselect();
       // Ensure walls are baked and continuous for seamless painting
       if (this.buildingManager) {
         this.buildingManager.confirmWalls();
@@ -209,8 +218,8 @@ export class BuildAbility implements IAbility {
     }
 
     // Always deselect any currently selected installed building element in the world when choosing a piece from UI
-    if (this.wallSelectionSystem) {
-      this.wallSelectionSystem.deselect();
+    if (this.pieceSelectionSystem) {
+      this.pieceSelectionSystem.deselect();
     }
 
     if (this.currentPieceType === type) {
@@ -246,11 +255,11 @@ export class BuildAbility implements IAbility {
     }
 
     // 2. If an already placed piece is actively selected in the world (with arrows/gizmo), rotate that piece!
-    const selectedPiece = this.wallSelectionSystem?.getSelectedPiece();
+    const selectedPiece = this.pieceSelectionSystem?.getSelectedPiece();
     if (selectedPiece && this.buildingManager) {
       const rotated = this.buildingManager.rotatePiece(selectedPiece.id, angleDelta);
       if (rotated) {
-        this.wallSelectionSystem?.selectPiece(selectedPiece);
+        this.pieceSelectionSystem?.selectPiece(selectedPiece);
         audioEngine.playBuildSelect();
         return;
       }
@@ -262,8 +271,8 @@ export class BuildAbility implements IAbility {
       if (aimedPiece) {
         const rotated = this.buildingManager.rotatePiece(aimedPiece.id, angleDelta);
         if (rotated) {
-          if (this.wallSelectionSystem?.getSelectedPieceId() === aimedPiece.id) {
-            this.wallSelectionSystem.selectPiece(aimedPiece);
+          if (this.pieceSelectionSystem?.getSelectedPieceId() === aimedPiece.id) {
+            this.pieceSelectionSystem.selectPiece(aimedPiece);
           }
           audioEngine.playBuildSelect();
           return;
@@ -329,17 +338,19 @@ export class BuildAbility implements IAbility {
         } else {
           raycaster.set(context.cameraPosition, context.cameraWorldDirection);
         }
+        // Walls cut away between the camera and the player can't be painted through
+        cutawayRayStart(raycaster.ray.origin, raycaster.ray.direction, raycaster.ray.origin);
 
-        const wallMesh = this.buildingManager.continuousWallSystem.getContinuousWallMesh();
-        const floorMesh = this.buildingManager.continuousWallSystem.getContinuousFloorMesh();
-        const solved = this.buildingManager.continuousWallSystem.getLastSolvedCorners();
+        const baked = this.buildingManager.continuousWallSystem;
+        const solved = baked.getLastSolvedCorners();
 
         const hitInfo = this.buildingManager.wallPaintingSystem.getHoveredCellInfo(
           raycaster,
-          wallMesh,
-          floorMesh,
+          baked.getWallMeshes(),
+          baked.getFloorMeshes(),
           this.buildingManager.pieces,
-          solved
+          solved,
+          (hit) => baked.faceKeyFromHit(hit)
         );
 
         this.currentHoverCellInfo = hitInfo;
@@ -447,7 +458,7 @@ export class BuildAbility implements IAbility {
       this.currentPieceType = null;
       this.selectedIndex = -1;
       this.ghostRenderer?.setVisible(false);
-      this.wallSelectionSystem?.deselect();
+      this.pieceSelectionSystem?.deselect();
     }
 
     // Detect touch/mobile devices
@@ -458,26 +469,40 @@ export class BuildAbility implements IAbility {
     let rayDir = context.cameraWorldDirection;
 
     // On PC/Mouse we use the mouse cursor (when unlocked), but on Mobile we always use the screen center
-    if (!isTouchDevice && context.camera?.camera && input.mouseNDC) {
-      const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(input.mouseNDC, context.camera.camera);
-      rayOrigin = raycaster.ray.origin;
-      rayDir = raycaster.ray.direction;
+    // Both rays come from the same mouse/tap position, so one reused raycaster serves both
+    let mouseRay: THREE.Ray | null = null;
+    if (context.camera?.camera && input.mouseNDC) {
+      BuildAbility._raycaster.setFromCamera(input.mouseNDC, context.camera.camera);
+      mouseRay = BuildAbility._raycaster.ray;
     }
+    if (!isTouchDevice && mouseRay) {
+      rayOrigin = mouseRay.origin;
+      rayDir = mouseRay.direction;
+    }
+    // Pieces cut away between the camera and the player are seen through, so aim past them too
+    rayOrigin = cutawayRayStart(rayOrigin, rayDir, BuildAbility._cutOrigin);
 
     // Secondary ray for selecting and dragging white/green extension arrows (always uses touch/mouse tap coords)
-    let arrowRayOrigin = context.cameraPosition;
-    let arrowRayDir = context.cameraWorldDirection;
-    if (context.camera?.camera && input.mouseNDC) {
-      const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(input.mouseNDC, context.camera.camera);
-      arrowRayOrigin = raycaster.ray.origin;
-      arrowRayDir = raycaster.ray.direction;
-    }
+    const arrowRayOrigin = mouseRay ? mouseRay.origin : context.cameraPosition;
+    const arrowRayDir = mouseRay ? mouseRay.direction : context.cameraWorldDirection;
 
     // Targeted piece under crosshair / mouse ray
     const targetPiece = this.buildingManager.findPieceUnderRay(rayOrigin, rayDir, 25.0, context.collider);
     this.aimedPieceId = targetPiece ? targetPiece.id : null;
+
+    // Roof over the whole house of the wall under the cursor via [U]
+    if (input.keys?.['KeyU'] && !this.houseRoofKeyHeld) {
+      const res = this.roofWholeHouse();
+      this.onHouseRoofMessage?.(res.ok, res.message);
+    }
+    this.houseRoofKeyHeld = !!input.keys?.['KeyU'];
+
+    // Walls around the whole floor of the tile under the cursor via [K]
+    if (input.keys?.['KeyK'] && !this.floorWallsKeyHeld) {
+      const res = this.wallFloorOutline();
+      this.onHouseRoofMessage?.(res.ok, res.message);
+    }
+    this.floorWallsKeyHeld = !!input.keys?.['KeyK'];
 
     // 3. Rotate piece via [R] key
     if (input.reloadJustPressed || input.buildRotateJustPressed) {
@@ -504,7 +529,8 @@ export class BuildAbility implements IAbility {
         this.buildingManager.getAllPieces(),
         context.physics,
         playerPos,
-        context.collider
+        context.collider,
+        this.queryNearbyPieces
       );
       this.currentSnapResult = snapResult;
 
@@ -524,17 +550,17 @@ export class BuildAbility implements IAbility {
     }
 
     // Update Wall Selection System (animations & hover detection on extension arrows)
-    if (this.wallSelectionSystem) {
-      this.wallSelectionSystem.update(dt, arrowRayOrigin, arrowRayDir, context.camera?.camera);
+    if (this.pieceSelectionSystem) {
+      this.pieceSelectionSystem.update(dt, arrowRayOrigin, arrowRayDir, context.camera?.camera);
     }
 
     // --- DRAG-TO-DUPLICATE INTERACTION LOOP ---
-    if (this.wallSelectionSystem && this.buildingManager) {
+    if (this.pieceSelectionSystem && this.buildingManager) {
       // 1. Check if user just pressed mouse button down on an extension arrow to begin dragging
       if (input.isMouseDownJustPressed) {
-        const hitArrowSide = this.wallSelectionSystem.raycastArrows(arrowRayOrigin, arrowRayDir);
-        if (hitArrowSide && this.wallSelectionSystem.getSelectedPiece()) {
-          this.wallSelectionSystem.startDrag(hitArrowSide, arrowRayOrigin, arrowRayDir, this.buildingManager);
+        const hitArrowSide = this.pieceSelectionSystem.raycastArrows(arrowRayOrigin, arrowRayDir);
+        if (hitArrowSide && this.pieceSelectionSystem.getSelectedPiece()) {
+          this.pieceSelectionSystem.startDrag(hitArrowSide, arrowRayOrigin, arrowRayDir, this.buildingManager);
           this.currentPieceType = null;
           this.selectedIndex = -1;
           this.ghostRenderer?.setVisible(false);
@@ -543,12 +569,12 @@ export class BuildAbility implements IAbility {
       }
 
       // 2. Active dragging update or release
-      if (this.wallSelectionSystem.isDragging) {
+      if (this.pieceSelectionSystem.isDragging) {
         if (input.isMouseDown) {
-          this.wallSelectionSystem.updateDrag(arrowRayOrigin, arrowRayDir, this.buildingManager);
+          this.pieceSelectionSystem.updateDrag(arrowRayOrigin, arrowRayDir, this.buildingManager);
           return;
         } else {
-          this.wallSelectionSystem.endDrag(this.buildingManager);
+          this.pieceSelectionSystem.endDrag(this.buildingManager);
           return;
         }
       }
@@ -572,8 +598,8 @@ export class BuildAbility implements IAbility {
         this.selectedIndex = -1;
         this.ghostRenderer.setVisible(false);
       } else if (targetPiece) {
-        if (this.wallSelectionSystem && this.wallSelectionSystem.getSelectedWallId() === targetPiece.id) {
-          this.wallSelectionSystem.deselect();
+        if (this.pieceSelectionSystem && this.pieceSelectionSystem.getSelectedWallId() === targetPiece.id) {
+          this.pieceSelectionSystem.deselect();
         }
         this.buildingManager.demolishPiece(targetPiece.id);
       }
@@ -584,9 +610,9 @@ export class BuildAbility implements IAbility {
     const isClickJustPressed = input.buildPlaceJustPressed;
     if (isClickJustPressed) {
       // 7a. PRIORITY 1: Clicked on one of the high-contrast extension arrows on the active piece
-      const hitArrowSide = this.wallSelectionSystem?.raycastArrows(arrowRayOrigin, arrowRayDir);
-      if (hitArrowSide && this.wallSelectionSystem?.getSelectedPiece() && this.buildingManager) {
-        this.wallSelectionSystem.extendSelectedPiece(hitArrowSide, this.buildingManager);
+      const hitArrowSide = this.pieceSelectionSystem?.raycastArrows(arrowRayOrigin, arrowRayDir);
+      if (hitArrowSide && this.pieceSelectionSystem?.getSelectedPiece() && this.buildingManager) {
+        this.pieceSelectionSystem.extendSelectedPiece(hitArrowSide, this.buildingManager);
         // Ensure UI piece is deselected so ghost does not appear
         this.currentPieceType = null;
         this.selectedIndex = -1;
@@ -602,18 +628,25 @@ export class BuildAbility implements IAbility {
           this.currentSnapResult.snappedQuaternion
         );
 
+        // Shift held: keep the piece in hand to place another one right away
+        const keepPlacing = !!input.buildPlaceKeepPiece;
+        if (keepPlacing && placed) {
+          this.pieceSelectionSystem?.deselect();
+          return;
+        }
+
         // Deselect the piece in the panel on placement so ghost object disappears
         this.currentPieceType = null;
         this.selectedIndex = -1;
         this.ghostRenderer.setVisible(false);
 
         // Automatically select the newly placed element and show its extension arrows!
-        if (placed && this.wallSelectionSystem?.isSelectablePiece(placed.type)) {
-          this.wallSelectionSystem.selectPiece(placed);
+        // (placePiece already played the placement sound)
+        if (placed && this.pieceSelectionSystem?.isSelectablePiece(placed.type)) {
+          this.pieceSelectionSystem.selectPiece(placed);
         } else {
-          this.wallSelectionSystem?.deselect();
+          this.pieceSelectionSystem?.deselect();
         }
-        audioEngine.playBuildPlace();
         return;
       }
 
@@ -623,8 +656,8 @@ export class BuildAbility implements IAbility {
         return;
       }
 
-      if (targetPiece && this.wallSelectionSystem?.isSelectablePiece(targetPiece.type)) {
-        this.wallSelectionSystem.selectPiece(targetPiece);
+      if (targetPiece && this.pieceSelectionSystem?.isSelectablePiece(targetPiece.type)) {
+        this.pieceSelectionSystem.selectPiece(targetPiece);
         this.currentPieceType = null;
         this.selectedIndex = -1;
         this.ghostRenderer.setVisible(false);
@@ -634,7 +667,7 @@ export class BuildAbility implements IAbility {
 
       // 7d. Clicked outside on empty ground without placement: deselect active piece
       if (!targetPiece) {
-        this.wallSelectionSystem?.deselect();
+        this.pieceSelectionSystem?.deselect();
       }
     }
   }
@@ -685,12 +718,16 @@ export class BuildAbility implements IAbility {
       isSnapped: this.currentSnapResult?.isSnapped ?? false,
       snappingEnabled: this.snappingEnabled,
       isValidPlacement: this.currentSnapResult?.isValidPlacement ?? false,
+      // SnapSystem reports the reason as an i18n key
+      placementReason: this.currentSnapResult?.validationReason
+        ? t(this.currentSnapResult.validationReason as TKey)
+        : null,
       totalPiecesBuilt: this.buildingManager ? this.buildingManager.getPieceCount() : 0,
       aimingAtPieceId: this.aimedPieceId,
       unconfirmedWallsCount: this.buildingManager ? this.buildingManager.getUnconfirmedWallCount() : 0,
       unconfirmedFloorsCount: this.buildingManager ? this.buildingManager.getUnconfirmedFloorCount() : 0,
       unconfirmedFoundationsCount: this.buildingManager ? this.buildingManager.getUnconfirmedFoundationCount() : 0,
-      selectedWallId: this.wallSelectionSystem?.getSelectedWallId() ?? null,
+      selectedWallId: this.pieceSelectionSystem?.getSelectedWallId() ?? null,
       isPaintingModeActive: this.isPaintingModeActive,
       activeWallpaperId: this.activeWallpaperId,
       activePaintingTool: this.activePaintingTool,
@@ -704,15 +741,65 @@ export class BuildAbility implements IAbility {
       canUndoPaint: this.buildingManager?.wallPaintingSystem.canUndo() ?? false,
       canRedoPaint: this.buildingManager?.wallPaintingSystem.canRedo() ?? false,
       fillPreviewCount: this.currentFillFaces?.length ?? 0,
-      gridCellSize: this.buildingManager?.wallPaintingSystem.gridCellSize ?? 1.0,
+      isRoofSelected: !!this.getSelectedShingleRoof(),
+      canRoofHouse: !!this.houseRoofWall(),
+      canWallFloor: !!this.outlineFloorTile(),
+      currentRoofStyle: this.getSelectedShingleRoof()?.roofStyle ?? this.buildingManager?.defaultRoofStyle,
     };
   }
 
-  public setGridCellSize(size: number): void {
-    if (this.buildingManager) {
-      this.buildingManager.setGridCellSize(size);
+  private getSelectedShingleRoof(): BuiltPiece | null {
+    const piece = this.pieceSelectionSystem?.getSelectedPiece();
+    return piece && isProceduralRoofPiece(piece.type) && !isGlassRoofPiece(piece.type) ? piece : null;
+  }
+
+  /** The wall a house roof would be built from: the selected wall, else the one under the cursor */
+  private houseRoofWall(): BuiltPiece | null {
+    const selected = this.pieceSelectionSystem?.getSelectedPiece();
+    if (selected && isSolidWallPiece(selected.type)) return selected;
+    const aimed = this.aimedPieceId ? this.buildingManager?.getPiece(this.aimedPieceId) : null;
+    return aimed && isSolidWallPiece(aimed.type) ? aimed : null;
+  }
+
+  /** One roof over the whole house of the selected / aimed wall. Returns the message to show. */
+  public roofWholeHouse(): { ok: boolean; message: string } {
+    const wall = this.houseRoofWall();
+    if (!this.buildingManager || !wall) return { ok: false, message: t('build.houseRoof.noWall') };
+    const res = this.buildingManager.placeHouseRoof(wall.id);
+    if (res.ok === false) {
       audioEngine.playBuildSelect();
+      return { ok: false, message: t(res.reason) };
     }
+    this.pieceSelectionSystem?.selectPiece(res.piece);
+    return { ok: true, message: t('build.houseRoof.done') };
+  }
+
+  /** The floor tile walls would go around: the selected tile, else the one under the cursor */
+  private outlineFloorTile(): BuiltPiece | null {
+    const selected = this.pieceSelectionSystem?.getSelectedPiece();
+    if (selected && isOutlineTile(selected.type)) return selected;
+    const aimed = this.aimedPieceId ? this.buildingManager?.getPiece(this.aimedPieceId) : null;
+    return aimed && isOutlineTile(aimed.type) ? aimed : null;
+  }
+
+  /** Walls on every outer edge of the selected / aimed floor. Returns the message to show. */
+  public wallFloorOutline(): { ok: boolean; message: string } {
+    const tile = this.outlineFloorTile();
+    if (!this.buildingManager || !tile) return { ok: false, message: t('build.floorWalls.noFloor') };
+    const res = this.buildingManager.placeFloorOutlineWalls(tile.id);
+    if (res.ok === false) {
+      audioEngine.playBuildSelect();
+      return { ok: false, message: t(res.reason) };
+    }
+    return { ok: true, message: t('build.floorWalls.done', { n: String(res.placed) }) };
+  }
+
+  /** Restyles the selected roof, and makes the style the one new roofs get */
+  public setRoofStyle(style: RoofStyle): void {
+    if (!this.buildingManager) return;
+    this.buildingManager.defaultRoofStyle = style;
+    const roof = this.getSelectedShingleRoof();
+    if (roof) this.buildingManager.setRoofStyle(roof.id, style);
   }
 
   public confirmWalls(): boolean {
@@ -735,14 +822,14 @@ export class BuildAbility implements IAbility {
     return this.buildingManager.confirmAll();
   }
 
-  public exportScene(roofStyle?: 'terracotta' | 'blue_slate' | 'wood_shingles') {
+  public exportScene() {
     if (!this.buildingManager) return null;
-    return this.buildingManager.exportScene(roofStyle);
+    return this.buildingManager.exportScene();
   }
 
-  public downloadSceneJson(roofStyle?: 'terracotta' | 'blue_slate' | 'wood_shingles') {
+  public downloadSceneJson() {
     if (!this.buildingManager) return null;
-    return this.buildingManager.downloadSceneJson(roofStyle);
+    return this.buildingManager.downloadSceneJson();
   }
 
   public importScene(data: any) {
@@ -754,8 +841,8 @@ export class BuildAbility implements IAbility {
     if (this.ghostRenderer) {
       this.ghostRenderer.dispose();
     }
-    if (this.wallSelectionSystem) {
-      this.wallSelectionSystem.dispose();
+    if (this.pieceSelectionSystem) {
+      this.pieceSelectionSystem.dispose();
     }
   }
 }

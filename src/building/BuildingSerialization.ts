@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { BuildingManager } from './BuildingManager';
 import { BuildingPieceType, BuildingSceneExportData, SavedPieceData, isSwingDoorPiece } from './types/BuildingTypes';
 import { isProceduralRoofPiece } from './config/BuildingPiecesConfig';
-import { ProceduralRoofSystem } from './ProceduralRoofSystem';
+import { normalizeRoofStyle } from './ProceduralRoofSystem';
+import { normalizeFootprint } from './HouseRoofGeometry';
 import { audioEngine } from '../audio/AudioEngine';
 
 /**
@@ -13,13 +14,18 @@ function roundTo(val: number, decimals: number = 3): number {
   return Math.round(val * factor) / factor;
 }
 
+/** A saved roof config, with a house roof's outline checked (an unusable one is dropped) */
+function sanitizeRoofConfig(cfg: any): any {
+  if (!('footprint' in cfg)) return cfg;
+  const footprint = normalizeFootprint(cfg.footprint);
+  const { footprint: _drop, ...rest } = cfg;
+  return footprint ? { ...rest, footprint } : rest;
+}
+
 /**
  * Extracts and formats the full building configuration, materials, and telemetry of the current scene.
  */
-export function exportBuildingScene(
-  buildingManager: BuildingManager,
-  currentRoofStyle: 'terracotta' | 'blue_slate' | 'wood_shingles' = 'terracotta'
-): BuildingSceneExportData {
+export function exportBuildingScene(buildingManager: BuildingManager): BuildingSceneExportData {
   const pieces = buildingManager.getAllPieces();
   const savedPieces: SavedPieceData[] = [];
 
@@ -52,6 +58,13 @@ export function exportBuildingScene(
 
     if (piece.roofConfig) {
       saved.roofConfig = { ...piece.roofConfig };
+      // House roof: its wall outline, rounded like the positions
+      if (piece.roofConfig.footprint) {
+        saved.roofConfig.footprint = piece.roofConfig.footprint.map(([x, z]) => [roundTo(x, 3), roundTo(z, 3)] as [number, number]);
+      }
+    }
+    if (piece.roofStyle) {
+      saved.roofStyle = piece.roofStyle;
     }
 
     savedPieces.push(saved);
@@ -67,7 +80,6 @@ export function exportBuildingScene(
     metadata: {
       totalPieces: savedPieces.length,
       customizedCells: customizedCellsCount,
-      roofStyle: currentRoofStyle,
       confirmed: buildingManager.getUnconfirmedWallCount() === 0 &&
                  buildingManager.getUnconfirmedFloorCount() === 0 &&
                  buildingManager.getUnconfirmedFoundationCount() === 0,
@@ -83,10 +95,9 @@ export function exportBuildingScene(
  * Triggers a browser download of the scene telemetry as a formatted JSON file.
  */
 export function downloadBuildingSceneAsJson(
-  buildingManager: BuildingManager,
-  currentRoofStyle: 'terracotta' | 'blue_slate' | 'wood_shingles' = 'terracotta'
+  buildingManager: BuildingManager
 ): { success: boolean; filename: string; piecesCount: number; customizedCells: number; fileSizeKb: number } {
-  const data = exportBuildingScene(buildingManager, currentRoofStyle);
+  const data = exportBuildingScene(buildingManager);
   const jsonString = JSON.stringify(data, null, 2);
   const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
 
@@ -178,7 +189,8 @@ export function parseBuildingSceneJson(jsonContent: string | object): BuildingSc
       quaternion: quat,
       health: typeof p.health === 'number' ? p.health : undefined,
       isOpen: typeof p.isOpen === 'boolean' ? p.isOpen : undefined,
-      roofConfig: p.roofConfig && typeof p.roofConfig === 'object' ? p.roofConfig : undefined,
+      roofConfig: p.roofConfig && typeof p.roofConfig === 'object' ? sanitizeRoofConfig(p.roofConfig) : undefined,
+      roofStyle: typeof p.roofStyle === 'string' ? normalizeRoofStyle(p.roofStyle) : undefined,
     });
   }
 
@@ -189,7 +201,7 @@ export function parseBuildingSceneJson(jsonContent: string | object): BuildingSc
     metadata: {
       totalPieces: normalizedPieces.length,
       customizedCells: parsed.wallPainting ? Object.keys(parsed.wallPainting).length : 0,
-      roofStyle: parsed.metadata?.roofStyle || 'terracotta',
+      roofStyle: typeof parsed.metadata?.roofStyle === 'string' ? parsed.metadata.roofStyle : undefined,
       confirmed: parsed.metadata?.confirmed ?? true,
     },
     pieces: normalizedPieces,
@@ -213,7 +225,6 @@ export function importBuildingScene(
   success: boolean;
   piecesCount: number;
   customizedCells: number;
-  roofStyle?: 'terracotta' | 'blue_slate' | 'wood_shingles';
   error?: string;
 } {
   try {
@@ -250,6 +261,11 @@ export function importBuildingScene(
         if (pieceData.roofConfig && isProceduralRoofPiece(piece.type)) {
           buildingManager.updateRoofConfig(piece.id, pieceData.roofConfig, true);
         }
+        // Older saves had one style for the whole scene
+        const style = pieceData.roofStyle ?? data.metadata.roofStyle;
+        if (style && isProceduralRoofPiece(piece.type)) {
+          buildingManager.setRoofStyle(piece.id, normalizeRoofStyle(style));
+        }
 
         // Restore door hinge position
         if (pieceData.isOpen && isSwingDoorPiece(piece.type)) {
@@ -265,21 +281,16 @@ export function importBuildingScene(
       buildingManager.wallPaintingSystem.importPaintedCells(data.wallPainting);
     }
 
-    // 4. Restore roof texture style
-    const roofStyle = data.metadata.roofStyle || 'terracotta';
-    ProceduralRoofSystem.applyRoofTextureStyle(roofStyle);
-
-    // 5. Regenerate seamless continuous meshes
+    // 4. Regenerate seamless continuous meshes
     buildingManager.confirmAll();
 
-    // 6. Audio feedback
+    // 5. Audio feedback
     audioEngine.playBuildSnap();
 
     return {
       success: true,
       piecesCount: placedCount,
       customizedCells: Object.keys(data.wallPainting || {}).length,
-      roofStyle,
     };
   } catch (err: any) {
     console.error('[BuildingSerialization] Failed to reconstruct scene:', err);

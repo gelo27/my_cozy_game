@@ -16,16 +16,26 @@ import {
   isSwingDoorPiece,
   isGreenhousePiece,
   PieceCategory,
+  isFloorPiece,
+  isFoundationPiece,
+  getWallSize,
 } from './types/BuildingTypes';
 import { GreenhouseBatch } from './GreenhouseBatch';
 import { BUILDING_PIECES, BUILDING_MATERIALS, createPieceMeshGroup, getPieceMeshTemplate, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface, createRoofGeometry, addFarGlassTwins } from './config/BuildingPiecesConfig';
-import { ProceduralRoofGenerator, ProceduralRoofConfig } from './ProceduralRoofSystem';
+import { ProceduralRoofGenerator, ProceduralRoofConfig, RoofStyle, DEFAULT_ROOF_STYLE } from './ProceduralRoofSystem';
+import { findHouseOutline } from './HouseOutline';
+import { houseRoofRun } from './HouseRoofGeometry';
+import { planFloorOutlineWalls, OUTLINE_WALL_TYPE } from './FloorOutlineWalls';
+import type { TKey } from '../i18n/en';
+import { dressRoof, resetRoofAtticTile } from './RoofDressing';
 import { PhysicsWorld, NPC_GHOST_COLLIDERS } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
 import { ContinuousWallSystem } from './ContinuousWallSystem';
-import { WallPaintingSystem, WallCellHitInfo } from './WallPaintingSystem';
+import { WallPaintingSystem, WallCellHitInfo, PaintChangeScope } from './WallPaintingSystem';
+import { computeFlippedWalls } from './WallSides';
+import { setWallPieceFlipped } from './config/DefaultWallMaterials';
 import { isFurniturePiece } from './furniture/FurnitureCatalog';
 import { exportBuildingScene, importBuildingScene, downloadBuildingSceneAsJson } from './BuildingSerialization';
 
@@ -111,13 +121,21 @@ export class BuildingManager {
   public wallPaintingSystem: WallPaintingSystem;
   private nextPieceId: number = 1;
   private spatialGrid: SpatialPieceGrid = new SpatialPieceGrid(4.0);
+  /** Pieces bigger than LARGE_PIECE_EXTENT: their bounds reach well past their grid cell */
+  private readonly largePieces = new Set<BuiltPiece>();
+  private static readonly LARGE_PIECE_EXTENT = 6.0;
+  private static readonly _tempSize = new THREE.Vector3();
   private cachedPiecesArray: BuiltPiece[] | null = null;
 
-  // Continuous meshes are rebuilt at most once per frame: edits only mark them dirty,
+  // Baked meshes are rebuilt at most once per frame: edits only mark chunks dirty,
   // flushPendingRegeneration() (called from the game loop) does the actual rebuild.
-  private dirtyWalls = false;
-  private dirtyFloors = false;
-  private dirtyFoundations = false;
+  /** `revision` the outer/inner wall sides were last worked out for */
+  private wallSidesRevision = -1;
+  /** `revision` the roofs' frontons last matched their walls for; paint changes force a re-check */
+  private roofDressingRevision = -1;
+  private roofDressingDirty = false;
+  /** Shingle style new roofs get */
+  public defaultRoofStyle: RoofStyle = DEFAULT_ROOF_STYLE;
 
   // Greenhouse pieces are merged per chunk into a few shared meshes (see GreenhouseBatch);
   // "live" ones (a roof whose resize arrows are being dragged) stay as their own mesh meanwhile.
@@ -138,7 +156,10 @@ export class BuildingManager {
     this.group.name = 'BuildingManager_ConstructedWorld';
     this.scene.add(this.group);
     this.wallPaintingSystem = new WallPaintingSystem(this.group, BUILDING_MATERIALS.wallChecker);
-    this.continuousWallSystem = new ContinuousWallSystem(this.group, this.wallPaintingSystem);
+    this.continuousWallSystem = new ContinuousWallSystem(this.group, this.wallPaintingSystem, {
+      getPieces: () => this.pieces,
+      near: (center, radius) => this.getPiecesTouchingRadius(center, radius),
+    });
     this.greenhouseBatch = new GreenhouseBatch(this.group);
   }
 
@@ -178,28 +199,109 @@ export class BuildingManager {
     return changed !== null;
   }
 
-  private markPaintDirty(changed: { walls: boolean; floors: boolean }): void {
-    if (changed.walls) this.dirtyWalls = true;
-    if (changed.floors) this.dirtyFloors = true;
+  /** Painted faces are re-skinned in place (no geometry rebuild); pending pieces get baked. */
+  private markPaintDirty(changed: PaintChangeScope): void {
+    this.continuousWallSystem.repaint(changed.pieceIds);
+    this.roofDressingDirty = true; // frontons follow the outer finish of their walls
   }
 
-  /** Rebuilds any continuous mesh marked dirty since the last call. Cheap no-op when nothing changed. */
+  /** Rebuilds the baked chunks marked dirty since the last call. Cheap no-op when nothing changed. */
   public flushPendingRegeneration(): void {
-    if (this.dirtyWalls) {
-      this.dirtyWalls = false;
-      this.continuousWallSystem.regenerateWalls(this.pieces);
-    }
-    if (this.dirtyFloors) {
-      this.dirtyFloors = false;
-      this.continuousWallSystem.regenerateFloors(this.pieces);
-    }
-    if (this.dirtyFoundations) {
-      this.dirtyFoundations = false;
-      this.continuousWallSystem.regenerateFoundations(this.pieces);
-    }
+    this.updateWallSides();
+    this.continuousWallSystem.flush();
+    this.updateRoofDressing();
     if (this.dirtyGreenhouse) {
       this.dirtyGreenhouse = false;
       this.greenhouseBatch.rebuild(this.pieces.values(), (id) => this.liveGreenhouseIds.has(id));
+    }
+  }
+
+  private updateRoofDressing(): void {
+    if (this.roofDressingRevision === this.revision && !this.roofDressingDirty) return;
+    this.roofDressingRevision = this.revision;
+    this.roofDressingDirty = false;
+    for (const piece of this.pieces.values()) {
+      if (isProceduralRoofPiece(piece.type)) this.dressRoof(piece);
+    }
+  }
+
+  private dressRoof(piece: BuiltPiece): void {
+    dressRoof(piece, this.wallPaintingSystem, (c, r) => this.getPiecesNear(c, r));
+  }
+
+  /**
+   * Puts one hip roof over the whole house `wallId` belongs to, following its outer walls (valleys
+   * at inner corners). A house roof already standing on the same outline is replaced.
+   */
+  public placeHouseRoof(wallId: string): { ok: true; piece: BuiltPiece } | { ok: false; reason: TKey } {
+    const wall = this.pieces.get(wallId);
+    if (!wall) return { ok: false, reason: 'build.houseRoof.noWall' };
+    const found = findHouseOutline(wall, (c, r) => this.getPiecesNear(c, r));
+    if (found.ok === false) return { ok: false, reason: found.reason };
+    const { origin, quaternion, footprint } = found.outline;
+
+    for (const p of this.getPiecesNear(origin, 1)) {
+      if (p.roofConfig?.footprint && p.position.distanceTo(origin) < 0.2) this.demolishPiece(p.id);
+    }
+
+    const piece = this.placePiece(BuildingPieceType.ROOF_HIP_4X4, origin, quaternion);
+    if (!piece) return { ok: false, reason: 'build.houseRoof.failed' };
+    const xs = footprint.map((p) => p[0]), zs = footprint.map((p) => p[1]);
+    // About 30 degrees, in the height arrow's 0.25 m steps
+    const height = THREE.MathUtils.clamp(Math.round((houseRoofRun(footprint) * 0.6 + 0.12) / 0.25) * 0.25, 0.5, 5);
+    this.updateRoofConfig(piece.id, {
+      roofType: 'hip',
+      footprint,
+      minX: Math.min(...xs),
+      maxX: Math.max(...xs),
+      minZ: Math.min(...zs),
+      maxZ: Math.max(...zs),
+      height,
+      maxHeight: Math.max(5, height),
+    });
+    return { ok: true, piece };
+  }
+
+  /**
+   * Walls on every outer edge of the floor this tile belongs to (2 m walls on the tile edges).
+   * Edges that already hold a wall, window, door or railing are skipped.
+   */
+  public placeFloorOutlineWalls(floorId: string): { ok: true; placed: number } | { ok: false; reason: TKey } {
+    const floor = this.pieces.get(floorId);
+    if (!floor) return { ok: false, reason: 'build.floorWalls.noFloor' };
+    const plan = planFloorOutlineWalls(floor, (c, r) => this.getPiecesNear(c, r));
+    if (plan.ok === false) return { ok: false, reason: plan.reason };
+    if (plan.walls.length === 0) return { ok: false, reason: 'build.floorWalls.nothing' };
+    let placed = 0;
+    plan.walls.forEach((w, i) => {
+      // One sound for the whole outline
+      if (this.placePiece(OUTLINE_WALL_TYPE, w.position, w.quaternion, undefined, i > 0)) placed++;
+    });
+    return placed > 0 ? { ok: true, placed } : { ok: false, reason: 'build.floorWalls.failed' };
+  }
+
+  /** Gives one roof a shingle style; returns false for anything that is not a shingle roof */
+  public setRoofStyle(pieceId: string, style: RoofStyle): boolean {
+    const piece = this.pieces.get(pieceId);
+    if (!piece || !isProceduralRoofPiece(piece.type) || isGlassRoofPiece(piece.type)) return false;
+    piece.roofStyle = style;
+    this.dressRoof(piece);
+    return true;
+  }
+
+  /**
+   * Works out which side of every wall faces outdoors whenever the building changed, and re-skins the
+   * walls whose outer side moved (siding outside, wainscoting inside).
+   */
+  private updateWallSides(): void {
+    if (this.wallSidesRevision === this.revision) return;
+    this.wallSidesRevision = this.revision;
+    const flipped = computeFlippedWalls(this.getAllPieces(), (c, r) => this.getPiecesNear(c, r));
+    for (const id of this.wallPaintingSystem.setFlippedWalls(flipped)) {
+      const piece = this.pieces.get(id);
+      if (!piece) continue;
+      setWallPieceFlipped(piece.meshGroup, flipped.has(id));
+      if (piece.isConfirmed) this.continuousWallSystem.repaint([id]);
     }
   }
 
@@ -225,18 +327,11 @@ export class BuildingManager {
         targetPiece.roofConfig.fasciaDepth = sourcePiece.roofConfig.fasciaDepth;
       }
     }
+    if (sourcePiece.roofStyle && targetPiece.roofConfig) this.setRoofStyle(targetPieceId, sourcePiece.roofStyle);
 
     const copiedWallpapers = this.wallPaintingSystem.copyPieceStyle(sourcePieceId, targetPieceId);
-    if (copiedWallpapers) {
-      this.dirtyWalls = true;
-      this.dirtyFloors = true;
-    }
+    if (copiedWallpapers) this.continuousWallSystem.repaint([targetPieceId]);
     return true;
-  }
-
-  public setGridCellSize(size: number): void {
-    this.wallPaintingSystem.setGridCellSize(size);
-    this.dirtyWalls = true;
   }
 
   public getAllPieces(): BuiltPiece[] {
@@ -248,6 +343,34 @@ export class BuildingManager {
 
   public getPiecesNear(center: THREE.Vector3, radius: number): BuiltPiece[] {
     return this.spatialGrid.getPiecesInRadius(center, radius);
+  }
+
+  /**
+   * Pieces whose bounds come within `radius` of `center`. The grid indexes pieces by their origin,
+   * so oversized ones (a stretched roof) are checked by their bounding box on top of the grid query.
+   */
+  public getPiecesTouchingRadius(center: THREE.Vector3, radius: number): BuiltPiece[] {
+    const result = this.spatialGrid.getPiecesInRadius(center, radius);
+    if (this.largePieces.size > 0) {
+      const radiusSq = radius * radius;
+      for (const piece of this.largePieces) {
+        if (piece.position.distanceToSquared(center) <= radiusSq) continue; // already in the grid result
+        if (piece.worldBoundingBox && piece.worldBoundingBox.distanceToPoint(center) <= radius) result.push(piece);
+      }
+    }
+    return result;
+  }
+
+  /** Keeps `largePieces` in sync with a piece's current bounding box. */
+  private trackPieceSize(piece: BuiltPiece): void {
+    const box = piece.worldBoundingBox;
+    if (!box) {
+      this.largePieces.delete(piece);
+      return;
+    }
+    const size = box.getSize(BuildingManager._tempSize);
+    if (Math.max(size.x, size.y, size.z) > BuildingManager.LARGE_PIECE_EXTENT) this.largePieces.add(piece);
+    else this.largePieces.delete(piece);
   }
 
   public getPieceCount(): number {
@@ -338,33 +461,29 @@ export class BuildingManager {
       createdAt: performance.now(),
       worldBoundingBox,
       roofConfig: isProceduralRoofPiece(type) ? getDefaultRoofConfig(type) : undefined,
+      roofStyle: isProceduralRoofPiece(type) && !isGlassRoofPiece(type) ? this.defaultRoofStyle : undefined,
     };
 
     this.pieces.set(id, builtPiece);
     this.spatialGrid.insert(builtPiece);
+    this.trackPieceSize(builtPiece);
     this.markGreenhouseDirty(type);
     this.cachedPiecesArray = null; // Invalidate cached pieces array
     this.revision++;
 
     if (isProceduralRoofPiece(type)) {
       this.rebuildRoofPhysicsCollider(builtPiece);
+      this.dressRoof(builtPiece);
     }
     if (isSwingDoorPiece(type)) {
       this.rebuildDoorPhysicsCollider(builtPiece);
     }
 
-    // Register with ContinuousWallSystem if it's a wall, floor, or foundation piece
-    if (this.continuousWallSystem.isConfirmablePiece(type)) {
-      this.continuousWallSystem.registerPiece(builtPiece);
-    }
+    // Walls, floors and foundations start unconfirmed; a window or door cuts its hole in the baked walls
+    this.continuousWallSystem.registerPiece(builtPiece);
 
     // Rebuild physics colliders for solid walls if doors or solid walls are added/modified
     this.rebuildWallCollidersAroundPiece(builtPiece);
-
-    // If an opening piece (window/door/doorway) was placed, regenerate wall mesh to cut out the hole
-    if (this.continuousWallSystem.isOpeningPiece(type)) {
-      this.dirtyWalls = true;
-    }
 
     // Audio and particles
     if (!skipAudioParticles) {
@@ -424,6 +543,8 @@ export class BuildingManager {
         if (updatePhysics || !wasLive) this.dirtyGreenhouse = true;
       } else {
         ProceduralRoofGenerator.updateBufferGeometry((roofMesh as THREE.Mesh).geometry, updatedConfig);
+        resetRoofAtticTile(piece);
+        this.dressRoof(piece);
       }
 
       piece.meshGroup.updateMatrix();
@@ -434,6 +555,7 @@ export class BuildingManager {
 
     // 2. Re-calculate precomputed world bounding box
     piece.worldBoundingBox = new THREE.Box3().setFromObject(piece.meshGroup);
+    this.trackPieceSize(piece);
 
     // 3. Re-create Rapier Physics Collider for new slope geometry if requested
     if (updatePhysics) {
@@ -488,10 +610,7 @@ export class BuildingManager {
     if (
       piece.isConfirmed &&
       !piece.meshGroup.visible &&
-      this.continuousWallSystem &&
-      (this.continuousWallSystem.isSolidWallPiece(piece.type) ||
-       this.continuousWallSystem.isFloorPiece(piece.type) ||
-       this.continuousWallSystem.isFoundationPiece(piece.type))
+      this.continuousWallSystem.isConfirmablePiece(piece.type)
     ) {
       return false;
     }
@@ -522,6 +641,7 @@ export class BuildingManager {
       const template = getPieceMeshTemplate(piece.type);
       piece.worldBoundingBox = template.boundingBox.clone().applyMatrix4(piece.meshGroup.matrixWorld);
     }
+    this.trackPieceSize(piece);
 
     // 4. Update Rapier static rigid body rotation
     if (piece.staticBody) {
@@ -543,10 +663,8 @@ export class BuildingManager {
     this.cachedPiecesArray = null;
     this.revision++;
 
-    // 7. Update continuous walls if opening piece changed orientation
-    if (this.continuousWallSystem && this.continuousWallSystem.isOpeningPiece(piece.type)) {
-      this.dirtyWalls = true;
-    }
+    // 7. Baked meshes around it (a turned window moves its hole; a turned pending wall re-cuts the floor)
+    this.continuousWallSystem.pieceChanged(piece);
 
     // 8. Recompute wall colliders if wall/opening rotated
     if (
@@ -694,7 +812,7 @@ export class BuildingManager {
       if (dist < minDistance) {
         // Transform player position to local door space to evaluate sensor box bounds
         const localPos = playerPosition.clone().sub(piece.position).applyQuaternion(piece.quaternion.clone().invert());
-        const isDoubleWide = piece.type === BuildingPieceType.WOOD_DOOR_DOUBLE || piece.type === BuildingPieceType.DOOR_GRAND_SIDELITES_2X2;
+        const isDoubleWide = isDoorPiece(piece.type) && getWallSize(piece.type)[0] >= 2;
         const halfWidth = isDoubleWide ? 1.4 : 0.8;
 
         if (Math.abs(localPos.x) <= halfWidth && Math.abs(localPos.z) <= 1.5 && Math.abs(localPos.y) <= 1.8) {
@@ -741,11 +859,7 @@ export class BuildingManager {
 
       const swingMultiplier = piece.lastSwingMultiplier || 1;
 
-      const isSingleDoorType =
-        piece.type === BuildingPieceType.WOOD_DOOR_SINGLE ||
-        piece.type === BuildingPieceType.DOOR_WHITE_2PANEL_1X2 ||
-        piece.type === BuildingPieceType.DOOR_COTTAGE_WINDOW_1X2 ||
-        piece.type === BuildingPieceType.DOOR_COLONIAL_6PANEL_1X2;
+      const isSingleDoorType = isDoorPiece(piece.type) && getWallSize(piece.type)[0] < 2;
 
       if (piece.type === BuildingPieceType.GLASS_DOOR_1X3) {
         // Greenhouse door, 3m panel: transom above a 0.86 x 2.25m opening (leaf centre y = -0.355)
@@ -1168,10 +1282,7 @@ export class BuildingManager {
     const piece = this.pieces.get(id);
     if (!piece) return false;
 
-    const isConfirmable = this.continuousWallSystem.isConfirmablePiece(piece.type);
-    if (isConfirmable) {
-      this.continuousWallSystem.unregisterPiece(id);
-    }
+    this.continuousWallSystem.unregisterPiece(piece);
 
     // 1. Remove from physics
     try {
@@ -1197,6 +1308,7 @@ export class BuildingManager {
 
     // 3. Update spatial index & cache
     this.spatialGrid.remove(piece);
+    this.largePieces.delete(piece);
     this.liveGreenhouseIds.delete(piece.id);
     this.markGreenhouseDirty(piece.type);
     this.cachedPiecesArray = null;
@@ -1214,20 +1326,6 @@ export class BuildingManager {
 
     // Rebuild physics colliders for any solid walls if a door was demolished
     this.rebuildWallCollidersAroundPiece(piece);
-
-    // If a wall/floor/foundation/opening was demolished, regenerate continuous meshes if pieces exist
-    if (isConfirmable) {
-      if (this.continuousWallSystem.isSolidWallPiece(piece.type)) {
-        this.dirtyWalls = true;
-        this.dirtyFloors = true;
-      } else if (this.continuousWallSystem.isFloorPiece(piece.type)) {
-        this.dirtyFloors = true;
-      } else if (this.continuousWallSystem.isFoundationPiece(piece.type)) {
-        this.dirtyFoundations = true;
-      }
-    } else if (this.continuousWallSystem.isOpeningPiece(piece.type)) {
-      this.dirtyWalls = true;
-    }
 
     return true;
   }
@@ -1741,12 +1839,11 @@ export class BuildingManager {
   }
 
   /**
-   * Heartopia-style confirmation: bakes all placed walls on the grid into a unified,
-   * continuous mesh with seamless corner miters, checker texture, and optimized draw calls.
+   * Confirmation: bakes all pending walls into the merged wall mesh (mitred corners, holes for
+   * windows and doors). Nothing else bakes pending pieces, except painting or cutting into them.
    */
   public confirmWalls(): boolean {
-    this.dirtyWalls = false;
-    const success = this.continuousWallSystem.regenerateWalls(this.pieces);
+    const success = this.continuousWallSystem.confirm('walls');
     if (success) {
       audioEngine.playBuildSnap();
     }
@@ -1754,8 +1851,7 @@ export class BuildingManager {
   }
 
   public confirmFloors(): boolean {
-    this.dirtyFloors = false;
-    const success = this.continuousWallSystem.regenerateFloors(this.pieces);
+    const success = this.continuousWallSystem.confirm('floors');
     if (success) {
       audioEngine.playBuildSnap();
     }
@@ -1763,8 +1859,7 @@ export class BuildingManager {
   }
 
   public confirmFoundations(): boolean {
-    this.dirtyFoundations = false;
-    const success = this.continuousWallSystem.regenerateFoundations(this.pieces);
+    const success = this.continuousWallSystem.confirm('foundations');
     if (success) {
       audioEngine.playBuildSnap();
     }
@@ -1772,10 +1867,7 @@ export class BuildingManager {
   }
 
   public confirmAll(): boolean {
-    this.dirtyWalls = false;
-    this.dirtyFloors = false;
-    this.dirtyFoundations = false;
-    const success = this.continuousWallSystem.regenerateAll(this.pieces);
+    const success = this.continuousWallSystem.confirm('all');
     if (success) {
       audioEngine.playBuildSnap();
     }
@@ -1787,12 +1879,74 @@ export class BuildingManager {
     const out: { x0: number; z0: number; x1: number; z1: number }[] = [];
     for (const piece of this.pieces.values()) {
       if (!isProceduralRoofPiece(piece.type) && piece.type !== BuildingPieceType.WOOD_ROOF_26) continue;
+      const cfg = piece.roofConfig;
+      if (cfg) {
+        // The walls' footprint (the overhang drips just outside them)
+        const box = new THREE.Box3();
+        for (const x of [cfg.minX, cfg.maxX]) {
+          for (const z of [cfg.minZ, cfg.maxZ]) {
+            box.expandByPoint(new THREE.Vector3(x, 0, z).applyQuaternion(piece.quaternion).add(piece.position));
+          }
+        }
+        out.push({ x0: box.min.x, z0: box.min.z, x1: box.max.x, z1: box.max.z });
+        continue;
+      }
       const bb = piece.worldBoundingBox;
       if (!bb) continue;
       const inset = 0.25; // drop the overhang/gutter: drips fall just outside the walls
       out.push({ x0: bb.min.x + inset, z0: bb.min.z + inset, x1: bb.max.x - inset, z1: bb.max.z - inset });
     }
     return out;
+  }
+
+  /**
+   * Axis-aligned "room" around a light at `p` for the night lighting: starts as the light's range cube
+   * and is cut by the nearest wall on each side (along the axis lines through `p`), the floor below and
+   * the floor or roof above. The box ends on the walls' inner faces, so light stays inside.
+   * Returns null when nothing bounds the light (it then lights its whole sphere).
+   */
+  public getLightVolume(p: THREE.Vector3, range: number): THREE.Box3 | null {
+    const box = new THREE.Box3(
+      new THREE.Vector3(p.x - range, p.y - range, p.z - range),
+      new THREE.Vector3(p.x + range, p.y + range, p.z + range)
+    );
+    let cut = false;
+    const eps = 0.05;
+    for (const piece of this.getPiecesNear(p, range + 5)) {
+      const bb = piece.worldBoundingBox;
+      if (!bb || isGreenhousePiece(piece.type)) continue; // glass lets the light out
+      const type = piece.type;
+      const sx = bb.max.x - bb.min.x;
+      const sz = bb.max.z - bb.min.z;
+
+      if (isSolidWallPiece(type) || isWindowOrDoorPiece(type)) {
+        if (p.y < bb.min.y - 0.1 || p.y > bb.max.y + 0.3) continue;
+        // Only walls running along X or Z (a diagonal wall's box is not thin)
+        if (sx * 3 < sz) {
+          if (p.z < bb.min.z - eps || p.z > bb.max.z + eps) continue;
+          if (bb.max.x <= p.x && bb.max.x > box.min.x) { box.min.x = bb.max.x; cut = true; }
+          else if (bb.min.x >= p.x && bb.min.x < box.max.x) { box.max.x = bb.min.x; cut = true; }
+        } else if (sz * 3 < sx) {
+          if (p.x < bb.min.x - eps || p.x > bb.max.x + eps) continue;
+          if (bb.max.z <= p.z && bb.max.z > box.min.z) { box.min.z = bb.max.z; cut = true; }
+          else if (bb.min.z >= p.z && bb.min.z < box.max.z) { box.max.z = bb.min.z; cut = true; }
+        }
+        continue;
+      }
+
+      const isFloor = isFloorPiece(type) || isFoundationPiece(type);
+      const isRoof = isProceduralRoofPiece(type) || type === BuildingPieceType.WOOD_ROOF_26;
+      if (!isFloor && !isRoof) continue;
+      if (p.x < bb.min.x - eps || p.x > bb.max.x + eps || p.z < bb.min.z - eps || p.z > bb.max.z + eps) continue;
+      if (isFloor && bb.max.y <= p.y + 0.05) {
+        if (bb.max.y > box.min.y) { box.min.y = bb.max.y; cut = true; }
+      } else if (bb.min.y >= p.y - 0.05) {
+        // A floor above caps at its underside; a roof at its ridge (its inner slopes stay lit)
+        const top = isRoof ? bb.max.y : bb.min.y;
+        if (top < box.max.y) { box.max.y = top; cut = true; }
+      }
+    }
+    return cut ? box : null;
   }
 
   public getUnconfirmedWallCount(): number {
@@ -1811,12 +1965,12 @@ export class BuildingManager {
     this.nextPieceId = Math.max(this.nextPieceId, nextId);
   }
 
-  public exportScene(roofStyle?: 'terracotta' | 'blue_slate' | 'wood_shingles'): BuildingSceneExportData {
-    return exportBuildingScene(this, roofStyle);
+  public exportScene(): BuildingSceneExportData {
+    return exportBuildingScene(this);
   }
 
-  public downloadSceneJson(roofStyle?: 'terracotta' | 'blue_slate' | 'wood_shingles') {
-    return downloadBuildingSceneAsJson(this, roofStyle);
+  public downloadSceneJson() {
+    return downloadBuildingSceneAsJson(this);
   }
 
   public importScene(data: BuildingSceneExportData) {

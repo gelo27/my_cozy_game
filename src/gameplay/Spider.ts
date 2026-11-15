@@ -145,6 +145,8 @@ const SPIDER_MATS = {
   eye: new THREE.MeshBasicMaterial({ color: 0xff3b2f }),
 };
 
+/** Seconds a spider stands stunned (not moving at all) after a hit. */
+const HIT_STUN = 0.6;
 /** Body height of the cephalothorax above the surface (m, before scale). */
 const RIDE = 0.36;
 const FEMUR = 0.46;
@@ -271,6 +273,8 @@ export class Spider extends Pest {
   /** Push away from overlapping spiders, filled each frame by the pest system. */
   public readonly avoid = new THREE.Vector3();
   private airTime = 0;
+  /** In the air because a hit knocked it off a wall / the ceiling (stunned on landing). */
+  private knockedOff = false;
   private rear = 0;
   private bite = 0;
   private cooldown = 0;
@@ -370,20 +374,33 @@ export class Spider extends Pest {
   }
 
   protected onHurt(from: THREE.Vector3): void {
-    this.emote.show('angry', 0.8);
-    this.playVoice('attack');
-    // Knocked off a wall or the ceiling: it falls; on the floor it is shoved back and dazed
-    tA.subVectors(this.position, from);
+    // A shriek of pain (louder than its other calls)
+    playSpiderVoice('pain', this.position, this.scale, 1.3);
+    // No pounce the moment the daze wears off (it used to leap straight back through the player)
+    this.cooldown = Math.max(this.cooldown, HIT_STUN + 0.8);
+    // Knocked off a wall or the ceiling: it falls, and is stunned where it lands
     if (this.up.y < 0.5) {
+      tA.subVectors(this.position, from);
       this.vel.copy(tA.setY(0).normalize().multiplyScalar(2));
+      this.knockedOff = true;
       this.startFlight();
       return;
     }
-    if (tangent(tA, this.up)) this.vel.copy(tA).multiplyScalar(4);
+    this.stun();
+  }
+
+  /** The finishing blow: a last shriek, then it goes in a puff as before. */
+  protected onDefeated(): number {
+    playSpiderVoice('pain', this.position, this.scale, 1.5);
+    return 0;
+  }
+
+  /** Stunned on the spot: it doesn't move at all for HIT_STUN seconds. */
+  private stun(): void {
     this.state = 'dazed';
-    this.timer = 0.9;
-    // No pounce the moment the daze wears off (it used to leap straight back through the player)
-    this.cooldown = Math.max(this.cooldown, 1.7);
+    this.timer = HIT_STUN;
+    this.speed = 0;
+    this.vel.set(0, 0, 0);
   }
 
   // ---------------------------------------------------------------- surfaces
@@ -532,6 +549,11 @@ export class Spider extends Pest {
       this.vel.set(0, 0, 0);
       this.state = 'recover';
       this.timer = 0.5;
+      // Knocked down by a hit: stunned where it lands
+      if (this.knockedOff) {
+        this.knockedOff = false;
+        this.stun();
+      }
       this.orient(1);
       this.plantAll(env);
       particles?.emitJumpDust(pos);
@@ -882,15 +904,10 @@ export class Spider extends Pest {
       this.fly(dt, env, player, port, particles);
       this.speed = 0;
     } else {
-      // Crawling over the rock (a shove after a hit slides it along the surface)
-      this.speed += (want - this.speed) * Math.min(1, dt * 8);
-      let sp = this.speed;
-      if (this.state === 'dazed' && this.vel.lengthSq() > 0.01) {
-        tC.copy(this.vel);
-        if (tangent(tC, this.up)) this.fwd.lerp(tC, 0.3), tangent(this.fwd, this.up);
-        sp = this.vel.length();
-        this.vel.multiplyScalar(Math.exp(-dt * 6));
-      }
+      // Crawling over the rock; stunned after a hit it stays put
+      const stunned = this.state === 'dazed';
+      this.speed = stunned ? 0 : this.speed + (want - this.speed) * Math.min(1, dt * 8);
+      const sp = this.speed;
       this.vel.set(0, 0, 0);
       if (sp > 0.05) {
         if (this.crawl(env, sp * dt)) {
@@ -909,7 +926,7 @@ export class Spider extends Pest {
         }
       }
       // Crowding: veer around and slide away from spiders whose legs overlap this one's
-      if (this.avoid.lengthSq() > 1e-4) {
+      if (!stunned && this.avoid.lengthSq() > 1e-4) {
         tAvoid.copy(this.avoid);
         const push = Math.min(1, tAvoid.length());
         if (tangent(tAvoid, this.up)) {

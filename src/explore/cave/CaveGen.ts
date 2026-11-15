@@ -183,6 +183,8 @@ export interface CaveLight {
   intensity: number;
   color?: Vec3;
   flicker?: boolean;
+  /** Light spilling in from outside: follows day and night. */
+  daylight?: boolean;
 }
 
 export interface CaveEntranceOut {
@@ -194,7 +196,6 @@ export interface CaveEntranceOut {
   yaw: number;
   /** Centre of the daylight disc on the end wall. */
   glow: Vec3;
-  torches: Vec3[];
   underwater: boolean;
 }
 
@@ -1250,7 +1251,6 @@ function buildField(layout: CaveLayout, input: CaveGenInput): Built {
         spawn: [tx + dx * 2, level - 0.6, tz + dz * 2],
         yaw: Math.atan2(dx, dz),
         glow: [mx + inx * 0.28, mouthY + 1.4, mz + inz * 0.28],
-        torches: [],
         underwater: true,
       });
       continue;
@@ -1262,14 +1262,12 @@ function buildField(layout: CaveLayout, input: CaveGenInput): Built {
     addAir(new Seg(mx, mouthY, mz, p5x, prof.at(k), p5z, 2.6, 2.7, prof, 0, k, 0.22, true, false));
     addAir(new Seg(p5x, prof.at(k), p5z, hub.x, hub.floor, hub.z, 2.7, 3.0, prof, k, 1, 0.7));
     const sx = mx + inx * 2.8, sz = mz + inz * 2.8;
-    const tx = mx + inx * 3.4, tz = mz + inz * 3.4;
     entrances.push({
       id: e.id,
       mouth: [mx + inx * 0.9, mouthY, mz + inz * 0.9],
       spawn: [sx, prof.at(2.8 / dl), sz],
       yaw: Math.atan2(inx, inz),
       glow: [mx + inx * 0.28, mouthY + 1.55, mz + inz * 0.28],
-      torches: [-1.9, 1.9].map((s): Vec3 => [tx - inz * s, prof.at(3.4 / dl), tz + inx * s]),
       underwater: false,
     });
   }
@@ -1776,17 +1774,12 @@ function deriveContents(layout: CaveLayout, b: Built, pools: CavePool[]) {
     lights.push({ x: h.x, y: h.floor + h.ry * 0.9, z: h.z, range: Math.max(h.rx, h.rz) * 1.3, halo: 0, intensity: wet ? 0.5 : 0.35, color: tint });
   }
   for (const en of b.entrances) {
-    for (const t of en.torches) lights.push({ x: t[0], y: t[1] + 1.5, z: t[2], range: 8, halo: 1.6, intensity: 1.2, flicker: true });
+    // No torches: the only light in the porch is what spills in from the way out, strong at the
+    // opening and a softer wash a few metres down the tunnel
     const inx = Math.sin(en.yaw), inz = Math.cos(en.yaw);
-    lights.push({
-      x: en.glow[0] + inx * 1.2,
-      y: en.glow[1],
-      z: en.glow[2] + inz * 1.2,
-      range: en.underwater ? 10 : 8,
-      halo: 0,
-      intensity: 0.9,
-      color: en.underwater ? [0.3, 0.75, 0.9] : [0.75, 0.85, 1.0],
-    });
+    const color: Vec3 = en.underwater ? [0.3, 0.75, 0.9] : [0.8, 0.88, 1.0];
+    lights.push({ x: en.glow[0] + inx * 1.2, y: en.glow[1], z: en.glow[2] + inz * 1.2, range: en.underwater ? 11 : 10, halo: 0, intensity: 1.3, color, daylight: true });
+    lights.push({ x: en.glow[0] + inx * 5, y: en.glow[1] - 0.4, z: en.glow[2] + inz * 5, range: 11, halo: 0, intensity: 0.55, color, daylight: true });
   }
   return { ores, mushrooms, crystals, embers, lights, chests, drips };
 }

@@ -25,7 +25,7 @@ import { PropTreeField } from '../gathering/PropTreeField';
 import { RockField } from '../gathering/RockField';
 import { BuildingManager } from '../building/BuildingManager';
 import { PreviewGhostRenderer } from '../building/PreviewGhostRenderer';
-import { WallSelectionSystem } from '../building/WallSelectionSystem';
+import { PieceSelectionSystem } from '../building/PieceSelectionSystem';
 import { ParticleManager } from '../particles/ParticleManager';
 import { WaterEffects } from '../scene/WaterEffects';
 import { WaterParticleSystem } from '../particles/WaterParticleSystem';
@@ -321,9 +321,9 @@ export class CharacterController {
     this.setForestZone(forest);
   }
 
-  public setBuildingSystems(manager: BuildingManager, ghostRenderer: PreviewGhostRenderer, wallSelectionSystem?: WallSelectionSystem): void {
+  public setBuildingSystems(manager: BuildingManager, ghostRenderer: PreviewGhostRenderer, pieceSelectionSystem?: PieceSelectionSystem): void {
     if (this.buildAbility) {
-      this.buildAbility.setBuildingSystems(manager, ghostRenderer, wallSelectionSystem);
+      this.buildAbility.setBuildingSystems(manager, ghostRenderer, pieceSelectionSystem);
     }
   }
 

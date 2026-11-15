@@ -1,4 +1,5 @@
 import { audioEngine } from '../audio/AudioEngine';
+import { slingshotSounds } from '../audio/SlingshotSounds';
 
 interface Pos { x: number; y: number; z: number }
 
@@ -93,18 +94,52 @@ export const critterSounds = {
   wingFlap(pos: Pos): void {
     voice(pos, 0.15, (ctx, out, t) => noise(ctx, out, t, 0.1, 0.07, 400, 1, 'lowpass'), 4);
   },
-  /** Slingshot release: the band's twang and a short whip of air. */
-  slingshot(pos: Pos): void {
-    voice(pos, 0.3, (ctx, out, t) => {
-      tone(ctx, out, t, 'triangle', 520, 180, 0.12, 0.08);
-      noise(ctx, out, t, 0.14, 0.12, 2400, 1.2, 'bandpass', 900);
+  /** Slingshot release: the band's snap, the pouch slap and a whip of air behind the pebble. */
+  slingshot(pos: Pos, power = 1): void {
+    slingshotSounds.stopDraw(0.015);
+    // A full draw snaps harder, a touch higher, with a longer whip of air
+    const k = 0.55 + 0.45 * power;
+    const snap = slingshotSounds.play('release', pos, { vol: 0.75 + 0.35 * power, pitch: 0.94 + 0.12 * power, ref: 5 });
+    const zip = slingshotSounds.play('whoosh', pos, { vol: 0.25 + 0.6 * power, pitch: 0.9 + 0.2 * power, delay: 0.015, ref: 5 });
+    if (snap && zip) return;
+    voice(pos, 0.35, (ctx, out, t) => {
+      if (!snap) tone(ctx, out, t, 'triangle', 380 + 260 * power, 160, 0.1 + 0.05 * power, 0.08 * k);
+      if (!zip) noise(ctx, out, t, 0.1 + 0.08 * power, 0.12 * k, 2000 + 900 * power, 1.2, 'bandpass', 900);
     }, 4);
   },
-  /** A pebble knocking on wood, stone or the ground. */
-  pebbleHit(pos: Pos): void {
+  /** Pulling the band back: rubber and leather stretching (stopped on release). */
+  slingDraw(drawTime = 0.65): void {
+    slingshotSounds.ensure();
+    if (slingshotSounds.startDraw(drawTime)) return;
+    voice(null, 0.6, (ctx, out, t) => {
+      noise(ctx, out, t, 0.5, 0.035, 500, 2.5, 'bandpass', 1300);
+      tone(ctx, out, t, 'sine', 140, 210, 0.45, 0.012);
+    });
+  },
+  /** The draw let go without a shot. */
+  slingCancel(): void {
+    slingshotSounds.stopDraw(0.08);
+  },
+  /** The band at full stretch: a tight little creak. */
+  slingFull(): void {
+    if (slingshotSounds.play('full', null, { vol: 0.6, spread: 0.04 })) return;
+    voice(null, 0.2, (ctx, out, t) => {
+      tone(ctx, out, t, 'triangle', 1500, 1150, 0.07, 0.035);
+      noise(ctx, out, t, 0.05, 0.05, 2600, 4);
+    });
+  },
+  /** A pebble smacking into a creature (on top of the hit's own impact sound). */
+  pebbleThwack(pos: Pos, power = 1): void {
+    slingshotSounds.play('thwack', pos, { vol: 0.6 + 0.4 * power, pitch: 0.95 + 0.1 * power, ref: 5 });
+  },
+  /** A pebble knocking on rock / wood (`ground` false) or thudding into dirt (softer as it slows down). */
+  pebbleHit(pos: Pos, strength = 1, ground = false): void {
+    const vol = 0.2 + 0.8 * strength;
+    // Slower bounces ring a little lower
+    if (slingshotSounds.play(ground ? 'ground' : 'hard', pos, { vol, pitch: 0.88 + 0.18 * strength, spread: 0.08 })) return;
     voice(pos, 0.15, (ctx, out, t) => {
-      tone(ctx, out, t, 'sine', 900 + Math.random() * 500, 400, 0.06, 0.07);
-      noise(ctx, out, t, 0.05, 0.12, 3000, 2);
+      tone(ctx, out, t, 'sine', 900 + Math.random() * 500, 400, 0.06, 0.07 * (0.3 + 0.7 * strength));
+      noise(ctx, out, t, 0.05, 0.12 * (0.3 + 0.7 * strength), 3000, 2);
     }, 4);
   },
   /** Shark rushing in: a low surge of water. */

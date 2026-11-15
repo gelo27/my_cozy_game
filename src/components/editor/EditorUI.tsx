@@ -29,7 +29,9 @@ import { vegetationSettings, VegetationSettings, setVegetation, resetVegetationS
 import { causticsSettings, applyCausticsSettings, resetCausticsSettings, CausticsSettings } from '../../scene/WaterEffects';
 import { lightShaftSettings, resetLightShaftSettings, saveLightShaftSettings, LightShaftSettings } from '../../world/LightShafts';
 import { cloudShadowSettings, resetCloudShadowSettings, saveCloudShadowSettings, CloudShadowSettings } from '../../world/CloudShadows';
+import { NIGHT_LIGHT_MODES, NightLightMode, nightLightSettings, setNightLightMode } from '../../world/NightLighting';
 import { pickGlowSettings, resetPickGlowSettings, savePickGlowSettings, PickGlowSettings } from '../../world/PickGlow';
+import { flameSettings, resetFlameSettings, saveFlameSettings, FlameSettings } from '../../world/FlameField';
 
 const ICONS: Record<string, React.ElementType> = {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
@@ -805,6 +807,7 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
       </Section>
       <WeatherTuner type={w.weather.weather} rerender={rerender} />
       <CloudShadowTuner rerender={rerender} />
+      <NightLightModeTuner rerender={rerender} />
       <BirdVoices engine={engine} rerender={rerender} />
       <Section title="Вода">
         <Slider
@@ -820,7 +823,31 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
       <CausticsTuner rerender={rerender} />
       <LightShaftTuner rerender={rerender} />
       <PickGlowTuner rerender={rerender} />
+      <FlameTuner rerender={rerender} />
     </>
+  );
+};
+
+const NIGHT_LIGHT_MODE_LABELS: Record<NightLightMode, { label: string; hint: string }> = {
+  legacy: { label: 'Старий', hint: 'Ламберт + 0.3: світло падає і на зворотний бік стін' },
+  wrap: { label: 'Wrap', hint: 'Поверхні, повернуті від лампи, лишаються темними' },
+  room: { label: 'Wrap + кімната', hint: 'Як Wrap, і світло ламп у будівлях обрізане коробкою кімнати' },
+};
+
+/** Shading mode of the lamps / campfires / cave lights (saved in this browser). */
+const NightLightModeTuner: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const mode = nightLightSettings.mode;
+  return (
+    <Section title="Нічні джерела світла">
+      <div className="grid grid-cols-3 gap-1">
+        {NIGHT_LIGHT_MODES.map((m) => (
+          <button key={m} className={chip(mode === m)} onClick={() => (setNightLightMode(m), rerender())}>
+            {NIGHT_LIGHT_MODE_LABELS[m].label}
+          </button>
+        ))}
+      </div>
+      <div className="mt-1 text-xs opacity-70">{NIGHT_LIGHT_MODE_LABELS[mode].hint}</div>
+    </Section>
   );
 };
 
@@ -850,6 +877,56 @@ const CloudShadowTuner: React.FC<{ rerender(): void }> = ({ rerender }) => {
       ))}
       <button className={chip(false)} onClick={() => (resetCloudShadowSettings(), rerender())}>
         Скинути
+      </button>
+    </Section>
+  );
+};
+
+type FlameColorKey = 'colorCore' | 'colorMid' | 'colorOuter';
+
+/** Shader flames of campfires and torches (saved in this browser; applies to every flame at once). */
+const FlameTuner: React.FC<{ rerender(): void }> = ({ rerender }) => {
+  const c = flameSettings;
+  const set = <K extends keyof FlameSettings>(k: K, v: FlameSettings[K]) => {
+    c[k] = v;
+    saveFlameSettings();
+    rerender();
+  };
+  const f2 = (v: number) => v.toFixed(2);
+  const sliders: { k: Exclude<keyof FlameSettings, FlameColorKey>; label: string; min: number; max: number; step: number }[] = [
+    { k: 'speed', label: 'Швидкість горіння', min: 0.1, max: 5, step: 0.05 },
+    { k: 'displacement', label: 'Сила язиків полумʼя', min: 0, max: 1.2, step: 0.01 },
+    { k: 'frequency', label: 'Деталізація (частота шуму)', min: 0.5, max: 6, step: 0.1 },
+    { k: 'stretch', label: 'Висота язиків (тяга)', min: 0, max: 2, step: 0.05 },
+    { k: 'turbulence', label: 'Турбулентність', min: 0, max: 3, step: 0.05 },
+    { k: 'brightness', label: 'Температура (яскравість)', min: 0.5, max: 2.5, step: 0.05 },
+    { k: 'fresnel', label: 'Мʼякість країв (Fresnel)', min: 0.5, max: 5, step: 0.1 },
+    { k: 'sparks', label: 'Іскри (кількість)', min: 0, max: 1, step: 0.05 },
+    { k: 'sparkHeight', label: 'Висота іскор', min: 0.3, max: 3, step: 0.05 },
+    { k: 'playerWind', label: 'Вітер від гравця (сила)', min: 0, max: 3, step: 0.05 },
+    { k: 'playerWindRadius', label: 'Вітер від гравця (радіус, м)', min: 0.5, max: 6, step: 0.1 },
+    { k: 'weatherWind', label: 'Погодний вітер (сила)', min: 0, max: 3, step: 0.05 },
+  ];
+  const colors: { k: FlameColorKey; label: string }[] = [
+    { k: 'colorCore', label: 'Ядро' },
+    { k: 'colorMid', label: 'Полумʼя' },
+    { k: 'colorOuter', label: 'Край' },
+  ];
+  return (
+    <Section title="Полумʼя (багаття, факели)">
+      {sliders.map((s) => (
+        <Slider key={s.k} label={s.label} value={c[s.k]} min={s.min} max={s.max} step={s.step} fmt={f2} onChange={(v) => set(s.k, v)} />
+      ))}
+      <div className="grid grid-cols-3 gap-1">
+        {colors.map((s) => (
+          <label key={s.k} className="flex flex-col items-center gap-1 rounded-lg bg-white/5 p-1.5 text-[10px] text-zinc-400">
+            <input type="color" value={c[s.k]} onChange={(e) => set(s.k, e.target.value)} className="h-6 w-8 cursor-pointer bg-transparent" />
+            {s.label}
+          </label>
+        ))}
+      </div>
+      <button className={chip(false)} onClick={() => (resetFlameSettings(), rerender())}>
+        Скинути до стандартних
       </button>
     </Section>
   );

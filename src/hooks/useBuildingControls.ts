@@ -1,6 +1,7 @@
 import { t } from '../i18n/i18n';
 import { BuildingPieceType, BuildingTelemetry } from '../building/types/BuildingTypes';
 import { PaintingToolMode } from '../building/WallPaintingSystem';
+import { RoofStyle } from '../building/ProceduralRoofSystem';
 import { GameEngine } from '../engine/GameEngine';
 import { AddLog } from './useConsoleLog';
 import { ShowToast } from './useToast';
@@ -22,6 +23,13 @@ export function useBuildingControls(
     setBuildingTelemetry({ ...buildAbility.getTelemetry() });
     return result;
   };
+
+  if (buildAbility) {
+    buildAbility.onHouseRoofMessage = (ok, message) => {
+      showToast({ text: message, type: ok ? 'success' : 'warn' });
+      setBuildingTelemetry({ ...buildAbility.getTelemetry() });
+    };
+  }
 
   const confirmWith = (confirm: () => boolean, message: string) => {
     if (withBuild(confirm)) {
@@ -49,13 +57,6 @@ export function useBuildingControls(
 
     redoPaint: () => withBuild(build => build.redoPaint()),
 
-    setGridCellSize: (size: number) => {
-      withBuild(build => build.setGridCellSize(size));
-      if (buildAbility) {
-        showToast({ text: t('paint.gridSize', { size: size === 1.0 ? '1×1' : '0.5×0.5' }), type: 'info' });
-      }
-    },
-
     selectPiece: (type: BuildingPieceType) => withBuild(build => build.setPieceType(type)),
 
     rotatePiece: () => withBuild(build => build.rotatePiece(true)),
@@ -81,5 +82,21 @@ export function useBuildingControls(
 
     confirmAll: () =>
       confirmWith(() => buildAbility!.confirmAll(), t('build.confirmedAll')),
+
+    setRoofStyle: (style: RoofStyle) => withBuild(build => build.setRoofStyle(style)),
+
+    wallFloorOutline: () =>
+      withBuild(build => {
+        const res = build.wallFloorOutline();
+        showToast({ text: res.message, type: res.ok ? 'success' : 'warn' });
+        if (res.ok) addLog('event', res.message);
+      }),
+
+    roofWholeHouse: () =>
+      withBuild(build => {
+        const res = build.roofWholeHouse();
+        showToast({ text: res.message, type: res.ok ? 'success' : 'warn' });
+        if (res.ok) addLog('event', res.message);
+      }),
   };
 }

@@ -119,7 +119,7 @@ export interface BuildingPieceDef {
   isWalkableSlope?: boolean;
 }
 
-import { ProceduralRoofConfig } from '../ProceduralRoofSystem';
+import type { ProceduralRoofConfig, RoofStyle } from '../ProceduralRoofSystem';
 
 export interface BuiltPiece {
   id: string;
@@ -136,26 +136,137 @@ export interface BuiltPiece {
   worldBoundingBox?: THREE.Box3;
   isConfirmed?: boolean;
   roofConfig?: ProceduralRoofConfig;
+  /** Shingle style of a procedural roof (each roof keeps its own) */
+  roofStyle?: RoofStyle;
   isOpen?: boolean;
   lastSwingMultiplier?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Piece traits: one row per piece type. Adding a new BuildingPieceType fails to compile until it
+// gets a row here, and every is*Piece() / size helper below reads this table instead of its own list.
+// ---------------------------------------------------------------------------
+
+export type PieceKind =
+  | 'floor'
+  | 'foundation'
+  | 'wall'
+  | 'window'
+  | 'door'
+  | 'doorway'
+  | 'stairs'
+  | 'roof'
+  | 'pillar'
+  | 'railing'
+  | 'furniture';
+
+export interface PieceTraits {
+  kind: PieceKind;
+  /** Greenhouse glass piece: stand-alone (not merged into continuous walls, no openings cut) */
+  glass?: boolean;
+  /** Wooden piece whose size, sockets and snapping this one shares (glass twins) */
+  shape?: BuildingPieceType;
+  /** Has a leaf the player can swing open */
+  swing?: boolean;
+  /** Roof drawn by ProceduralRoofGenerator, resizable with arrows */
+  proceduralRoof?: boolean;
+  /** Furniture that hangs from a ceiling instead of standing on a surface */
+  ceilingHung?: boolean;
+  /** Width x height in the wall plane, meters (walls and wall openings) */
+  wallSize?: [number, number];
+}
+
+const T = BuildingPieceType;
+export const PIECE_TRAITS: Record<BuildingPieceType, PieceTraits> = {
+  [T.WOOD_FLOOR_2X2]: { kind: 'floor' },
+  [T.WOOD_FLOOR_1X1]: { kind: 'floor' },
+  [T.STONE_FOUNDATION_2X2]: { kind: 'foundation' },
+
+  [T.WOOD_WALL_2X3]: { kind: 'wall', wallSize: [2, 3] },
+  [T.WOOD_WALL_1X3]: { kind: 'wall', wallSize: [1, 3] },
+  [T.WOOD_WALL_1X2]: { kind: 'wall', wallSize: [1, 2] },
+  [T.WOOD_WALL_2X1]: { kind: 'wall', wallSize: [2, 1] },
+  [T.WOOD_WALL_1X1]: { kind: 'wall', wallSize: [1, 1] },
+
+  [T.WOOD_WALL_WINDOW_1X2]: { kind: 'window', wallSize: [1, 2] },
+  [T.WOOD_WALL_WINDOW_1X1_5]: { kind: 'window', wallSize: [1, 1.5] },
+  [T.WOOD_WALL_WINDOW_2X2]: { kind: 'window', wallSize: [2, 2] },
+  [T.WOOD_WALL_WINDOW_2X4]: { kind: 'window', wallSize: [2, 4] },
+
+  [T.WOOD_WALL_DOORWAY_2X2]: { kind: 'doorway', wallSize: [2, 2] },
+  [T.WOOD_WALL_DOORWAY_1X2]: { kind: 'doorway', wallSize: [1, 2] },
+
+  [T.WOOD_DOOR_SINGLE]: { kind: 'door', swing: true, wallSize: [1, 2] },
+  [T.WOOD_DOOR_DOUBLE]: { kind: 'door', swing: true, wallSize: [2, 2] },
+  [T.DOOR_GRAND_SIDELITES_2X2]: { kind: 'door', swing: true, wallSize: [2, 2] },
+  [T.DOOR_WHITE_2PANEL_1X2]: { kind: 'door', swing: true, wallSize: [1, 2] },
+  [T.DOOR_COTTAGE_WINDOW_1X2]: { kind: 'door', swing: true, wallSize: [1, 2] },
+  [T.DOOR_COLONIAL_6PANEL_1X2]: { kind: 'door', swing: true, wallSize: [1, 2] },
+
+  [T.WOOD_STAIRS_2X2]: { kind: 'stairs' },
+  [T.WOOD_STAIRS_2X1]: { kind: 'stairs' },
+  [T.WOOD_STAIRS_2X3]: { kind: 'stairs' },
+
+  [T.WOOD_ROOF_26]: { kind: 'roof' },
+  [T.ROOF_GABLE_2X2]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_GABLE_2X4]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_GABLE_4X4]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_HIP_2X2]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_HIP_2X4]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_HIP_4X4]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_SHED_2X2]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_SHED_2X4]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_SHED_4X4]: { kind: 'roof', proceduralRoof: true },
+
+  [T.WOOD_POLE_2M]: { kind: 'pillar' },
+  [T.CHECKER_PILLAR_1M]: { kind: 'pillar' },
+  [T.CORNER_RUSTICATED_QUOIN_1M]: { kind: 'pillar' },
+
+  [T.WOOD_RAILING_2M]: { kind: 'railing' },
+  [T.WOOD_RAILING_1M]: { kind: 'railing' },
+  [T.WOOD_STAIR_RAILING_2X2]: { kind: 'railing' },
+  [T.WHITE_DECORATIVE_FENCE_1M]: { kind: 'railing' },
+
+  [T.FURN_DINING_TABLE]: { kind: 'furniture' },
+  [T.FURN_COFFEE_TABLE]: { kind: 'furniture' },
+  [T.FURN_WOOD_CHAIR]: { kind: 'furniture' },
+  [T.FURN_ARMCHAIR]: { kind: 'furniture' },
+  [T.FURN_SOFA]: { kind: 'furniture' },
+  [T.FURN_BED_SINGLE]: { kind: 'furniture' },
+  [T.FURN_BED_DOUBLE]: { kind: 'furniture' },
+  [T.FURN_WARDROBE]: { kind: 'furniture' },
+  [T.FURN_DRESSER]: { kind: 'furniture' },
+  [T.FURN_NIGHTSTAND]: { kind: 'furniture' },
+  [T.FURN_BOOKSHELF]: { kind: 'furniture' },
+  [T.FURN_CHANDELIER]: { kind: 'furniture', ceilingHung: true },
+  [T.FURN_TABLE_LAMP]: { kind: 'furniture' },
+
+  // Greenhouse: same footprint and snapping as their wooden twins
+  [T.GLASS_WALL_2X3]: { kind: 'wall', glass: true, shape: T.WOOD_WALL_2X3 },
+  [T.GLASS_WALL_1X3]: { kind: 'wall', glass: true, shape: T.WOOD_WALL_1X3 },
+  [T.GLASS_DOORWAY_1X3]: { kind: 'doorway', glass: true, shape: T.WOOD_WALL_1X3 },
+  [T.GLASS_DOOR_1X3]: { kind: 'door', glass: true, swing: true, shape: T.WOOD_WALL_1X3 },
+  [T.GLASS_ROOF_GABLE_2X2]: { kind: 'roof', glass: true, proceduralRoof: true, shape: T.ROOF_GABLE_2X2 },
+  [T.GLASS_ROOF_SHED_2X2]: { kind: 'roof', glass: true, proceduralRoof: true, shape: T.ROOF_SHED_2X2 },
+};
+
+export function pieceTraits(type: BuildingPieceType): PieceTraits {
+  return PIECE_TRAITS[type];
+}
+
 /** Glass greenhouse wall panels: stand-alone walls (not merged into continuous walls, no openings cut). */
 export function isGlassWallPiece(type: BuildingPieceType): boolean {
-  return (
-    type === BuildingPieceType.GLASS_WALL_2X3 ||
-    type === BuildingPieceType.GLASS_WALL_1X3 ||
-    type === BuildingPieceType.GLASS_DOORWAY_1X3 ||
-    type === BuildingPieceType.GLASS_DOOR_1X3
-  );
+  const t = PIECE_TRAITS[type];
+  return !!t?.glass && (t.kind === 'wall' || t.kind === 'doorway' || t.kind === 'door');
 }
 
 export function isGlassRoofPiece(type: BuildingPieceType): boolean {
-  return type === BuildingPieceType.GLASS_ROOF_GABLE_2X2 || type === BuildingPieceType.GLASS_ROOF_SHED_2X2;
+  const t = PIECE_TRAITS[type];
+  return !!t?.glass && t.kind === 'roof';
 }
 
 export function isGreenhousePiece(type: BuildingPieceType): boolean {
-  return isGlassWallPiece(type) || isGlassRoofPiece(type);
+  return !!PIECE_TRAITS[type]?.glass;
 }
 
 /**
@@ -163,31 +274,13 @@ export function isGreenhousePiece(type: BuildingPieceType): boolean {
  * Every non-glass type maps to itself, so size/snap lookups can switch on `shapeOf(type)`.
  */
 export function shapeOf(type: BuildingPieceType): BuildingPieceType {
-  switch (type) {
-    case BuildingPieceType.GLASS_WALL_2X3:
-      return BuildingPieceType.WOOD_WALL_2X3;
-    case BuildingPieceType.GLASS_WALL_1X3:
-    case BuildingPieceType.GLASS_DOORWAY_1X3:
-    case BuildingPieceType.GLASS_DOOR_1X3:
-      return BuildingPieceType.WOOD_WALL_1X3;
-    case BuildingPieceType.GLASS_ROOF_GABLE_2X2:
-      return BuildingPieceType.ROOF_GABLE_2X2;
-    case BuildingPieceType.GLASS_ROOF_SHED_2X2:
-      return BuildingPieceType.ROOF_SHED_2X2;
-    default:
-      return type;
-  }
+  return PIECE_TRAITS[type]?.shape ?? type;
 }
 
+/** Wooden door set into a wall opening (the glass greenhouse door is a wall panel, not one of these). */
 export function isDoorPiece(type: BuildingPieceType): boolean {
-  return (
-    type === BuildingPieceType.WOOD_DOOR_SINGLE ||
-    type === BuildingPieceType.WOOD_DOOR_DOUBLE ||
-    type === BuildingPieceType.DOOR_GRAND_SIDELITES_2X2 ||
-    type === BuildingPieceType.DOOR_WHITE_2PANEL_1X2 ||
-    type === BuildingPieceType.DOOR_COTTAGE_WINDOW_1X2 ||
-    type === BuildingPieceType.DOOR_COLONIAL_6PANEL_1X2
-  );
+  const t = PIECE_TRAITS[type];
+  return t?.kind === 'door' && !t.glass;
 }
 
 /**
@@ -195,70 +288,64 @@ export function isDoorPiece(type: BuildingPieceType): boolean {
  * greenhouse glass door (which is a wall panel itself, so it is not an `isDoorPiece` opening).
  */
 export function isSwingDoorPiece(type: BuildingPieceType): boolean {
-  return isDoorPiece(type) || type === BuildingPieceType.GLASS_DOOR_1X3;
+  return !!PIECE_TRAITS[type]?.swing;
 }
 
 export function isDoorwayPiece(type: BuildingPieceType): boolean {
-  return type === BuildingPieceType.WOOD_WALL_DOORWAY_2X2 || type === BuildingPieceType.WOOD_WALL_DOORWAY_1X2;
+  const t = PIECE_TRAITS[type];
+  return t?.kind === 'doorway' && !t.glass;
 }
 
 export function isWindowPiece(type: BuildingPieceType): boolean {
-  return (
-    type === BuildingPieceType.WOOD_WALL_WINDOW_1X2 ||
-    type === BuildingPieceType.WOOD_WALL_WINDOW_1X1_5 ||
-    type === BuildingPieceType.WOOD_WALL_WINDOW_2X2 ||
-    type === BuildingPieceType.WOOD_WALL_WINDOW_2X4
-  );
+  return PIECE_TRAITS[type]?.kind === 'window';
 }
 
+/** Openings cut into continuous wooden walls: windows, doors and empty doorways. */
 export function isWindowOrDoorPiece(type: BuildingPieceType): boolean {
   return isWindowPiece(type) || isDoorPiece(type) || isDoorwayPiece(type);
 }
 
+/** Wooden wall panels merged into continuous walls. */
 export function isSolidWallPiece(type: BuildingPieceType): boolean {
-  return (
-    type === BuildingPieceType.WOOD_WALL_2X3 ||
-    type === BuildingPieceType.WOOD_WALL_1X3 ||
-    type === BuildingPieceType.WOOD_WALL_1X2 ||
-    type === BuildingPieceType.WOOD_WALL_2X1 ||
-    type === BuildingPieceType.WOOD_WALL_1X1
-  );
+  const t = PIECE_TRAITS[type];
+  return t?.kind === 'wall' && !t.glass;
+}
+
+export function isFloorPiece(type: BuildingPieceType): boolean {
+  return PIECE_TRAITS[type]?.kind === 'floor';
+}
+
+export function isFoundationPiece(type: BuildingPieceType): boolean {
+  return PIECE_TRAITS[type]?.kind === 'foundation';
+}
+
+export function isProceduralRoofPiece(type: BuildingPieceType): boolean {
+  return !!PIECE_TRAITS[type]?.proceduralRoof;
+}
+
+export function isFurniturePiece(type: BuildingPieceType): boolean {
+  return PIECE_TRAITS[type]?.kind === 'furniture';
+}
+
+/** Furniture that hangs from a ceiling instead of standing on a surface. */
+export function isCeilingFurniture(type: BuildingPieceType): boolean {
+  return !!PIECE_TRAITS[type]?.ceilingHung;
+}
+
+/**
+ * Size of a wall or wall opening in the wall plane (meters), 2 x 2 for anything without one.
+ * Pass `shapeOf(type)` to read a glass piece's wooden twin.
+ */
+export function getWallSize(type: BuildingPieceType): [number, number] {
+  return PIECE_TRAITS[type]?.wallSize ?? [2, 2];
 }
 
 export function getWallHalfWidth(type: BuildingPieceType): number {
-  type = shapeOf(type);
-  if (
-    type === BuildingPieceType.WOOD_WALL_1X3 ||
-    type === BuildingPieceType.WOOD_WALL_1X2 ||
-    type === BuildingPieceType.WOOD_WALL_1X1 ||
-    type === BuildingPieceType.WOOD_WALL_WINDOW_1X2 ||
-    type === BuildingPieceType.WOOD_WALL_WINDOW_1X1_5 ||
-    type === BuildingPieceType.WOOD_WALL_DOORWAY_1X2 ||
-    type === BuildingPieceType.WOOD_DOOR_SINGLE ||
-    type === BuildingPieceType.DOOR_WHITE_2PANEL_1X2 ||
-    type === BuildingPieceType.DOOR_COTTAGE_WINDOW_1X2 ||
-    type === BuildingPieceType.DOOR_COLONIAL_6PANEL_1X2
-  ) {
-    return 0.5;
-  }
-  return 1.0; // 1.0m (HALF_SIZE)
+  return getWallSize(shapeOf(type))[0] / 2;
 }
 
 export function getWallHalfHeight(type: BuildingPieceType): number {
-  type = shapeOf(type);
-  if (type === BuildingPieceType.WOOD_WALL_WINDOW_2X4) {
-    return 2.0;
-  }
-  if (type === BuildingPieceType.WOOD_WALL_2X3 || type === BuildingPieceType.WOOD_WALL_1X3) {
-    return 1.5;
-  }
-  if (type === BuildingPieceType.WOOD_WALL_WINDOW_1X1_5) {
-    return 0.75;
-  }
-  if (type === BuildingPieceType.WOOD_WALL_2X1 || type === BuildingPieceType.WOOD_WALL_1X1) {
-    return 0.5;
-  }
-  return 1.0; // 1.0m (HALF_SIZE)
+  return getWallSize(shapeOf(type))[1] / 2;
 }
 
 export interface WallGridInfo {
@@ -314,6 +401,8 @@ export interface BuildingTelemetry {
   isSnapped: boolean;
   snappingEnabled: boolean;
   isValidPlacement: boolean;
+  /** Localized reason why the piece can't be placed here (null when placement is valid) */
+  placementReason?: string | null;
   totalPiecesBuilt: number;
   aimingAtPieceId: string | null;
   unconfirmedWallsCount?: number;
@@ -332,8 +421,14 @@ export interface BuildingTelemetry {
   canUndoPaint?: boolean;
   canRedoPaint?: boolean;
   fillPreviewCount?: number;
-  gridCellSize?: number;
-  currentRoofStyle?: 'terracotta' | 'blue_slate' | 'wood_shingles';
+  /** Style of the selected roof, or the one new roofs get */
+  currentRoofStyle?: RoofStyle;
+  /** A shingle roof is selected, so the style buttons restyle it */
+  isRoofSelected?: boolean;
+  /** A wall is selected or under the cursor: "roof the whole house" can run */
+  canRoofHouse?: boolean;
+  /** A floor tile is selected or aimed at: its outline can be walled in */
+  canWallFloor?: boolean;
 }
 
 export interface SavedPieceData {
@@ -345,6 +440,7 @@ export interface SavedPieceData {
   health?: number;
   isOpen?: boolean;
   roofConfig?: ProceduralRoofConfig;
+  roofStyle?: RoofStyle;
 }
 
 export interface BuildingSceneExportData {
@@ -354,7 +450,8 @@ export interface BuildingSceneExportData {
   metadata: {
     totalPieces: number;
     customizedCells: number;
-    roofStyle?: 'terracotta' | 'blue_slate' | 'wood_shingles';
+    /** Scene-wide roof style of older saves; roofs now carry their own */
+    roofStyle?: string;
     confirmed: boolean;
   };
   pieces: SavedPieceData[];

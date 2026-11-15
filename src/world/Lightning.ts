@@ -105,7 +105,7 @@ export class LightningStrikes {
 
   private readonly group = new THREE.Group();
   private readonly strikes: Strike[] = [];
-  private readonly scorches: { mesh: THREE.Mesh; age: number }[] = [];
+  private readonly scorches: { mesh: THREE.Mesh; age: number; life: number }[] = [];
   private readonly moteMat = pointsMaterial(new THREE.Color(0.55, 0.75, 2.0), 0.2);
   private readonly sparkMat = pointsMaterial(new THREE.Color(1.6, 1.1, 0.7), 0.1);
   private readonly groundMat = new THREE.ShaderMaterial({
@@ -211,8 +211,8 @@ export class LightningStrikes {
     for (let i = this.scorches.length - 1; i >= 0; i--) {
       const sc = this.scorches[i];
       sc.age += dt;
-      (sc.mesh.material as THREE.ShaderMaterial).uniforms.uFade.value = 1 - THREE.MathUtils.smoothstep(sc.age, SCORCH_LIFE * 0.5, SCORCH_LIFE);
-      if (sc.age >= SCORCH_LIFE) {
+      (sc.mesh.material as THREE.ShaderMaterial).uniforms.uFade.value = 1 - THREE.MathUtils.smoothstep(sc.age, sc.life * 0.5, sc.life);
+      if (sc.age >= sc.life) {
         this.group.remove(sc.mesh);
         sc.mesh.geometry.dispose();
         (sc.mesh.material as THREE.Material).dispose();
@@ -245,7 +245,7 @@ export class LightningStrikes {
     s.scorch.visible = true;
     this.group.remove(s.scorch);
     this.group.add(s.scorch);
-    this.scorches.push({ mesh: s.scorch, age: 0 });
+    this.scorches.push({ mesh: s.scorch, age: 0, life: SCORCH_LIFE });
     this.onStrike?.(s.pos);
   }
 
@@ -387,9 +387,22 @@ export class LightningStrikes {
     hAttr.needsUpdate = true;
   }
 
+  /** A scorch mark without a strike (a dragon's fireball hitting the ground), fading over `life` s. */
+  public addScorch(x: number, z: number, radius: number, life: number): void {
+    // Keep it cheap: the oldest marks go first once there are many
+    if (this.scorches.length >= 24) {
+      const old = this.scorches.shift()!;
+      this.group.remove(old.mesh);
+      old.mesh.geometry.dispose();
+      (old.mesh.material as THREE.Material).dispose();
+    }
+    const mesh = this.buildScorch(x, z, radius);
+    this.group.add(mesh);
+    this.scorches.push({ mesh, age: 0, life });
+  }
+
   /** A dark, ragged disc draped over the ground (a small grid following the terrain). */
-  private buildScorch(x: number, z: number): THREE.Mesh {
-    const R = SCORCH_RADIUS;
+  private buildScorch(x: number, z: number, R = SCORCH_RADIUS): THREE.Mesh {
     const g = new THREE.PlaneGeometry(R * 2, R * 2, 8, 8).rotateX(-Math.PI / 2);
     const p = g.getAttribute('position') as THREE.BufferAttribute;
     for (let i = 0; i < p.count; i++) p.setY(i, this.heightAt(x + p.getX(i), z + p.getZ(i)) + 0.04);

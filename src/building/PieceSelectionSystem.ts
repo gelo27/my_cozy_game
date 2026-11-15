@@ -530,7 +530,7 @@ export function getPieceExtensionConfigs(type: BuildingPieceType, piece?: BuiltP
  * rendering high-contrast 3D arrows on the edges rendered ALWAYS ON TOP (depthTest: false),
  * and placing adjoining pieces seamlessly when arrows are clicked.
  */
-export class WallSelectionSystem {
+export class PieceSelectionSystem {
   public selectedPiece: BuiltPiece | null = null;
   public isDragging: boolean = false;
   private scene: THREE.Scene;
@@ -849,6 +849,8 @@ export class WallSelectionSystem {
 
     for (const config of configs) {
       if (isProceduralRoofPiece(piece.type)) {
+        // A house roof follows its walls' outline: only its height can change
+        if (piece.roofConfig?.footprint && config.side !== 'top') continue;
         if (piece.position.y >= BUILDING_CONFIG.GROUND_SURFACE_Y + BUILDING_CONFIG.MIN_SURFACE_TOLERANCE) {
           this.createArrow(config);
         }
@@ -1146,11 +1148,7 @@ export class WallSelectionSystem {
       }
 
       if (placedNewCount > 0) {
-        const now = performance.now();
-        if (now - this.lastAudioTime > 100) {
-          audioEngine.playBuildPlace(true);
-          this.lastAudioTime = now;
-        }
+        // placePiece already plays the placement sound for each new piece
         if (this.selectedPiece.type === BuildingPieceType.WOOD_FLOOR_2X2 || this.selectedPiece.type === BuildingPieceType.WOOD_FLOOR_1X1) {
           buildingManager.confirmFloors();
         } else if (this.selectedPiece.type === BuildingPieceType.STONE_FOUNDATION_2X2) {
@@ -1253,7 +1251,6 @@ export class WallSelectionSystem {
         } else if (this.selectedPiece.type === BuildingPieceType.STONE_FOUNDATION_2X2) {
           buildingManager.confirmFoundations();
         }
-        audioEngine.playBuildPlace();
         this.selectPiece(lastPlaced);
         return lastPlaced;
       }
@@ -1273,7 +1270,6 @@ export class WallSelectionSystem {
 
       if (newPiece) {
         buildingManager.copyPieceStyle(this.selectedPiece.id, newPiece.id);
-        audioEngine.playBuildPlace();
         this.selectPiece(newPiece);
         return newPiece;
       }
@@ -1348,7 +1344,6 @@ export class WallSelectionSystem {
     if (newPiece) {
       buildingManager.copyPieceStyle(this.selectedPiece.id, newPiece.id);
       this.selectPiece(newPiece);
-      audioEngine.playBuildPlace();
     }
 
     return newPiece;

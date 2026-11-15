@@ -25,10 +25,8 @@ export const FURNITURE_TYPES: BuildingPieceType[] = [
   BuildingPieceType.FURN_TABLE_LAMP,
 ];
 
-/** Furniture that hangs from a ceiling instead of standing on a surface. */
-export function isCeilingFurniture(type: BuildingPieceType): boolean {
-  return type === BuildingPieceType.FURN_CHANDELIER;
-}
+// Re-exported for existing imports; both read PIECE_TRAITS
+export { isCeilingFurniture, isFurniturePiece } from '../types/BuildingTypes';
 
 /**
  * Light emitted by lamp furniture, relative to the piece pivot (bounding-box centre).
@@ -38,12 +36,6 @@ export const FURNITURE_LIGHTS: Partial<Record<BuildingPieceType, { yOffset: numb
   [BuildingPieceType.FURN_CHANDELIER]: { yOffset: 0.02, range: 6.5, halo: 1.4, intensity: 0.45 },
   [BuildingPieceType.FURN_TABLE_LAMP]: { yOffset: 0.08, range: 3.5, halo: 0.8, intensity: 0.32 },
 };
-
-const FURNITURE_SET = new Set(FURNITURE_TYPES);
-
-export function isFurniturePiece(type: BuildingPieceType): boolean {
-  return FURNITURE_SET.has(type);
-}
 
 /** Placement grid step for furniture when snapping is on (meters). */
 export const FURNITURE_GRID_STEP = 0.25;

@@ -3,6 +3,23 @@ import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { IslandSite } from '../world/IslandSites';
 import { StructureBuilder, STRUCTURE_MATERIALS, siteToWorld } from './StructureBuilder';
 import type { ExtraLight } from '../world/NightLighting';
+import { createCavePortalMaterial, LAND_MOUTH_PORTAL, SEA_MOUTH_PORTAL } from './cave/CavePortalMaterial';
+
+let landMouthMat: THREE.Material | null = null;
+let seaMouthMat: THREE.Material | null = null;
+
+/** The opening itself: a half disc with the tunnel parallax, just in front of the void strip. */
+function addMouthPortal(group: THREE.Group, w: number, h: number, z: number, sea: boolean): void {
+  const geo = new THREE.CircleGeometry(1, 24, 0, Math.PI);
+  geo.scale(w, h, 1);
+  geo.translate(0, 0.15, z + 0.02);
+  const mat = sea
+    ? (seaMouthMat ??= createCavePortalMaterial(SEA_MOUTH_PORTAL()))
+    : (landMouthMat ??= createCavePortalMaterial(LAND_MOUTH_PORTAL()));
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.name = sea ? 'SeaCaveMouth_portal' : 'CaveMouth_portal';
+  group.add(mesh);
+}
 
 /** What a built landmark exposes to gameplay. */
 export interface LandmarkAnchors {
@@ -205,11 +222,7 @@ function buildCaveMouth(site: IslandSite, origin: THREE.Vector3, scene: THREE.Sc
   b.rock('stone', 3.6, 1.8, 2.6, 0, 4.4, back - 1.4, seed + 22);
   b.colliderBox(2.4, 6, 3.2, -3.9, 2.5, back - 0.6).colliderBox(2.4, 6, 3.2, 3.9, 2.5, back - 0.6);
   b.colliderBox(9, 2.4, 3.6, 0, 5.2, back - 0.8);
-  // The dark mouth: a void the light does not reach; a collider stops the player at it
-  const mouth = new THREE.CircleGeometry(1, 20, 0, Math.PI);
-  mouth.scale(2.5, 3.0, 1);
-  mouth.translate(0, 0.15, back - 0.7);
-  b.add('void', mouth);
+  // The dark mouth (a tunnel-parallax half disc over a void strip); a collider stops the player at it
   b.add('void', new THREE.PlaneGeometry(5, 0.4).translate(0, 0.0, back - 0.7));
   b.colliderBox(5.4, 4, 1, 0, 2, back - 1.4);
   // Torches either side
@@ -217,8 +230,11 @@ function buildCaveMouth(site: IslandSite, origin: THREE.Vector3, scene: THREE.Sc
     b.cylinder('darkWood', 0.05, 0.06, 1.3, sx, 0.65, back + 0.9, 6);
     b.cylinder('gold', 0.12, 0.07, 0.18, sx, 1.35, back + 0.9, 6);
   }
-  b.build(scene, physics, origin, site.yaw, 'CaveMouth');
-  const torch = (sx: number) => ({ ...siteToWorld(origin, site.yaw, sx, 1.5, back + 0.9), range: 7, halo: 1.4, intensity: 1.1 });
+  addMouthPortal(b.build(scene, physics, origin, site.yaw, 'CaveMouth'), 2.5, 3.0, back - 0.7, false);
+  const torch = (sx: number): ExtraLight => {
+    const at = siteToWorld(origin, site.yaw, sx, 1.5, back + 0.9);
+    return { ...at, range: 7, halo: 1.4, intensity: 1.1, flicker: true, flame: { y: at.y - 0.1, size: 0.55 } };
+  };
   return {
     action: siteToWorld(origin, site.yaw, 0, 0, back + 0.4),
     lights: [torch(-1.9), torch(1.9)],
@@ -244,10 +260,6 @@ function buildSeaCaveMouth(site: IslandSite, origin: THREE.Vector3, scene: THREE
   b.rock('moss', 3.4, 1.4, 3.6, 0, 0.3, back - 3.4, seed + 23);
   b.colliderBox(2.6, 5, 3.4, -4, 2.2, back - 0.8).colliderBox(2.6, 5, 3.4, 4, 2.2, back - 0.8);
   b.colliderBox(9.4, 2.4, 4, 0, 5, back - 1.2);
-  const mouth = new THREE.CircleGeometry(1, 20, 0, Math.PI);
-  mouth.scale(2.6, 3.0, 1);
-  mouth.translate(0, 0.15, back - 0.7);
-  b.add('void', mouth);
   b.add('void', new THREE.PlaneGeometry(5.2, 0.4).translate(0, 0.0, back - 0.7));
   b.colliderBox(5.4, 4, 1, 0, 2, back - 1.4);
   // Crystal beacons on the arch and the shoulders
@@ -261,7 +273,7 @@ function buildSeaCaveMouth(site: IslandSite, origin: THREE.Vector3, scene: THREE
       b.add('crystal', g.translate(x + (k - 1) * 0.25 * s, y - 0.2, z));
     }
   });
-  b.build(scene, physics, origin, site.yaw, 'SeaCaveMouth');
+  addMouthPortal(b.build(scene, physics, origin, site.yaw, 'SeaCaveMouth'), 2.6, 3.0, back - 0.7, true);
   const glow = (x: number, y: number) => ({ ...siteToWorld(origin, site.yaw, x, y, back - 1), range: 9, halo: 1.6, intensity: 1, color: [0.35, 0.8, 1.1] as [number, number, number] });
   return {
     action: siteToWorld(origin, site.yaw, 0, 0.6, back + 0.4),

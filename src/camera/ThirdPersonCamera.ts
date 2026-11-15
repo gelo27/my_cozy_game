@@ -4,6 +4,11 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { CAMERA_CONFIG, COLLISION_GROUPS } from '../config/constants';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 
+/** Camera shake: trauma lost per second, and the largest pitch/yaw and roll (radians) at full trauma. */
+const SHAKE_DECAY = 1.6;
+const SHAKE_ANGLE = 0.07;
+const SHAKE_ROLL = 0.05;
+
 export class ThirdPersonCamera {
   public camera: THREE.PerspectiveCamera;
   
@@ -120,6 +125,8 @@ export class ThirdPersonCamera {
     );
   }
 
+  /** How far the slingshot is drawn (0..1): the view zooms in with it. */
+  public drawZoom = 0;
   private baseFov: number = CAMERA_CONFIG.FOV;
   private targetFov: number = CAMERA_CONFIG.FOV;
 
@@ -169,6 +176,35 @@ export class ThirdPersonCamera {
       CAMERA_CONFIG.PITCH_MIN,
       CAMERA_CONFIG.PITCH_MAX
     );
+  }
+
+  /**
+   * Shakes the view (a blow landing): `amount` adds to a "trauma" level (0..1) that decays on its
+   * own; the shake is its square, so small hits stay small and big ones read clearly. Runs on real
+   * time, so it keeps shaking through the hit-stop freeze.
+   */
+  public shake(amount: number): void {
+    this.trauma = Math.min(1, this.trauma + amount);
+  }
+
+  private trauma = 0;
+  private shakeClock = 0;
+  private shakeLast = 0;
+
+  private applyShake(): void {
+    const now = performance.now() / 1000;
+    const dt = Math.min(0.05, Math.max(0, now - (this.shakeLast || now)));
+    this.shakeLast = now;
+    if (this.trauma <= 0) return;
+    this.trauma = Math.max(0, this.trauma - dt * SHAKE_DECAY);
+    this.shakeClock += dt;
+    const s = this.trauma * this.trauma;
+    const t = this.shakeClock;
+    // Smooth pseudo-noise: a few unrelated sines per axis
+    const n = (a: number, b: number, c: number) => (Math.sin(t * a) + Math.sin(t * b + 1.7) * 0.6 + Math.sin(t * c + 4.1) * 0.3) / 1.9;
+    this.camera.rotateX(SHAKE_ANGLE * s * n(47, 83, 131));
+    this.camera.rotateY(SHAKE_ANGLE * s * n(53, 97, 151));
+    this.camera.rotateZ(SHAKE_ROLL * s * n(41, 71, 113));
   }
 
   public setFov(fov: number): void {
@@ -249,9 +285,9 @@ export class ThirdPersonCamera {
       targetZoomOffset = -2.0; // Zoom in
       this.targetFov = 45;
     } else if (this.isBuilding) {
-      // Over-the-shoulder right offset for clear building placement visibility (1.5m)
-      targetSideOffset = 1.5;
-      targetZoomOffset = -0.5;
+      // Closer than walking (walls no longer pull it in here: they are cut away instead)
+      targetSideOffset = 1.1;
+      targetZoomOffset = -1.6;
       this.targetFov = CAMERA_CONFIG.FOV;
     } else {
       if (this.isHoldingObject) {
@@ -287,6 +323,9 @@ export class ThirdPersonCamera {
     // Exponential smoothing for focus tracking
     const posAlpha = 1.0 - Math.exp(-CAMERA_CONFIG.POSITION_SMOOTH_SPEED * dt);
     this.currentFocusPoint.lerp(this.targetFocusPoint, posAlpha);
+    // The shoulder offset must not carry the focus through a wall (the boom is cast from it, so
+    // the camera would end up on the far side): keep it on the player's side of whatever is there
+    this.clampFocusToPlayer(characterPosition, physics, characterCollider);
 
     // 3. Compute effective angles including dynamic recoil spring offsets
     let effectivePitch = THREE.MathUtils.clamp(
@@ -439,11 +478,41 @@ export class ThirdPersonCamera {
 
     // Apply GTA 5 cinematic camera roll tilt
     this.camera.rotation.z += this.recoilRollOffset;
+    this.applyShake();
 
     // 7. Update FOV with dynamic recoil shock impulse
     const fovAlpha = 1.0 - Math.exp(-14 * dt);
-    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, this.targetFov + this.recoilFovOffset, fovAlpha);
+    // Drawing the slingshot narrows the view a little (more when aiming over the shoulder)
+    const drawFov = this.drawZoom * (this.isAiming ? 7 : 4);
+    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, this.targetFov - drawFov + this.recoilFovOffset, fovAlpha);
     this.camera.updateProjectionMatrix();
+  }
+
+  private readonly _head = new THREE.Vector3();
+  private readonly _toFocus = new THREE.Vector3();
+
+  private clampFocusToPlayer(characterPosition: THREE.Vector3, physics: PhysicsWorld, characterCollider?: RAPIER.Collider): void {
+    if (!physics.isInitialized()) return;
+    const head = this._head.copy(characterPosition);
+    head.y += this.heightOffset;
+    const dir = this._toFocus.subVectors(this.currentFocusPoint, head);
+    const len = dir.length();
+    if (len < 0.05) return;
+    dir.divideScalar(len);
+    const pad = 0.25;
+    const flags = physics.rapier.QueryFilterFlags;
+    const hit = physics.castRay(
+      head,
+      dir,
+      len + pad,
+      true,
+      flags.EXCLUDE_DYNAMIC | flags.EXCLUDE_KINEMATIC | flags.EXCLUDE_SENSORS,
+      physics.packCollisionGroups(COLLISION_GROUPS.CAMERA_RAY, COLLISION_GROUPS.ENVIRONMENT | COLLISION_GROUPS.DYNAMIC_PROPS),
+      characterCollider
+    );
+    if (hit && hit.timeOfImpact < len + pad) {
+      this.currentFocusPoint.copy(head).addScaledVector(dir, Math.max(0, hit.timeOfImpact - pad));
+    }
   }
 
   /**

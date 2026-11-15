@@ -254,7 +254,6 @@ export class Shark extends Pest {
     this.knock = 4;
     this.state = 'retreat';
     this.timer = 2.5;
-    this.emote.show('angry', 1);
     this.rig?.playHurt();
   }
 

@@ -45,7 +45,7 @@ import {
 } from 'lucide-react';
 import { BuildingPieceType, BuildingTelemetry, PieceCategory } from '../building/types/BuildingTypes';
 import { BUILDING_PIECES } from '../building/config/BuildingPiecesConfig';
-import { ProceduralRoofSystem } from '../building/ProceduralRoofSystem';
+import { DEFAULT_ROOF_STYLE, RoofStyle } from '../building/ProceduralRoofSystem';
 import { InputManager } from '../input/InputManager';
 
 interface BuildingHUDProps {
@@ -62,6 +62,11 @@ interface BuildingHUDProps {
   onConfirmFloors?: () => void;
   onConfirmFoundations?: () => void;
   onConfirmAll?: () => void;
+  /** Restyles the selected roof and sets the style for new ones */
+  onSetRoofStyle?: (style: RoofStyle) => void;
+  /** One roof over the whole house of the selected / aimed wall */
+  onRoofWholeHouse?: () => void;
+  onWallFloorOutline?: () => void;
 }
 
 interface PieceItemConfig {
@@ -71,6 +76,13 @@ interface PieceItemConfig {
   icon: React.ReactNode;
   dimBadge: string;
 }
+
+const ROOF_STYLE_BUTTONS: Array<{ style: RoofStyle; label: string; active: string }> = [
+  { style: 'barkwood', label: '🌲 Barkwood', active: 'bg-amber-900 text-white border-amber-400 ring-1 ring-amber-500 shadow-sm' },
+  { style: 'sunrise', label: '🌅 Sunrise', active: 'bg-amber-700 text-white border-amber-300 ring-1 ring-amber-400 shadow-sm' },
+  { style: 'mission', label: '🏮 Mission', active: 'bg-rose-700 text-white border-rose-300 ring-1 ring-rose-400 shadow-sm' },
+  { style: 'blue_slate', label: '🔷 Slate', active: 'bg-sky-600 text-white border-sky-300 ring-1 ring-sky-400 shadow-sm' },
+];
 
 const PIECE_ITEMS: PieceItemConfig[] = [
   // Floors
@@ -82,16 +94,9 @@ const PIECE_ITEMS: PieceItemConfig[] = [
     dimBadge: '2x2м',
   },
   {
-    type: BuildingPieceType.WOOD_FLOOR_1X1,
-    category: PieceCategory.FLOORS,
-    slot: 2,
-    icon: <Square className="w-4 h-4" />,
-    dimBadge: '1x1м',
-  },
-  {
     type: BuildingPieceType.STONE_FOUNDATION_2X2,
     category: PieceCategory.FLOORS,
-    slot: 3,
+    slot: 2,
     icon: <Box className="w-5 h-5" />,
     dimBadge: '2x2м',
   },
@@ -105,32 +110,11 @@ const PIECE_ITEMS: PieceItemConfig[] = [
     dimBadge: '2x3м',
   },
   {
-    type: BuildingPieceType.WOOD_WALL_1X3,
-    category: PieceCategory.WALLS,
-    slot: 2,
-    icon: <Columns className="w-5 h-5" />,
-    dimBadge: '1x3м',
-  },
-  {
-    type: BuildingPieceType.WOOD_WALL_1X2,
-    category: PieceCategory.WALLS,
-    slot: 3,
-    icon: <Columns2 className="w-5 h-5" />,
-    dimBadge: '1x2м',
-  },
-  {
     type: BuildingPieceType.WOOD_WALL_2X1,
     category: PieceCategory.WALLS,
-    slot: 4,
+    slot: 2,
     icon: <Columns2 className="w-5 h-5" />,
     dimBadge: '2x1м',
-  },
-  {
-    type: BuildingPieceType.WOOD_WALL_1X1,
-    category: PieceCategory.WALLS,
-    slot: 5,
-    icon: <Square className="w-5 h-5" />,
-    dimBadge: '1x1м',
   },
 
   // Windows
@@ -154,13 +138,6 @@ const PIECE_ITEMS: PieceItemConfig[] = [
     slot: 3,
     icon: <AppWindow className="w-5 h-5" />,
     dimBadge: '2x2м',
-  },
-  {
-    type: BuildingPieceType.WOOD_WALL_WINDOW_2X4,
-    category: PieceCategory.WINDOWS,
-    slot: 4,
-    icon: <AppWindow className="w-5 h-5" />,
-    dimBadge: '2x4м',
   },
 
   // Doors & Doorways
@@ -404,6 +381,9 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
   onConfirmFloors,
   onConfirmFoundations,
   onConfirmAll,
+  onSetRoofStyle,
+  onRoofWholeHouse,
+  onWallFloorOutline,
 }) => {
   useLang();
   const {
@@ -417,7 +397,7 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
   } = telemetry;
 
   const [activeCategory, setActiveCategory] = useState<PieceCategory | 'ALL'>('ALL');
-  const [roofStyle, setRoofStyle] = useState<'barkwood' | 'sunrise' | 'mission' | 'blue_slate' | 'terracotta'>('barkwood');
+  const roofStyle = telemetry.currentRoofStyle ?? DEFAULT_ROOF_STYLE;
   const categoryScrollRef = useRef<HTMLDivElement>(null);
 
   const scrollCategories = (direction: 'left' | 'right') => {
@@ -427,10 +407,6 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
     }
   };
 
-  const handleSelectRoofStyle = (style: 'barkwood' | 'sunrise' | 'mission' | 'blue_slate' | 'terracotta') => {
-    setRoofStyle(style);
-    ProceduralRoofSystem.applyRoofTextureStyle(style);
-  };
 
   // Filter pieces by active category
   const filteredPieces = useMemo(() => {
@@ -583,11 +559,12 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                     <>
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       <span>{t('build.ready')}</span>
+                      <span className="text-emerald-400/70">· {t('build.keepHint')}</span>
                     </>
                   ) : (
                     <>
                       <AlertCircle className="w-3.5 h-3.5" />
-                      <span>{t('build.blocked')}</span>
+                      <span>{telemetry.placementReason || t('build.blocked')}</span>
                     </>
                   )}
                 </div>
@@ -679,58 +656,54 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                 </button>
               </div>
 
+              {/* Walls on every outer edge of the selected / aimed floor */}
+              {telemetry.canWallFloor && onWallFloorOutline && (
+                <button
+                  id="btn-wall-floor-outline"
+                  onClick={onWallFloorOutline}
+                  title={t('build.floorWallsTitle')}
+                  className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400/60 transition-all"
+                >
+                  <Home className="w-3.5 h-3.5" />
+                  <span>{t('build.floorWalls')}</span>
+                  <span className="text-amber-100/70 font-normal">[K]</span>
+                </button>
+              )}
+
+              {/* One roof over the whole house of the selected / aimed wall */}
+              {telemetry.canRoofHouse && onRoofWholeHouse && (
+                <button
+                  id="btn-roof-whole-house"
+                  onClick={onRoofWholeHouse}
+                  title={t('build.houseRoofTitle')}
+                  className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400/60 transition-all"
+                >
+                  <Home className="w-3.5 h-3.5" />
+                  <span>{t('build.houseRoof')}</span>
+                  <span className="text-amber-100/70 font-normal">[U]</span>
+                </button>
+              )}
+
               {/* Sims 4 Style Architectural Roof Texture Selector */}
-              {(activeCategory === PieceCategory.ROOFS || (selectedPieceType && selectedPieceType.startsWith('ROOF_'))) && (
+              {(activeCategory === PieceCategory.ROOFS || (selectedPieceType && selectedPieceType.startsWith('ROOF_')) || telemetry.isRoofSelected) && (
                 <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-stone-900/90 rounded-xl border border-amber-500/30 text-xs">
                   <span className="text-amber-300 font-semibold flex items-center gap-1.5">
                     <Home className="w-3.5 h-3.5 text-amber-400" />
                     <span>{t('build.roofTexture')}</span>
                   </span>
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    <button
-                      id="btn-roof-style-barkwood"
-                      onClick={() => handleSelectRoofStyle('barkwood')}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-all ${
-                        roofStyle === 'barkwood'
-                          ? 'bg-amber-900 text-white border-amber-400 ring-1 ring-amber-500 shadow-sm'
-                          : 'bg-stone-800/80 text-stone-300 border-stone-700 hover:bg-stone-700'
-                      }`}
-                    >
-                      🌲 Barkwood
-                    </button>
-                    <button
-                      id="btn-roof-style-sunrise"
-                      onClick={() => handleSelectRoofStyle('sunrise')}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-all ${
-                        roofStyle === 'sunrise'
-                          ? 'bg-amber-700 text-white border-amber-300 ring-1 ring-amber-400 shadow-sm'
-                          : 'bg-stone-800/80 text-stone-300 border-stone-700 hover:bg-stone-700'
-                      }`}
-                    >
-                      🌅 Sunrise
-                    </button>
-                    <button
-                      id="btn-roof-style-mission"
-                      onClick={() => handleSelectRoofStyle('mission')}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-all ${
-                        roofStyle === 'mission'
-                          ? 'bg-rose-700 text-white border-rose-300 ring-1 ring-rose-400 shadow-sm'
-                          : 'bg-stone-800/80 text-stone-300 border-stone-700 hover:bg-stone-700'
-                      }`}
-                    >
-                      🏮 Mission
-                    </button>
-                    <button
-                      id="btn-roof-style-blue-slate"
-                      onClick={() => handleSelectRoofStyle('blue_slate')}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-all ${
-                        roofStyle === 'blue_slate'
-                          ? 'bg-sky-600 text-white border-sky-300 ring-1 ring-sky-400 shadow-sm'
-                          : 'bg-stone-800/80 text-stone-300 border-stone-700 hover:bg-stone-700'
-                      }`}
-                    >
-                      🔷 Slate
-                    </button>
+                    {ROOF_STYLE_BUTTONS.map((b) => (
+                      <button
+                        key={b.style}
+                        id={`btn-roof-style-${b.style.replace('_', '-')}`}
+                        onClick={() => onSetRoofStyle?.(b.style)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-all ${
+                          roofStyle === b.style ? b.active : 'bg-stone-800/80 text-stone-300 border-stone-700 hover:bg-stone-700'
+                        }`}
+                      >
+                        {b.label}
+                      </button>
+                    ))}
                   </div>
                 </div>
               )}

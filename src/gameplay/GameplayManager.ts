@@ -14,7 +14,10 @@ import { PestSystem, PestKind, PestEnv } from './Pests';
 import { SlingshotSystem } from './Slingshot';
 import { LockOnSystem } from './LockOn';
 import { hitFx } from './HitFeedback';
+import { slingshotSounds } from '../audio/SlingshotSounds';
 import { playerHealth } from './PlayerHealth';
+import { fireFx } from '../world/FlameField';
+import { riverWorld } from '../world/rivers/RiverWorld';
 import { EnemyHealthBars } from './EnemyHealthBars';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
@@ -151,6 +154,8 @@ export class GameplayManager {
   private readonly aimTmp = new THREE.Vector3();
   private readonly eyeTmp = new THREE.Vector3();
   private readonly muzzle = new THREE.Vector3();
+  /** Which button started the slingshot draw: letting go of it shoots. */
+  private slingDrawKey: 'shoot' | 'interact' | null = null;
 
   /** Bed the player last slept in (they respawn beside it), or null for the starting point. */
   public respawnBed: THREE.Vector3 | null = null;
@@ -199,6 +204,7 @@ export class GameplayManager {
     this.lockOn = new LockOnSystem(scene, this.pests);
     hitFx.init(scene);
     this.healthBars = new EnemyHealthBars(scene, this.pests);
+    fireFx.onBurnDamage = (halves) => this.burnPlayer(halves);
   }
 
   /**
@@ -366,20 +372,47 @@ export class GameplayManager {
     if (this.tmp.lengthSq() < 1e-4) this.tmp.copy(this.character.getFacingDirection()).negate();
     this.character.knockback(this.tmp, power, 0.55);
     critterSounds.ouch();
+    // The view shakes with the blow: harder for a whole heart (sharks, dragon fire)
+    hitFx.onShake?.(PEST_HEART_DAMAGE[kind] >= 2 ? 0.7 : 0.55);
     const lost = Math.min(HIT_COIN_LOSS, this.inventory.getItemCount('coins'));
     if (lost > 0) this.inventory.removeItem('coins', lost);
     this.revision++;
     // Sharks and dragon fire take a whole heart, the small pests half of one
-    if (playerHealth.damage(PEST_HEART_DAMAGE[kind])) {
-      this.onNotify(t('health.fainted'), 'warning');
-      // A moment to see the last heart go before the screen fades
-      window.setTimeout(() => {
-        playerHealth.refill();
-        this.onFaint();
-      }, 700);
-      this.invulnerable = 3;
-    } else this.onNotify(t(PEST_HIT_MSG[kind], { n: lost }), 'warning');
+    if (!this.takeDamage(PEST_HEART_DAMAGE[kind])) this.onNotify(t(PEST_HIT_MSG[kind], { n: lost }), 'warning');
     return true;
+  }
+
+  /** Burning (dragon fire, a campfire): half-hearts without knockback or lost coins. */
+  private burnPlayer(halves: number): void {
+    if (this.sleep) return;
+    critterSounds.ouch();
+    hitFx.onShake?.(0.35);
+    this.revision++;
+    this.takeDamage(halves);
+  }
+
+  /** Takes hearts; out of them the player faints and wakes at the bed. Returns true on fainting. */
+  private takeDamage(halves: number): boolean {
+    if (!playerHealth.damage(halves)) return false;
+    this.onNotify(t('health.fainted'), 'warning');
+    fireFx.douse();
+    // A moment to see the last heart go before the screen fades
+    window.setTimeout(() => {
+      playerHealth.refill();
+      this.onFaint();
+    }, 700);
+    this.invulnerable = 3;
+    return true;
+  }
+
+  /** A burning player steps into water (ankle deep is enough) or swims: the fire goes out. */
+  private douseInWater(pos: THREE.Vector3): void {
+    if (!fireFx.playerBurning) return;
+    if (this.character.swimAbility?.isSwimming) return fireFx.douse();
+    const cave = riverWorld.caveLevelAt(pos.x, pos.y, pos.z);
+    const level = Number.isNaN(cave) ? riverWorld.waterLevelAt(pos.x, pos.z) : cave;
+    // Position is the capsule centre, the feet 0.75 m below it
+    if (level - (pos.y - 0.75) > 0.1) fireFx.douse();
   }
 
   // ---------------------------------------------------------------- frame
@@ -395,14 +428,16 @@ export class GameplayManager {
     this.updateBuff(dt);
     this.updateCooking(dt);
     this.invulnerable -= dt;
+    this.douseInWater(pos);
     if (!this.sleep) playerHealth.update(dt);
     this.updateSleep(dt);
     this.pests.update(dt, pos, !isDriving && !this.sleep, !!this.explore?.inCave);
     this.slingshot.update(dt);
-    if (this.sleep) return;
+    if (this.sleep) return this.cancelSlingDraw();
 
     const facing = this.character.getFacingDirection();
     if (isDriving || this.panel) {
+      this.cancelSlingDraw();
       this.setPrompt(null);
       this.flowerTarget = null;
       if (this.fishing.busy) this.fishing.cancel();
@@ -427,13 +462,9 @@ export class GameplayManager {
     const equipped = swimming ? null : this.inventory.getEquippedItemId();
     const pressed = m.interactJustPressed;
 
-    // Slingshot: LMB / the touch tool button always shoots; E shoots when nothing here wants it
-    if (equipped === 'slingshot' && !this.inventory.isInventoryOpen() && !this.character.buildAbility?.isBuildModeActive) {
-      if (m.shootJustPressed || (m.interactJustPressed && !this.prompt && !ownedByOthers)) {
-        this.shootSlingshot(pos);
-        return;
-      }
-    }
+    // Slingshot: hold LMB / the touch tool button (or E, when nothing here wants it) to draw, release to shoot
+    if (equipped === 'slingshot') slingshotSounds.ensure();
+    if (this.updateSlingshot(pos, input, equipped === 'slingshot', ownedByOthers)) return;
 
     if (this.updateFishing(dt, pos, facing, input, equipped === 'fishing_rod')) return;
     if (keysG && this.prompt?.secondary) this.runAction('treat');
@@ -640,19 +671,53 @@ export class GameplayManager {
     this.promptTimer = 0;
   }
 
+  /**
+   * The slingshot's draw: a press starts pulling the band, letting go of that same button shoots
+   * with however far it got. True while the slingshot owns the input this frame.
+   */
+  private updateSlingshot(pos: THREE.Vector3, input: InputManager, inHand: boolean, ownedByOthers: boolean): boolean {
+    const m = input.movement;
+    const s = this.slingshot;
+    const usable = inHand && !this.inventory.isInventoryOpen() && !this.character.buildAbility?.isBuildModeActive;
+    if (!usable) {
+      this.cancelSlingDraw();
+      return false;
+    }
+    if (!s.isDrawing) {
+      const byMouse = m.shootJustPressed;
+      const byKey = !byMouse && m.interactJustPressed && !this.prompt && !ownedByOthers;
+      if ((byMouse || byKey) && s.beginDraw()) this.slingDrawKey = byMouse ? 'shoot' : 'interact';
+    }
+    if (s.isDrawing) {
+      const held = this.slingDrawKey === 'interact' ? m.interact : m.shoot;
+      if (!held) this.shootSlingshot(pos);
+    }
+    if (this.character.model) this.character.model.slingDraw = s.isDrawing ? s.power : 0;
+    return s.isDrawing;
+  }
+
+  private cancelSlingDraw(): void {
+    if (this.slingshot.isDrawing) this.slingshot.cancelDraw();
+    this.slingDrawKey = null;
+    if (this.character.model) this.character.model.slingDraw = 0;
+  }
+
   private shootSlingshot(pos: THREE.Vector3): void {
-    if (!this.slingshot.ready) return;
+    this.slingDrawKey = null;
     // From the hand, chest high, a little in front of the body
     const aim = this.aim(this.aimTmp).normalize();
     this.muzzle.copy(pos).addScaledVector(this.character.getFacingDirection(), 0.35);
     this.muzzle.y += 0.45;
-    // RMB aiming: straight to the crosshair; otherwise a gentle auto-aim at the nearest visible pest
+    const power = this.slingshot.power;
+    // RMB aiming: to the crosshair (a pest right beside it pulls the shot on); otherwise at the
+    // locked enemy, or bent a little towards a pest right on the line of sight
+    const locked = this.lockOn.target;
     const yaw = this.character.telemetry.isAiming
-      ? this.slingshot.fireAimed(this.muzzle, this.eye(this.eyeTmp), aim)
-      : this.slingshot.fire(this.muzzle, aim);
+      ? this.slingshot.releaseAimed(this.muzzle, this.eye(this.eyeTmp), aim)
+      : this.slingshot.release(this.muzzle, aim, locked);
     if (yaw === null) return;
     this.character.model?.setFacingAngleInstant(yaw);
-    this.character.model?.triggerWeaponRecoil(1.4);
+    this.character.model?.triggerWeaponRecoil(0.8 + 0.9 * power);
   }
 
   /** Millstone: one crate of wheat -> FLOUR_PER_CRATE flour, with a puff of flour dust. */

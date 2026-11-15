@@ -204,8 +204,8 @@ export abstract class Pest implements PestTarget {
     this.provoked = true;
     this.hurtAt = performance.now() / 1000;
     const at = this.hitPoint(tmpB);
-    // White flash, hit-stop slow-mo, impact star and sparks, the crunchy impact sound
-    hitFx.strike(this, this.group, at, from, this.kind, weapon, this.health <= 0);
+    // Hit-stop slow-mo, impact star, camera kick / shake, the crunchy impact sound
+    hitFx.strike(at, from, this.kind, weapon, this.health <= 0);
     critterSounds.hurt(at, this.kind);
     particles?.emitJumpDust(at);
     if (this.health <= 0) {
@@ -250,7 +250,6 @@ export abstract class Pest implements PestTarget {
   abstract get threat(): number;
 
   public dispose(): void {
-    hitFx.forget(this);
     this.group.removeFromParent();
     this.group.traverse((o) => {
       const m = o as THREE.Mesh;

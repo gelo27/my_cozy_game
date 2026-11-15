@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { injectNightLights } from './NightLighting';
+import { injectNightLights, FOLIAGE_NIGHT_LIGHTS } from './NightLighting';
 import { injectWaterline } from '../scene/WaterDetails';
 import { fieldCropTime } from '../farming/WheatModel';
 import { injectPickGlow } from './PickGlow';
@@ -58,7 +58,7 @@ export function tulipYawFor(color: number): number {
 function createFlowerMaterial(): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
   mat.onBeforeCompile = (shader) => {
-    injectNightLights(shader);
+    injectNightLights(shader, FOLIAGE_NIGHT_LIGHTS);
     injectWaterline(shader);
     // The clump the E prompt is about glows
     injectPickGlow(shader, 'instance');

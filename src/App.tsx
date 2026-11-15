@@ -237,6 +237,9 @@ export default function App() {
                         onConfirmFloors={building.confirmFloors}
                         onConfirmFoundations={building.confirmFoundations}
                         onConfirmAll={building.confirmAll}
+                        onSetRoofStyle={building.setRoofStyle}
+                        onRoofWholeHouse={building.roofWholeHouse}
+                        onWallFloorOutline={building.wallFloorOutline}
                       />
                     )}
                     {buildingTelemetry.isPaintingModeActive && (
@@ -247,7 +250,6 @@ export default function App() {
                         onSelectTool={building.selectPaintingTool}
                         onUndo={building.undoPaint}
                         onRedo={building.redoPaint}
-                        onSetGridCellSize={building.setGridCellSize}
                       />
                     )}
                   </>

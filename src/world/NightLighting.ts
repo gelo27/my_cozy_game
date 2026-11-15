@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { isMobileDevice } from './WorldSettings';
+import { FlameField, fireFx, type FlameSpot } from './FlameField';
 import type { PropSystem } from './PropSystem';
 import type { WeatherSystem } from './WeatherSystem';
 import { injectWaterline } from '../scene/WaterDetails';
@@ -19,11 +20,55 @@ import { CLOUD_SHADOW_BEGIN, CLOUD_SHADOW_END, CLOUD_SHADOW_GLSL, cloudShadowUni
  */
 export const MAX_FAKE_LIGHTS = isMobileDevice() ? 6 : 12;
 
+/**
+ * Options for overdrawn double-sided foliage (tree crowns, bushes, flowers, field crops): on phones
+ * the lights are evaluated per vertex, since alpha-tested leaf layers run the light loop several
+ * times per screen pixel; leaves are small enough that per-vertex light looks the same.
+ */
+export const FOLIAGE_NIGHT_LIGHTS = isMobileDevice() ? { perVertex: true, twoSided: true } : {};
+
+/**
+ * How the fake lights shade surfaces (dev panel, saved in this browser):
+ * - `legacy`: Lambert lifted by a flat 0.3, so even surfaces facing away get some light;
+ * - `wrap`: true wrapped Lambert, surfaces facing away from the light stay dark;
+ * - `room`: `wrap` plus the light clipped to its room box (walls / floors around lamps in buildings).
+ */
+export type NightLightMode = 'legacy' | 'wrap' | 'room';
+export const NIGHT_LIGHT_MODES: NightLightMode[] = ['legacy', 'wrap', 'room'];
+const MODE_STORAGE_KEY = 'nightLightMode';
+
+function loadMode(): NightLightMode {
+  try {
+    const v = localStorage.getItem(MODE_STORAGE_KEY) as NightLightMode | null;
+    if (v && NIGHT_LIGHT_MODES.includes(v)) return v;
+  } catch {
+    // storage disabled: default
+  }
+  return 'room';
+}
+
+export const nightLightSettings = { mode: loadMode() };
+
+export function setNightLightMode(mode: NightLightMode): void {
+  nightLightSettings.mode = mode;
+  nightLightUniforms.uFakeLightMode.value = NIGHT_LIGHT_MODES.indexOf(mode);
+  try {
+    localStorage.setItem(MODE_STORAGE_KEY, mode);
+  } catch {
+    // storage full / disabled: the mode simply does not persist
+  }
+}
+
 export const nightLightUniforms = {
   /** xyz = view-space position, w = range. */
   uFakeLightPos: { value: Array.from({ length: MAX_FAKE_LIGHTS }, () => new THREE.Vector4()) },
   uFakeLightColor: { value: Array.from({ length: MAX_FAKE_LIGHTS }, () => new THREE.Color(0, 0, 0)) },
   uFakeLightCount: { value: 0 },
+  /** Room box of each light in WORLD space: xyz = min, w = 1 when the light has a box. */
+  uFakeLightBoxMin: { value: Array.from({ length: MAX_FAKE_LIGHTS }, () => new THREE.Vector4()) },
+  uFakeLightBoxMax: { value: Array.from({ length: MAX_FAKE_LIGHTS }, () => new THREE.Vector3()) },
+  /** Index in NIGHT_LIGHT_MODES. */
+  uFakeLightMode: { value: NIGHT_LIGHT_MODES.indexOf(nightLightSettings.mode) },
 };
 
 /**
@@ -93,9 +138,19 @@ const LIGHT_DECL = `
       uniform vec4 uFakeLightPos[MAX_FAKE_LIGHTS];
       uniform vec3 uFakeLightColor[MAX_FAKE_LIGHTS];
       uniform int uFakeLightCount;
+      uniform vec4 uFakeLightBoxMin[MAX_FAKE_LIGHTS];
+      uniform vec3 uFakeLightBoxMax[MAX_FAKE_LIGHTS];
+      uniform int uFakeLightMode; // 0 legacy, 1 wrap, 2 wrap + room box
       // p = view-space position, n = view-space unit normal
       vec3 fakeNightLight(vec3 p, vec3 n) {
         vec3 sum = vec3(0.0);
+        // World position for the room boxes: the view matrix is rigid, so its inverse rotation is
+        // the transpose (once per pixel, not per light)
+        vec3 wp = vec3(0.0);
+        if (uFakeLightMode == 2) {
+          vec3 q = p - viewMatrix[3].xyz;
+          wp = vec3(dot(viewMatrix[0].xyz, q), dot(viewMatrix[1].xyz, q), dot(viewMatrix[2].xyz, q));
+        }
         for (int i = 0; i < MAX_FAKE_LIGHTS; i++) {
           if (i >= uFakeLightCount) break;
           vec3 toLight = uFakeLightPos[i].xyz - p;
@@ -104,8 +159,30 @@ const LIGHT_DECL = `
           if (d2 >= r * r) continue; // out of range: skip the rest
           float att = 1.0 - d2 / (r * r);
           att *= att;
-          // Wrapped Lambert keeps the pools soft and readable on the back side of objects
-          float ndl = max(dot(n, toLight * inversesqrt(max(d2, 1e-4))), 0.0) * 0.7 + 0.3;
+          if (uFakeLightMode == 2 && uFakeLightBoxMin[i].w > 0.5) {
+            // Outside the room box (past the walls' inner faces) the light fades out within 12 cm,
+            // less than a wall is thick; pixels fully outside skip the shading below
+            vec3 o = max(max(uFakeLightBoxMin[i].xyz - wp, wp - uFakeLightBoxMax[i]), 0.0);
+            float out_ = max(o.x, max(o.y, o.z));
+            if (out_ >= 0.12) continue;
+            att *= 1.0 - smoothstep(0.0, 0.12, out_);
+          }
+          float nl = dot(n, toLight * inversesqrt(max(d2, 1e-4)));
+          #ifdef FAKE_LIGHT_TWO_SIDED
+          // Per-vertex double-sided foliage: the vertex normal cannot be flipped for back faces, so
+          // a leaf is lit from either side (thin leaves let the light through anyway)
+          nl = abs(nl);
+          #endif
+          float ndl;
+          if (uFakeLightMode == 0) {
+            // Legacy: Lambert lifted by a flat 0.3 (back faces get light too)
+            ndl = max(nl, 0.0) * 0.7 + 0.3;
+          } else {
+            // Wrapped Lambert: the terminator creeps a little past the equator so objects keep soft
+            // pools, but surfaces facing away from the light (the outer side of a wall) stay dark
+            const float WRAP = 0.25;
+            ndl = max((nl + WRAP) * (1.0 / (1.0 + WRAP)), 0.0);
+          }
           sum += uFakeLightColor[i] * (att * ndl);
         }
         return sum;
@@ -114,9 +191,10 @@ const LIGHT_DECL = `
 /**
  * Adds the fake light loop to a lit built-in shader. Safe to call more than once.
  * `perVertex` evaluates the lights per vertex instead of per pixel: only for dense meshes
- * (the 1 m terrain), where it looks the same and costs a fraction on phones.
+ * (the 1 m terrain) and, on phones, overdrawn foliage, where it looks the same and costs a fraction.
+ * `twoSided` (per-vertex only) lights both sides of double-sided foliage.
  */
-export function injectNightLights(shader: PatchableShader, opts: { perVertex?: boolean } = {}): void {
+export function injectNightLights(shader: PatchableShader, opts: { perVertex?: boolean; twoSided?: boolean } = {}): void {
   if (shader.fragmentShader.includes('uFakeLightCount') || shader.vertexShader.includes('uFakeLightCount')) return;
   if (!shader.fragmentShader.includes('#include <opaque_fragment>') || !shader.vertexShader.includes('#include <project_vertex>')) return;
 
@@ -127,7 +205,7 @@ export function injectNightLights(shader: PatchableShader, opts: { perVertex?: b
   if (opts.perVertex) {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
-varying vec3 vNightLight;${LIGHT_DECL}`)
+varying vec3 vNightLight;${opts.twoSided ? '\n#define FAKE_LIGHT_TWO_SIDED' : ''}${LIGHT_DECL}`)
       .replace(
         '#include <project_vertex>',
         `#include <project_vertex>
@@ -203,6 +281,10 @@ export interface ExtraLight {
   color?: [number, number, number];
   /** Torch-like flicker. */
   flicker?: boolean;
+  /** World box the light stays inside (its room), for the `room` mode. */
+  box?: THREE.Box3 | null;
+  /** A visible animated flame at this light (torches): base height and flame height in metres. */
+  flame?: { y: number; size: number };
 }
 
 const byDistance = (a: { d: number }, b: { d: number }): number => a.d - b.d;
@@ -213,6 +295,7 @@ interface LightSource {
   color: THREE.Color;
   flicker: number; // 0 = steady, 1 = campfire
   seed: number;
+  box: THREE.Box3 | null;
 }
 
 const LAMP_COLOR = new THREE.Color(1.0, 0.72, 0.38).multiplyScalar(1.7);
@@ -254,6 +337,8 @@ export class NightLighting {
   private readonly haloColor = new Float32Array(MAX_HALOS * 3);
   private readonly tmp = new THREE.Vector3();
   private readonly viewPos = new THREE.Vector3();
+  /** Shader flames on campfires and torches (drawn by day too). */
+  private readonly flames: FlameField;
 
   constructor(
     scene: THREE.Scene,
@@ -296,6 +381,7 @@ export class NightLighting {
     this.halos.frustumCulled = false;
     this.halos.renderOrder = 10;
     scene.add(this.halos);
+    this.flames = new FlameField(scene);
   }
 
   /**
@@ -318,6 +404,7 @@ export class NightLighting {
   /** Viewport height drives point sizes so halos keep their world size at any resolution. */
   public setViewportHeight(px: number): void {
     this.haloMat.uniforms.uScale.value = px * 0.9;
+    this.flames.setViewportHeight(px);
   }
 
   /**
@@ -355,6 +442,11 @@ export class NightLighting {
     }
     if (rebuild) this.rebuildSources();
 
+    // Diving puts a burning player out
+    if (this.weather.underwater > 0.5) fireFx.douse();
+    // Weather wind on the flames, none underground
+    const flameWind = (this.weather.sound.wind + this.weather.sound.breeze * 0.25) * (1 - this.weather.caveFactor);
+    this.flames.update(dt, night, camera, playerPos, Math.min(1, flameWind));
     this.haloMat.uniforms.uNight.value = night;
     this.haloMat.uniforms.uTime.value = this.time;
     this.halos.visible = night > 0.02;
@@ -420,6 +512,10 @@ export class NightLighting {
       v.copy(s.pos).applyMatrix4(view);
       u.uFakeLightPos.value[n].set(v.x, v.y, v.z, s.range);
       u.uFakeLightColor.value[n].copy(s.color).multiplyScalar(night * flicker * w * w * (3 - 2 * w));
+      if (s.box) {
+        u.uFakeLightBoxMin.value[n].set(s.box.min.x, s.box.min.y, s.box.min.z, 1);
+        u.uFakeLightBoxMax.value[n].copy(s.box.max);
+      } else u.uFakeLightBoxMin.value[n].w = 0;
       n++;
     }
     if (playerPos && n < MAX_FAKE_LIGHTS) {
@@ -427,6 +523,7 @@ export class NightLighting {
       v.set(playerPos.x, playerPos.y + 1.4, playerPos.z).applyMatrix4(view);
       u.uFakeLightPos.value[n].set(v.x, v.y, v.z, 5.5 + this.forcedDark * 3.5);
       u.uFakeLightColor.value[n].copy(PLAYER_COLOR).multiplyScalar(night);
+      u.uFakeLightBoxMin.value[n].w = 0;
       n++;
     }
     u.uFakeLightCount.value = n;
@@ -434,18 +531,21 @@ export class NightLighting {
 
   private rebuildSources(): void {
     this.sources = [];
+    const flames: FlameSpot[] = [];
     let h = 0;
     for (const p of this.props.list()) {
       const isLamp = p.type === 'lamp';
       if (!isLamp && p.type !== 'campfire') continue;
       const yOff = (isLamp ? 2.48 : 0.6) * p.scale;
       const pos = new THREE.Vector3(p.position.x, p.position.y + yOff, p.position.z);
+      if (!isLamp) flames.push({ x: p.position.x, y: p.position.y + 0.1 * p.scale, z: p.position.z, size: 0.95 * p.scale });
       this.sources.push({
         pos,
         range: (isLamp ? 9 : 7.5) * p.scale,
         color: isLamp ? LAMP_COLOR : FIRE_COLOR,
         flicker: isLamp ? 0 : 1,
         seed: Math.random(),
+        box: null,
       });
       if (h < MAX_HALOS) {
         this.haloPos.set([pos.x, pos.y, pos.z], h * 3);
@@ -457,8 +557,9 @@ export class NightLighting {
     }
     for (const l of this.extraProvider?.() ?? []) {
       const pos = new THREE.Vector3(l.x, l.y, l.z);
+      if (l.flame) flames.push({ x: l.x, y: l.flame.y, z: l.z, size: l.flame.size });
       const color = l.color ? new THREE.Color(...l.color) : LAMP_COLOR.clone();
-      this.sources.push({ pos, range: l.range, color: color.multiplyScalar(l.intensity), flicker: l.flicker ? 1 : 0, seed: Math.random() });
+      this.sources.push({ pos, range: l.range, color: color.multiplyScalar(l.intensity), flicker: l.flicker ? 1 : 0, seed: Math.random(), box: l.box ?? null });
       if (h < MAX_HALOS) {
         this.haloPos.set([pos.x, pos.y, pos.z], h * 3);
         this.haloSize[h] = l.halo;
@@ -471,6 +572,7 @@ export class NightLighting {
     (geo.attributes.size as THREE.BufferAttribute).needsUpdate = true;
     (geo.attributes.haloColor as THREE.BufferAttribute).needsUpdate = true;
     geo.setDrawRange(0, h);
+    this.flames.setSpots(flames);
     this.selectTimer = 0;
     // Sources were recreated: keep the fade of lights that are still there (same position)
     for (const slot of this.slots) {

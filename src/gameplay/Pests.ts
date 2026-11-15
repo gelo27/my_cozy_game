@@ -6,6 +6,7 @@ import { makeBlobShadow } from './Emotes';
 import { critterSounds } from './CritterSounds';
 import type { HitWeapon } from './HitFeedback';
 import { worldSettings } from '../world/WorldSettings';
+import { fireFx, type DynamicFlame } from '../world/FlameField';
 import { waterLevelAt, riverWorld } from '../world/rivers/RiverWorld';
 import { Shark, SHARK_MIN_DEPTH, seaDepthAt } from './Shark';
 import { Spider, flushSpiderLegs, insideRock } from './Spider';
@@ -17,6 +18,7 @@ import {
 export type { PestKind, PestEnv, PestPort, PestHabitat } from './PestBase';
 
 const tmpA = new THREE.Vector3();
+const tmpB = new THREE.Vector3();
 const tmpEye = new THREE.Vector3();
 const tA = new THREE.Vector3();
 const sepTmp = new THREE.Vector3();
@@ -147,7 +149,6 @@ export class Hedgehog extends Pest {
     this.state = 'dazed';
     this.timer = 1.4;
     this.rollSpeed = 0;
-    this.emote.show('angry', 0.8);
   }
 
   public update(dt: number, player: THREE.Vector3, port: PestPort, env: PestEnv, particles?: ParticleManager): void {
@@ -342,16 +343,23 @@ const DRAGON_MATS = {
   mouth: new THREE.MeshBasicMaterial({ color: 0x7a1f1f }),
 };
 
-const FIRE_CORE = new THREE.MeshBasicMaterial({ color: 0xfff1a8 });
 const FIRE_SHELL = new THREE.MeshBasicMaterial({ color: 0xff6a1a, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending });
 const FIRE_GEO = new THREE.IcosahedronGeometry(1, 1);
 SHARED_GEOS.add(FIRE_GEO);
 
 interface Fireball {
-  mesh: THREE.Group;
+  pos: THREE.Vector3;
   vel: THREE.Vector3;
   life: number;
+  /** The shader flame drawn for it (FlameField), its tongue trailing behind. */
+  flame: DynamicFlame;
 }
+
+/** Height of a fireball's flame (its head is ~1/3 of it across). */
+const FIREBALL_SIZE = 1.0;
+/** Fire left where a fireball lands: height, seconds at full strength, seconds dying out. */
+const IMPACT_FIRE = { size: 1.3, burn: 2.0, fadeOut: 1.6, ignites: true };
+const IMPACT_SCORCH_RADIUS = 1.3;
 
 interface Burst {
   mesh: THREE.Mesh;
@@ -491,7 +499,6 @@ export class BabyDragon extends Pest {
     this.knockDir = Math.atan2(this.position.x - from.x, this.position.z - from.z);
     this.knock = 4;
     this.altitude += 0.5;
-    this.emote.show('angry', 1);
     if (this.state === 'patrol' || this.state === 'rest') {
       this.state = 'aggro';
       this.timer = 0.8;
@@ -678,38 +685,44 @@ export class BabyDragon extends Pest {
     const vel = target.sub(from);
     const t = vel.length() / speed;
     vel.divideScalar(Math.max(0.1, t));
-    const mesh = new THREE.Group();
-    const core = new THREE.Mesh(FIRE_GEO, FIRE_CORE);
-    core.scale.setScalar(0.13);
-    const shell = new THREE.Mesh(FIRE_GEO, FIRE_SHELL);
-    shell.scale.setScalar(0.24);
-    mesh.add(core, shell);
-    mesh.position.copy(from);
-    this.scene.add(mesh);
-    this.fireballs.push({ mesh, vel, life: 3 });
+    const flame = fireFx.spawn({ pos: from, size: FIREBALL_SIZE, burn: Infinity, fadeOut: 0.1, sparks: false, wind: false });
+    const f: Fireball = { pos: from, vel, life: 3, flame };
+    this.placeFireballFlame(f);
+    this.fireballs.push(f);
     critterSounds.fireball(from);
+  }
+
+  /** Head of the flame on the ball, its tongue streaming back along the flight. */
+  private placeFireballFlame(f: Fireball): void {
+    const dir = tmpB.copy(f.vel).normalize();
+    f.flame.dir.copy(dir).negate();
+    // The flame's base is the front of its sphere: put the sphere's centre on the ball
+    f.flame.pos.copy(f.pos).addScaledVector(dir, FIREBALL_SIZE / 3);
   }
 
   private updateFireballs(dt: number, player: THREE.Vector3, port: PestPort, env: PestEnv, particles?: ParticleManager): void {
     for (let i = this.fireballs.length - 1; i >= 0; i--) {
       const f = this.fireballs[i];
       f.life -= dt;
-      const p = f.mesh.position;
+      const p = f.pos;
       // Swept against walls, trees and rocks: a fireball bursts on the first thing in its way
       const len = f.vel.length() * dt;
       const dir = tmpA.copy(f.vel).divideScalar(Math.max(1e-6, f.vel.length()));
       const wall = len > 0 ? env.sweep(p, dir, len + 0.2) : -1;
       if (wall >= 0) p.addScaledVector(dir, Math.max(0, wall - 0.25));
       else p.addScaledVector(f.vel, dt);
-      f.mesh.rotation.y += dt * 9;
-      f.mesh.children[1].scale.setScalar(0.22 + Math.sin(this.time * 30 + i) * 0.04);
+      this.placeFireballFlame(f);
       const hitPlayer = p.distanceTo(player) < 0.95;
       const ground = this.terrain.getHeight(p.x, p.z);
       if (hitPlayer || wall >= 0 || p.y <= ground + 0.1 || f.life <= 0) {
         this.explode(p, particles);
-        // Splash damage near the impact, but not through the wall it burst on
-        if (hitPlayer || (Math.hypot(player.x - p.x, player.z - p.z) < 1.5 && env.canSee(p, player))) port.hurt(p, 7, 'dragon');
-        f.mesh.removeFromParent();
+        // Splash damage near the impact, but not through the wall it burst on; a hit sets the
+        // player on fire for a few seconds (not in the water)
+        if (hitPlayer || (Math.hypot(player.x - p.x, player.z - p.z) < 1.5 && env.canSee(p, player))) {
+          if (port.hurt(p, 7, 'dragon') && !port.playerSwimming()) fireFx.ignitePlayer();
+        }
+        this.burnAt(p, ground, wall >= 0, hitPlayer);
+        f.flame.dead = true;
         this.fireballs.splice(i, 1);
       } else if (Math.random() < dt * 20) {
         particles?.emitJumpDust(p);
@@ -739,8 +752,25 @@ export class BabyDragon extends Pest {
     critterSounds.explode(p);
   }
 
+  /**
+   * Fire left at the impact: a flame that burns a couple of seconds and dies out, and a burn mark
+   * when it landed on the ground (nothing on water; on a wall a smaller flame and no mark).
+   */
+  private burnAt(p: THREE.Vector3, ground: number, wall: boolean, hitPlayer: boolean): void {
+    const water = waterLevelAt(p.x, p.z);
+    const onGround = p.y - ground < 1.2;
+    if (onGround && ground < water - 0.05) return;
+    if (onGround) {
+      fireFx.onScorch?.(p.x, p.z, IMPACT_SCORCH_RADIUS);
+      // On a direct hit the fire goes onto the player instead
+      if (!hitPlayer) fireFx.spawn({ pos: tmpB.set(p.x, ground + 0.02, p.z), ...IMPACT_FIRE });
+    } else if (wall) {
+      fireFx.spawn({ pos: tmpB.copy(p).setY(p.y - 0.25), size: IMPACT_FIRE.size * 0.6, burn: IMPACT_FIRE.burn * 0.7, fadeOut: IMPACT_FIRE.fadeOut, ignites: true });
+    }
+  }
+
   private disposeFire(): void {
-    for (const f of this.fireballs) f.mesh.removeFromParent();
+    for (const f of this.fireballs) f.flame.dead = true;
     this.fireballs.length = 0;
   }
 

@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { CrownLeafOptions, addCrownLeaves } from './CrownLeaves';
 import { addRingScallops } from './RingScallops';
 import { loadPineCrown, trunkWithCrown } from './PineCrownModel';
-import { injectNightLights } from './NightLighting';
+import { injectNightLights, FOLIAGE_NIGHT_LIGHTS } from './NightLighting';
 import { injectWaterline } from '../scene/WaterDetails';
 import { injectSnowCover } from './SnowCover';
 import { vegetationSettings as veg } from './VegetationSettings';
@@ -52,7 +52,7 @@ export const uBushBendCount = (bendStore.__bushBendCount ??= { value: 0 });
 function foliageMaterial(bend: boolean): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
   mat.onBeforeCompile = (shader) => {
-    injectNightLights(shader);
+    injectNightLights(shader, FOLIAGE_NIGHT_LIGHTS);
     injectWaterline(shader);
     shader.uniforms.uTreeWind = uTreeWind;
     shader.uniforms.uLeafWind = uLeafWind;

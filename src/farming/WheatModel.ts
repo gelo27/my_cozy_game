@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { injectNightLights } from '../world/NightLighting';
+import { injectNightLights, FOLIAGE_NIGHT_LIGHTS } from '../world/NightLighting';
 import { injectPickGlow } from '../world/PickGlow';
 import { CropStage } from './types/FarmingTypes';
 
@@ -22,7 +22,7 @@ export function createFieldCropMaterial(sway: number, height: number): THREE.Mes
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
   const uCrop = { value: new THREE.Vector2(sway, 1 / height) };
   mat.onBeforeCompile = (shader) => {
-    injectNightLights(shader);
+    injectNightLights(shader, FOLIAGE_NIGHT_LIGHTS);
     shader.uniforms.uTime = fieldCropTime;
     shader.uniforms.uCrop = uCrop;
     shader.vertexShader = shader.vertexShader

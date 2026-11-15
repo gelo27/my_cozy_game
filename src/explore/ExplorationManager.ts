@@ -21,7 +21,8 @@ import { buildLandmark, LandmarkAnchors } from './Landmarks';
 import { STRUCTURE_MATERIALS } from './StructureBuilder';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { CaveNetwork, CaveContentsWorld } from './cave/CaveNetwork';
-import { isCaveLayout } from './cave/CaveGen';
+import { updateCavePortals } from './cave/CavePortalMaterial';
+import { isCaveLayout, CaveLight } from './cave/CaveGen';
 import cavesJson from './cave/caves.json';
 import { ForageField, ForageNode } from './ForageField';
 import { EXPLORE_GRID } from './MapRenderer';
@@ -121,6 +122,8 @@ export class ExplorationManager {
   /** One network under the whole island; every cave mouth leads into it. */
   private readonly network: CaveNetwork;
   private readonly caveLights: ExtraLight[] = [];
+  /** Day/night step the cave's daylight was last lit at (bumps the light revision on change). */
+  private caveDayStep = -1;
   private caveLightKey = NaN;
   private caveHintShown = false;
   private readonly forage: ForageField;
@@ -412,6 +415,7 @@ export class ExplorationManager {
     this.forage.update(dt);
     const night = Math.max(this.weather.nightFactor, this.inCave ? 1 : 0);
     for (const lm of this.landmarks.values()) lm.update?.(dt, this.inCave ? 0 : night);
+    updateCavePortals(dt, this.weather.nightFactor);
     for (const c of this.chests) {
       if (c.opened && c.open < 1) {
         c.open = Math.min(1, c.open + dt * 2.2);
@@ -428,6 +432,11 @@ export class ExplorationManager {
         this.caveLightKey = key;
         this.caveLights.length = 0;
         this.network.lightsNear(playerPos, this.caveLights);
+        this.lightRevision++;
+      }
+      const step = Math.round(this.weather.nightFactor * 12);
+      if (step !== this.caveDayStep) {
+        this.caveDayStep = step;
         this.lightRevision++;
       }
     }
@@ -623,7 +632,20 @@ export class ExplorationManager {
   public getLights(): ExtraLight[] {
     const out: ExtraLight[] = [];
     if (this.inCave) {
-      for (const l of this.caveLights) out.push(l);
+      // Light from the way out follows the sky outside: daylight by day, a faint moonlit blue by night
+      const night = this.caveDayStep / 12;
+      for (const l of this.caveLights) {
+        if (!(l as CaveLight).daylight) {
+          out.push(l);
+          continue;
+        }
+        const c = l.color ?? [1, 1, 1];
+        out.push({
+          ...l,
+          intensity: l.intensity * (1 - 0.8 * night),
+          color: [c[0] * (1 - 0.6 * night), c[1] * (1 - 0.45 * night), c[2] * (1 - 0.2 * night)],
+        });
+      }
     } else {
       for (const lm of this.landmarks.values()) out.push(...lm.lights);
     }

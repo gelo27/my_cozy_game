@@ -19,6 +19,7 @@ import { WaterEffects } from '../scene/WaterEffects';
 import { WaterParticleSystem } from '../particles/WaterParticleSystem';
 import { BuildingManager } from '../building/BuildingManager';
 import { PreviewGhostRenderer } from '../building/PreviewGhostRenderer';
+import { patchCutawayMaterials, updateCutaway } from '../building/BuildCutaway';
 import { BuildingTelemetry } from '../building/types/BuildingTypes';
 import { InventoryManager } from '../inventory/InventoryManager';
 import { FarmingManager } from '../farming/FarmingManager';
@@ -86,6 +87,7 @@ import { WildlifeSystem } from '../wildlife/WildlifeSystem';
 import { StaticShadows } from '../world/StaticShadows';
 import { GrassField } from '../world/GrassField';
 import { LightningStrikes } from '../world/Lightning';
+import { fireFx } from '../world/FlameField';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
 import { setRippleCamera } from '../scene/WaterDetails';
@@ -476,7 +478,11 @@ export class GameEngine {
           const out: ExtraLight[] = exploration ? exploration.getLights() : [];
           for (const piece of buildingManager.getAllPieces()) {
             const light = FURNITURE_LIGHTS[piece.type];
-            if (light) out.push({ x: piece.position.x, y: piece.position.y + light.yOffset, z: piece.position.z, range: light.range, halo: light.halo, intensity: light.intensity });
+            if (!light) continue;
+            const pos = new THREE.Vector3(piece.position.x, piece.position.y + light.yOffset, piece.position.z);
+            // Room box from the surrounding walls / floors, so the lamp does not light the yard
+            const box = buildingManager.getLightVolume(pos, light.range);
+            out.push({ x: pos.x, y: pos.y, z: pos.z, range: light.range, halo: light.halo, intensity: light.intensity, box });
           }
           return out;
         },
@@ -680,6 +686,8 @@ export class GameEngine {
       shadows.grass = grass;
       // Storm bolts that land near the player: a warning, then the strike, flash and thunder
       const lightning = new LightningStrikes(scene, (x, z) => terrain.getHeight(x, z));
+      // Dragon fire leaves the same kind of burn mark, smaller and shorter-lived
+      fireFx.onScorch = (x, z, r) => lightning.addScorch(x, z, r, 18);
       lightning.onStrike = (pos) => {
         weather.flashNow(1);
         this.ambient.thunder(this.listenerPos, Math.max(weather.sound.thunder, 0.6), pos);
@@ -815,6 +823,8 @@ export class GameEngine {
   private lastStepMs = 0;
   /** Building revision the terrain's roof-shelter mask was last built from. */
   private shelterRevision = -1;
+  private cutawayPatchTimer = 0;
+  private readonly cutawayTarget = new THREE.Vector3();
 
   /** Frame cap (0 = every vsync). On 120 / 144 Hz screens this halves the work for the same look. */
   public maxFps = 60;
@@ -854,11 +864,12 @@ export class GameEngine {
     const dt = rawDt * worldSettings.timeScale * (editing ? 1 : hitFx.timeScale(rawDt));
     hitFx.onKick = (s) =>
       tpCamera.applyRecoil(0.012 * s, (Math.random() - 0.5) * 0.02 * s, 0, (Math.random() - 0.5) * 0.035 * s, 1.6 * s);
+    hitFx.onShake = (trauma) => tpCamera.shake(trauma);
 
     inputManager.update();
 
     const mouseDelta = inputManager.consumeMouseDelta();
-    const isDraggingWall = character.buildAbility?.wallSelectionSystem?.isDragging ?? false;
+    const isDraggingWall = character.buildAbility?.pieceSelectionSystem?.isDragging ?? false;
     const isPaintingMode = character.buildAbility?.isPaintingModeActive ?? false;
     const isPaintingWithLMB = isPaintingMode && inputManager.isMouseDown;
     // Target lock (Tab / middle mouse): while locked, sideways mouse flicks switch enemies
@@ -963,6 +974,17 @@ export class GameEngine {
       tpCamera.allowUnderwater = !!character.oxygenAbility?.isUnderwater && !ride;
       tpCamera.update(dt, cameraTargetPos, physics, ride ? ride.collider : character.collider);
       w.gameplay.healthBars.update(rawDt, tpCamera.camera, w.gameplay.lockOn.target);
+    }
+    // Building / painting: built pieces between the camera and the player are cut away
+    {
+      const cutOn = !editing && !ride && tpCamera.isBuilding && !!buildings;
+      if (cutOn && buildings && (this.cutawayPatchTimer -= dt) <= 0) {
+        this.cutawayPatchTimer = 0.5; // new pieces and wallpapers get the patch within half a second
+        patchCutawayMaterials(buildings.group);
+      }
+      const p = character.getPosition();
+      this.cutawayTarget.set(p.x, p.y + 0.25, p.z);
+      updateCutaway(dt, cutOn, tpCamera.camera.position, this.cutawayTarget, p.y - 0.75);
     }
     w.weather.update(dt, tpCamera.camera.position);
     this.lightShafts?.update(dt, this.camera.camera, {
@@ -1091,6 +1113,7 @@ export class GameEngine {
     w.wildlife.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), tpCamera.camera, !!w.exploration.inCave);
     w.shadows.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
+    tpCamera.drawZoom = editing ? 0 : w.gameplay.slingshot.isDrawing ? w.gameplay.slingshot.power : 0;
 
     // Push prompts to React only when they actually change (each push re-renders the HUD tree)
     if (this.frameCount % 4 === 0 && character.farmingAbility) {
@@ -1463,7 +1486,7 @@ export class GameEngine {
       const type = ud.pieceType ?? '';
       if (type.startsWith('STONE')) return 'stone';
       const bm = w.character.buildAbility?.buildingManager;
-      if (type.includes('FLOOR') && bm) return floorSurface(bm.wallPaintingSystem.getCellWallpaper(ud.pieceId, 'top'));
+      if (type.includes('FLOOR') && bm) return floorSurface(bm.wallPaintingSystem.getFaceWallpaper(ud.pieceId, 'top'));
       return 'wood';
     }
     if (ud?.surface) return ud.surface;

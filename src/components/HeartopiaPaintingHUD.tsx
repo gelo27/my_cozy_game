@@ -24,7 +24,6 @@ interface HeartopiaPaintingHUDProps {
   onTogglePaintMode: () => void;
   onSelectWallpaper: (id: string) => void;
   onSelectTool: (tool: PaintingToolMode) => void;
-  onSetGridCellSize?: (size: number) => void;
   onUndo?: () => void;
   onRedo?: () => void;
 }
@@ -34,7 +33,6 @@ export const HeartopiaPaintingHUD: React.FC<HeartopiaPaintingHUDProps> = ({
   onTogglePaintMode,
   onSelectWallpaper,
   onSelectTool,
-  onSetGridCellSize,
   onUndo,
   onRedo,
 }) => {

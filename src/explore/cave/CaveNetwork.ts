@@ -3,13 +3,13 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../../physics/PhysicsWorld';
 import type { ExtraLight } from '../../world/NightLighting';
-import { STRUCTURE_MATERIALS } from '../StructureBuilder';
 import {
   planCaveNetwork, meshCaveChunks, chunkEntranceDistance, CaveGenRequest, CaveGenOutput, CaveEntranceIn, CaveChunk, CaveLayout, Box,
   CavePlan, CaveMeshJob, CaveMeshResult, CRYSTAL_COLORS,
 } from './CaveGen';
 import { caveCacheKey, loadCaveCache, CaveCacheWriter } from './CaveCache';
 import { createCaveRockMaterial, createCaveWaterMaterial, caveUniforms } from './CaveMaterial';
+import { createCavePortalMaterial, LAND_DAYLIGHT_PORTAL, SEA_DAYLIGHT_PORTAL } from './CavePortalMaterial';
 import { CaveDrips } from './CaveDrips';
 
 /** Chunks farther than this from the player are hidden (the cave fog swallows them long before). */
@@ -78,7 +78,7 @@ export interface CaveContentsWorld {
 
 /**
  * The island-wide cave network on the main thread: generated in a worker, then turned into chunk
- * meshes (one shared shader), water, glowing crystals and embers, entrance torches, colliders
+ * meshes (one shared shader), water, glowing crystals and embers, entrance daylight, colliders
  * (spread over frames) and a light list bucketed by area. Lives in its own pocket of the world at
  * `origin`; cave-local x/z are island x/z, so the map can show where you are underground.
  *
@@ -433,7 +433,7 @@ export class CaveNetwork {
 
     this.lightBuckets.clear();
     for (const l of plan.lights) {
-      const light: ExtraLight = { x: l.x + o.x, y: l.y + o.y, z: l.z + o.z, range: l.range, halo: l.halo, intensity: l.intensity, color: l.color, flicker: l.flicker };
+      const light: ExtraLight & { daylight?: boolean } = { x: l.x + o.x, y: l.y + o.y, z: l.z + o.z, range: l.range, halo: l.halo, intensity: l.intensity, color: l.color, flicker: l.flicker, daylight: l.daylight };
       const key = this.bucketKey(light.x, light.z);
       let list = this.lightBuckets.get(key);
       if (!list) this.lightBuckets.set(key, (list = []));
@@ -543,18 +543,12 @@ export class CaveNetwork {
     if (stoneGeo) this.addDecor(stoneGeo, new THREE.MeshLambertMaterial({ color: 0x2b1d18, emissive: 0x200800 }), true);
   }
 
-  /** Torches beside each way in, and the disc of daylight (sea light, under water) on the end wall. */
+  /** The disc of daylight (sea light, under water) on the end wall of each way in. */
   private buildEntrances(out: CavePlan): void {
-    const poles: THREE.BufferGeometry[] = [];
-    const flames: THREE.BufferGeometry[] = [];
     const glows: THREE.BufferGeometry[] = [];
     const seaGlows: THREE.BufferGeometry[] = [];
     for (const e of out.entrances) {
-      for (const t of e.torches) {
-        poles.push(new THREE.CylinderGeometry(0.05, 0.06, 1.3, 6).translate(t[0], t[1] + 0.65, t[2]));
-        flames.push(new THREE.ConeGeometry(0.1, 0.25, 6).translate(t[0], t[1] + 1.42, t[2]));
-      }
-      const g = new THREE.CircleGeometry(1.7, 20);
+      const g = new THREE.CircleGeometry(1.7, 24);
       g.scale(1, 1.15, 1);
       g.rotateY(e.yaw); // the disc faces into the cave
       g.translate(e.glow[0], e.glow[1], e.glow[2]);
@@ -566,10 +560,9 @@ export class CaveNetwork {
       geos.forEach((g) => g.dispose());
       if (geo) this.addDecor(geo, mat(), owned);
     };
-    add(poles, () => STRUCTURE_MATERIALS.darkWood, false);
-    add(flames, () => new THREE.MeshBasicMaterial({ color: 0xffb347 }), true);
-    add(glows, () => new THREE.MeshBasicMaterial({ color: 0xdff3ff, fog: false }), true);
-    add(seaGlows, () => new THREE.MeshBasicMaterial({ color: 0x5fc4e6, fog: false }), true);
+    // Rock rims fading onto daylight (sea light) with a cheap layered parallax
+    add(glows, () => createCavePortalMaterial(LAND_DAYLIGHT_PORTAL()), true);
+    add(seaGlows, () => createCavePortalMaterial(SEA_DAYLIGHT_PORTAL()), true);
   }
 
   // ---------------------------------------------------------------- editor view

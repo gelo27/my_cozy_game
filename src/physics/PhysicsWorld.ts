@@ -259,7 +259,8 @@ export class PhysicsWorld {
     solid: boolean = true,
     filterFlags?: number,
     filterGroups?: number,
-    excludeCollider?: RAPIER.Collider
+    excludeCollider?: RAPIER.Collider,
+    filterPredicate?: (collider: RAPIER.Collider) => boolean
   ): RAPIER.RayColliderHit | null {
     if (!this.world || !this.initialized) return null;
 
@@ -291,7 +292,9 @@ export class PhysicsWorld {
         solid,
         filterFlags,
         filterGroups,
-        validExcludeCollider
+        validExcludeCollider,
+        undefined,
+        filterPredicate
       );
     } catch {
       return null;

@@ -30,6 +30,15 @@ const MODEL_URL = `${import.meta.env.BASE_URL}models/character.glb`;
 const TOOL_HAND_BONE = 'arm_1_left';
 /** Grip point along the arm bone, matching the tool previews in Blender (bone tail - 0.1). */
 const TOOL_GRIP_OFFSET = new THREE.Vector3(0, 1.25, 0);
+/** Slingshot fork tips (the top ends of its arms) in the slingshot's own space. */
+const SLING_TIP_X = 0.081;
+const SLING_TIP_Y = 0.266;
+const SLING_TIP_Z = 0.06;
+/** How far back (m, world) a full draw pulls the pouch. */
+const SLING_PULL = 0.3;
+const SLING_Z = new THREE.Vector3(0, 0, 1);
+const slingTmpA = new THREE.Vector3();
+const slingTmpB = new THREE.Vector3();
 
 /** Leg bones whose meshes are sampled to measure how fast each clip moves the feet over the ground. */
 const LEG_BONES = ['leg_1_right', 'leg_1_left'];
@@ -201,6 +210,17 @@ export class CharacterModel {
 
   public activeWeapon: number = 0;
   public weaponRecoilKick: number = 0;
+  /** How far the slingshot's band is drawn (0..1), set by gameplay; the band eases to it. */
+  public slingDraw = 0;
+  private slingDrawVis = 0;
+  /** The slingshot's band parts (built with the slingshot, kept with it in the held-item cache). */
+  private slingRig: {
+    root: THREE.Group;
+    tips: THREE.Vector3[];
+    strands: THREE.Mesh[];
+    pouch: THREE.Mesh;
+    stone: THREE.Mesh;
+  } | null = null;
   public axeSwingProgress: number = 0;
   public wateringProgress: number = 0;
   private wateringDuration: number = WATERING_DURATION;
@@ -588,6 +608,41 @@ export class CharacterModel {
     this.squashVelocity = -5.5 * Math.max(0.6, intensity);
   }
 
+  /**
+   * Lays the slingshot's band out for a draw of `draw` (0..1): the pouch moves back towards the
+   * player (in world terms, against the way they face) and the strands stretch to it.
+   */
+  private layoutSlingBand(draw: number, jitter = 0): void {
+    const rig = this.slingRig;
+    if (!rig) return;
+    const pouch = rig.pouch.position;
+    pouch.set(0, SLING_TIP_Y, SLING_TIP_Z);
+    if (draw > 0.001 && rig.root.parent) {
+      rig.root.updateWorldMatrix(true, false);
+      const w = slingTmpA.copy(pouch);
+      rig.root.localToWorld(w);
+      const a = this.currentFacingAngle;
+      w.x -= Math.sin(a) * SLING_PULL * draw + (Math.random() - 0.5) * jitter;
+      w.z -= Math.cos(a) * SLING_PULL * draw + (Math.random() - 0.5) * jitter;
+      w.y -= 0.03 * draw;
+      rig.root.worldToLocal(pouch.copy(w));
+    }
+    rig.stone.visible = draw > 0.05;
+    // The pouch turns to face back along the band
+    rig.pouch.lookAt(rig.root.localToWorld(slingTmpB.set(0, SLING_TIP_Y, SLING_TIP_Z + 1)));
+    // Thinner as they stretch
+    const thick = 0.012 * (1 - 0.35 * draw);
+    for (let i = 0; i < 2; i++) {
+      const tip = rig.tips[i];
+      const s = rig.strands[i];
+      const d = slingTmpA.subVectors(pouch, tip);
+      const len = d.length();
+      s.position.copy(tip);
+      s.quaternion.setFromUnitVectors(SLING_Z, d.divideScalar(len || 1));
+      s.scale.set(thick, thick * 1.5, Math.max(1e-3, len));
+    }
+  }
+
   public triggerWeaponRecoil(intensity: number = 1.0): void {
     this.weaponRecoilKick = Math.min(this.weaponRecoilKick + intensity, 2.5);
   }
@@ -834,9 +889,28 @@ export class CharacterModel {
         arm.rotation.z = -sx * 0.5;
         sling.add(arm);
       }
-      const band = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.018, 0.012), new THREE.MeshLambertMaterial({ color: 0x5b3a1e }));
-      band.position.set(0, 0.27, 0.06);
-      sling.add(band);
+      // The band: two strands from the fork tips to a leather pouch that the draw pulls back
+      const bandMat = new THREE.MeshLambertMaterial({ color: 0x5b3a1e });
+      const strandGeo = new THREE.BoxGeometry(1, 1, 1);
+      strandGeo.translate(0, 0, 0.5);
+      const strands = [-1, 1].map(() => {
+        const s = new THREE.Mesh(strandGeo, bandMat);
+        sling.add(s);
+        return s;
+      });
+      const pouch = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.026, 0.018), bandMat);
+      sling.add(pouch);
+      const stone = new THREE.Mesh(new THREE.IcosahedronGeometry(0.05, 0), new THREE.MeshLambertMaterial({ color: 0x8d8478, flatShading: true }));
+      stone.visible = false;
+      pouch.add(stone);
+      this.slingRig = {
+        root: sling,
+        tips: [new THREE.Vector3(-SLING_TIP_X, SLING_TIP_Y, SLING_TIP_Z), new THREE.Vector3(SLING_TIP_X, SLING_TIP_Y, SLING_TIP_Z)],
+        strands,
+        pouch,
+        stone,
+      };
+      this.layoutSlingBand(0);
       this.weaponPivot.add(sling);
     } else if (this.activeWeapon === 11 && this.equippedPropId) {
       // Seed Pouch
@@ -982,9 +1056,21 @@ export class CharacterModel {
         grip.rotation.z += (tilt - grip.rotation.z) * (1 - Math.exp(-14 * dt));
       }
     }
-    // Slingshot shot: the fork snaps forward and settles back
-    if (this.activeWeapon === 15) this.weaponPivot.rotation.x = -this.weaponRecoilKick * 0.35;
-    else if (this.weaponPivot.rotation.x !== 0) this.weaponPivot.rotation.x = 0;
+    // Slingshot shot: the fork snaps forward and settles back; the band follows the draw
+    if (this.activeWeapon === 15) {
+      this.weaponPivot.rotation.x = -this.weaponRecoilKick * 0.35;
+      // Pulled back steadily, let go in a snap
+      const want = state.isSwimming ? 0 : this.slingDraw;
+      const rate = want < this.slingDrawVis ? 45 : 18;
+      this.slingDrawVis += (want - this.slingDrawVis) * (1 - Math.exp(-rate * dt));
+      // At full stretch the hand trembles a little
+      const shake = this.slingDraw >= 1 ? 0.012 : 0;
+      this.weaponPivot.rotation.z = shake ? (Math.random() - 0.5) * shake * 2 : 0;
+      this.layoutSlingBand(this.slingDrawVis, shake);
+    } else if (this.weaponPivot.rotation.x !== 0 || this.weaponPivot.rotation.z !== 0) {
+      this.weaponPivot.rotation.x = 0;
+      this.weaponPivot.rotation.z = 0;
+    }
 
     // Full-body one-shots that no longer fit once the situation changes
     if (this.isPlayingOneShot('LAND') && (state.isMoving || !state.isGrounded || state.isSwimming)) this.cancelOneShot();

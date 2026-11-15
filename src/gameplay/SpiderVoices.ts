@@ -8,16 +8,16 @@ import { audioEngine } from '../audio/AudioEngine';
  * The sounds are built from layers, as creature designers build big bugs (see the note below).
  */
 
-export type SpiderVoice = 'scream' | 'attack' | 'idle' | 'step';
+export type SpiderVoice = 'scream' | 'attack' | 'pain' | 'idle' | 'step';
 
-const VARIANTS: Record<SpiderVoice, number> = { scream: 3, attack: 3, idle: 4, step: 6 };
+const VARIANTS: Record<SpiderVoice, number> = { scream: 3, attack: 3, pain: 3, idle: 4, step: 6 };
 /**
  * The voices are rendered at this rate (the context resamples on playback): nothing in them needs
  * more than ~10 kHz, and it halves the one-off rendering cost.
  */
 const RENDER_RATE = 24000;
 /** Voices of one kind sounding at once (more are dropped). */
-const MAX_PLAYING: Record<SpiderVoice, number> = { scream: 2, attack: 3, idle: 2, step: 5 };
+const MAX_PLAYING: Record<SpiderVoice, number> = { scream: 2, attack: 3, pain: 3, idle: 2, step: 5 };
 
 interface Pos { x: number; y: number; z: number }
 
@@ -271,6 +271,42 @@ function renderAttack(sr: number, seed: number): Float32Array {
   return d;
 }
 
+/**
+ * Hurt: a sharp shriek of pain. The squeal shoots up higher than any other call and breaks off,
+ * then a second, weaker sob of it falls away; a shuddering hiss and a sputter of liquid under it.
+ */
+function renderPain(sr: number, seed: number): Float32Array {
+  const r = rng(seed * 23 + 7);
+  const dur = 0.6 + r() * 0.2;
+  const d = new Float32Array(Math.floor(dur * sr));
+  const top = 3600 + r() * 600;
+  const base = 2000 + r() * 300;
+  // The yelp: up in a flash, held for a moment, then it cracks downward
+  const yelp = 0.24 + r() * 0.06;
+  wetSqueal(d, sr, r, {
+    t0: 0.005,
+    dur: yelp,
+    f: (t) => (t < 0.15 ? base + (top - base) * (t / 0.15) : top - (top - base) * 0.55 * ((t - 0.15) / 0.85) ** 1.5),
+    env: attackRelease(0.03, 0.55, 1.1),
+    gain: 0.9,
+  });
+  // A second, weaker sob that falls away
+  const t2 = yelp + 0.03 + r() * 0.03;
+  wetSqueal(d, sr, r, {
+    t0: t2,
+    dur: dur - t2 - 0.02,
+    f: (t) => top * 0.82 - (top * 0.82 - base * 0.8) * t,
+    env: attackRelease(0.06, 0.2, 1.6),
+    gain: 0.5,
+  });
+  gurgle(d, sr, r, 0.01, dur * 0.8, 90, attackRelease(0.02, 0.3), 0.35);
+  hiss(d, sr, r, 0, dur, attackRelease(0.01, 0.25, 1.6), 0.55, 0.9, 32 + r() * 8);
+  // A hard crack of chitin at the moment of the blow
+  chitter(d, sr, r, 0, 0.04, 0.008, 1);
+  finish(d, sr, 0.5, 0.22);
+  return d;
+}
+
 /** One click: a short resonant tick of chitin on chitin (or on rock). */
 function addClick(d: Float32Array, sr: number, at: number, r: () => number, freq: number, gain: number): void {
   const bp = new Biquad(sr).set('bp', freq, 9 + r() * 6);
@@ -323,6 +359,7 @@ function renderStep(sr: number, seed: number): Float32Array {
 const RENDER: Record<SpiderVoice, (sr: number, seed: number) => Float32Array> = {
   scream: renderScream,
   attack: renderAttack,
+  pain: renderPain,
   idle: renderIdle,
   step: renderStep,
 };
@@ -335,8 +372,8 @@ export function renderSpiderVoice(kind: SpiderVoice, sampleRate: number, variant
 // ------------------------------------------------------------------ bank & playback
 
 let bankCtx: BaseAudioContext | null = null;
-const bank: Record<SpiderVoice, (AudioBuffer | undefined)[]> = { scream: [], attack: [], idle: [], step: [] };
-const playing: Record<SpiderVoice, number> = { scream: 0, attack: 0, idle: 0, step: 0 };
+const bank: Record<SpiderVoice, (AudioBuffer | undefined)[]> = { scream: [], attack: [], pain: [], idle: [], step: [] };
+const playing: Record<SpiderVoice, number> = { scream: 0, attack: 0, pain: 0, idle: 0, step: 0 };
 
 /** One variant of `kind`, rendered the first time it is asked for. */
 function buffer(ctx: AudioContext, kind: SpiderVoice): AudioBuffer {
@@ -370,7 +407,7 @@ export function prewarmSpiderVoices(): void {
     for (const k of Object.keys(bank) as SpiderVoice[]) bank[k] = [];
   }
   const todo: [SpiderVoice, number][] = [];
-  for (const k of ['scream', 'attack', 'idle', 'step'] as SpiderVoice[]) {
+  for (const k of ['scream', 'attack', 'pain', 'idle', 'step'] as SpiderVoice[]) {
     for (let i = 0; i < VARIANTS[k]; i++) if (!bank[k][i]) todo.push([k, i]);
   }
   if (!todo.length) return;

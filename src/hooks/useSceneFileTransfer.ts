@@ -21,7 +21,7 @@ export function useSceneFileTransfer(
 
   const exportJSON = () => {
     if (!buildingManager) return warnNotReady();
-    const res = buildingManager.downloadSceneJson(buildingTelemetry?.currentRoofStyle);
+    const res = buildingManager.downloadSceneJson();
     if (res.success) {
       const msg = `Експортовано ${res.piecesCount} обʼєктів та ${res.customizedCells} клітинок (${res.fileSizeKb} KB)`;
       showToast({ text: `✓ ${msg}`, type: 'success' });
@@ -42,7 +42,7 @@ export function useSceneFileTransfer(
         setBuildingTelemetry({ ...buildAbility.getTelemetry() });
         const msg = `Відновлено ${res.piecesCount} деталей будівлі та ${res.customizedCells} розфарбованих клітинок стін!`;
         showToast({ text: `✓ ${msg}`, type: 'success' });
-        addLog('event', `[Імпорт JSON] ${msg} (стиль даху: ${res.roofStyle})`);
+        addLog('event', `[Імпорт JSON] ${msg}`);
       } else {
         reportError(res.error || 'Помилка відновлення сцени');
       }

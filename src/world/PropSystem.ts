@@ -416,7 +416,8 @@ export const PROP_DEFS: PropDef[] = [
         b.rock(M.rock, 0.16, Math.cos(a) * 0.55, 0.08, Math.sin(a) * 0.55);
       }
       for (let i = 0; i < 3; i++) b.box(M.darkWood, 0.8, 0.1, 0.1, 0, 0.12, 0, (i * Math.PI) / 3);
-      b.cone(M.fire, 0.25, 0.55, 0, 0.42, 0, 5);
+      // Glowing coals; the flame itself is a shader (FlameField, fed by the night lighting)
+      b.cone(M.fire, 0.24, 0.16, 0, 0.2, 0, 6);
     },
   },
   {

@@ -30,6 +30,8 @@ export interface MovementInput {
   buildSnapToggleJustPressed: boolean;
   buildDemolishJustPressed: boolean;
   buildPlaceJustPressed: boolean;
+  /** Shift was held on the placement click: keep the piece in hand */
+  buildPlaceKeepPiece?: boolean;
   paintToggleJustPressed: boolean;
   terrainToggleJustPressed: boolean;
   inventoryToggleJustPressed: boolean;
@@ -103,6 +105,7 @@ export class InputManager {
   private lastMouseY: number = 0;
   public startedOnUI: boolean = false;
   private mouseBuildPlaceJustPressed: boolean = false;
+  private mouseBuildPlaceShift: boolean = false;
   private mouseBuildDemolishJustPressed: boolean = false;
   private middleClicked = false;
 
@@ -192,6 +195,7 @@ export class InputManager {
     if (e.button === 0) {
       if ((this.isBuildMode || this.isPaintMode) && !isDragGesture && !isUI) {
         this.mouseBuildPlaceJustPressed = true;
+        this.mouseBuildPlaceShift = e.shiftKey;
       }
       this.isMouseDown = false;
     } else if (e.button === 2) {
@@ -527,6 +531,7 @@ export class InputManager {
       buildSnapToggleJustPressed,
       buildDemolishJustPressed,
       buildPlaceJustPressed,
+      buildPlaceKeepPiece: this.mouseBuildPlaceJustPressed && this.mouseBuildPlaceShift,
       paintToggleJustPressed,
       terrainToggleJustPressed,
       inventoryToggleJustPressed,
