@@ -4,6 +4,7 @@ import { waterLevelAt } from '../world/rivers/RiverWorld';
 import { coastRadius } from '../world/IslandGenerator';
 import { emitWaterRipple } from '../scene/WaterDetails';
 import { waterRippleSim } from '../scene/WaterRippleSim';
+import { duckweedSim, DUCKWEED_BOBBER_SLOT } from '../scene/DuckweedSim';
 import type { ParticleManager } from '../particles/ParticleManager';
 import { FishingFish, FishAgent, FishingWater, WaterSampler } from './fishing/FishingFish';
 import { FishingLine } from './fishing/FishingLine';
@@ -706,6 +707,8 @@ export class FishingSystem {
     this.rippleFocus = this.bobber;
     if (p === 'flight') return;
     const b = this.bobber;
+    // The float keeps a small gap in the duckweed
+    duckweedSim.setPusher(DUCKWEED_BOBBER_SLOT, b.x, b.z, this.hooked ? 0.22 : 0.1, 1);
     if (waterRippleSim.active) waterRippleSim.setPusher(RIPPLE_SLOT, b.x, b.z, this.hooked ? Math.max(this.baitSpeed, 1.2) : this.baitSpeed, this.hooked ? 0.22 : 0.1);
     if (this.rippleT <= 0) {
       if (this.hooked) {

@@ -62,6 +62,10 @@ export interface CharacterContext {
   jumpForce: number;
   jumpCutMultiplier: number;
   airControl: number;
+  /** Traction of the ground underfoot: 1 normally, low on ice (the player slides on). */
+  groundGrip: number;
+  /** Share of the usual walking speed on this ground (mud and puddles drag at the boots). */
+  groundSpeed: number;
   gravity: number;
 }
 

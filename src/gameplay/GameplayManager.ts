@@ -106,6 +106,13 @@ export interface ExplorePort {
   interact(): void;
 }
 
+/** Falls up to this height (metres) are harmless (a jump is ~1.6 m, a storey ~3 m). */
+const FALL_SAFE_HEIGHT = 4.5;
+/** Each further this many metres of fall takes another half heart. */
+const FALL_HALF_STEP = 2.5;
+/** How long (ms) the fainted player lies as a ragdoll before waking at the bed. */
+const FAINT_RAGDOLL_MS = 2800;
+
 /**
  * Glue for the cosy-life activities: fishing, pets, cooking, the mailbox shop and food buffs.
  * Owns one-button interaction routing so the E key / touch button always does the obvious thing.
@@ -205,6 +212,7 @@ export class GameplayManager {
     hitFx.init(scene);
     this.healthBars = new EnemyHealthBars(scene, this.pests);
     fireFx.onBurnDamage = (halves) => this.burnPlayer(halves);
+    character.onHardLanding = (height) => this.fallDamage(height);
   }
 
   /**
@@ -391,17 +399,34 @@ export class GameplayManager {
     this.takeDamage(halves);
   }
 
+  /**
+   * Landing after a fall: up to FALL_SAFE_HEIGHT nothing, then half a heart per FALL_HALF_STEP
+   * metres more (a fall of ~17 m takes all three hearts). A hard landing staggers the player for
+   * a moment and shakes the view; any landing in water is soft (the controller doesn't report it).
+   */
+  private fallDamage(height: number): void {
+    if (this.sleep || height <= FALL_SAFE_HEIGHT) return;
+    const halves = Math.ceil((height - FALL_SAFE_HEIGHT) / FALL_HALF_STEP);
+    critterSounds.ouch();
+    hitFx.onShake?.(Math.min(0.9, 0.45 + halves * 0.08));
+    // Knees buckle: a short stun, longer for a harder fall
+    this.character.stunTimer = Math.max(this.character.stunTimer, Math.min(1.2, 0.35 + halves * 0.12));
+    this.revision++;
+    this.takeDamage(halves);
+  }
+
   /** Takes hearts; out of them the player faints and wakes at the bed. Returns true on fainting. */
   private takeDamage(halves: number): boolean {
     if (!playerHealth.damage(halves)) return false;
     this.onNotify(t('health.fainted'), 'warning');
     fireFx.douse();
-    // A moment to see the last heart go before the screen fades
+    // The player goes limp (a ragdoll carrying the blow on) and lies a moment before the screen fades
+    const limp = this.character.startRagdoll();
     window.setTimeout(() => {
       playerHealth.refill();
       this.onFaint();
-    }, 700);
-    this.invulnerable = 3;
+    }, limp ? FAINT_RAGDOLL_MS : 700);
+    this.invulnerable = limp ? FAINT_RAGDOLL_MS / 1000 + 2 : 3;
     return true;
   }
 

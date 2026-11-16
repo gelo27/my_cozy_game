@@ -40,6 +40,9 @@ import type RAPIER from '@dimforge/rapier3d-compat';
 
 const WHITE_MIST = new THREE.Color(0.92, 0.95, 1);
 
+/** Traction on ice (share of the usual acceleration and braking): the player slides on. */
+const ICE_GRIP = 0.15;
+
 /** Villagers' footsteps are only played this close to the listener (m). */
 const NPC_STEP_RANGE = 26;
 
@@ -51,7 +54,23 @@ const TILE_SURFACE: Record<TerrainTileType, FootSurface> = {
   [TerrainTileType.STONE_COBBLE]: 'cobble',
   [TerrainTileType.SAND_BEACH]: 'sand',
   [TerrainTileType.SNOW]: 'snow',
+  [TerrainTileType.FALLEN_LEAVES]: 'leaves',
+  [TerrainTileType.DRY_GRASS]: 'grass',
+  [TerrainTileType.BIRCH_GRASS]: 'grass',
+  [TerrainTileType.GRAVEL]: 'gravel',
+  [TerrainTileType.ICE]: 'ice',
+  [TerrainTileType.MUD]: 'mud',
+  [TerrainTileType.PUDDLE]: 'mud', // 'water' while the puddle holds water (surfaceUnder)
 };
+
+/** Walking speed on soft ground (share of the usual): mud drags at the boots, puddles a little. */
+const GROUND_SPEED: Partial<Record<TerrainTileType, number>> = {
+  [TerrainTileType.MUD]: 0.6,
+  [TerrainTileType.PUDDLE]: 0.8,
+};
+/** Seconds of heavy rain to fill the puddles, and of dry weather for them to dry out again. */
+const PUDDLE_FILL_TIME = 45;
+const PUDDLE_DRY_TIME = 900;
 
 /** Floor paint (building) -> footstep recipe; unpainted floors are wooden planks. */
 function floorSurface(wallpaperId: string): FootSurface {
@@ -92,8 +111,9 @@ import { LightningStrikes } from '../world/Lightning';
 import { fireFx } from '../world/FlameField';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { WaterSystem } from '../world/WaterSystem';
-import { setRippleCamera } from '../scene/WaterDetails';
+import { emitWaterRipple, setRippleCamera, setWaterBody } from '../scene/WaterDetails';
 import { waterRippleSim } from '../scene/WaterRippleSim';
+import { duckweedSim, DUCKWEED_BOAT_SLOT } from '../scene/DuckweedSim';
 import { updatePickGlow } from '../world/PickGlow';
 import { updateCloudShadows } from '../world/CloudShadows';
 import { LightShafts } from '../world/LightShafts';
@@ -107,7 +127,7 @@ import { setAlgaeDaylight } from '../world/AlgaeChains';
 import { setWebLight } from '../world/SpiderWebs';
 import { setGlassLight, setGlassNight } from '../scene/GlassMatcap';
 import { WindowGlow } from '../building/WindowGlow';
-import { VIEW_DISTANCE, isMobileDevice, worldSettings } from '../world/WorldSettings';
+import { VIEW_DISTANCE, WORLD_HALF, WORLD_SIZE, isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState, GameplayPrompt } from '../gameplay/GameplayManager';
 import { lockOnSettings } from '../gameplay/LockOn';
 import { hitFx } from '../gameplay/HitFeedback';
@@ -278,6 +298,8 @@ export class GameEngine {
   private lastFarmPrompt = '';
   /** Reused for the field-wheat pushers so the frame loop doesn't allocate. */
   private readonly pushTmp = new THREE.Vector3();
+  /** Passes one body to both the algae and the water lilies (made on the first frame). */
+  private chainPushers: { addPusher(x: number, y: number, z: number, r: number, h: number): void } | null = null;
   /** Scratch list: the sharks parting the algae this frame. */
   private readonly sharkTmp: Shark[] = [];
   private lastGatherPrompt: unknown = null;
@@ -459,6 +481,27 @@ export class GameEngine {
       setRippleCamera(this.camera.camera);
       this.lightShafts = new LightShafts(scene);
       waterRippleSim.setGround((x, z) => terrain.getHeight(x, z));
+      // Painted puddles hold water too: the wave simulation runs over them (steps, rain drops)
+      waterRippleSim.setExtraWet((ox, oz, area, out) => {
+        const x0 = Math.max(0, Math.floor(ox) + WORLD_HALF), x1 = Math.min(WORLD_SIZE - 1, Math.ceil(ox + area) + WORLD_HALF);
+        const z0 = Math.max(0, Math.floor(oz) + WORLD_HALF), z1 = Math.min(WORLD_SIZE - 1, Math.ceil(oz + area) + WORLD_HALF);
+        let any = false;
+        out.minX = out.minZ = Infinity;
+        out.maxX = out.maxZ = -Infinity;
+        const tiles = terrain.tiles;
+        for (let z = z0; z <= z1; z++) {
+          for (let x = x0, i = z * WORLD_SIZE + x0; x <= x1; x++, i++) {
+            if (tiles[i] !== TerrainTileType.PUDDLE) continue;
+            any = true;
+            const wx = x - WORLD_HALF, wz = z - WORLD_HALF;
+            if (wx < out.minX) out.minX = wx;
+            if (wz < out.minZ) out.minZ = wz;
+            if (wx + 1 > out.maxX) out.maxX = wx + 1;
+            if (wz + 1 > out.maxZ) out.maxZ = wz + 1;
+          }
+        }
+        return any;
+      });
       const rivers = new RiverSystem(scene, terrain);
       const weather = new WeatherSystem(scene);
       weather.onLightning = () => this.ambient.thunder(this.listenerPos, weather.sound.thunder);
@@ -691,6 +734,8 @@ export class GameEngine {
       shadows.orchard = orchard;
       const interiors = new InteriorLighting(physics, buildingManager);
       const windowGlow = new WindowGlow(buildingManager);
+      // Steady lamps and lit windows baked on the ground
+      nightLighting.setGround((x, z) => terrain.getHeight(x, z), () => windowGlow.spills, () => windowGlow.spillRevision);
       const grass = new GrassField(scene, terrain);
       shadows.grass = grass;
       // Storm bolts that land near the player: a warning, then the strike, flash and thunder
@@ -974,7 +1019,15 @@ export class GameEngine {
     w.boat.syncVisuals(dt);
 
     // Asleep in bed: the player stays put until morning
-    if (!editing && !isDriving && !w.gameplay.sleeping) character.update(dt, inputManager, tpCamera);
+    if (!editing && !isDriving && !w.gameplay.sleeping) {
+      const feet = character.groundInfo.isGrounded ? character.groundInfo.surfaceHitPoint : null;
+      character.groundGrip = this.groundGrip(feet, character.groundCollider);
+      const tile = feet ? this.terrainTileUnder(feet, character.groundCollider) : null;
+      character.groundSpeed = tile !== null ? GROUND_SPEED[tile] ?? 1 : 1;
+      // Wading through a puddle: the feet push a wake into the wave simulation
+      if (tile === TerrainTileType.PUDDLE && feet) setWaterBody(feet.x, feet.z, character.telemetry.speed, 0.28);
+      character.update(dt, inputManager, tpCamera);
+    }
     // Splash drops, the swimmer's rising air bubbles and the caustics' clock
     character.swimAbility?.waterParticles?.update(dt);
     const camPos = this.camera.camera.position;
@@ -999,9 +1052,17 @@ export class GameEngine {
     const rainOnWater = w.exploration.inCave ? 0 : w.weather.rainIntensity * (1 - w.weather.snowAmount);
     w.water.update(dt, this.camera.camera.position);
     // Ripple wave simulation around the player (developer toggle; asleep when nothing stirs)
-    waterRippleSim.update(this.renderer, dt, rainOnWater, editing ? this.camera.camera.position : ride ? ride.getPosition() : w.gameplay.fishing.rippleFocus ?? character.getPosition());
+    const waterFocus = editing ? this.camera.camera.position : ride ? ride.getPosition() : w.gameplay.fishing.rippleFocus ?? character.getPosition();
+    waterRippleSim.update(this.renderer, dt, rainOnWater, waterFocus);
+    // Duckweed pushed aside by the swimmer / the boat, drifting back over a few seconds
+    if (ride === w.boat) {
+      const bp = w.boat.getPosition();
+      duckweedSim.setPusher(DUCKWEED_BOAT_SLOT, bp.x, bp.z, 1.3, 1);
+    }
+    duckweedSim.update(this.renderer, dt, waterFocus);
     w.rivers.update(dt, w.weather.nightFactor);
     updateCloudShadows(dt, w.weather.sunDir, w.weather.cloudCover, w.weather.nightFactor);
+    WaterEffects.setSun(w.weather.sunDir);
     // What the HUD prompt is about glows: the tulip clump E picks, the ripe field E harvests
     this.updatePickGlowTargets(dt, editing);
     if (editing) {
@@ -1037,6 +1098,12 @@ export class GameEngine {
       updateCutaway(dt, cutOn, tpCamera.camera.position, this.cutawayTarget, p.y - 0.75);
     }
     w.weather.update(dt, tpCamera.camera.position);
+    w.water.sparkles.update(
+      this.camera.camera.position,
+      w.weather.sun,
+      (this.scene.fog as THREE.FogExp2 | null)?.density ?? 0,
+      !w.exploration.inCave && w.weather.underwater < 0.5
+    );
     this.lightShafts?.update(dt, this.camera.camera, {
       sunDir: w.weather.sunDir,
       sunColor: w.weather.sun.color,
@@ -1065,8 +1132,17 @@ export class GameEngine {
     flowers.clearPushers();
     const grassField = w.grass;
     grassField.clearPushers();
-    const algae = w.props.algae;
-    algae.clearPushers();
+    const algaeField = w.props.algae;
+    const lilies = w.props.lilies;
+    algaeField.clearPushers();
+    lilies.clearPushers();
+    // Bodies part the algae and the water lilies alike (one forwarder, made once)
+    const algae = (this.chainPushers ??= {
+      addPusher: (x: number, y: number, z: number, r: number, h: number) => {
+        algaeField.addPusher(x, y, z, r, h);
+        lilies.addPusher(x, y, z, r, h);
+      },
+    });
     if (!editing) {
       if (character.body) {
         const cp = character.body.translation();
@@ -1115,7 +1191,8 @@ export class GameEngine {
     }
     // Sunlight on the algae: full by day, none at night or in caves, dimmed by rain
     setAlgaeDaylight(w.exploration.inCave ? 0 : (1 - w.weather.nightFactor) * (1 - w.weather.rainIntensity * 0.6));
-    algae.update(dt, this.camera.camera.position);
+    algaeField.update(dt, this.camera.camera.position);
+    lilies.update(dt, this.camera.camera.position);
     // Spider webs: the player on foot sticks to them (not while editing, driving or asleep)
     const webs = w.props.webs;
     webs.setPlayer(!editing && !isDriving && !w.gameplay.sleeping && character.body ? character.body.translation() : null);
@@ -1140,10 +1217,18 @@ export class GameEngine {
     w.propTrees.gustsAllowed = wt !== 'rain' && wt !== 'storm' && wt !== 'snow' && wt !== 'blizzard' && w.weather.rainIntensity < 0.05;
     setFoliageWeatherWind(w.exploration.inCave ? 0 : w.weather.sound.wind);
     w.terrain.setSnowCover(w.weather.snowCover);
+    // Puddles fill in the rain and dry out slowly afterwards (they freeze rather than dry in snow)
+    {
+      const rain = w.weather.rainIntensity * (1 - w.weather.snowAmount);
+      if (rain > 0.02) this.puddleFill = Math.min(1, this.puddleFill + (rain * dt) / PUDDLE_FILL_TIME);
+      else if (w.weather.snowAmount < 0.05) this.puddleFill = Math.max(0, this.puddleFill - dt / PUDDLE_DRY_TIME);
+      w.terrain.setPuddleFill(this.puddleFill);
+      w.terrain.setRainFall(w.exploration.inCave ? 0 : rain);
+    }
     grass.snowCover = w.weather.snowCover;
     // Footprints fill in within a minute or two of heavy snowfall, and barely at all once it stops
     grass.printFill = w.weather.snowAmount > 0.05 ? 50 / w.weather.snowAmount : 1500;
-    setSnowCover(w.exploration.inCave ? 0 : w.weather.snowCover);
+    setSnowCover(w.weather.snowCover, !w.exploration.inCave);
     {
       // Low mist over the ground while it snows (and a faint one over a white landscape)
       const pp = character.getPosition();
@@ -1537,6 +1622,24 @@ export class GameEngine {
     return this.portalPoint.set(best.mouth.x, best.mouth.y + 1.5, best.mouth.z);
   }
 
+  /** How full the painted puddles are (0 dried down to their middles .. 1 brimming after rain). */
+  private puddleFill = 0;
+
+  /** Painted terrain tile the foot is on, or null on a floor, prop, structure, water or in a cave. */
+  private terrainTileUnder(p: THREE.Vector3, collider: RAPIER.Collider | null): TerrainTileType | null {
+    const w = this.world!;
+    const ud = (collider as unknown as { userData?: { pieceId?: string; surface?: FootSurface } } | null)?.userData;
+    if (ud?.pieceId || ud?.surface || w.exploration.inCave) return null;
+    if (Math.abs(p.y - w.terrain.getHeight(p.x, p.z)) >= 0.3) return null;
+    return w.terrain.getTile(Math.floor(p.x), Math.floor(p.z));
+  }
+
+  /** Traction underfoot: ice (painted, not under water) lets the player slide; null = airborne. */
+  private groundGrip(p: THREE.Vector3 | null, collider: RAPIER.Collider | null): number {
+    if (!p || riverWorld.waterLevelAt3(p.x, p.y + 0.5, p.z) > p.y + 0.04) return 1;
+    return this.terrainTileUnder(p, collider) === TerrainTileType.ICE ? ICE_GRIP : 1;
+  }
+
   /** What the foot landed on: building floor paint, structure/prop tag, wading water or the painted terrain tile. */
   private surfaceUnder(p: THREE.Vector3, collider: RAPIER.Collider | null): FootSurface {
     const w = this.world!;
@@ -1551,8 +1654,10 @@ export class GameEngine {
     }
     if (ud?.surface) return ud.surface;
     if (w.exploration.inCave) return 'stone';
-    if (Math.abs(p.y - w.terrain.getHeight(p.x, p.z)) < 0.3) {
-      const tile = TILE_SURFACE[w.terrain.getTile(Math.floor(p.x), Math.floor(p.z))] ?? 'grass';
+    const t = this.terrainTileUnder(p, collider);
+    if (t !== null) {
+      if (t === TerrainTileType.PUDDLE && this.puddleFill > 0.25) return 'water';
+      const tile = TILE_SURFACE[t] ?? 'grass';
       // Fallen snow covers the ground once it is more than a dusting (it melts on fields and dirt tracks)
       return w.weather.snowCover > 0.35 && tile !== 'dirt' && p.y > worldSettings.waterLevel + 0.3 ? 'snow' : tile;
     }
@@ -1563,6 +1668,10 @@ export class GameEngine {
     const w = this.world;
     if (!w || this.paused || this.mode !== 'play' || !audioEngine.context) return;
     const surface = this.surfaceUnder(point, collider);
+    // A step into a puddle's water: a splash ring (the wave simulation spreads it)
+    if (surface === 'water' && this.terrainTileUnder(point, collider) === TerrainTileType.PUDDLE) {
+      emitWaterRipple(point.x + (Math.random() - 0.5) * 0.25, point.z + (Math.random() - 0.5) * 0.25, Math.min(1, 0.45 + intensity * 0.35), 1.4);
+    }
     // Rain soaks open ground: steps get a squelch layer (not under roofs, in caves or on floors)
     const weather = w.weather;
     const exposed = !w.exploration.inCave && !weather.isSheltered(point) && !(collider as unknown as { userData?: { pieceId?: string } } | null)?.userData?.pieceId;
@@ -1726,6 +1835,8 @@ export class GameEngine {
       interiors: w.interiors,
       /** Lamp-lit window glass: `dev.windowGlow.stats`. */
       windowGlow: w.windowGlow,
+      /** Ground light bake: `dev.groundLight()` = { lamps, spills, ms }. */
+      groundLight: () => w.nightLighting.groundStats,
       interiorSettings,
       grass: w.grass,
     };

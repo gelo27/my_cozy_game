@@ -15,7 +15,7 @@ import { LodInstances } from './LodInstances';
 import { withSnowCover } from './SnowCover';
 import { buildDecorRockLods } from './RockModels';
 import { FLOWER_MATERIAL, loadFlowerModels } from './FlowerModels';
-import { AlgaeField, algaeGeometry, clampLinks } from './AlgaeChains';
+import { ALGAE, CHAIN_SPECIES, ChainField, ChainKind, LILY } from './AlgaeChains';
 import { WebField, WebParams, clampWeb, webPreviewGeometry } from './SpiderWebs';
 
 /**
@@ -108,10 +108,10 @@ export interface PropDef {
   collider?: { kind: 'cyl'; r: number; h: number } | { kind: 'box'; w: number; h: number; d: number };
   build: (b: PropBuilder) => void;
   /**
-   * Chain props (algae): drawn by AlgaeField from welded chain links instead of the instanced
-   * batches; each instance has its own link count (`PropInstance.length`).
+   * Chain props (algae, water lilies): drawn by their ChainField from welded chain links instead
+   * of the instanced batches; each instance has its own link count (`PropInstance.length`).
    */
-  chain?: true;
+  chain?: ChainKind;
   /** Spider webs: simulated threads drawn by WebField; each instance has its own `web` params. */
   web?: true;
 }
@@ -128,6 +128,8 @@ export interface PropInstance {
   length?: number;
   /** Algae: own root and top colours (sRGB hex); none = the developer panel's. */
   colors?: [number, number];
+  /** Water lily: what caps the stem (0 / none = a leaf, 1 = a flower). */
+  head?: number;
   /** Spider web: its shape and strength. */
   web?: WebParams;
   /** Frameless spider web: where its radials anchor (local x, y, z per radial), found once. */
@@ -146,6 +148,8 @@ export interface PropSaveData {
   n?: number;
   /** Algae: own root and top colours. */
   c?: [number, number];
+  /** Water lily head (1 = flower). */
+  hd?: number;
   /** Spider web params. */
   w?: WebParams;
   /** Frameless spider web anchors. */
@@ -332,7 +336,13 @@ export const PROP_DEFS: PropDef[] = [
   },
   {
     // Algae stalk: chain links from algae_chain.glb with a top; built by AlgaeField (underwater)
-    id: 'algae', name: 'Водорість', icon: 'Waves', category: 'nature', chain: true,
+    id: 'algae', name: 'Водорість', icon: 'Waves', category: 'nature', chain: 'algae',
+    build: (b) => b.cyl(M.leaf, 0.02, 0.02, 1.5, 0, 0.75, 0, 5),
+  },
+  {
+    // Water lily: a stiff stem of chain links from water_lily.glb under a leaf or a flower that
+    // floats flat on the surface when the stem reaches it; built by the lily ChainField
+    id: 'water_lily', name: 'Латаття', icon: 'Flower2', category: 'nature', chain: 'lily',
     build: (b) => b.cyl(M.leaf, 0.02, 0.02, 1.5, 0, 0.75, 0, 5),
   },
   {
@@ -534,15 +544,18 @@ export class PropSystem {
   private static readonly _s = new THREE.Vector3();
   private static readonly _up = new THREE.Vector3(0, 1, 0);
 
-  /** Algae chains (props with `chain` defs live here instead of the batches). */
-  public readonly algae: AlgaeField;
+  /** Algae chains (props with `chain: 'algae'` defs live here instead of the batches). */
+  public readonly algae: ChainField;
+  /** Water lilies (`chain: 'lily'`). */
+  public readonly lilies: ChainField;
   /** Spider webs (props with `web` defs). */
   public readonly webs: WebField;
 
   constructor(scene: THREE.Scene, private readonly physics: PhysicsWorld, private readonly terrain: TerrainSystem) {
     this.group.name = 'Props';
     scene.add(this.group);
-    this.algae = new AlgaeField(this.group);
+    this.algae = new ChainField(this.group, ALGAE);
+    this.lilies = new ChainField(this.group, LILY);
     this.webs = new WebField(this.group, physics, terrain);
     this.webs.onAnchors = () => this.revision++;
     // Oak and pine come from the trees pack; until it loads (or if it fails) the procedural trees stand in
@@ -940,7 +953,7 @@ export class PropSystem {
 
   public add(
     type: string, x: number, z: number, rotationY = 0, scale = 1, y?: number, grounded = true, length?: number, colors?: [number, number] | null,
-    web?: Partial<WebParams> | null, webAnchors?: number[] | null, tilt?: [number, number] | null
+    web?: Partial<WebParams> | null, webAnchors?: number[] | null, tilt?: [number, number] | null, head?: number | null
   ): number | null {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
     const def = PROP_DEF_MAP.get(type);
@@ -958,12 +971,14 @@ export class PropSystem {
     }
     if (def?.chain) {
       const id = this.nextId++;
+      const species = CHAIN_SPECIES[def.chain];
       const prop: PropInstance = {
-        id, type, position: new THREE.Vector3(x, y ?? this.terrain.getHeight(x, z), z), rotationY, scale, grounded, length: clampLinks(length),
-        colors: colors ? [colors[0], colors[1]] : undefined,
+        id, type, position: new THREE.Vector3(x, y ?? this.terrain.getHeight(x, z), z), rotationY, scale, grounded, length: species.clampLinks(length),
+        colors: colors && def.chain === 'algae' ? [colors[0], colors[1]] : undefined,
+        head: def.chain === 'lily' && head ? species.clampHead(head) : undefined,
       };
       this.props.set(id, prop);
-      this.algae.add(prop);
+      this.chainField(def.chain).add(prop);
       this.revision++;
       return id;
     }
@@ -991,6 +1006,7 @@ export class PropSystem {
     if (!prop) return;
     this.detach(id);
     this.algae.remove(id);
+    this.lilies.remove(id);
     this.webs.remove(id);
     const body = this.bodies.get(id);
     if (body) this.physics.removeRigidBody(body);
@@ -1066,8 +1082,9 @@ export class PropSystem {
     prop.position.copy(position);
     prop.rotationY = rotationY;
     prop.scale = scale;
-    if (PROP_DEF_MAP.get(prop.type)?.chain) {
-      this.algae.refresh(prop);
+    const kind = PROP_DEF_MAP.get(prop.type)?.chain;
+    if (kind) {
+      this.chainField(kind).refresh(prop);
       this.revision++;
       return;
     }
@@ -1098,16 +1115,32 @@ export class PropSystem {
   /** Chain props: sets the number of links (the stalk is rebuilt from the shared geometries). */
   public setChainLength(id: number, length: number): void {
     const prop = this.props.get(id);
-    if (!prop || !PROP_DEF_MAP.get(prop.type)?.chain) return;
-    prop.length = clampLinks(length);
-    this.algae.refresh(prop);
+    const kind = prop && PROP_DEF_MAP.get(prop.type)?.chain;
+    if (!prop || !kind) return;
+    prop.length = CHAIN_SPECIES[kind].clampLinks(length);
+    this.chainField(kind).refresh(prop);
     this.revision++;
+  }
+
+  /** Water lily: what caps the stem (0 = leaf, 1 = flower). */
+  public setChainHead(id: number, head: number): void {
+    const prop = this.props.get(id);
+    if (!prop || PROP_DEF_MAP.get(prop.type)?.chain !== 'lily') return;
+    const h = LILY.clampHead(head);
+    prop.head = h || undefined;
+    this.lilies.refresh(prop);
+    this.revision++;
+  }
+
+  /** The field that draws a chain species. */
+  public chainField(kind: ChainKind): ChainField {
+    return kind === 'lily' ? this.lilies : this.algae;
   }
 
   /** Algae: own root and top colours (sRGB hex), or null for the developer panel's. */
   public setChainColors(id: number, colors: [number, number] | null): void {
     const prop = this.props.get(id);
-    if (!prop || !PROP_DEF_MAP.get(prop.type)?.chain) return;
+    if (!prop || PROP_DEF_MAP.get(prop.type)?.chain !== 'algae') return;
     prop.colors = colors ? [colors[0], colors[1]] : undefined;
     this.algae.recolor(prop);
     this.revision++;
@@ -1127,10 +1160,10 @@ export class PropSystem {
   }
 
   /** Geometry to preview a type with (the editor's placement ghost); null while it loads. */
-  public previewGeometry(type: string, length?: number, web?: Partial<WebParams> | null): THREE.BufferGeometry | null {
+  public previewGeometry(type: string, length?: number, web?: Partial<WebParams> | null, head?: number): THREE.BufferGeometry | null {
     const def = PROP_DEF_MAP.get(type);
     if (!def) return null;
-    if (def.chain) return algaeGeometry(clampLinks(length));
+    if (def.chain) return CHAIN_SPECIES[def.chain].geometry(length ?? CHAIN_SPECIES[def.chain].cfg.defaultLinks, head);
     if (def.web) return webPreviewGeometry(clampWeb(web));
     let shared = this.geometries.get(type);
     if (!shared) {
@@ -1202,8 +1235,10 @@ export class PropSystem {
         best = { id: batch.ids[h.instanceId], point: h.point.clone(), distance: h.distance };
       }
     }
-    const algae = this.algae.pick(raycaster);
-    if (algae && (!best || algae.distance < best.distance)) best = algae;
+    for (const field of [this.algae, this.lilies]) {
+      const hit = field.pick(raycaster);
+      if (hit && (!best || hit.distance < best.distance)) best = hit;
+    }
     const web = this.webs.pick(raycaster);
     if (web && (!best || web.distance < best.distance)) best = web;
     return best;
@@ -1231,7 +1266,10 @@ export class PropSystem {
             prop.webAnchors = undefined;
             this.webs.refresh(prop);
           }
-          else this.algae.refresh(prop);
+          else {
+            const kind = PROP_DEF_MAP.get(prop.type)?.chain;
+            if (kind) this.chainField(kind).refresh(prop);
+          }
           continue;
         }
         this.writeMatrix(batch, this.slotOf.get(prop.id)!, prop);
@@ -1286,6 +1324,7 @@ export class PropSystem {
       g: p.grounded ? undefined : false,
       n: p.length,
       c: p.colors,
+      hd: p.head,
       w: p.web,
       wa: p.webAnchors,
       t: p.tilt ? [+p.tilt[0].toFixed(4), +p.tilt[1].toFixed(4)] : undefined,
@@ -1296,7 +1335,7 @@ export class PropSystem {
 
   public deserialize(data: PropSaveData[]): void {
     this.clear();
-    for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.p[1], d.g !== false, d.n, Array.isArray(d.c) && d.c.length === 2 ? d.c : null, d.w, d.wa, d.t);
+    for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.p[1], d.g !== false, d.n, Array.isArray(d.c) && d.c.length === 2 ? d.c : null, d.w, d.wa, d.t, d.hd);
   }
 
   /** Default decoration so a fresh world does not look empty. */

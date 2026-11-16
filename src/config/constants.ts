@@ -53,6 +53,9 @@ export const CHARACTER_CONFIG = {
   GROUND_DECELERATION: 38.0, // m/s^2 natural braking deceleration
   TURNING_DECELERATION: 25.0, // m/s^2 skid response when turning direction
   AIR_ACCELERATION: 18.0,
+  // Ice (ground grip < 1): what slows a glide when no key is held, and how hard slopes pull
+  ICE_GLIDE_DECELERATION: 2.2, // m/s^2: from a jog the player glides ~4-5 m to a stop
+  ICE_SLOPE_PULL: 0.8, // share of gravity pulling down the slope (the glide friction holds slopes under ~7 deg)
   AIR_DECELERATION: 4.0,
 
   // Squash & Stretch dynamics (Mario Odyssey style)

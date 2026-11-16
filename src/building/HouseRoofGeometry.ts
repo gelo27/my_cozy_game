@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { WALL_THICKNESS } from './config/BuildingConstants';
 import type { ProceduralRoofConfig } from './ProceduralRoofSystem';
-import { solvePitch, type RoofShape } from './RoofGeometry';
+import { brokenPitch, solvePitch, type RoofShape } from './RoofGeometry';
 
 /**
  * One hip roof over the whole outline of a house (L-, T-, U-shaped and any other right-angled plan).
+ * A gable roof ends its wings with upright gables; the broken-pitch ones (mansard: hip based,
+ * gambrel: gable based) bend every slope at a knee line that runs level round the whole house.
  *
  * The footprint is the closed loop of wall centre lines in the roof's local space. Every slope has
  * the same pitch, so the roof is the straight skeleton of the footprint: for a right-angled polygon
@@ -207,12 +209,17 @@ interface Piece {
   /** Vertex keys, counter-clockwise */
   loop: string[];
   plane: FacePlane;
+  /** Broken pitch: 0 below the knee line, 1 above it */
+  tier?: number;
 }
+
+const pieceKey = (p: { plane: FacePlane; tier?: number }) => `${planeKey(p.plane)}|${p.tier ?? 0}`;
 
 export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]): RoofShape {
   const thickness = THREE.MathUtils.clamp(cfg.fasciaDepth ?? 0.135, 0.04, 0.3);
-  const eaveO = Math.max(0, cfg.eaveOverhang ?? cfg.overhang ?? 0.25);
+  let eaveO = Math.max(0, cfg.eaveOverhang ?? cfg.overhang ?? 0.25);
   const h = Math.max(cfg.height, 0.05);
+  const broken = cfg.roofType === 'gambrel' || cfg.roofType === 'mansard' ? cfg.roofType : null;
 
   // Lattice: footprint corners on step g, creases on step g/2 (coarsened for huge plans)
   let g = latticeStep(footprint);
@@ -229,7 +236,7 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
 
   // Gable roof: the wing ends are upright gables, so the slopes ignore those edges (the roof runs
   // out over them at full height, `gableO` past the wall)
-  const gables = cfg.roofType === 'gable' ? houseGableEdges(poly) : new Set<number>();
+  const gables = cfg.roofType === 'gable' || cfg.roofType === 'gambrel' ? houseGableEdges(poly) : new Set<number>();
   const gableO = Math.max(0, cfg.gableOverhang ?? cfg.overhang ?? 0.3);
   const H = (x: number, z: number) => linfToBoundary(poly, x, z, gables);
 
@@ -306,6 +313,25 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
     }
   }
 
+  // Pitch: the highest point is `height` above the wall tops, `run` in from the outer wall line.
+  // A broken pitch bends at the knee, `knee.hp` in skeleton height (level round the whole house).
+  const run = maxHp + HALF_WALL;
+  let slope: number, drop: number;
+  let knee: { hp: number; d: number; y: number; up: number } | null = null;
+  if (broken) {
+    const bp = brokenPitch(broken, h, run, thickness, eaveO);
+    ({ slope, drop } = bp);
+    eaveO = bp.eaveO;
+    if (bp.kIn < run - 1e-3) knee = { hp: bp.kIn - HALF_WALL, d: bp.kIn, y: bp.yk, up: bp.upSlope };
+  } else {
+    ({ slope, drop } = solvePitch(h, run, thickness));
+  }
+  const ye = drop - slope * eaveO;
+  const yOf = (hp: number) => {
+    const d = hp + HALF_WALL;
+    return !knee || d <= knee.d ? drop + slope * d : knee.y + knee.up * (d - knee.d);
+  };
+
   // Eave strips: each wall edge's slope carried on out to the eave line at the same pitch
   const delta = HALF_WALL + eaveO;
   const gd = HALF_WALL + gableO;
@@ -321,7 +347,19 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
   const edgePoints = (i: number): P2[] => {
     const a = poly[i], b = poly[(i + 1) % n];
     const steps = Math.max(1, Math.round(Math.hypot(b[0] - a[0], b[1] - a[1]) / c));
-    return Array.from({ length: steps + 1 }, (_, s) => [a[0] + ((b[0] - a[0]) * s) / steps, a[1] + ((b[1] - a[1]) * s) / steps] as P2);
+    const pts = Array.from({ length: steps + 1 }, (_, s) => [a[0] + ((b[0] - a[0]) * s) / steps, a[1] + ((b[1] - a[1]) * s) / steps] as P2);
+    if (!knee) return pts;
+    // Where the knee line meets a gable (the skeleton height is linear between lattice points)
+    const out: P2[] = [pts[0]];
+    for (let s = 0; s + 1 < pts.length; s++) {
+      const ha = H(...pts[s]) - knee.hp, hb = H(...pts[s + 1]) - knee.hp;
+      if ((ha < -1e-7 && hb > 1e-7) || (ha > 1e-7 && hb < -1e-7)) {
+        const t = ha / (ha - hb);
+        out.push([pts[s][0] + (pts[s + 1][0] - pts[s][0]) * t, pts[s][1] + (pts[s + 1][1] - pts[s][1]) * t]);
+      }
+      out.push(pts[s + 1]);
+    }
+    return out;
   };
   /** Point `p` pushed out past gable edge i to the rake line */
   const rake = (p: P2, i: number): P2 => [p[0] + gd * outs[i][0], p[1] + gd * outs[i][1]];
@@ -400,16 +438,45 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
     }
   }
 
+  // Broken pitch: cut every piece along the knee line, the two sides become separate faces
+  if (knee) {
+    const hk = knee.hp;
+    const cut: Piece[] = [];
+    for (const p of pieces) {
+      const hs = p.loop.map((k) => verts.get(k)!.hp - hk);
+      if (hs.every((v) => v <= 1e-7)) { cut.push({ ...p, tier: 0 }); continue; }
+      if (hs.every((v) => v >= -1e-7)) { cut.push({ ...p, tier: 1 }); continue; }
+      const lo: string[] = [], hi: string[] = [];
+      for (let i = 0; i < p.loop.length; i++) {
+        const j = (i + 1) % p.loop.length;
+        const a = hs[i], b = hs[j];
+        if (a <= 1e-7) lo.push(p.loop[i]);
+        if (a >= -1e-7) hi.push(p.loop[i]);
+        if ((a < -1e-7 && b > 1e-7) || (a > 1e-7 && b < -1e-7)) {
+          const t = a / (a - b);
+          const va = verts.get(p.loop[i])!, vb = verts.get(p.loop[j])!;
+          const km = vertex(va.x + (vb.x - va.x) * t, va.z + (vb.z - va.z) * t, hk);
+          lo.push(km);
+          hi.push(km);
+        }
+      }
+      if (lo.length >= 3) cut.push({ loop: lo, plane: p.plane, tier: 0 });
+      if (hi.length >= 3) cut.push({ loop: hi, plane: p.plane, tier: 1 });
+    }
+    pieces.length = 0;
+    pieces.push(...cut);
+  }
+
   // Group pieces into faces: same plane and sharing an edge
   const parent = pieces.map((_, i) => i);
   const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
   const edgeOwner = new Map<string, number>();
   pieces.forEach((p, i) => {
-    const key = planeKey(p.plane);
+    const key = pieceKey(p);
     for (let e = 0; e < p.loop.length; e++) {
       const a = p.loop[e], b = p.loop[(e + 1) % p.loop.length];
       const other = edgeOwner.get(`${b}|${a}`);
-      if (other !== undefined && planeKey(pieces[other].plane) === key) parent[find(i)] = find(other);
+      if (other !== undefined && pieceKey(pieces[other]) === key) parent[find(i)] = find(other);
       edgeOwner.set(`${a}|${b}`, i);
     }
   });
@@ -423,6 +490,7 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
   // Boundary loops of each face (interior edges cancel out)
   interface Face {
     plane: FacePlane;
+    tier: number;
     loops: string[][];
   }
   const faces: Face[] = [];
@@ -456,7 +524,7 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
       }
       if (loop.length >= 3) loops.push(loop);
     }
-    faces.push({ plane: pieces[members[0]].plane, loops });
+    faces.push({ plane: pieces[members[0]].plane, tier: pieces[members[0]].tier ?? 0, loops });
   }
 
   // Drop vertices that are only a straight-through point on every face that uses them
@@ -480,11 +548,6 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
     return u.corner || u.faces > 2;
   }));
 
-  // Pitch: the highest point is `height` above the wall tops, `run` in from the outer wall line
-  const run = maxHp + HALF_WALL;
-  const { slope, drop } = solvePitch(h, run, thickness);
-  const ye = drop - slope * eaveO;
-  const yOf = (hp: number) => ye + slope * (hp + delta);
   const points = new Map<string, THREE.Vector3>();
   const point = (k: string): THREE.Vector3 => {
     let p = points.get(k);
@@ -526,9 +589,10 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
     const dx = pb[0] - pa[0], dz = pb[1] - pa[1];
     const len = Math.hypot(dx, dz);
     if (len < 1e-6) continue;
-    // A point just inside face A (left of a→b): the roof there is below face B's plane at a peak
+    // A point just inside face A (left of a→b): the roof there is below face B's plane at a peak.
+    // The knee line (lower meets upper slope) always bends convex and gets a trim too.
     const qx = (pa[0] + pb[0]) / 2 - (dz / len) * 0.05, qz = (pa[1] + pb[1]) / 2 + (dx / len) * 0.05;
-    const convex = evalPlane(faces[fb].plane, qx, qz) > evalPlane(faces[fa].plane, qx, qz) + 1e-6;
+    const convex = faces[fa].tier !== faces[fb].tier || evalPlane(faces[fb].plane, qx, qz) > evalPlane(faces[fa].plane, qx, qz) + 1e-6;
     if (convex) creases.push([point(a), point(b)]);
   }
 
@@ -550,7 +614,9 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
     const wallPts = [new THREE.Vector3(a[0] + HALF_WALL * (outs[ip][0] + o[0]), 0, a[1] + HALF_WALL * (outs[ip][1] + o[1]))];
     for (let s = 1; s + 1 < pts.length; s++) {
       // Only where the profile bends (a fan over straight runs would make slivers)
-      if (Math.abs(hps[s - 1] + hps[s + 1] - 2 * hps[s]) < 1e-9) continue;
+      const [y0, y1, y2] = [yOf(hps[s - 1]), yOf(hps[s]), yOf(hps[s + 1])];
+      const t = Math.hypot(pts[s][0] - pts[s - 1][0], pts[s][1] - pts[s - 1][1]) / Math.max(1e-9, Math.hypot(pts[s + 1][0] - pts[s - 1][0], pts[s + 1][1] - pts[s - 1][1]));
+      if (Math.abs(y0 + (y2 - y0) * t - y1) < 1e-7) continue;
       wallPts.push(new THREE.Vector3(pts[s][0] + HALF_WALL * o[0], yOf(hps[s]) - drop, pts[s][1] + HALF_WALL * o[1]));
     }
     wallPts.push(new THREE.Vector3(b[0] + HALF_WALL * (outs[inx][0] + o[0]), 0, b[1] + HALF_WALL * (outs[inx][1] + o[1])));
@@ -566,8 +632,7 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
     // A hip roof's eaves are boxed in level; a gable's rakes would cut through a level soffit
     soffit: gables.size > 0 ? undefined : { y: ye - drop, inner: ceiling },
     ceiling,
-    capWidth: Math.min(0.11, run * 0.3),
-    capRise: 0.06,
+    capWidth: Math.min(0.14, run * 0.3),
   };
 }
 

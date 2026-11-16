@@ -7,6 +7,7 @@ import { CharacterModel, AnimationState } from './CharacterModel';
 import { InputManager } from '../input/InputManager';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { CHARACTER_CONFIG, COLLISION_GROUPS } from '../config/constants';
+import { Ragdoll } from './Ragdoll';
 import { IAbility, CharacterContext, GroundInfo } from './abilities/IAbility';
 import { MovementAbility } from './abilities/MovementAbility';
 import { JumpAbility } from './abilities/JumpAbility';
@@ -138,6 +139,14 @@ export class CharacterController {
    */
   public onFootstep: ((intensity: number, point: THREE.Vector3, collider: RAPIER.Collider | null) => void) | null = null;
   private previousYVelocity: number = 0;
+  /**
+   * Fall damage: called on touching down after a fall, with the height dropped (metres, the
+   * lower of the measured drop from the highest point in the air and the height the impact speed
+   * implies) and the impact speed (m/s). Not called for landings in water or off a climb.
+   */
+  public onHardLanding: ((fallHeight: number, impactSpeed: number) => void) | null = null;
+  /** Highest body Y since the feet last touched ground / water / a wall being climbed. */
+  private fallPeakY = Number.NaN;
 
   // Real-time tweakable parameters
   public walkSpeed: number = CHARACTER_CONFIG.WALK_SPEED;
@@ -146,6 +155,25 @@ export class CharacterController {
   public jumpForce: number = CHARACTER_CONFIG.JUMP_IMPULSE;
   public jumpCutMultiplier: number = CHARACTER_CONFIG.JUMP_CUT_MULTIPLIER;
   public airControl: number = CHARACTER_CONFIG.AIR_CONTROL_FACTOR;
+  private grip = 1;
+  /** Share of the usual speed on the ground underfoot (set by the engine: mud, puddles). */
+  public groundSpeed = 1;
+  /**
+   * Traction of the ground underfoot (set by the engine from the tile): 1 normally, low on ice.
+   * On slippery ground the capsule's physics friction is dropped too (its 0 is otherwise averaged
+   * with the ground's 0.9, and that friction alone outweighs the weak push of feet on ice).
+   */
+  public get groundGrip(): number {
+    return this.grip;
+  }
+  public set groundGrip(v: number) {
+    const slippery = v < 0.999;
+    if (slippery !== this.grip < 0.999 && this.collider) {
+      const R = this.physics.rapier.CoefficientCombineRule;
+      this.collider.setFrictionCombineRule(slippery ? R.Min : R.Average);
+    }
+    this.grip = v;
+  }
   public maxWalkableSlope: number = CHARACTER_CONFIG.MAX_WALKABLE_SLOPE_DEG;
 
   public get allowSteepSlopeJump(): boolean {
@@ -514,8 +542,54 @@ export class CharacterController {
     return m;
   }
 
+  /** Fainted: the body is a ragdoll until the next respawn. */
+  private ragdoll: Ragdoll | null = null;
+  private readonly ragdollPos = new THREE.Vector3();
+
+  public get isRagdoll(): boolean {
+    return !!this.ragdoll?.active;
+  }
+
+  /**
+   * Goes limp: the capsule leaves the simulation and the model's parts become a physics ragdoll
+   * carrying on with the current velocity. Lasts until respawn(). False if the model isn't loaded.
+   */
+  public startRagdoll(): boolean {
+    if (!this.body || !this.physics.isInitialized() || this.isRagdoll) return false;
+    this.ragdoll ??= new Ragdoll(this.physics);
+    if (this.carryAbility?.isHolding) this.carryAbility.dropObject();
+    const v = this.body.linvel();
+    // The model updates its pose first so the bodies start exactly where the parts are drawn
+    const trans = this.body.translation();
+    this.model.group.position.set(trans.x, trans.y, trans.z);
+    if (!this.ragdoll.start(this.model, new THREE.Vector3(v.x, v.y, v.z))) return false;
+    this.collider.setEnabled(false);
+    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    this.body.setBodyType(this.physics.rapier.RigidBodyType.KinematicPositionBased, true);
+    this.stunTimer = 0;
+    return true;
+  }
+
+  private stopRagdoll(): void {
+    if (!this.ragdoll?.active) return;
+    this.ragdoll.stop();
+    this.body.setBodyType(this.physics.rapier.RigidBodyType.Dynamic, true);
+    this.collider.setEnabled(true);
+  }
+
   public update(dt: number, input: InputManager, camera: ThirdPersonCamera): void {
     if (!this.body || !this.body.isValid() || !this.physics.isInitialized()) return;
+
+    // Limp: the parts move on their own; the (parked) capsule follows the torso for the camera
+    if (this.ragdoll?.active) {
+      this.ragdoll.update(dt);
+      const p = this.ragdoll.torsoPosition(this.ragdollPos);
+      this.body.setNextKinematicTranslation({ x: p.x, y: p.y + 0.3, z: p.z });
+      this.telemetry.position.set(p.x, p.y + 0.3, p.z);
+      this.telemetry.velocity.set(0, 0, 0);
+      this.telemetry.speed = 0;
+      return;
+    }
 
     try {
       // 1. Respawn / Reset check
@@ -544,9 +618,29 @@ export class CharacterController {
         if (Math.abs(this.previousYVelocity) > 1.2 && this.particleManager && CHARACTER_CONFIG.FOOT_DUST_ENABLED) {
           this.particleManager.emitLandDust(this.getFeetPosition(), this.previousYVelocity);
         }
+        // Fall damage: both the drop and the impact speed must say it was a real fall, so a
+        // teleport or a physics pop doesn't hurt, and a slide down a slope (slow) doesn't either
+        const impact = -this.previousYVelocity;
+        if (impact > 0 && !Number.isNaN(this.fallPeakY) && !this.telemetry.isSwimming && !this.telemetry.isClimbing) {
+          const drop = this.fallPeakY - this.body.translation().y;
+          const g = Math.abs(this.physics.getGravity()) || 22;
+          const height = Math.min(drop, (impact * impact) / (2 * g));
+          if (height > 0) this.onHardLanding?.(height, impact);
+        }
+      }
+      // Track the top of the fall: reset whenever something holds the player up
+      {
+        const y = this.body.translation().y;
+        if (this.groundInfo.isGrounded || this.telemetry.isSwimming || this.telemetry.isClimbing || Number.isNaN(this.fallPeakY)) {
+          this.fallPeakY = y;
+        } else if (y > this.fallPeakY) {
+          this.fallPeakY = y;
+        }
       }
       this.wasGrounded = this.groundInfo.isGrounded;
       this.previousYVelocity = linvel.y;
+      // A fatal landing turned the player into a ragdoll: nothing else moves the capsule now
+      if (this.ragdoll?.active) return;
 
       // Harvesting (while the hold bar fills and the pick-up plays) and watering root the player:
       // movement, jumping and dashing are ignored until the action's animation has finished
@@ -616,6 +710,8 @@ export class CharacterController {
         jumpForce: this.jumpForce,
         jumpCutMultiplier: this.jumpCutMultiplier,
         airControl: this.airControl,
+        groundGrip: this.groundGrip,
+        groundSpeed: this.groundSpeed,
         gravity: this.physics.getGravity(),
       };
 
@@ -752,7 +848,7 @@ export class CharacterController {
 
   /** Throws the player away from a hit (horizontal direction `dir`) and stuns them briefly. */
   public knockback(dir: THREE.Vector3, power: number, stunSeconds = 0.5): void {
-    if (!this.body || !this.physics.isInitialized()) return;
+    if (!this.body || !this.physics.isInitialized() || this.isRagdoll) return;
     const len = Math.hypot(dir.x, dir.z) || 1;
     this.body.setGravityScale(1.0, true);
     this.body.setLinvel({ x: (dir.x / len) * power, y: 3.2 + power * 0.25, z: (dir.z / len) * power }, true);
@@ -763,6 +859,7 @@ export class CharacterController {
   public respawn(customPos?: THREE.Vector3): void {
     if (!this.body || !this.physics.isInitialized()) return;
     try {
+      this.stopRagdoll();
       if (this.carryAbility) {
         this.carryAbility.dropObject();
       }
@@ -776,6 +873,9 @@ export class CharacterController {
         this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
         this.body.setGravityScale(1.0, true);
         this.model.group.position.set(p.x, p.y, p.z);
+        // A teleport is not a fall
+        this.previousYVelocity = 0;
+        this.fallPeakY = Number.NaN;
       }
     } catch (err) {
       console.warn('[CharacterController] respawn error:', err);

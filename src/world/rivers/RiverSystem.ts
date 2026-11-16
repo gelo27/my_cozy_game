@@ -377,6 +377,11 @@ float meet = smoothstep(0.85, 1.0, mouth) * (1.0 - smoothstep(1.0, 1.35, mouth))
 foam = max(foam, meet * smoothstep(0.5, 0.8, rNoise(vec2(vRiverUv.x * 1.3, vRiverUv.y * 0.6 + uTime * 0.4) + 5.0)) * 0.6);
 foam *= 1.0 - smoothstep(1.3, 1.8, mouth);
 foam = clamp(max(foam, ripRings * 0.85), 0.0, 1.0);
+// Duckweed painted on the water (Duckweed.ts), as on the sea
+wsDuckweed(vRipW.xz, rDist, slope * 0.03);
+foam *= 1.0 - wsWeed;
+water = mix(water, gl_FrontFacing ? wsWeedCol : wsWeedCol * 0.6, wsWeed);
+wsN = normalize(mix(wsN, vWN, wsWeed * 0.8));
 wsFoam = foam;
 diffuseColor.rgb = mix(water, uWsFoamCol, foam);
 diffuseColor.a = mix(1.0, 0.96, foam) * vRiver.y;

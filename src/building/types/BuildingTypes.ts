@@ -400,7 +400,7 @@ export interface BuildPreviewState {
 }
 
 /** Roof kinds that can cover a whole house outline */
-export type HouseRoofKind = 'gable' | 'hip';
+export type HouseRoofKind = 'gable' | 'hip' | 'gambrel' | 'mansard';
 
 export interface BuildingTelemetry {
   isBuildModeActive: boolean;

@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { IAbility, CharacterContext } from './IAbility';
 import { CHARACTER_CONFIG } from '../../config/constants';
 
+/** m/s pushed into the ground on ice, where gravity is off (keeps the capsule in contact). */
+const ICE_STICK = 0.8;
+
 export class MovementAbility implements IAbility {
   public name = 'Movement';
   public enabled = true;
@@ -45,11 +48,15 @@ export class MovementAbility implements IAbility {
     } else if (context.isSprinting) {
       targetSpeed = context.sprintSpeed;
     }
+    targetSpeed *= context.groundSpeed;
 
     // 3. Grounded vs Airborne movement
     const isJumping = context.isJumping;
 
-    if (ground.isGrounded && ground.isWalkableSlope && !isJumping) {
+    const slippery = context.groundGrip < 0.999;
+    if (ground.isGrounded && ground.isWalkableSlope && !isJumping && slippery) {
+      this.updateOnIce(dt, context, hasInput, targetSpeed);
+    } else if (ground.isGrounded && ground.isWalkableSlope && !isJumping) {
       // --- GROUNDED ON WALKABLE SURFACE (AND NOT CURRENTLY JUMPING UPWARD) ---
       if (hasInput) {
         body.setGravityScale(1.0, true);
@@ -188,6 +195,55 @@ export class MovementAbility implements IAbility {
           }
         }
       }
+    }
+  }
+
+  /**
+   * On ice: the velocity lives in the surface plane and keeps going. The feet only nudge it
+   * (grip x the usual acceleration) toward where the player wants to go, a little kinetic
+   * friction slows a glide, and the slope pulls the player downhill whether a key is held or not
+   * (gravity stays on and the capsule has no friction here, so the physics does the sliding).
+   * The velocity is written straight (no impulses fighting the contact solver).
+   */
+  private updateOnIce(dt: number, context: CharacterContext, hasInput: boolean, targetSpeed: number): void {
+    const { ground, body, currentVelocity } = context;
+    // Gravity is integrated here, not by the physics: a capsule resting on the heightfield gets
+    // its pull cancelled by the contact (it would never start sliding from a standstill)
+    body.setGravityScale(0.0, true);
+    const n = ground.normal;
+    // Velocity along the surface (drop the part into / out of the ground)
+    const v = this.vCur.copy(currentVelocity);
+    v.addScaledVector(n, -v.dot(n));
+
+    // Downhill pull: gravity's share along the slope, g * sin(slope)
+    const g = Math.abs(context.gravity) * CHARACTER_CONFIG.ICE_SLOPE_PULL;
+    const down = this.tempTangent.set(0, -1, 0).addScaledVector(n, n.y); // -Y on the plane, |sin(slope)| long
+    if (down.lengthSq() > 1e-6) v.addScaledVector(down, g * dt);
+
+    if (hasInput) {
+      // Push toward the wanted velocity (in the surface plane), but weakly
+      const dir = this.vH.copy(this.tempDir).addScaledVector(n, -this.tempDir.dot(n));
+      if (dir.lengthSq() > 1e-6) dir.normalize();
+      context.targetVelocity.copy(dir).multiplyScalar(targetSpeed);
+      const accel = (v.lengthSq() < 0.25 ? CHARACTER_CONFIG.INITIAL_ACCELERATION : CHARACTER_CONFIG.GROUND_ACCELERATION) * context.groundGrip;
+      const dv = this.vDelta.subVectors(context.targetVelocity, v);
+      const max = accel * dt;
+      const len = dv.length();
+      if (len > max) dv.multiplyScalar(max / len);
+      v.add(dv);
+    } else {
+      context.targetVelocity.set(0, 0, 0);
+      // Kinetic friction: a glide slows down (on a slope the pull outweighs it)
+      const s = v.length();
+      if (s > 1e-4) v.multiplyScalar(Math.max(0, s - CHARACTER_CONFIG.ICE_GLIDE_DECELERATION * dt) / s);
+    }
+
+    if (Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z)) {
+      const mass = body.mass();
+      context.appliedImpulse.addScaledVector(this.vDelta.subVectors(v, currentVelocity), mass);
+      // A little velocity into the ground keeps the capsule pressed on it (the contact absorbs it)
+      v.addScaledVector(n, -ICE_STICK);
+      body.setLinvel(v, true);
     }
   }
 }

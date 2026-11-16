@@ -5,6 +5,7 @@ import type { TerrainSystem } from './TerrainSystem';
 import { injectCaustics } from '../scene/WaterEffects';
 import { WATER_DETAIL_GLSL, WATER_RIPPLE_GLSL, rippleUniforms, updateWaterDetails } from '../scene/WaterDetails';
 import { waterSettings } from './WaterSettings';
+import { WaterSparkles } from './WaterSparkles';
 import {
   WATER_LIGHT_GLSL,
   WATER_NORMAL_GLSL,
@@ -33,6 +34,8 @@ const HEIGHT_REFRESH = 0.25;
  */
 export class WaterSystem {
   public readonly mesh: THREE.Mesh;
+  /** Star sprites over the sun's sparkles on the sea. */
+  public readonly sparkles: WaterSparkles;
   private readonly seabed: THREE.Mesh;
   private readonly material: THREE.MeshLambertMaterial;
   private readonly uOpacity = { value: 1 };
@@ -99,8 +102,14 @@ float seaRipAa = length(fwidth(vSeaW.xz));
 float seaSimAa = fwidth(simH);
 float seaRip = seaDist < 80.0 ? wdRipples(vSeaW.xz, seaRipAa) * (1.0 - smoothstep(45.0, 80.0, seaDist)) : 0.0;
 wsFoam = clamp(max(wsFoam, max(seaRip * 0.9, wdSimCrest(simH, seaSimAa))), 0.0, 1.0);
+// Duckweed painted on the water (Duckweed.ts): fronds over the water, foam and rings hidden under
+// them, the surface calmed; from below the light shines through them (WATER_LIGHT_GLSL)
+wsDuckweed(vSeaW.xz, seaDist, slope * 0.03);
+wsFoam *= 1.0 - wsWeed;
+seaCol = mix(seaCol, gl_FrontFacing ? wsWeedCol : wsWeedCol * 0.6, wsWeed);
+wsN = normalize(mix(wsN, vec3(0.0, 1.0, 0.0), wsWeed * 0.8));
 diffuseColor.rgb = mix(seaCol, uWsFoamCol, wsFoam);
-diffuseColor.a = max(uOpacity, wsFoam);`
+diffuseColor.a = max(uOpacity, max(wsFoam, wsWeed));`
         )
         .replace('#include <normal_fragment_maps>', WATER_NORMAL_GLSL)
         .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${WATER_LIGHT_GLSL}`);
@@ -138,6 +147,7 @@ diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
     this.seabed.position.y = SEA_FLOOR_Y - 0.01;
     this.seabed.frustumCulled = false;
     scene.add(this.seabed);
+    this.sparkles = new WaterSparkles(scene);
   }
 
   /** The terrain whose heights give the water its depth colour and shore lines. */

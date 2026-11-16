@@ -1,4 +1,5 @@
 import { injectNightLights } from './NightLighting';
+import { updateSnowMask } from './SnowCover';
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
@@ -7,7 +8,8 @@ import { TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/type
 import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
 import { islandHeight } from './IslandGenerator';
 import { riverWorld, GridRect } from './rivers/RiverWorld';
-import { causticsUniforms, CAUSTICS_GLSL, CAUSTICS_TINT } from '../scene/WaterEffects';
+import { causticsUniforms, CAUSTICS_GLSL } from '../scene/WaterEffects';
+import { rippleSimUniforms } from '../scene/WaterRippleSim';
 import { TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
 
 const N = WORLD_SIZE; // cells per side (1 m cells)
@@ -139,6 +141,10 @@ export class TerrainSystem {
   private readonly chunkColliders: (RAPIER.Collider | null)[] = new Array(CHUNKS * CHUNKS).fill(null);
   private body: RAPIER.RigidBody | null = null;
   private readonly uniforms = { uWaterLevel: { value: worldSettings.waterLevel }, uRainWet: { value: 0 },
+    // Rain falling right now (ripples in puddles), puddle water level (0 dried out .. 1 brimming)
+    uRainFall: { value: 0 },
+    uPuddleFill: { value: 0 },
+    uTerrTime: { value: 0 },
     uSnowCover: { value: 0 },
     // Footprints (GrassTrail's blue channel) around the player, and the window's centre
     uSnowTrail: { value: null as THREE.Texture | null },
@@ -340,7 +346,7 @@ export class TerrainSystem {
           }
           h[i] += (sum / n - h[i]) * Math.min(1, k * 2);
         }
-        h[i] = THREE.MathUtils.clamp(h[i], SEA_FLOOR_Y, 24);
+        h[i] = THREE.MathUtils.clamp(h[i], SEA_FLOOR_Y, 128);
       }
     }
     this.markHeightsDirty(minX, minZ, maxX, maxZ);
@@ -366,6 +372,7 @@ export class TerrainSystem {
   /** Call once per frame: uploads changed chunks / weights; physics rebuilds at most 4x per second. */
   public update(dt: number): void {
     this.uniforms.uWaterLevel.value = worldSettings.waterLevel;
+    this.uniforms.uTerrTime.value = (this.uniforms.uTerrTime.value + dt) % 1000;
     // Last frame's render took the queued full upload
     this.splatFullPending = false;
     if (this.dirtyChunks.size) {
@@ -569,6 +576,8 @@ export class TerrainSystem {
     // The id texture's data *is* `tiles`: only the changed rows go to the GPU (a brush stroke is a
     // few rows, not the whole 256 KB); a big rectangle (load, world reset) goes in one full upload
     const r = this.splatRect;
+    // Snow-tile mask for the snow caps on trees, bushes and rocks (SnowCover)
+    updateSnowMask(this.tiles, r.x0, r.z0, r.x1, r.z1);
     const rows = r.z1 - r.z0 + 1;
     if (this.splatFullPending || rows * (r.x1 - r.x0 + 1) > (N * N) / 4) {
       this.tileTex.clearUpdateRanges();
@@ -589,6 +598,16 @@ export class TerrainSystem {
   /** Rain soaking all bare earth (the dirt layer): 0 dry .. 1 the darkest damp soil. */
   public setRainWetness(value: number): void {
     this.uniforms.uRainWet.value = value;
+  }
+
+  /** Rain falling now (0..1): rings on the puddles. */
+  public setRainFall(value: number): void {
+    this.uniforms.uRainFall.value = value;
+  }
+
+  /** How full the painted puddles are: 0 only their deepest middles hold water .. 1 brimming. */
+  public setPuddleFill(value: number): void {
+    this.uniforms.uPuddleFill.value = value;
   }
 
   /** Fallen snow from the weather (0 bare .. 1 white everywhere); settles in patches first. */
@@ -690,8 +709,8 @@ export class TerrainSystem {
     // The sea bed past the map edge continues the sand (WaterSystem): its own 2D texture
     this.sandLayer = createLayerTexture(TerrainTileType.SAND_BEACH);
     mat.onBeforeCompile = (shader) => {
-      injectNightLights(shader, { perVertex: lite });
-      Object.assign(shader.uniforms, this.uniforms, causticsUniforms, {
+      injectNightLights(shader, { perVertex: lite, ground: true });
+      Object.assign(shader.uniforms, this.uniforms, causticsUniforms, rippleSimUniforms, {
         tRiver: { value: riverWorld.texture },
         tTiles: { value: this.tileTex },
         tSplatB: { value: this.splatB },
@@ -719,6 +738,13 @@ ${SURFACE_GLSL}
 uniform float uWorldSize;
 uniform float uWaterLevel;
 uniform float uRainWet;
+uniform float uRainFall;
+uniform float uPuddleFill;
+uniform float uTerrTime;
+// The wave simulation around the player (WaterRippleSim): puddles ripple with it too
+uniform sampler2D uWdSim;
+uniform vec4 uWdSimArea;
+uniform vec4 uWdSimLook;
 uniform float uSnowCover;
 uniform sampler2D uSnowTrail;
 uniform vec2 uSnowTrailC;
@@ -775,6 +801,9 @@ vec3 terrainColor() {
   // Weights of bare earth (rain darkens it, fallen snow melts on it) and of painted snow tiles
   float earthW = 0.0;
   float snowTileW = 0.0;
+  float iceW = 0.0;
+  float mudW = 0.0;
+  float puddleW = 0.0;
   if (sN > 0) {
     float total = sW.x + sW.y + sW.z + sW.w;
     float cover = smoothstep(0.32, 0.68, total + n * 0.45);
@@ -803,6 +832,9 @@ vec3 terrainColor() {
       if (w < 0.001) continue;
       int id = sIds[i];
       earthW += w * T_EARTH[id];
+      iceW += w * T_ICE[id];
+      mudW += w * T_MUD[id];
+      puddleW += w * T_PUDDLE[id];
       if (T_OVERLAY[id] > 0.5) {
         snowTileW += w;
         continue;
@@ -823,6 +855,12 @@ vec3 terrainColor() {
   if (beach > 0.001) c = mix(c, texture(tLayers, vec3(uv, ${SAND_LAYER}.0)).rgb, beach);
   float rock = smoothstep(0.8, 0.62, vTerrUpY);
   if (rock > 0.001) c = mix(c, rockTriplanar(0.5), rock);
+  // Ice: a cold sky sheen, strongest at grazing angles (a cheap Fresnel instead of a reflection)
+  if (iceW > 0.001) {
+    float iceFres = 1.0 - max(dot(normalize(cameraPosition - vTerrWorld), normalize(vTerrN)), 0.0);
+    iceFres *= iceFres * iceFres;
+    c = mix(c, vec3(0.78, 0.88, 1.0), iceW * (1.0 - rock) * (0.1 + iceFres * 0.6));
+  }
   // Damp soil: watered fields, and in the rain every patch of bare earth (the dirt layer) as one
   // surface; dark wet earth, a little mottled, under the snow
   // splatB.a: ground under a roof (greenhouse, house) stays dry in the rain and gets no snow
@@ -830,6 +868,74 @@ vec3 terrainColor() {
   float roofed = wetDry.y;
   float wet = max(wetDry.x, uRainWet * earthW * (1.0 - roofed));
   if (wet > 0.004) c = mix(c, vec3(0.0123, 0.0052, 0.003), wet * (0.82 + 0.36 * n));
+  // Mud and puddle beds: footprints pressed in (dark, wet hollows), and a wet sheen of the sky,
+  // brighter at grazing angles and in the rain
+  float soft = (mudW + puddleW) * (1.0 - rock);
+  // View angle terms: only worked out on mud / puddle pixels (everywhere else they stay unused)
+  vec3 toEyeT = vec3(0.0, 1.0, 0.0);
+  float fresT = 0.0;
+  if (soft > 0.001) {
+    toEyeT = normalize(cameraPosition - vTerrWorld);
+    fresT = 1.0 - max(dot(toEyeT, normalize(vTerrN)), 0.0);
+    fresT *= fresT * fresT;
+    vec2 mtD = abs(vTerrWorld.xz - uSnowTrailC);
+    float mtEdge = max(mtD.x, mtD.y);
+    if (mtEdge < ${TRAIL_HALF.toFixed(2)}) {
+      float pr = texture2D(uSnowTrail, vTerrWorld.xz / ${TRAIL_SIZE.toFixed(1)}).b * smoothstep(${TRAIL_HALF.toFixed(2)}, ${(TRAIL_HALF - 3).toFixed(2)}, mtEdge);
+      // Pressed-in hollows: darker, and in the rain they hold a little water that catches the sky
+      float prK = min(1.0, pr * 1.4) * soft;
+      c = mix(c, c * 0.45, prK);
+      c += vec3(0.16, 0.19, 0.23) * prK * uRainWet * (0.25 + fresT);
+    }
+    c = mix(c, vec3(0.16, 0.19, 0.23), soft * (0.02 + uRainWet * 0.06 + fresT * (0.12 + uRainWet * 0.22)));
+  }
+  // Puddles: water lies where the painted patch is deepest (its middle, broken up by the noise);
+  // the fuller they are, the further it spreads. A dark mirror of the sky with rain rings.
+  if (puddleW > 0.001) {
+    // Shape: the painted weight (deepest in the middle) broken up by finer noise, so a drying
+    // puddle shrinks into a few separate pools
+    float pn = texture2D(tGrass, vTerrWorld.xz * 0.23 + 0.31).a - 0.5;
+    float depth = puddleW + pn * 0.9 + n * 0.3;
+    float lvl = mix(1.12, 0.3, uPuddleFill);
+    float water = smoothstep(lvl - 0.04, lvl + 0.04, depth) * (1.0 - rock);
+    if (water > 0.001) {
+      // Simulated waves (steps, splashes, rain drops) near the player: their slope tilts the
+      // surface, so the sky's reflection brightens on one side of each crest and dims on the other
+      vec2 simG = vec2(0.0);
+      float simOn = 0.0;
+      if (uWdSimArea.w > 0.5) {
+        vec2 suvW = (vTerrWorld.xz - uWdSimArea.xy) * uWdSimArea.z;
+        vec2 e2W = min(suvW, 1.0 - suvW);
+        simOn = smoothstep(0.0, 0.15, min(e2W.x, e2W.y));
+        if (simOn > 0.0) simG = textureLod(uWdSim, suvW, 0.0).ba * simOn * uWdSimLook.y;
+      }
+      vec3 nW = normalize(vec3(-simG.x, 1.0, -simG.y));
+      float fresW = 1.0 - max(dot(toEyeT, nW), 0.0);
+      fresW *= fresW * fresW;
+      float ripple = 0.0;
+      // Drawn rain rings only where the simulation isn't running (it drops its own)
+      if (uRainFall > 0.02 && simOn < 0.999) {
+        // Rings from drops: one per 0.33 m cell, at a random spot and phase, sparser in light rain
+        for (int k = 0; k < 2; k++) {
+          vec2 rp = vTerrWorld.xz * 3.0 + float(k) * vec2(0.5, 0.37);
+          vec2 ci = floor(rp);
+          float h1 = fract(sin(dot(ci, vec2(127.1, 311.7)) + float(k) * 7.0) * 43758.5453);
+          float h2 = fract(h1 * 91.7);
+          vec2 f = fract(rp) - 0.5 - (vec2(h1, h2) - 0.5) * 0.4;
+          float ph = fract(uTerrTime * 1.4 + h1 * 3.0);
+          float r = length(f);
+          ripple += smoothstep(0.1, 0.02, abs(r - 0.04 - ph * 0.42)) * (1.0 - ph) * step(h2, uRainFall * 0.55);
+        }
+        ripple *= 1.0 - simOn;
+      }
+      float simShade = clamp(dot(simG, vec2(0.55, 0.45)) * 0.6, -0.35, 0.35);
+      // (linear colours: the sky's reflection is dimmer than it looks in sRGB)
+      vec3 sky = vec3(0.2, 0.27, 0.36);
+      vec3 waterC = mix(c * 0.3, sky, 0.22 + fresW * 0.55) + sky * (ripple + simShade * 0.8);
+      waterC = max(waterC, vec3(0.0));
+      c = mix(c, waterC, water);
+    }
+  }
   // Snow: settles last, but never on rocky slopes (weight fades with the rock mask) and melts
   // into slush at the waterline. Drifts (macro noise) are bright, hollows take a cold blue tint,
   // and sparse view-dependent glints twinkle as the camera moves.
@@ -883,8 +989,8 @@ vec3 terrainColor() {
         .replace(
           '#include <lights_fragment_end>',
           '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= 1.0 - vShade;\nreflectedLight.indirectDiffuse *= 1.0 - vShade * 0.3;\n' +
-            // Sea floor and river beds: the sun's caustics
-            `reflectedLight.directDiffuse *= 1.0 + causticsLight(vTerrWorld, terrWaterY, vTerrUpY) * ${CAUSTICS_TINT};`
+            // Sea floor and river beds: the sun's caustics (and the shade of duckweed above)
+            'reflectedLight.directDiffuse *= causticsSun(vTerrWorld, terrWaterY, vTerrUpY);'
         );
     };
     return mat;
@@ -1066,16 +1172,20 @@ const SURFACE_TILES = (Object.keys(TILE_DEFINITIONS).map(Number) as TerrainTileT
  * Shader traits per surface type. `jitter`: how the border noise pushes this layer's share
  * (neighbouring types with opposite signs make the seam between them ragged; defaults cycle
  * through +-0.45 / +-0.3). `earth`: bare soil, darkened by rain, fallen snow melts on it.
- * `overlay`: laid over the other surfaces afterwards with its own look (snow). A new type needs
+ * `overlay`: laid over the other surfaces afterwards with its own look (snow). `ice`: a glossy sheen. `mud`: wet sheen and footprints. `puddle`: like mud, plus water that
+ * fills and dries with the rain. A new type needs
  * only a TerrainTileType + TILE_DEFINITIONS entry (+ a pattern in createLayerTexture); add it here
  * only if it needs one of these traits.
  */
-const SURFACE_TRAITS: Partial<Record<TerrainTileType, { jitter?: number; earth?: boolean; overlay?: boolean }>> = {
+const SURFACE_TRAITS: Partial<Record<TerrainTileType, { jitter?: number; earth?: boolean; overlay?: boolean; ice?: boolean; mud?: boolean; puddle?: boolean }>> = {
   [TerrainTileType.DIRT_ROAD]: { jitter: 0.45, earth: true },
   [TerrainTileType.ASPHALT_ROAD]: { jitter: -0.45 },
   [TerrainTileType.STONE_COBBLE]: { jitter: 0.3 },
   [TerrainTileType.SAND_BEACH]: { jitter: -0.3 },
   [TerrainTileType.SNOW]: { jitter: 0, overlay: true },
+  [TerrainTileType.ICE]: { ice: true },
+  [TerrainTileType.MUD]: { earth: true, mud: true },
+  [TerrainTileType.PUDDLE]: { earth: true, puddle: true },
 };
 
 const SAND_LAYER = SURFACE_TILES.indexOf(TerrainTileType.SAND_BEACH);
@@ -1088,6 +1198,9 @@ const SURFACE_GLSL = (() => {
   const jitter: number[] = new Array(count).fill(0);
   const earth: number[] = new Array(count).fill(0);
   const overlay: number[] = new Array(count).fill(0);
+  const ice: number[] = new Array(count).fill(0);
+  const mud: number[] = new Array(count).fill(0);
+  const puddle: number[] = new Array(count).fill(0);
   const cycle = [0.45, -0.45, 0.3, -0.3];
   SURFACE_TILES.forEach((t, i) => {
     const tr = SURFACE_TRAITS[t] ?? {};
@@ -1095,6 +1208,9 @@ const SURFACE_GLSL = (() => {
     jitter[t] = tr.jitter ?? cycle[i % cycle.length];
     earth[t] = tr.earth ? 1 : 0;
     overlay[t] = tr.overlay ? 1 : 0;
+    ice[t] = tr.ice ? 1 : 0;
+    mud[t] = tr.mud ? 1 : 0;
+    puddle[t] = tr.puddle ? 1 : 0;
   });
   const f = (v: number[]) => v.map((x) => x.toFixed(3)).join(', ');
   return `
@@ -1103,6 +1219,9 @@ const int T_LAYER[${count}] = int[${count}](${layer.join(', ')});
 const float T_JITTER[${count}] = float[${count}](${f(jitter)});
 const float T_EARTH[${count}] = float[${count}](${f(earth)});
 const float T_OVERLAY[${count}] = float[${count}](${f(overlay)});
+const float T_ICE[${count}] = float[${count}](${f(ice)});
+const float T_MUD[${count}] = float[${count}](${f(mud)});
+const float T_PUDDLE[${count}] = float[${count}](${f(puddle)});
 int terrTileAt(ivec2 p, ivec2 tMax) {
   return int(texelFetch(tTiles, clamp(p, ivec2(0), tMax), 0).r * 255.0 + 0.5);
 }
@@ -1162,6 +1281,22 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
   const wrapRect = (x: number, y: number, w: number, h: number) => {
     for (const ox of [0, -size]) for (const oy of [0, -size]) ctx.fillRect(x + ox, y + oy, w, h);
   };
+  /** Draws a shape around (x, y) on all sides it may cross, so the tile stays seamless. */
+  const wrapShape = (x: number, y: number, draw: () => void) => {
+    for (const ox of [-size, 0, size]) {
+      for (const oy of [-size, 0, size]) {
+        ctx.save();
+        ctx.translate(x + ox, y + oy);
+        draw();
+        ctx.restore();
+      }
+    }
+  };
+  const ellipse = (x: number, y: number, rx: number, ry: number, rot: number) => {
+    ctx.beginPath();
+    ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2);
+    ctx.fill();
+  };
 
   switch (type) {
     case TerrainTileType.GRASS:
@@ -1194,6 +1329,129 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
         wrapRect(rnd() * size, rnd() * size, 1, 1);
       }
       break;
+    case TerrainTileType.DRY_GRASS:
+    case TerrainTileType.BIRCH_GRASS: {
+      // Blade strokes like the grass base (dry: a few pale straws and bare patches between)
+      const dry = type === TerrainTileType.DRY_GRASS;
+      for (let i = 0; i < 2400; i++) {
+        ctx.fillStyle = rnd() < 0.5 ? def.secondaryColor : def.accentColor;
+        ctx.globalAlpha = 0.35 + rnd() * 0.4;
+        wrapRect(rnd() * size, rnd() * size, 2, 4 + rnd() * 5);
+      }
+      if (dry) {
+        for (let i = 0; i < 40; i++) {
+          ctx.fillStyle = '#7d6a3c';
+          ctx.globalAlpha = 0.2 + rnd() * 0.2;
+          wrapShape(rnd() * size, rnd() * size, () => ellipse(0, 0, 8 + rnd() * 16, 5 + rnd() * 10, rnd() * Math.PI));
+        }
+        for (let i = 0; i < 260; i++) {
+          ctx.fillStyle = '#e2d28e';
+          ctx.globalAlpha = 0.5 + rnd() * 0.3;
+          wrapRect(rnd() * size, rnd() * size, 1, 5 + rnd() * 6);
+        }
+      }
+      break;
+    }
+    case TerrainTileType.FALLEN_LEAVES: {
+      // Overlapping leaves in autumn colours over dark forest litter, each with a midrib
+      const colours = ['#a8441f', '#c8622a', '#d9922f', '#e2b23a', '#8a3a1c', '#6e4a22', '#b07a2c', '#9c5a24'];
+      for (let i = 0; i < 520; i++) {
+        const x = rnd() * size, y = rnd() * size;
+        const l = 6 + rnd() * 9, w = l * (0.4 + rnd() * 0.25), a = rnd() * Math.PI * 2;
+        ctx.globalAlpha = 0.85 + rnd() * 0.15;
+        ctx.fillStyle = colours[(rnd() * colours.length) | 0];
+        wrapShape(x, y, () => ellipse(0, 0, l, w, a));
+        ctx.globalAlpha = 0.35;
+        ctx.strokeStyle = '#4a2a12';
+        ctx.lineWidth = 0.8;
+        wrapShape(x, y, () => {
+          ctx.beginPath();
+          ctx.moveTo(-Math.cos(a) * l, -Math.sin(a) * l);
+          ctx.lineTo(Math.cos(a) * l, Math.sin(a) * l);
+          ctx.stroke();
+        });
+      }
+      break;
+    }
+    case TerrainTileType.GRAVEL: {
+      // Packed small stones: each one a shaded pebble with a lit top-left and a dark rim
+      const tones = ['#9a958b', '#7f7a71', '#b1aca1', '#6c675f', '#8e8a84', '#a39a8a'];
+      for (let i = 0; i < 1500; i++) {
+        const x = rnd() * size, y = rnd() * size;
+        const r = 1.5 + rnd() * 3.2, a = rnd() * Math.PI;
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = '#4a4640';
+        wrapShape(x + 0.8, y + 0.9, () => ellipse(0, 0, r * 1.15, r * 0.85, a));
+        ctx.fillStyle = tones[(rnd() * tones.length) | 0];
+        wrapShape(x, y, () => ellipse(0, 0, r * 1.1, r * 0.8, a));
+        ctx.globalAlpha = 0.45;
+        ctx.fillStyle = '#d4cfc4';
+        wrapShape(x - r * 0.3, y - r * 0.3, () => ellipse(0, 0, r * 0.45, r * 0.3, a));
+      }
+      break;
+    }
+    case TerrainTileType.ICE: {
+      // Clear ice: soft deep and pale patches, frozen bubbles, long white cracks
+      for (let i = 0; i < 30; i++) {
+        ctx.fillStyle = rnd() < 0.5 ? def.secondaryColor : def.accentColor;
+        ctx.globalAlpha = 0.15 + rnd() * 0.2;
+        wrapShape(rnd() * size, rnd() * size, () => ellipse(0, 0, 20 + rnd() * 50, 12 + rnd() * 30, rnd() * Math.PI));
+      }
+      for (let i = 0; i < 120; i++) {
+        ctx.fillStyle = '#f2f9fd';
+        ctx.globalAlpha = 0.3 + rnd() * 0.4;
+        const r = 0.6 + rnd() * 1.4;
+        wrapShape(rnd() * size, rnd() * size, () => ellipse(0, 0, r, r, 0));
+      }
+      ctx.strokeStyle = '#f4fbff';
+      for (let i = 0; i < 14; i++) {
+        const x = rnd() * size, y = rnd() * size;
+        let a = rnd() * Math.PI * 2;
+        ctx.globalAlpha = 0.35 + rnd() * 0.35;
+        ctx.lineWidth = 0.6 + rnd() * 0.8;
+        const pts: [number, number][] = [[0, 0]];
+        let px = 0, py = 0;
+        for (let k = 0; k < 6; k++) {
+          a += (rnd() - 0.5) * 1.1;
+          const step = 6 + rnd() * 14;
+          px += Math.cos(a) * step;
+          py += Math.sin(a) * step;
+          pts.push([px, py]);
+        }
+        wrapShape(x, y, () => {
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          for (const [qx, qy] of pts) ctx.lineTo(qx, qy);
+          ctx.stroke();
+        });
+      }
+      break;
+    }
+    case TerrainTileType.MUD:
+    case TerrainTileType.PUDDLE: {
+      // Churned wet earth: soft lumps with a lit rim, darker wet hollows, a few small stones
+      for (let i = 0; i < 60; i++) {
+        ctx.fillStyle = rnd() < 0.5 ? '#2c2016' : def.accentColor;
+        ctx.globalAlpha = 0.25 + rnd() * 0.25;
+        wrapShape(rnd() * size, rnd() * size, () => ellipse(0, 0, 10 + rnd() * 26, 6 + rnd() * 16, rnd() * Math.PI));
+      }
+      for (let i = 0; i < 700; i++) {
+        const x = rnd() * size, y = rnd() * size, r = 1.5 + rnd() * 4, a = rnd() * Math.PI;
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = def.secondaryColor;
+        wrapShape(x + 0.7, y + 0.8, () => ellipse(0, 0, r, r * 0.7, a));
+        ctx.globalAlpha = 0.45;
+        ctx.fillStyle = def.accentColor;
+        wrapShape(x, y, () => ellipse(0, 0, r * 0.8, r * 0.55, a));
+      }
+      for (let i = 0; i < 90; i++) {
+        ctx.globalAlpha = 0.7;
+        ctx.fillStyle = rnd() < 0.5 ? '#6f665a' : '#857b6c';
+        const r = 0.8 + rnd() * 1.6;
+        wrapShape(rnd() * size, rnd() * size, () => ellipse(0, 0, r, r * 0.8, 0));
+      }
+      break;
+    }
     case TerrainTileType.ASPHALT_ROAD:
       for (let i = 0; i < 3000; i++) {
         ctx.fillStyle = rnd() < 0.5 ? def.secondaryColor : '#4a5058';

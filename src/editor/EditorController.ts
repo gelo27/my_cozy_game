@@ -3,7 +3,7 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { InputManager } from '../input/InputManager';
 import { TerrainSystem, TerrainBrushKind } from '../world/TerrainSystem';
 import { PropSystem, PROP_DEF_MAP } from '../world/PropSystem';
-import { ALGAE_DEFAULT_LINKS } from '../world/AlgaeChains';
+import { ALGAE_DEFAULT_LINKS, LILY } from '../world/AlgaeChains';
 import { WEB_DEFAULTS, WebParams, clampWeb } from '../world/SpiderWebs';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { RiverEditTool } from './RiverEditTool';
@@ -15,20 +15,33 @@ import type { CaveNetwork } from '../explore/cave/CaveNetwork';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
 import type { PestKind, PestSystem } from '../gameplay/Pests';
 import { worldSettings } from '../world/WorldSettings';
+import { duckweed } from '../world/Duckweed';
 
-export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy';
+export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy' | 'duckweed';
 
 export interface EditorState {
   tool: EditorTool;
   sculptKind: TerrainBrushKind;
   paintTile: TerrainTileType;
   paintFill: boolean;
+  /** Duckweed brush: clears the cover instead of growing it. */
+  duckweedErase: boolean;
+  /** Duckweed brush: how fast the centre fills to a full carpet (1 = in a second). */
+  duckweedRate: number;
   placeType: string;
   placeScale: number;
   /** Links in a placed algae stalk (chain props). */
   placeChainLength: number;
   /** Algae: root and top colours given to placed stalks (sRGB hex); null = the panel's colours. */
   placeAlgaeColors: [number, number] | null;
+  /** Water lily: what caps placed stems (0 = leaf, 1 = flower). */
+  placeLilyHead: number;
+  /**
+   * Water lily: 'bottom' roots it where the cursor hits the ground with the chosen length;
+   * 'surface' takes the water surface under the cursor and gives the stem just enough links to
+   * reach it from the bottom below (its head then floats).
+   */
+  placeLilyAnchor: 'bottom' | 'surface';
   /** Spider web shape given to placed webs. */
   placeWeb: WebParams;
   /** Placed webs turn to span the passage under the cursor (its narrowest way across). */
@@ -52,6 +65,8 @@ interface Snapshot {
   rivers: string;
   /** Cave layout JSON ('' before the network has built). */
   caves: string;
+  /** Duckweed cells (Duckweed.ts). */
+  duckweed: Uint8Array;
 }
 
 /**
@@ -65,10 +80,14 @@ export class EditorController {
     sculptKind: 'raise',
     paintTile: TerrainTileType.DIRT_ROAD,
     paintFill: false,
+    duckweedErase: false,
+    duckweedRate: 1.5,
     placeType: 'tree_pine',
     placeScale: 1,
     placeChainLength: ALGAE_DEFAULT_LINKS,
     placeAlgaeColors: null,
+    placeLilyHead: 0,
+    placeLilyAnchor: 'surface',
     placeWeb: { ...WEB_DEFAULTS },
     placeWebAutoOrient: true,
     placeRandomize: true,
@@ -283,7 +302,7 @@ export class EditorController {
     const prop = this.state.selectedPropId !== null ? this.props.get(this.state.selectedPropId) : undefined;
     if (!prop) return;
     this.pushUndo();
-    const id = this.props.add(prop.type, prop.position.x + 1.5, prop.position.z, prop.rotationY, prop.scale, prop.grounded ? undefined : prop.position.y, prop.grounded, prop.length, prop.colors, prop.web, null, prop.tilt);
+    const id = this.props.add(prop.type, prop.position.x + 1.5, prop.position.z, prop.rotationY, prop.scale, prop.grounded ? undefined : prop.position.y, prop.grounded, prop.length, prop.colors, prop.web, null, prop.tilt, prop.head);
     this.select(id);
   }
 
@@ -304,6 +323,14 @@ export class EditorController {
   }
 
   /** Chain props: changes the selected stalk's link count (push the undo step on drag start). */
+  /** Water lily: the selected plant's head (0 = leaf, 1 = flower; push the undo step first). */
+  public setSelectedChainHead(head: number): void {
+    const id = this.state.selectedPropId;
+    if (id === null) return;
+    this.props.setChainHead(id, head);
+    this.touch();
+  }
+
   public setSelectedChainLength(length: number): void {
     const id = this.state.selectedPropId;
     if (id === null) return;
@@ -359,6 +386,7 @@ export class EditorController {
       props: this.props.serialize(),
       rivers: stringifyRivers(riverWorld.defs),
       caves: this.caves.work ? JSON.stringify(this.caves.work) : '',
+      duckweed: duckweed.snapshot(),
     };
   }
 
@@ -377,6 +405,7 @@ export class EditorController {
     const save = this.terrain.serialize();
     this.terrain.deserialize(save); // marks all chunks/splat/physics dirty
     this.props.deserialize(s.props);
+    duckweed.restore(s.duckweed);
     this.select(null);
   }
 
@@ -479,7 +508,7 @@ export class EditorController {
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
       this.deleteSelected();
     } else if (!e.ctrlKey && !this.looking) {
-      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave', Digit7: 'enemy' };
+      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave', Digit7: 'enemy', Digit8: 'duckweed' };
       if (tools[e.code]) this.set('tool', tools[e.code]);
       if (e.code === 'KeyG') this.set('gizmoMode', 'translate');
       if (e.code === 'KeyR' && this.state.tool === 'select') this.set('gizmoMode', 'rotate');
@@ -513,7 +542,11 @@ export class EditorController {
     if (tool === 'place' || tool === 'enemy') this.castIntoCaves();
     // Sharks go in the water: the sea surface under the cursor counts as the hit
     if (tool === 'enemy' && this.state.enemyKind === 'shark') this.castOntoSea();
-    const brushTool = tool === 'sculpt' || tool === 'paint';
+    // Water lilies set "on the surface" aim at the water, not the bottom seen through it
+    if (tool === 'place' && this.lilyOnSurface()) this.castOntoSea();
+    // Duckweed is painted on the water surface (sea, lakes, rivers), not on the bottom under it
+    if (tool === 'duckweed') this.castOntoWater();
+    const brushTool = tool === 'sculpt' || tool === 'paint' || tool === 'duckweed';
 
     this.updateCursor((brushTool || tool === 'enemy') && this.hasHit);
     this.updateGhost(tool === 'place' && this.hasHit);
@@ -524,6 +557,8 @@ export class EditorController {
       this.terrain.sculpt(this.state.sculptKind, this.hit.x, this.hit.z, r, s, dt, this.flattenHeight);
     } else if (tool === 'paint') {
       this.terrain.paintCircle(this.hit.x, this.hit.z, r * 0.5, this.state.paintTile);
+    } else if (tool === 'duckweed') {
+      duckweed.paint(this.hit.x, this.hit.z, r, this.state.duckweedRate, dt, this.state.duckweedErase);
     } else if (tool === 'place') {
       // Click places one; dragging scatters with spacing proportional to the prop size
       const spacing = Math.max(1.2, this.state.placeScale * 2);
@@ -533,10 +568,59 @@ export class EditorController {
         const rot = rnd ? Math.random() * Math.PI * 2 : this.ghost.rotation.y;
         const scale = this.state.placeScale * (rnd ? 0.85 + Math.random() * 0.3 : 1);
         const y = this.hitOnTerrain ? undefined : this.hit.y;
-        this.props.add(this.state.placeType, this.hit.x, this.hit.z, rot, scale, y, this.hitOnTerrain, this.state.placeChainLength, this.state.placeAlgaeColors, this.state.placeWeb);
-        this.lastPlaceAt.copy(this.hit);
-        this.touch();
+        const links = this.placeLinks(scale);
+        if (links !== null) {
+          const id = this.props.add(
+            this.state.placeType, this.hit.x, this.hit.z, rot, scale, y, this.hitOnTerrain, links, this.state.placeAlgaeColors, this.state.placeWeb,
+            null, null, this.state.placeLilyHead
+          );
+          if (id !== null && this.lilyOnSurface()) this.centreLilyHead(id, rot, scale);
+          this.lastPlaceAt.copy(this.hit);
+          this.touch();
+        }
       }
+    }
+  }
+
+  private lilyOnSurface(): boolean {
+    return PROP_DEF_MAP.get(this.state.placeType)?.chain === 'lily' && this.state.placeLilyAnchor === 'surface';
+  }
+
+  /**
+   * Links of the chain about to be placed at the cursor: the chosen length, or for a water lily
+   * put on the surface just enough for its stem to reach the water from the bottom below (null:
+   * no water there to float on).
+   */
+  private placeLinks(scale: number): number | null {
+    if (!this.lilyOnSurface()) return this.state.placeChainLength;
+    const linkH = LILY.parts?.linkH ?? 0;
+    if (!this.hitOnTerrain || !linkH) return null;
+    const depth = riverWorld.waterLevelAt(this.hit.x, this.hit.z) - this.terrain.getHeight(this.hit.x, this.hit.z);
+    if (depth < 0.15) return null;
+    return LILY.clampLinks(Math.ceil(depth / (linkH * scale)));
+  }
+
+  /**
+   * A lily put on the surface lays its spare stem in an arc, so its head comes to rest beside the
+   * root: the root moves back by that much (once), so the head floats where the cursor was.
+   */
+  private centreLilyHead(id: number, rot: number, scale: number): void {
+    const off = new THREE.Vector3();
+    if (!this.props.lilies.headOffset(id, off) || off.lengthSq() < 0.01) return;
+    const prop = this.props.get(id);
+    if (!prop) return;
+    const x = prop.position.x - off.x;
+    const z = prop.position.z - off.z;
+    const ground = this.terrain.getHeight(x, z);
+    // Only onto ground still under the water (not up a bank)
+    const depth = riverWorld.waterLevelAt(x, z) - ground;
+    if (depth < 0.15) return;
+    this.props.setTransform(id, new THREE.Vector3(x, ground, z), rot, scale);
+    // Still just long enough to reach the surface from the new spot
+    const linkH = LILY.parts?.linkH ?? 0;
+    if (linkH) {
+      const links = LILY.clampLinks(Math.ceil(depth / (linkH * scale)));
+      if (links !== prop.length) this.props.setChainLength(id, links);
     }
   }
 
@@ -550,6 +634,31 @@ export class EditorController {
     ray.at(t, this.hit);
     this.hasHit = true;
     this.hitOnTerrain = true;
+  }
+
+  /**
+   * The water surface under the cursor (the sea, or a lake / river above it): where the ray crosses
+   * the surface height before the ground. A few fixed-point steps settle on the right surface
+   * when its level changes along the ray (a lake above the sea).
+   */
+  private castOntoWater(): void {
+    const ray = this.raycaster.ray;
+    if (ray.direction.y >= -1e-3) return;
+    if (!this.hasHit || !this.hitOnTerrain) {
+      this.castOntoSea();
+      return;
+    }
+    let level = riverWorld.waterLevelAt(this.hit.x, this.hit.z);
+    if (level <= this.hit.y) return; // dry ground: paint right there
+    const p = new THREE.Vector3();
+    for (let i = 0; i < 4; i++) {
+      const t = (level - ray.origin.y) / ray.direction.y;
+      if (t < 0) return;
+      ray.at(t, p);
+      level = riverWorld.waterLevelAt(p.x, p.z);
+    }
+    if (p.y < this.terrain.getHeight(p.x, p.z)) return;
+    this.hit.copy(p);
   }
 
   /** Enemy tool click: the chosen kind at the cursor, or why it cannot live there. */
@@ -627,6 +736,7 @@ export class EditorController {
       (this.cursor.material as THREE.LineBasicMaterial).color.setHex(ok ? 0x22c55e : 0xef4444);
       return;
     }
+    const weed = this.state.tool === 'duckweed';
     const r = this.state.tool === 'paint' ? this.state.brushRadius * 0.5 : this.state.brushRadius;
     const attr = this.cursor.geometry.getAttribute('position') as THREE.BufferAttribute;
     const a = attr.array as Float32Array;
@@ -635,13 +745,13 @@ export class EditorController {
       const x = this.hit.x + Math.cos(t) * r;
       const z = this.hit.z + Math.sin(t) * r;
       a[i * 3] = x;
-      a[i * 3 + 1] = this.terrain.getHeight(x, z) + 0.08;
+      a[i * 3 + 1] = (weed ? Math.max(this.terrain.getHeight(x, z), riverWorld.waterLevelAt(x, z)) : this.terrain.getHeight(x, z)) + 0.08;
       a[i * 3 + 2] = z;
     }
     attr.needsUpdate = true;
     const colors: Record<string, number> = { raise: 0x22c55e, lower: 0xf97316, smooth: 0x38bdf8, flatten: 0xa855f7 };
     (this.cursor.material as THREE.LineBasicMaterial).color.setHex(
-      this.state.tool === 'paint' ? 0xfacc15 : colors[this.state.sculptKind]
+      weed ? (this.state.duckweedErase ? 0xf97316 : 0x84cc16) : this.state.tool === 'paint' ? 0xfacc15 : colors[this.state.sculptKind]
     );
   }
 
@@ -700,8 +810,14 @@ export class EditorController {
       this.ghostWebKey = '';
     }
     if (!visible) return;
+    // A lily on the surface: its stem from the bottom up to the water (none where there is none)
+    const links = this.placeLinks(this.state.placeScale);
+    if (links === null) {
+      this.ghost.visible = false;
+      return;
+    }
     // The type's shared geometry (algae: the stalk of the chosen length), rendered translucent
-    const geometry = this.props.previewGeometry(this.state.placeType, this.state.placeChainLength, this.state.placeWeb);
+    const geometry = this.props.previewGeometry(this.state.placeType, links, this.state.placeWeb, this.state.placeLilyHead);
     if (this.ghostType !== this.state.placeType || this.ghostGeometry !== geometry) {
       this.ghostType = this.state.placeType;
       this.ghostGeometry = geometry;
@@ -712,6 +828,7 @@ export class EditorController {
       }
     }
     this.ghost.position.copy(this.hit);
+    if (this.lilyOnSurface()) this.ghost.position.y = this.terrain.getHeight(this.hit.x, this.hit.z);
     this.ghost.scale.setScalar(this.state.placeScale);
     if (web) this.updateWebGhost();
   }

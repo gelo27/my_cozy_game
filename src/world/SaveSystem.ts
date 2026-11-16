@@ -6,6 +6,7 @@ import { PetSaveData } from '../gameplay/PetSystem';
 import { WeatherType } from './WeatherSystem';
 import type { WeatherDirectorSave } from './WeatherDirector';
 import { worldSettings } from './WorldSettings';
+import { duckweed } from './Duckweed';
 import { SEASONS, Season, legacySeasonOf } from './Seasons';
 import type { GameWorld } from '../engine/GameEngine';
 import type { FieldSaveData } from '../farming/FieldManager';
@@ -57,6 +58,8 @@ export interface WorldSaveData {
   day?: number;
   /** Fixed season; saves from before it follow their day counter (legacySeasonOf) */
   season?: Season;
+  /** Duckweed painted on the water (Duckweed.ts RLE; missing: none). */
+  duckweed?: string;
   /** Sleep and respawn: the bed slept in last and that night's index. */
   sleep?: { bed: [number, number, number] | null; night: number };
 }
@@ -98,6 +101,7 @@ export class SaveSystem {
       savedAt: new Date().toISOString(),
       terrain: w.terrain.serialize(),
       waterLevel: worldSettings.waterLevel,
+      duckweed: duckweed.serialize(),
       timeOfDay: worldSettings.timeOfDay,
       weather: w.weather.weather,
       weatherDirector: w.weather.director.serialize(),
@@ -143,6 +147,7 @@ export class SaveSystem {
     w.weather.director.deserialize(data.weather, data.weatherDirector);
     w.weather.snowCover = Math.min(1, Math.max(0, data.snowCover ?? 0));
     w.terrain.deserialize(data.terrain);
+    duckweed.deserialize(data.duckweed);
     w.props.deserialize(data.props);
     // Saves from before the millstone existed get one at its usual spot
     w.props.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);

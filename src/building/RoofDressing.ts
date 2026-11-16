@@ -23,7 +23,7 @@ function atticLines(roof: BuiltPiece): Array<[THREE.Vector3, THREE.Vector3]> {
   const V = (x: number, z: number) => new THREE.Vector3(x, 0, z);
   const fp = c.footprint ? normalizeFootprint(c.footprint) : null;
   if (fp) {
-    if (c.roofType !== 'gable') return [];
+    if (c.roofType !== 'gable' && c.roofType !== 'gambrel') return [];
     return [...houseGableEdges(fp)].map((i) => {
       const a = fp[i], b = fp[(i + 1) % fp.length];
       return [V(a[0], a[1]), V(b[0], b[1])] as [THREE.Vector3, THREE.Vector3];

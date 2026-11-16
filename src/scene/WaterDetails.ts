@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { WORLD_SIZE, worldSettings } from '../world/WorldSettings';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { rippleSimUniforms, waterRippleSim } from './WaterRippleSim';
+import { duckweedSim } from './DuckweedSim';
 
 /**
  * Flat white water details, drawn crisp (step-like edges, antialiased with fwidth) for a clean
@@ -99,6 +100,8 @@ export function emitWaterRipple(x: number, z: number, strength = 0.6, maxRadius 
  */
 export function setWaterBody(x: number, z: number, speed: number, radius = 0.4): void {
   if (waterRippleSim.active) waterRippleSim.setBody(x, z, speed, radius);
+  // The body keeps an opening in the duckweed around itself, still or moving
+  duckweedSim.setPusher(0, x, z, radius * 1.6, 1);
 }
 
 /** Wave-simulation slots for animals breaking the surface (a shark's fin and back). */
@@ -107,6 +110,8 @@ export const WATER_ANIMAL_SLOTS = [5, 6];
 /** Per frame for a hand / foot moving in the water (slot 1..4): its own small wake in the simulation. */
 export function setWaterLimb(slot: number, x: number, z: number, speed: number, radius = 0.16): void {
   if (waterRippleSim.active) waterRippleSim.setPusher(slot, x, z, speed, radius);
+  // Hands, feet and fins part the duckweed only while they move
+  duckweedSim.setPusher(slot, x, z, radius * 1.4, 0);
 }
 
 /**

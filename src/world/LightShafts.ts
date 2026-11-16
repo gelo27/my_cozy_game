@@ -3,6 +3,7 @@ import { isMobileDevice, worldSettings } from './WorldSettings';
 import { riverWorld } from './rivers/RiverWorld';
 import { causticsUniforms } from '../scene/WaterEffects';
 import { waterSurfaceUniforms } from './WaterSurface';
+import { duckweed } from './Duckweed';
 import { SEA_FLOOR_Y, WORLD_SIZE } from './WorldSettings';
 
 /**
@@ -300,6 +301,8 @@ export class LightShafts {
       const surface = Math.max(worldSettings.waterLevel, riverWorld.waterLevelAt(x, z));
       // Only the camera's own water (not a river high above the sea it dives in)
       if (surface < cam.y) continue;
+      // No shafts through a duckweed carpet
+      if (duckweed.densityAt(x, z) > 0.45) continue;
       sh.x = x;
       sh.z = z;
       sh.y = surface - 0.05;

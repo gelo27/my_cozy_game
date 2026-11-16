@@ -297,13 +297,20 @@ export class BuildingManager {
       if (p.roofConfig?.footprint && p.position.distanceTo(origin) < 0.2) this.demolishPiece(p.id);
     }
 
-    const type = kind === 'gable' ? BuildingPieceType.ROOF_GABLE_4X4 : BuildingPieceType.ROOF_HIP_4X4;
+    const type = {
+      gable: BuildingPieceType.ROOF_GABLE_4X4,
+      hip: BuildingPieceType.ROOF_HIP_4X4,
+      gambrel: BuildingPieceType.ROOF_GAMBREL_2X2,
+      mansard: BuildingPieceType.ROOF_MANSARD_2X2,
+    }[kind];
     const piece = this.placePiece(type, origin, quaternion);
     if (!piece) return { ok: false, reason: 'build.houseRoof.failed' };
     const xs = footprint.map((p) => p[0]), zs = footprint.map((p) => p[1]);
-    // About 30 degrees, in the height arrow's 0.25 m steps
-    const run = houseRoofRun(footprint, kind === 'gable');
-    const height = THREE.MathUtils.clamp(Math.round((run * 0.6 + 0.12) / 0.25) * 0.25, 0.5, 5);
+    // About 30 degrees (broken-pitch roofs stand taller, for the room under them), in the height
+    // arrow's 0.25 m steps
+    const run = houseRoofRun(footprint, kind === 'gable' || kind === 'gambrel');
+    const rise = kind === 'gambrel' || kind === 'mansard' ? 0.8 : 0.6;
+    const height = THREE.MathUtils.clamp(Math.round((run * rise + 0.12) / 0.25) * 0.25, 0.5, 5);
     this.updateRoofConfig(piece.id, {
       roofType: kind,
       footprint,

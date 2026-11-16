@@ -125,6 +125,13 @@ interface Drop { x: number; z: number; r: number; depth: number }
 
 /** Ground height under a point (set by the engine: the terrain). */
 type GroundFn = (x: number, z: number) => number;
+/** World rectangle (minX, minZ, maxX, maxZ). */
+export interface WetRect { minX: number; minZ: number; maxX: number; maxZ: number }
+/**
+ * Other water in the area that the sea / river probe can't see (painted puddles): fills `out`
+ * with its bounds and returns true if there is any.
+ */
+type ExtraWetFn = (ox: number, oz: number, area: number, out: WetRect) => boolean;
 
 class WaterRippleSim {
   private targets: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget] | null = null;
@@ -149,6 +156,8 @@ class WaterRippleSim {
   private supported: boolean | null = null;
 
   private ground: GroundFn | null = null;
+  private extraWet: ExtraWetFn | null = null;
+  private readonly extraRect: WetRect = { minX: 0, minZ: 0, maxX: 0, maxZ: 0 };
   /** Wet part of the area in world space (minX, minZ, maxX, maxZ); empty = no water around. */
   private wet = { minX: 0, minZ: 0, maxX: 0, maxZ: 0, any: false };
   private wetTimer = 0;
@@ -191,6 +200,12 @@ class WaterRippleSim {
   /** The terrain height, so the simulation knows where there is water to ripple. */
   public setGround(fn: GroundFn): void {
     this.ground = fn;
+    this.wetAtX = NaN;
+  }
+
+  /** Water the sea / river probe can't see (puddles on the terrain), so it ripples too. */
+  public setExtraWet(fn: ExtraWetFn | null): void {
+    this.extraWet = fn;
     this.wetAtX = NaN;
   }
 
@@ -382,12 +397,26 @@ class WaterRippleSim {
         if (z > maxZ) maxZ = z;
       }
     }
-    w.any = any;
     // One probe cell of margin: water may reach a little past the last wet sample
-    w.minX = minX - cell;
-    w.minZ = minZ - cell;
-    w.maxX = maxX + cell;
-    w.maxZ = maxZ + cell;
+    if (any) {
+      minX -= cell;
+      minZ -= cell;
+      maxX += cell;
+      maxZ += cell;
+    }
+    const e = this.extraRect;
+    if (this.extraWet?.(ox, oz, area, e)) {
+      any = true;
+      minX = Math.min(minX, e.minX);
+      minZ = Math.min(minZ, e.minZ);
+      maxX = Math.max(maxX, e.maxX);
+      maxZ = Math.max(maxZ, e.maxZ);
+    }
+    w.any = any;
+    w.minX = minX;
+    w.minZ = minZ;
+    w.maxX = maxX;
+    w.maxZ = maxZ;
   }
 
   private clearPushers(): void {

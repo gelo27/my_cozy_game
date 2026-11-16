@@ -5,6 +5,7 @@
 /** What the player walks on; picks the footstep recipe. */
 export type FootSurface =
   | 'grass' | 'dirt' | 'asphalt' | 'cobble' | 'sand' | 'snow'
+  | 'leaves' | 'gravel' | 'ice' | 'mud'
   | 'wood' | 'stone' | 'tile' | 'carpet' | 'water';
 
 /**
@@ -44,11 +45,12 @@ export const OTHER_RANGE = 28;
 
 export type Kind = FootSurface | 'wet' | 'stroke' | 'lap' | 'splash' | 'under' | 'exhale';
 /** Pre-render order: what the player hears first comes first. */
-export const WARM_ORDER: Kind[] = ['grass', 'dirt', 'wood', 'sand', 'stone', 'water', 'wet', 'cobble', 'asphalt', 'tile', 'carpet', 'snow', 'stroke', 'lap', 'splash', 'under', 'exhale'];
+export const WARM_ORDER: Kind[] = ['grass', 'dirt', 'wood', 'sand', 'stone', 'water', 'wet', 'cobble', 'asphalt', 'tile', 'carpet', 'snow', 'leaves', 'gravel', 'ice', 'mud', 'stroke', 'lap', 'splash', 'under', 'exhale'];
 
 /** Relative loudness per surface (soft floors are quieter). */
 export const SURFACE_GAIN: Record<FootSurface, number> = {
   grass: 0.7, dirt: 0.8, asphalt: 0.75, cobble: 0.8, sand: 0.65, snow: 0.8,
+  leaves: 0.85, gravel: 0.85, ice: 0.6, mud: 0.8,
   wood: 0.72, stone: 0.75, tile: 0.7, carpet: 0.45, water: 1.25,
 };
 
@@ -309,7 +311,7 @@ function soleOnHardGround(o: Float32Array, sr: number, p: number, grit: number):
 }
 
 function renderStep(sr: number, surface: FootSurface): Float32Array {
-  const long = surface === 'snow' || surface === 'sand' || surface === 'water';
+  const long = surface === 'snow' || surface === 'sand' || surface === 'water' || surface === 'leaves' || surface === 'gravel' || surface === 'mud';
   const o = new Float32Array(Math.ceil(sr * (surface === 'water' ? 0.6 : long ? 0.38 : 0.28)));
   const p = rr(0.92, 1.1); // per-variant shoe / weight
   switch (surface) {
@@ -340,6 +342,39 @@ function renderStep(sr: number, surface: FootSurface): Float32Array {
       const g = grf(0.016, 0.11, 0.15, 0.55, 0.02, 0.09);
       phisem(o, sr, g, 1600, 0.982, [res(950 * p, 0.86), res(2200 * p, 0.8, 0.8), res(3800 * p, 0.7, 0.4)], 1);
       return finish(o, sr, 220, 5500);
+    }
+    case 'leaves': {
+      // Dry leaves: a dense, bright crackle of crumpling, and a soft rustle as they slide aside
+      const g = grf(0.012, 0.07, 0.11, 0.8, 0.018, 0.08);
+      phisem(o, sr, g, 3200, 0.9, [res(3400 * p, 0.55), res(5600 * p, 0.5, 0.7)], 1);
+      phisem(o, sr, g, 1200, 0.97, [res(1800 * p, 0.5, 0.5)], 0.35);
+      swish(o, sr, g.toeAt, 0.02, 0.07, 2600 * p, 0.4, 0.25 * g.toeAmp);
+      return finish(o, sr, 400, 8000);
+    }
+    case 'gravel': {
+      // Loose gravel: the stones shift and grind, a coarse crunch of fewer, louder grains
+      const g = grf(0.008, 0.07, 0.11, 0.85, 0.012, 0.07);
+      swish(o, sr, 0, 0.004, 0.025, 700 * p, 0.5, 0.5);
+      phisem(o, sr, g, 900, 0.86, [res(1600 * p, 0.5), res(3000 * p, 0.55, 0.7), res(4800 * p, 0.5, 0.3)], 1);
+      phisem(o, sr, g, 2600, 0.8, [res(3800 * p, 0.45, 0.4)], 0.25);
+      return finish(o, sr, 220, 6000);
+    }
+    case 'mud': {
+      // Mud: a soft, heavy press, the suck of the boot pulling free and a couple of wet pops
+      const g = grf(0.012, 0.06, 0.14, 0.7, 0.02, 0.07);
+      swish(o, sr, 0, 0.01, 0.05, 380 * p, 0.6, 1);
+      phisem(o, sr, g, 1200, 0.975, [res(rr(700, 950) * p, 0.88), res(1900 * p, 0.6, 0.4)], 0.8);
+      swish(o, sr, g.toeAt + 0.03, 0.015, 0.06, 520 * p, 0.9, 0.6 * g.toeAmp); // suction as the boot lifts
+      for (let i = 0; i < 2; i++) bubble(o, sr, rr(0.05, 0.25), rr(500, 900) * p, 0.02, 0.18);
+      return finish(o, sr, 140, 3800);
+    }
+    case 'ice': {
+      // Ice: a firm, cold click with a short glassy ring, then the sole scraping a little
+      const g = grf(0.0015, 0.018, 0.075, 0.5, 0.003, 0.025);
+      swish(o, sr, 0, 0.0015, 0.01, 1500 * p, 0.6, 0.5);
+      impact(o, sr, g, 1.1, [[3100 * p, 0.03, 0.3], [5200 * p, 0.02, 0.15]], 0.08);
+      swish(o, sr, g.toeAt, 0.01, 0.05, 4200 * p, 0.5, 0.18 * g.toeAmp);
+      return finish(o, sr, 300, 7500);
     }
     // Asphalt and cobbles sound alike under shoes; cobbles only have a bit more grit in the joints
     case 'asphalt':

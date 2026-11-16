@@ -177,6 +177,18 @@ export class CharacterModel {
     return parts;
   }
 
+  private readonly restParts = new Map<string, { q: THREE.Quaternion; p: THREE.Vector3 }>();
+
+  /** A rigid part's bone in the rest pose (T-pose), in the rig's own frame. */
+  public partRest(name: string): { q: THREE.Quaternion; p: THREE.Vector3 } | undefined {
+    return this.restParts.get(name);
+  }
+
+  /** World rotation of the frame the rig hangs in (the rest pose is expressed in the rig's own frame). */
+  public rigRestParentQuaternion(out: THREE.Quaternion): THREE.Quaternion {
+    return this.rig?.parent ? this.rig.parent.getWorldQuaternion(out) : out.identity();
+  }
+
   private limbTipCache: { bone: THREE.Object3D; tip: THREE.Vector3 }[] | null = null;
 
   /**
@@ -351,6 +363,14 @@ export class CharacterModel {
       this.weaponPivot.rotation.set(0, 0, 0);
       this.weaponPivot.scale.setScalar(1 / modelScale);
       toolHand.add(this.weaponPivot);
+    }
+
+    // Rest pose of the rigid parts (in the rig's own frame), the ragdoll's reference for joint limits
+    cloned.updateMatrixWorld(true);
+    this.restParts.clear();
+    for (const name of ['body', 'head_1', 'arm_1_right', 'arm_1_left', 'leg_1_right', 'leg_1_left']) {
+      const bone = cloned.getObjectByName(name);
+      if (bone) this.restParts.set(name, { q: bone.getWorldQuaternion(new THREE.Quaternion()), p: bone.getWorldPosition(new THREE.Vector3()) });
     }
 
     this.setupAnimations(cloned, data.animations);

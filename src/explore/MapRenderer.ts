@@ -56,6 +56,14 @@ export function renderTerrainMap(terrain: TerrainSystem): HTMLCanvasElement {
         if (tile === TerrainTileType.DIRT_ROAD) { r = 168; g = 128; b = 88; }
         else if (tile === TerrainTileType.SAND_BEACH) { r = 232; g = 214; b = 160; }
         else if (tile === TerrainTileType.STONE_COBBLE || tile === TerrainTileType.ASPHALT_ROAD) { r = 130; g = 128; b = 124; }
+        else if (tile === TerrainTileType.SNOW) { r = 236; g = 242; b = 248; }
+        else if (tile === TerrainTileType.FALLEN_LEAVES) { r = 176; g = 104; b = 48; }
+        else if (tile === TerrainTileType.DRY_GRASS) { r = 182; g = 162; b = 92; }
+        else if (tile === TerrainTileType.BIRCH_GRASS) { r = 132; g = 186; b = 80; }
+        else if (tile === TerrainTileType.GRAVEL) { r = 150; g = 145; b = 136; }
+        else if (tile === TerrainTileType.ICE) { r = 176; g = 212; b = 232; }
+        else if (tile === TerrainTileType.MUD) { r = 96; g = 72; b = 52; }
+        else if (tile === TerrainTileType.PUDDLE) { r = 92; g = 110; b = 128; }
       }
       // Hill shading with light from the north-west
       if (y >= water) {

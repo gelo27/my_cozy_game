@@ -3,7 +3,13 @@ import { injectNightLights } from './NightLighting';
 import { WORLD_HALF, WORLD_SIZE, worldSettings } from './WorldSettings';
 import { riverWorld } from './rivers/RiverWorld';
 import { TERRAIN_CHUNK, TERRAIN_CHUNKS, type TerrainSystem } from './TerrainSystem';
-import { TerrainTileType } from '../terrain/types/TerrainTypes';
+import { GRASSY_TILES, TerrainTileType } from '../terrain/types/TerrainTypes';
+
+// Blade tints of the other grassy tiles (sRGB in, linear out: what the grass shader works in)
+const DRY_GRASS_COL = new THREE.Color('#9c8646');
+const DRY_GRASS_TIP = new THREE.Color('#d8c780');
+const BIRCH_GRASS_COL = new THREE.Color('#6aa636');
+const glsl = (c: THREE.Color) => `vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)})`;
 import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
 import { GrassTrail, TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
 
@@ -58,8 +64,13 @@ export class GrassField {
 
   private readonly heightData = new Uint16Array(V * V);
   private readonly heightTex: THREE.DataTexture;
-  /** R = density, G = baked shade, B = blocked (by buildings / props), per 1 m vertex. */
+  /**
+   * R = density, G = baked shade, B = dry (yellow) grass share, A = birch-grove (light) grass
+   * share, per 1 m vertex.
+   */
   private readonly data = new Uint8Array(V * V * 4);
+  /** Blocked by buildings / props (0..255), per 1 m vertex: only the density reads it. */
+  private readonly blocked = new Uint8Array(V * V);
   private readonly dataTex: THREE.DataTexture;
 
   private readonly uniforms = {
@@ -221,10 +232,9 @@ export class GrassField {
     for (let z = 0; z < S; z++) {
       const row = (gz + z) * V + gx;
       for (let x = 0; x < S; x++) {
-        const o = (row + x) * 4;
-        d[o + 1] = shade[z * S + x];
-        if (d[o + 2] !== block[z * S + x]) {
-          d[o + 2] = block[z * S + x];
+        d[(row + x) * 4 + 1] = shade[z * S + x];
+        if (this.blocked[row + x] !== block[z * S + x]) {
+          this.blocked[row + x] = block[z * S + x];
           changedBlock = true;
         }
       }
@@ -250,11 +260,12 @@ export class GrassField {
     const h = this.terrain.heights;
     const tiles = this.terrain.tiles;
     const d = this.data;
-    const grass = TerrainTileType.GRASS;
+    const dryT = TerrainTileType.DRY_GRASS;
+    const birchT = TerrainTileType.BIRCH_GRASS;
     for (let z = r.z0; z <= r.z1; z++) {
       for (let x = r.x0; x <= r.x1; x++) {
-        // Share of the (up to) four cells around this vertex that are grass
-        let g = 0, n = 0;
+        // Share of the (up to) four cells around this vertex that grow grass, and which kind
+        let g = 0, n = 0, dry = 0, birch = 0;
         for (let dz = -1; dz <= 0; dz++) {
           const cz = z + dz;
           if (cz < 0 || cz >= N) continue;
@@ -262,7 +273,12 @@ export class GrassField {
             const cx = x + dx;
             if (cx < 0 || cx >= N) continue;
             n++;
-            if (tiles[cz * N + cx] === grass) g++;
+            const t = tiles[cz * N + cx];
+            if (GRASSY_TILES.has(t)) {
+              g++;
+              if (t === dryT) dry++;
+              else if (t === birchT) birch++;
+            }
           }
         }
         let v = n ? g / n : 0;
@@ -275,7 +291,9 @@ export class GrassField {
           v *= k * k * (3 - 2 * k);
         }
         const o = (z * V + x) * 4;
-        d[o] = (v * (255 - d[o + 2]) + 0.5) | 0;
+        d[o] = (v * (255 - this.blocked[z * V + x]) + 0.5) | 0;
+        d[o + 2] = g ? ((dry / g) * 255 + 0.5) | 0 : 0;
+        d[o + 3] = g ? ((birch / g) * 255 + 0.5) | 0 : 0;
       }
     }
     grow(this.uploadRect, r.x0, r.z0, r.x1, r.z1);
@@ -433,11 +451,14 @@ if (grH > 0.03) {
 }
 // The terrain's own grass colour at the root (a coarse mip: the average tone, no speckle)
 vec3 grCol = textureLod(uGrColor, grRoot * 0.5, 3.0).rgb;
+// Dry (yellow, straw tips) and birch-grove (light lime) grass, blended at the tile borders
+grCol = mix(grCol, mix(${glsl(DRY_GRASS_COL)}, ${glsl(DRY_GRASS_TIP)}, vGrTip * aGrRnd.x), grD.b);
+grCol = mix(grCol, ${glsl(BIRCH_GRASS_COL)}, grD.a);
 vGrCol = grCol * mix(0.9, 1.1, aGrRnd.z);
 // Frosted under snow: pale blue-white, the tips the most (per vertex, nothing extra per pixel)
 if (grSnowK > 0.001) vGrCol = mix(vGrCol, vec3(0.6, 0.66, 0.74), min(1.0, grSnowK * 1.8) * (0.45 + 0.5 * vGrTip));`
         );
-      injectNightLights(shader, { perVertex: true });
+      injectNightLights(shader, { perVertex: true, ground: true });
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',

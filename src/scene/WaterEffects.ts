@@ -4,6 +4,7 @@ import { WATER_EFFECTS_CONFIG } from '../config/constants';
 import { WORLD_SIZE, worldSettings } from '../world/WorldSettings';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { emitWaterRipple, injectWaterline } from './WaterDetails';
+import { DUCKWEED_CORE_GLSL, duckweedCoreUniforms } from '../world/Duckweed';
 
 /**
  * Fake caustics: sunlight focused by the surface waves into a moving web of bright lines on
@@ -21,7 +22,10 @@ import { emitWaterRipple, injectWaterline } from './WaterDetails';
  *   little either way), so the rainbow fringes cost nothing at run time;
  * - it MULTIPLIES the direct sun / moon light (in lights_fragment_end), so it follows the time of
  *   day, clouds and shadows on its own and never glows at night or in shade;
- * - it fades in just under the surface, dims with depth and fades out with camera distance.
+ * - it fades in just under the surface, dims with depth and fades out with camera distance;
+ * - under duckweed (Duckweed.ts) the sun is dimmed and turned green and the caustics fade out
+ *   (the cover breaks up the focused light): one more fetch of the duckweed mask, looked up where
+ *   the sun ray entered the water, so the shadow slants with the sun.
  * Per frame on the CPU: three uniform writes.
  */
 
@@ -81,10 +85,18 @@ export const causticsUniforms = {
   uCausticsParams: { value: new THREE.Vector4() },
   /** depth falloff, distance fade start, distance fade end */
   uCausticsFade: { value: new THREE.Vector3() },
+  /** Toward the sun per metre of depth: where the sun ray down to a point crossed the surface. */
+  uCausticsSun: { value: new THREE.Vector2() },
+  ...duckweedCoreUniforms,
 };
 
+/** Sky-blue tint of the focused light. */
+export const CAUSTICS_TINT = 'vec3(0.85, 1.05, 1.15)';
+
 export const CAUSTICS_GLSL = /* glsl */ `
+${DUCKWEED_CORE_GLSL}
 uniform sampler2D uCausticsMap;
+uniform vec2 uCausticsSun;
 uniform sampler2D uCausticsRiver;
 uniform float uCausticsTime;
 uniform float uCausticsSea;
@@ -121,10 +133,19 @@ vec3 causticsLight(vec3 wp, float waterY, float upY) {
   if (uCausticsOn < 0.5) return vec3(0.0);
   return causticsPattern(wp, waterY - wp.y, upY);
 }
+/**
+ * Factor for the direct sun / moon light at wp (multiplies directDiffuse): 1 + the caustics; under
+ * duckweed the light it lets through, green, with the caustics fading as the cover closes.
+ */
+vec3 causticsSun(vec3 wp, float waterY, float upY) {
+  if (uCausticsOn < 0.5) return vec3(1.0);
+  float depth = waterY - wp.y;
+  vec3 c = causticsPattern(wp, depth, upY) * ${CAUSTICS_TINT};
+  if (depth <= 0.0) return 1.0 + c;
+  vec3 t = wsWeedLight(wp.xz + uCausticsSun * depth);
+  return t * (1.0 + c * t.g * t.g);
+}
 `;
-
-/** Sky-blue tint of the focused light. */
-export const CAUSTICS_TINT = 'vec3(0.85, 1.05, 1.15)';
 
 /**
  * Adds caustics to a lit (Lambert / Standard) material's shader. Needs world position and the
@@ -142,7 +163,7 @@ export function injectCaustics(shader: THREE.WebGLProgramParametersWithUniforms)
     .replace('#include <common>', `#include <common>\nvarying vec3 vCauPos;\nvarying float vCauUp;\n${CAUSTICS_GLSL}`)
     .replace(
       '#include <lights_fragment_end>',
-      `#include <lights_fragment_end>\nreflectedLight.directDiffuse *= 1.0 + causticsLight(vCauPos, causticsWaterY(vCauPos.xz), vCauUp) * ${CAUSTICS_TINT};`
+      '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= causticsSun(vCauPos, causticsWaterY(vCauPos.xz), vCauUp);'
     );
 }
 
@@ -298,6 +319,12 @@ export class WaterEffects {
     causticsUniforms.uCausticsTime.value = this.totalTime;
     causticsUniforms.uCausticsSea.value = worldSettings.waterLevel;
     causticsUniforms.uCausticsOn.value = cameraUnderwater || causticsSettings.alwaysOn ? 1 : 0;
+  }
+
+  /** The sun (unit vector toward it): the duckweed's shadow on the bottom slants with it. */
+  public static setSun(dir: THREE.Vector3): void {
+    const y = Math.max(Math.abs(dir.y), 0.3);
+    causticsUniforms.uCausticsSun.value.set(dir.x / y, dir.z / y);
   }
 
   public dispose(): void {}

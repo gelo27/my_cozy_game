@@ -89,13 +89,18 @@ export const interiorUniforms = {
 };
 
 export const INTERIOR_GLSL = /* glsl */ `
+#define INTERIOR_SHADE
 uniform sampler2D uIntMap;
 uniform vec4 uIntBox;
 uniform vec2 uIntA;
 uniform vec3 uIntB;`;
 
-/** After the lights: scales the sky and sun light of pixels inside a room. */
+/**
+ * After the lights: scales the sky and sun light of pixels inside a room. Leaves the pixel's
+ * darkness in `intDark` (0 outdoors), which also keeps street lamps out of rooms (NightLighting).
+ */
 export const INTERIOR_END = /* glsl */ `
+float intDark = 0.0;
 if (uIntB.z > 0.5) {
   mat3 intInv = transpose(mat3(viewMatrix));
   vec3 intQ = cameraPosition + intInv * (-vViewPosition) + (intInv * normal) * 0.35;
@@ -105,6 +110,7 @@ if (uIntB.z > 0.5) {
     vec3 intT = texture2D(uIntMap, intQ.xz * uIntA.x).rgb;
     float intK = intT.r * smoothstep(0.35, 0.75, intT.b)
       * (1.0 - smoothstep(intT.g - 0.12, intT.g + 0.02, intQ.y));
+    intDark = intK;
     if (intK > 0.001) {
       float intAmb = mix(1.0, uIntB.x, intK);
       float intSun = mix(1.0, uIntB.y, intK);

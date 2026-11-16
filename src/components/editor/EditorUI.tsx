@@ -16,11 +16,12 @@ import { PEST_KINDS, PestKind } from '../../gameplay/Pests';
 import { lockOnSettings } from '../../gameplay/LockOn';
 import { PROP_DEFS, PROP_DEF_MAP, PropCategory } from '../../world/PropSystem';
 import { WEB_LIMITS, WebParams, webSettings, setWebSetting, resetWebSettings } from '../../world/SpiderWebs';
-import { ALGAE_MAX_LINKS, ALGAE_MIN_LINKS, algaeHeight, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
+import { CHAIN_SPECIES, LILY_HEADS, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
 import { TerrainTileType, TILE_DEFINITIONS } from '../../terrain/types/TerrainTypes';
 import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, WeatherSound } from '../../world/WeatherSystem';
 import { SEASONS, SEASON_LABELS, currentSeason } from '../../world/Seasons';
 import { worldSettings } from '../../world/WorldSettings';
+import { duckweed } from '../../world/Duckweed';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
 import { waterSettings, WaterSettings, saveWaterSettings, resetWaterSettings } from '../../world/WaterSettings';
@@ -80,6 +81,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'river', icon: Spline, label: 'Річки та водоспади (5)' },
     { id: 'cave', icon: Shell, label: 'Печери (6)' },
     { id: 'enemy', icon: Skull, label: 'Вороги (7)' },
+    { id: 'duckweed', icon: Sprout, label: 'Ряска (8)' },
   ];
   const tabs: { id: Tab; icon: React.ElementType; label: string }[] = [
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
@@ -219,18 +221,32 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           </div>
         </Section>
         <Slider label="Масштаб" value={s.placeScale} min={0.3} max={3} step={0.05} onChange={(v) => editor.set('placeScale', v)} fmt={(v) => `${v.toFixed(2)}×`} />
-        {PROP_DEF_MAP.get(s.placeType)?.chain && (
-          <Slider
-            label="Довжина ланцюжка"
+        {PROP_DEF_MAP.get(s.placeType)?.chain === 'lily' && (
+          <>
+            <LilyHeadChips head={s.placeLilyHead} onChange={(h) => editor.set('placeLilyHead', h)} />
+            <div className="flex flex-wrap gap-1">
+              <button className={chip(s.placeLilyAnchor === 'surface')} onClick={() => editor.set('placeLilyAnchor', 'surface')}>
+                На поверхню
+              </button>
+              <button className={chip(s.placeLilyAnchor === 'bottom')} onClick={() => editor.set('placeLilyAnchor', 'bottom')}>
+                На дно
+              </button>
+            </div>
+            {s.placeLilyAnchor === 'surface' && (
+              <p className="text-[10px] text-zinc-500">Наведіть на воду: стебло з дна саме дотягнеться до поверхні, голівка ляже на воду.</p>
+            )}
+          </>
+        )}
+        {PROP_DEF_MAP.get(s.placeType)?.chain && !(PROP_DEF_MAP.get(s.placeType)?.chain === 'lily' && s.placeLilyAnchor === 'surface') && (
+          <ChainLengthSlider
+            kind={PROP_DEF_MAP.get(s.placeType)!.chain!}
             value={s.placeChainLength}
-            min={ALGAE_MIN_LINKS}
-            max={ALGAE_MAX_LINKS}
-            step={1}
+            scale={s.placeScale}
+            head={s.placeLilyHead}
             onChange={(v) => editor.set('placeChainLength', v)}
-            fmt={(v) => `${v} ланок · ${(algaeHeight(v) * s.placeScale).toFixed(2)} м`}
           />
         )}
-        {PROP_DEF_MAP.get(s.placeType)?.chain && (
+        {PROP_DEF_MAP.get(s.placeType)?.chain === 'algae' && (
           <AlgaeColorFields colors={s.placeAlgaeColors} onChange={(c) => editor.set('placeAlgaeColors', c)} />
         )}
         {PROP_DEF_MAP.get(s.placeType)?.web && (
@@ -256,6 +272,35 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
   if (s.tool === 'river') return <RiverPanel engine={engine} />;
   if (s.tool === 'cave') return <CavePanel engine={engine} />;
   if (s.tool === 'enemy') return <EnemyPanel engine={engine} />;
+
+  if (s.tool === 'duckweed') {
+    return (
+      <>
+        <Section title="Ряска">
+          <div className="flex gap-1">
+            <button className={chip(!s.duckweedErase)} onClick={() => editor.set('duckweedErase', false)}>
+              <Sprout className="w-3.5 h-3.5" /> Додати
+            </button>
+            <button className={chip(s.duckweedErase)} onClick={() => editor.set('duckweedErase', true)}>
+              <Minus className="w-3.5 h-3.5" /> Стерти
+            </button>
+          </div>
+        </Section>
+        <Slider label="Радіус" value={s.brushRadius} min={1} max={20} step={1} onChange={(v) => editor.set('brushRadius', v)} fmt={(v) => `${v} м`} />
+        <Slider label="Сила" value={s.duckweedRate} min={0.1} max={4} step={0.1} onChange={(v) => editor.set('duckweedRate', v)} fmt={(v) => v.toFixed(1)} />
+        <p className="text-zinc-500">Малюється по поверхні води (море, озера, річки). Слабкий мазок дає окремі листочки, повторний ущільнює до суцільного килима.</p>
+        <button
+          className={`${btn} gap-1.5 py-1.5 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25`}
+          onClick={() => {
+            editor.pushUndo();
+            duckweed.clear();
+          }}
+        >
+          <Trash2 className="w-3.5 h-3.5" /> Прибрати всю ряску
+        </button>
+      </>
+    );
+  }
 
   if (s.tool === 'sculpt') {
     const kinds = [
@@ -373,15 +418,22 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         Прилипати до землі
       </label>
       {def?.chain && (
-        <Slider
-          label="Довжина ланцюжка"
-          value={prop.length ?? ALGAE_MIN_LINKS}
-          min={ALGAE_MIN_LINKS}
-          max={ALGAE_MAX_LINKS}
-          step={1}
+        <ChainLengthSlider
+          kind={def.chain}
+          value={prop.length ?? CHAIN_SPECIES[def.chain].cfg.minLinks}
+          scale={prop.scale}
+          head={prop.head ?? 0}
           onStart={() => editor.pushUndo()}
           onChange={(v) => editor.setSelectedChainLength(v)}
-          fmt={(v) => `${v} ланок · ${(algaeHeight(v) * prop.scale).toFixed(2)} м`}
+        />
+      )}
+      {def?.chain === 'lily' && (
+        <LilyHeadChips
+          head={prop.head ?? 0}
+          onChange={(h) => {
+            editor.pushUndo();
+            editor.setSelectedChainHead(h);
+          }}
         />
       )}
       {def?.web && prop.web && (
@@ -391,7 +443,7 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         </>
       )}
       {def?.web && <WebLookPanel />}
-      {def?.chain && (
+      {def?.chain === 'algae' && (
         <AlgaeColorFields
           colors={prop.colors ?? null}
           onStart={() => editor.pushUndo()}
@@ -1049,6 +1101,18 @@ const WATER_GROUPS: { title: string; sliders: WaterSlider[] }[] = [
     ],
   },
   {
+    title: 'Іскри на воді',
+    sliders: [
+      { k: 'sparkle', label: 'Яскравість іскор', min: 0, max: 20, step: 0.1, fmt: (v) => (v > 0 ? v.toFixed(1) : 'вимк.') },
+      { k: 'sparkleDensity', label: 'Частота іскор', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
+      { k: 'sparkleSize', label: 'Розмір грані', min: 0.04, max: 0.6, step: 0.01, fmt: (v) => `${Math.round(v * 100)} см` },
+      { k: 'sparkleSpread', label: 'Ширина доріжки', min: 0.05, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
+      { k: 'sparkleStars', label: 'Зірочки (яскравість)', min: 0, max: 15, step: 0.1, fmt: (v) => (v > 0 ? v.toFixed(1) : 'вимк.') },
+      { k: 'sparkleStarSize', label: 'Розмір зірочок', min: 4, max: 64, step: 1, fmt: (v) => `${v} px` },
+      { k: 'sparkleStarDensity', label: 'Частота зірочок', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
+    ],
+  },
+  {
     title: 'Піна',
     sliders: [
       { k: 'foamAmount', label: 'Кількість', min: 0, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
@@ -1292,6 +1356,42 @@ const VegetationPanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
     </>
   );
 };
+
+/** Links in a chain plant (algae, water lily) with the height they make at this scale. */
+const ChainLengthSlider: React.FC<{
+  kind: keyof typeof CHAIN_SPECIES;
+  value: number;
+  scale: number;
+  head: number;
+  onChange(v: number): void;
+  onStart?(): void;
+}> = ({ kind, value, scale, head, onChange, onStart }) => {
+  const sp = CHAIN_SPECIES[kind];
+  return (
+    <Slider
+      label="Довжина ланцюжка"
+      value={sp.clampLinks(value)}
+      min={sp.cfg.minLinks}
+      max={sp.cfg.maxLinks}
+      step={1}
+      onStart={onStart}
+      onChange={onChange}
+      fmt={(v) => `${v} ланок · ${(sp.height(v, head) * scale).toFixed(2)} м`}
+    />
+  );
+};
+
+/** Water lily: what caps the stem (a leaf or a flower). */
+const LilyHeadChips: React.FC<{ head: number; onChange(h: number): void }> = ({ head, onChange }) => (
+  <div className="flex flex-wrap items-center gap-1">
+    <span className="text-zinc-400 text-[11px] mr-1">Верхівка:</span>
+    {LILY_HEADS.map((label, i) => (
+      <button key={label} className={chip(head === i)} onClick={() => onChange(i)}>
+        {label}
+      </button>
+    ))}
+  </div>
+);
 
 /**
  * One stalk's colours: off = it follows the panel's algae colours, on = its own root and top

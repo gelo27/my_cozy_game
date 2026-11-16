@@ -42,6 +42,7 @@ import {
   Lamp,
   LampCeiling,
   Warehouse,
+  Landmark,
 } from 'lucide-react';
 import { BuildingPieceType, BuildingTelemetry, DormerAction, HouseRoofKind, PieceCategory } from '../building/types/BuildingTypes';
 import { DORMER_STYLES } from '../building/RoofDormers';
@@ -65,19 +66,18 @@ interface BuildingHUDProps {
   onConfirmAll?: () => void;
   /** Restyles the selected roof and sets the style for new ones */
   onSetRoofStyle?: (style: RoofStyle) => void;
-  /** One roof over the whole house of the selected / aimed wall */
-  onRoofWholeHouse?: () => void;
   /** Picks the whole-house roof tool: the next wall clicked gets that roof over its house */
   onSelectHouseRoofTool?: (kind: HouseRoofKind) => void;
   /** Dormer panel of the selected roof */
   onDormerAction?: (action: DormerAction) => void;
-  onFillOutline?: () => void;
 }
 
 /** Whole-house roofs in the roofs shelf (orange): pick one, then click a wall of the house */
 const HOUSE_ROOF_ITEMS: Array<{ kind: HouseRoofKind; name: TKey; icon: React.ReactNode }> = [
   { kind: 'gable', name: 'build.houseRoof.gable', icon: <Home className="w-5 h-5" /> },
   { kind: 'hip', name: 'build.houseRoof.hip', icon: <Box className="w-5 h-5" /> },
+  { kind: 'gambrel', name: 'build.houseRoof.gambrel', icon: <Warehouse className="w-5 h-5" /> },
+  { kind: 'mansard', name: 'build.houseRoof.mansard', icon: <Landmark className="w-5 h-5" /> },
 ];
 
 interface PieceItemConfig {
@@ -407,10 +407,8 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
   onConfirmFoundations,
   onConfirmAll,
   onSetRoofStyle,
-  onRoofWholeHouse,
   onSelectHouseRoofTool,
   onDormerAction,
-  onFillOutline,
 }) => {
   useLang();
   const {
@@ -682,34 +680,6 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                   <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
-
-              {/* Walls on every outer edge of the selected / aimed floor */}
-              {telemetry.fillKind && onFillOutline && (
-                <button
-                  id="btn-fill-outline"
-                  onClick={onFillOutline}
-                  title={t(telemetry.fillKind === 'walls' ? 'build.floorWallsTitle' : 'build.fill.ceilingTitle')}
-                  className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400/60 transition-all"
-                >
-                  <Home className="w-3.5 h-3.5" />
-                  <span>{t(telemetry.fillKind === 'walls' ? 'build.floorWalls' : 'build.fill.ceiling')}</span>
-                  <span className="text-amber-100/70 font-normal">[K]</span>
-                </button>
-              )}
-
-              {/* One roof over the whole house of the selected / aimed wall */}
-              {telemetry.canRoofHouse && onRoofWholeHouse && (
-                <button
-                  id="btn-roof-whole-house"
-                  onClick={onRoofWholeHouse}
-                  title={t('build.houseRoofTitle')}
-                  className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400/60 transition-all"
-                >
-                  <Home className="w-3.5 h-3.5" />
-                  <span>{t('build.houseRoof')}</span>
-                  <span className="text-amber-100/70 font-normal">[U]</span>
-                </button>
-              )}
 
               {/* Sims 4 Style Architectural Roof Texture Selector */}
               {(activeCategory === PieceCategory.ROOFS || (selectedPieceType && selectedPieceType.startsWith('ROOF_')) || telemetry.isRoofSelected) && (

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { isMobileDevice } from './WorldSettings';
 import { PrecipitationOcclusion } from './PrecipitationOcclusion';
-import { MAX_FAKE_LIGHTS, nightLightUniforms } from './NightLighting';
+import { FAKE_LIGHT_MASK_GLSL, MAX_FAKE_LIGHTS, nightLightUniforms } from './NightLighting';
 
 /** Side of the box of drops that follows the camera (m). */
 export const PRECIP_BOX = 40;
@@ -94,6 +94,8 @@ export class Precipitation {
         uFakeLightPos: nightLightUniforms.uFakeLightPos,
         uFakeLightColor: nightLightUniforms.uFakeLightColor,
         uFakeLightCount: nightLightUniforms.uFakeLightCount,
+        uFakeLightGrid: nightLightUniforms.uFakeLightGrid,
+        uFakeLightAlways: nightLightUniforms.uFakeLightAlways,
       },
       vertexShader: `
         attribute vec3 offset;
@@ -107,6 +109,7 @@ export class Precipitation {
         uniform vec4 uFakeLightPos[MAX_FAKE_LIGHTS];
         uniform vec3 uFakeLightColor[MAX_FAKE_LIGHTS];
         uniform int uFakeLightCount;
+        ${FAKE_LIGHT_MASK_GLSL}
         varying vec2 vUv;
         varying float vFade;
         varying vec3 vLit;
@@ -168,8 +171,10 @@ export class Precipitation {
           // Lamp light on the flake: no facing (a flake scatters every way), a soft falloff that
           // reaches a bit past the lamp's ground pool so a glowing cone of snow hangs around it
           vLit = vec3(0.0);
+          uint lightMask = uFakeLightCount > 0 ? fakeLightMask(p) : 0u;
           for (int i = 0; i < MAX_FAKE_LIGHTS; i++) {
-            if (i >= uFakeLightCount) break;
+            if (i >= uFakeLightCount || lightMask == 0u) break;
+            if (((lightMask >> uint(i)) & 1u) == 0u) continue;
             vec3 tl = uFakeLightPos[i].xyz - mv.xyz;
             float r = uFakeLightPos[i].w * 1.2;
             float d2 = dot(tl, tl);

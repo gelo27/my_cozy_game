@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { SEA_FLOOR_Y, WORLD_SIZE } from './WorldSettings';
 import { waterSettings } from './WaterSettings';
+import { DUCKWEED_GLSL, duckweedUniforms } from './Duckweed';
 
 /**
  * The one water look, shared by the sea (WaterSystem) and the rivers / lakes (RiverSystem):
@@ -46,6 +47,9 @@ export const waterSurfaceUniforms = {
   uWsShoreA: { value: new THREE.Vector4() },
   /** x gap 0..1 */
   uWsShoreB: { value: new THREE.Vector4() },
+  /** Sparkles: x brightness (0 = off), y slope tolerance, z facets per metre, w slope spread */
+  uWsSparkle: { value: new THREE.Vector4() },
+  ...duckweedUniforms,
 };
 
 const normals = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}water_normals.jpg`);
@@ -68,7 +72,50 @@ export function updateWaterSurface(dt: number): void {
   u.uWsFoam.value.set(ws.foamLine, ws.rippleFoam ? 1 : 0, ws.rippleSpeed);
   u.uWsShoreA.value.set(Math.round(ws.shoreLineCount), ws.shoreLineWidth, ws.shoreLineReach, ws.shoreLineDash);
   u.uWsShoreB.value.set(ws.shoreLineGap, 0, 0, 0);
+  u.uWsSparkle.value.set(ws.sparkle, Math.max(ws.sparkleDensity, 1e-3), 1 / Math.max(ws.sparkleSize, 0.02), Math.max(ws.sparkleSpread, 0.01));
 }
+
+/**
+ * Bed height and wave slope (GLSL, safe in a vertex shader too: no derivatives). Needs uWsTime,
+ * uWsNormals, uWsBed, uWsWaveA, uWsWaveB declared before it.
+ */
+export const WATER_SHARED_GLSL = /* glsl */ `
+/** Terrain texture uv of a world point, and 1 inside the island / 0 outside. */
+vec2 wsBedUv(vec2 xz) { return (xz + ${(HALF + 0.5).toFixed(1)}) / ${V.toFixed(1)}; }
+float wsInIsland(vec2 xz) { return step(abs(xz.x), ${HALF.toFixed(1)}) * step(abs(xz.y), ${HALF.toFixed(1)}); }
+/** Height of the bed under a point (outside the island: the flat sea floor). */
+float wsBedY(vec2 xz) { return mix(${SEA_FLOOR_Y.toFixed(2)}, texture2D(uWsBed, wsBedUv(xz)).r, wsInIsland(xz)); }
+/**
+ * Wave slope at p (in the frame p is measured in), calmer with camera distance; shade = a little
+ * light / dark from the waves, wob = a small wobble for edges.
+ */
+vec2 wsWaves(vec2 p, float dist, out float shade, out float wob) {
+  float detail = 1.0 - smoothstep(uWsWaveB.z, uWsWaveB.w, dist);
+  vec3 n1 = texture2D(uWsNormals, p * uWsWaveB.x + uWsTime * uWsWaveA.w * vec2(0.011, 0.007)).xyz * 2.0 - 1.0;
+  vec3 n2 = texture2D(uWsNormals, p * uWsWaveB.y + uWsTime * uWsWaveA.w * vec2(-0.015, 0.010)).xyz * 2.0 - 1.0;
+  shade = 0.94 + (n1.z + n2.z) * 0.04;
+  wob = (n1.x + n2.y) * 0.6;
+  return (n1.xy * 0.6 + n2.xy * 0.4) * mix(uWsWaveA.z, uWsWaveA.y, detail);
+}
+float wsHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+/**
+ * One sparkle facet of the cell id of a world grid. need = the extra slope the water there would
+ * need to mirror the light into the eye: 0 in the middle of the glint, growing away from it.
+ * Facets within spread of it can catch the light (a jittered edge, so the path is no hard
+ * ellipse); a share of them (density, fewer toward the edge) flash at a time. Every facet
+ * re-rolls a few times a second, each in its own rhythm, and flashes up and down within a roll.
+ * Returns 0..1, and the facet's spot inside the cell (cell units) in spot.
+ */
+float wsSparkleFacet(vec2 id, vec2 need, float density, float spread, float rate, out vec2 spot) {
+  float h = wsHash(id);
+  float c = uWsTime * rate * (0.6 + h * 0.8) + h * 9.0;
+  vec2 e = id + floor(c) * vec2(17.13, 31.71);
+  spot = (vec2(wsHash(e + 11.9), wsHash(e + 23.1)) - 0.5) * 0.6;
+  vec2 s = (vec2(wsHash(e + 41.7), wsHash(e + 57.3)) - 0.5) * spread * 0.6;
+  float k = max(0.0, 1.0 - length(need - s) / spread);
+  return step(wsHash(e), density * k) * k * sin(3.14159265 * fract(c));
+}
+`;
 
 /**
  * Declarations and helpers (fragment shader, after #include <common>; needs WATER_DETAIL_GLSL
@@ -88,25 +135,10 @@ uniform vec4 uWsShine;
 uniform vec3 uWsFoam;
 uniform vec4 uWsShoreA;
 uniform vec4 uWsShoreB;
+uniform vec4 uWsSparkle;
 vec3 wsN;
 float wsFoam;
-/** Terrain texture uv of a world point, and 1 inside the island / 0 outside. */
-vec2 wsBedUv(vec2 xz) { return (xz + ${(HALF + 0.5).toFixed(1)}) / ${V.toFixed(1)}; }
-float wsInIsland(vec2 xz) { return step(abs(xz.x), ${HALF.toFixed(1)}) * step(abs(xz.y), ${HALF.toFixed(1)}); }
-/** Height of the bed under a point (outside the island: the flat sea floor). */
-float wsBedY(vec2 xz) { return mix(${SEA_FLOOR_Y.toFixed(2)}, texture2D(uWsBed, wsBedUv(xz)).r, wsInIsland(xz)); }
-/**
- * Wave slope at p (in the frame p is measured in), calmer with camera distance; shade = a little
- * light / dark from the waves, wob = a small wobble for edges.
- */
-vec2 wsWaves(vec2 p, float dist, out float shade, out float wob) {
-  float detail = 1.0 - smoothstep(uWsWaveB.z, uWsWaveB.w, dist);
-  vec3 n1 = texture2D(uWsNormals, p * uWsWaveB.x + uWsTime * uWsWaveA.w * vec2(0.011, 0.007)).xyz * 2.0 - 1.0;
-  vec3 n2 = texture2D(uWsNormals, p * uWsWaveB.y + uWsTime * uWsWaveA.w * vec2(-0.015, 0.010)).xyz * 2.0 - 1.0;
-  shade = 0.94 + (n1.z + n2.z) * 0.04;
-  wob = (n1.x + n2.y) * 0.6;
-  return (n1.xy * 0.6 + n2.xy * 0.4) * mix(uWsWaveA.z, uWsWaveA.y, detail);
-}
+${WATER_SHARED_GLSL}
 /** Shallow turquoise -> deep blue (linear colours). */
 vec3 wsColour(float depth, float shade) {
   return mix(uWsShallow, uWsDeep, 1.0 - exp(-depth * uWsWaveA.x)) * shade;
@@ -140,6 +172,7 @@ float wsShoreLines(float d, vec2 dashP, float aa, float seed, float reachMax) {
   // Lines thinner than a pixel far away: fade instead of flicker
   return v * (1.0 - smoothstep(0.06, 0.2, aa));
 }
+${DUCKWEED_GLSL}
 `;
 
 /** The surface normal (world wsN) into the view space normal; flipped for the underside. */
@@ -150,6 +183,14 @@ normal = normalize((viewMatrix * vec4(gl_FrontFacing ? wsN : -wsN, 0.0)).xyz);`;
 export const WATER_LIGHT_GLSL = /* glsl */ `
 vec3 wsV = normalize(vViewPosition);
 float wsNV = clamp(dot(normal, wsV), 0.0, 1.0);
+// Sparkle grid (derivatives here, outside the branches): facets per pixel by area, so the
+// facets fade out where they get smaller than a pixel instead of turning into noise
+mat3 wsV2W = transpose(mat3(viewMatrix));
+vec2 wsSpG = (cameraPosition + wsV2W * (-vViewPosition)).xz * uWsSparkle.z;
+vec2 wsSpDx = dFdx(wsSpG);
+vec2 wsSpDy = dFdy(wsSpG);
+float wsSpPx = sqrt(abs(wsSpDx.x * wsSpDy.y - wsSpDx.y * wsSpDy.x));
+float wsSpFade = uWsSparkle.x > 0.0 ? 1.0 - smoothstep(0.5, 1.4, wsSpPx) : 0.0;
 vec3 wsSky = ambientLightColor;
 #if NUM_HEMI_LIGHTS > 0
 wsSky += hemisphereLights[0].skyColor;
@@ -157,16 +198,39 @@ wsSky += hemisphereLights[0].skyColor;
 if (gl_FrontFacing) {
   // Fresnel: grazing angles mirror the sky
   float fres = 0.02 + uWsShine.x * pow(1.0 - wsNV, 5.0);
-  totalEmissiveRadiance += wsSky * vec3(0.55, 0.75, 0.95) * fres * (1.0 - wsFoam);
+  float wsBare = 1.0 - max(wsFoam, wsWeed);
+  totalEmissiveRadiance += wsSky * vec3(0.55, 0.75, 0.95) * fres * wsBare;
   #if NUM_DIR_LIGHTS > 0
   // Sun glint: a sharp highlight plus a soft sheen around it
   float nh = max(dot(normal, normalize(directionalLights[0].direction + wsV)), 0.0);
-  totalEmissiveRadiance += directionalLights[0].color * csSun * (pow(nh, uWsShine.z) * uWsShine.y + pow(nh, 48.0) * 0.12) * (1.0 - wsFoam);
+  totalEmissiveRadiance += directionalLights[0].color * csSun * (pow(nh, uWsShine.z) * uWsShine.y + pow(nh, 48.0) * 0.12) * wsBare;
+  // Sparkles: single tiny facets that mirror the sun (or the moon) straight into the eye.
+  // need = the extra slope a facet must have for that; each cell's facet has a random one.
+  if (wsSpFade > 0.0 && wsBare > 0.01) {
+    vec3 wsHw = wsV2W * normalize(directionalLights[0].direction + wsV);
+    if (wsHw.y > 0.05) {
+      vec2 need = wsHw.xz / wsHw.y - wsN.xz / max(wsN.y, 0.05);
+      vec2 spot;
+      float f = wsSparkleFacet(floor(wsSpG), need, uWsSparkle.y, uWsSparkle.w, 3.0, spot);
+      // A dot of ~2 px whatever the distance (cell units: wsSpPx cells per pixel)
+      float r = clamp(wsSpPx * 2.2, 0.03, 0.45);
+      float m = 1.0 - smoothstep(r * 0.35, r, length(fract(wsSpG) - 0.5 - spot));
+      totalEmissiveRadiance += directionalLights[0].color * csSun * (f * m * wsSpFade * uWsSparkle.x * wsBare);
+    }
+  }
+  // Duckweed fronds are waxy: a soft, broad sheen instead of the water's glint
+  totalEmissiveRadiance += directionalLights[0].color * csSun * pow(nh, 20.0) * 0.06 * wsWeed;
   #endif
 } else {
   // From below: a dim ceiling, with the bright Snell's window straight overhead
   float window = smoothstep(0.55, 0.9, wsNV);
-  totalEmissiveRadiance += wsSky * vec3(0.12, 0.45, 0.55) * (0.15 + window * 0.9);
+  totalEmissiveRadiance += wsSky * vec3(0.12, 0.45, 0.55) * (0.15 + window * 0.9) * (1.0 - wsWeed * 0.55);
+  // Duckweed seen from below: the thin fronds let the light through and glow green, brightest
+  // inside the window where the sky and the sun are
+  totalEmissiveRadiance += wsSky * wsWeedCol * wsWeed * (0.35 + window * 0.6);
+  #if NUM_DIR_LIGHTS > 0
+  totalEmissiveRadiance += directionalLights[0].color * csSun * wsWeedCol * vec3(1.1, 1.2, 0.75) * wsWeed * (0.25 + window * 0.55);
+  #endif
 }`;
 
 // ---------------------------------------------------------------- bed and shore textures

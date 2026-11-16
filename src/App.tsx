@@ -238,10 +238,8 @@ export default function App() {
                         onConfirmFoundations={building.confirmFoundations}
                         onConfirmAll={building.confirmAll}
                         onSetRoofStyle={building.setRoofStyle}
-                        onRoofWholeHouse={building.roofWholeHouse}
                         onSelectHouseRoofTool={building.selectHouseRoofTool}
                         onDormerAction={building.dormerAction}
-                        onFillOutline={building.fillOutline}
                       />
                     )}
                     {buildingTelemetry.isPaintingModeActive && (
