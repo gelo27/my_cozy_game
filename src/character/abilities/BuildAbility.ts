@@ -3,8 +3,10 @@ import type { TKey } from '../../i18n/en';
 import * as THREE from 'three';
 import { cutawayRayStart } from '../../building/BuildCutaway';
 import { IAbility, CharacterContext } from './IAbility';
-import { BuildingPieceType, BuildingTelemetry, BuiltPiece, SnapResult, isSwingDoorPiece, isProceduralRoofPiece, isGlassRoofPiece, isSolidWallPiece } from '../../building/types/BuildingTypes';
+import { DORMER_HEIGHT, DORMER_WIDTH, type DormerStyle } from '../../building/RoofDormers';
+import { BuildingPieceType, BuildingTelemetry, BuiltPiece, DormerAction, HouseRoofKind, SnapResult, isSwingDoorPiece, isProceduralRoofPiece, isGlassRoofPiece, isSolidWallPiece } from '../../building/types/BuildingTypes';
 import { isOutlineTile } from '../../building/FloorOutlineWalls';
+import type { OutlineFillKind } from '../../building/OutlineFill';
 import { RoofStyle } from '../../building/ProceduralRoofSystem';
 import { BUILDING_PIECES } from '../../building/config/BuildingPiecesConfig';
 import { BuildingManager } from '../../building/BuildingManager';
@@ -29,6 +31,8 @@ const PIECE_TYPES_ORDER: BuildingPieceType[] = [
   BuildingPieceType.ROOF_GABLE_4X4,
   BuildingPieceType.ROOF_HIP_2X4,
   BuildingPieceType.ROOF_HIP_4X4,
+  BuildingPieceType.ROOF_GAMBREL_2X2,
+  BuildingPieceType.ROOF_MANSARD_2X2,
   BuildingPieceType.WOOD_ROOF_26,
   BuildingPieceType.WOOD_POLE_2M,
   BuildingPieceType.CHECKER_PILLAR_1M,
@@ -75,6 +79,17 @@ export class BuildAbility implements IAbility {
   /** Shows the outcome of the [U] house-roof hotkey (wired by the HUD) */
   public onHouseRoofMessage: ((ok: boolean, message: string) => void) | null = null;
   private houseRoofKeyHeld = false;
+  /** Whole-house roof picked in the dock: the next wall clicked gets it */
+  private houseRoofTool: HouseRoofKind | null = null;
+  /** Dormer tool on: clicks on the selected roof's slopes place dormers */
+  private dormerTool = false;
+  /** Style and size the next dormer gets (and the picked one shows) */
+  private dormerSettings: { style: DormerStyle; width: number; height: number } = {
+    style: 'gable', width: DORMER_WIDTH.initial, height: DORMER_HEIGHT.initial,
+  };
+  /** The placed dormer the panel edits */
+  private activeDormer: { roofId: string; id: string } | null = null;
+  private dormerHint: TKey | null = null;
   private floorWallsKeyHeld = false;
 
   private wasSnappedPrevious: boolean = false;
@@ -92,6 +107,7 @@ export class BuildAbility implements IAbility {
     this.pieceSelectionSystem = pieceSelectionSystem || new PieceSelectionSystem(manager.scene, manager);
     if (this.pieceSelectionSystem) {
       this.pieceSelectionSystem.setBuildingManager(manager);
+      this.pieceSelectionSystem.fillKindResolver = (piece) => manager.getOutlineFillKind(piece.id);
     }
   }
 
@@ -105,6 +121,12 @@ export class BuildAbility implements IAbility {
     }
     if (!this.isBuildModeActive && this.pieceSelectionSystem) {
       this.pieceSelectionSystem.deselect();
+    }
+    if (!this.isBuildModeActive) {
+      this.houseRoofTool = null;
+      this.dormerTool = false;
+      this.activeDormer = null;
+      this.buildingManager?.clearDormerPreviews();
     }
     audioEngine.playBuildSelect();
     return this.isBuildModeActive;
@@ -200,6 +222,8 @@ export class BuildAbility implements IAbility {
   }
 
   public setPieceType(type: BuildingPieceType | null): void {
+    this.houseRoofTool = null;
+    this.dormerTool = false;
     if (type === null) {
       this.currentPieceType = null;
       this.selectedIndex = -1;
@@ -455,6 +479,8 @@ export class BuildAbility implements IAbility {
 
     // Escape key deselects currently selected piece and active wall
     if (input.keys?.['Escape']) {
+      this.houseRoofTool = null;
+      this.dormerTool = false;
       this.currentPieceType = null;
       this.selectedIndex = -1;
       this.ghostRenderer?.setVisible(false);
@@ -497,9 +523,9 @@ export class BuildAbility implements IAbility {
     }
     this.houseRoofKeyHeld = !!input.keys?.['KeyU'];
 
-    // Walls around the whole floor of the tile under the cursor via [K]
+    // Outline fill from the selected / aimed wall or floor tile via [K]
     if (input.keys?.['KeyK'] && !this.floorWallsKeyHeld) {
-      const res = this.wallFloorOutline();
+      const res = this.fillOutline();
       this.onHouseRoofMessage?.(res.ok, res.message);
     }
     this.floorWallsKeyHeld = !!input.keys?.['KeyK'];
@@ -558,6 +584,8 @@ export class BuildAbility implements IAbility {
     if (this.pieceSelectionSystem && this.buildingManager) {
       // 1. Check if user just pressed mouse button down on an extension arrow to begin dragging
       if (input.isMouseDownJustPressed) {
+        // The fill icon acts on the click (release) below; pressing on it starts no drag
+        if (this.pieceSelectionSystem.raycastFillButton(arrowRayOrigin, arrowRayDir)) return;
         const hitArrowSide = this.pieceSelectionSystem.raycastArrows(arrowRayOrigin, arrowRayDir);
         if (hitArrowSide && this.pieceSelectionSystem.getSelectedPiece()) {
           this.pieceSelectionSystem.startDrag(hitArrowSide, arrowRayOrigin, arrowRayDir, this.buildingManager);
@@ -608,8 +636,24 @@ export class BuildAbility implements IAbility {
     // 7. Click Interaction:
     // Uses exclusively input.buildPlaceJustPressed (clean mouse release without camera dragging or UI clicks)
     const isClickJustPressed = input.buildPlaceJustPressed;
+    if (this.updateDormers(rayOrigin, rayDir, targetPiece, isClickJustPressed)) return;
+    if (isClickJustPressed && this.houseRoofTool) {
+      // Whole-house roof tool: the clicked wall's house gets the roof
+      const res = this.roofWholeHouse(this.houseRoofTool, targetPiece && isSolidWallPiece(targetPiece.type) ? targetPiece : null);
+      if (res.ok) this.houseRoofTool = null;
+      this.onHouseRoofMessage?.(res.ok, res.message);
+      return;
+    }
     if (isClickJustPressed) {
-      // 7a. PRIORITY 1: Clicked on one of the high-contrast extension arrows on the active piece
+      // 7a. PRIORITY 1: Clicked the fill icon or one of the extension arrows on the active piece
+      if (this.pieceSelectionSystem?.raycastFillButton(arrowRayOrigin, arrowRayDir)) {
+        const res = this.fillOutline(this.pieceSelectionSystem.getSelectedPiece());
+        this.onHouseRoofMessage?.(res.ok, res.message);
+        this.currentPieceType = null;
+        this.selectedIndex = -1;
+        this.ghostRenderer.setVisible(false);
+        return;
+      }
       const hitArrowSide = this.pieceSelectionSystem?.raycastArrows(arrowRayOrigin, arrowRayDir);
       if (hitArrowSide && this.pieceSelectionSystem?.getSelectedPiece() && this.buildingManager) {
         this.pieceSelectionSystem.extendSelectedPiece(hitArrowSide, this.buildingManager);
@@ -743,7 +787,9 @@ export class BuildAbility implements IAbility {
       fillPreviewCount: this.currentFillFaces?.length ?? 0,
       isRoofSelected: !!this.getSelectedShingleRoof(),
       canRoofHouse: !!this.houseRoofWall(),
-      canWallFloor: !!this.outlineFloorTile(),
+      houseRoofTool: this.houseRoofTool,
+      fillKind: this.fillTargetKind(),
+      dormer: this.dormerTelemetry(),
       currentRoofStyle: this.getSelectedShingleRoof()?.roofStyle ?? this.buildingManager?.defaultRoofStyle,
     };
   }
@@ -751,6 +797,131 @@ export class BuildAbility implements IAbility {
   private getSelectedShingleRoof(): BuiltPiece | null {
     const piece = this.pieceSelectionSystem?.getSelectedPiece();
     return piece && isProceduralRoofPiece(piece.type) && !isGlassRoofPiece(piece.type) ? piece : null;
+  }
+
+  // ----------------------------------------------------------------------------------- dormers
+
+  /**
+   * Dormer tool and picking, each frame: the tool previews a dormer on the selected roof's slope
+   * under the cursor and places it on a click; a click on a placed dormer picks it for the panel.
+   * Returns true when the click was used.
+   */
+  private updateDormers(rayOrigin: THREE.Vector3, rayDir: THREE.Vector3, target: BuiltPiece | null, click: boolean): boolean {
+    const bm = this.buildingManager;
+    if (!bm) return false;
+    const roof = this.getSelectedShingleRoof();
+    if (this.activeDormer && (!roof || roof.id !== this.activeDormer.roofId || !bm.getRoofDormers(roof.id).some((d) => d.id === this.activeDormer!.id))) {
+      this.activeDormer = null;
+    }
+    if (!roof) {
+      if (this.dormerTool) this.dormerTool = false;
+      this.dormerHint = null;
+      bm.clearDormerPreviews();
+      return false;
+    }
+    const onRoof = !target || target.id === roof.id;
+    if (!this.dormerTool) {
+      bm.clearDormerPreviews();
+      this.dormerHint = null;
+      if (!click || !onRoof) return false;
+      const id = bm.dormerUnderRay(roof.id, rayOrigin, rayDir);
+      if (!id) {
+        this.activeDormer = null;
+        return false;
+      }
+      this.pickDormer(roof.id, id);
+      return true;
+    }
+
+    const aimed = onRoof ? bm.pickDormerSpot(roof.id, rayOrigin, rayDir) : null;
+    const existing = aimed ? bm.dormerUnderRay(roof.id, rayOrigin, rayDir) : null;
+    // Too high up a low roof, the dormer slides down the slope to where it fits
+    const fit = aimed && !existing ? bm.fitDormer(roof.id, { ...aimed, ...this.dormerSettings }) : null;
+    const spot = fit && !fit.reason ? { x: fit.x, z: fit.z } : aimed;
+    if (!aimed || existing) {
+      bm.setDormerPreview(roof.id, null);
+      this.dormerHint = aimed ? 'build.dormer.pickHint' : 'build.dormer.aim';
+    } else {
+      this.dormerHint = bm.setDormerPreview(roof.id, { ...spot!, ...this.dormerSettings });
+    }
+    if (!click || !spot) return false;
+    if (existing) {
+      this.pickDormer(roof.id, existing);
+      return true;
+    }
+    const res = bm.addDormer(roof.id, { ...spot, ...this.dormerSettings });
+    if (res.ok === false) {
+      audioEngine.playBuildSelect();
+      this.onHouseRoofMessage?.(false, t(res.reason));
+    } else {
+      this.activeDormer = { roofId: roof.id, id: res.id };
+      this.onHouseRoofMessage?.(true, t('build.dormer.placed'));
+    }
+    return true;
+  }
+
+  /** Picks a placed dormer: the panel now shows and changes its style and size */
+  private pickDormer(roofId: string, id: string): void {
+    const d = this.buildingManager?.getRoofDormers(roofId).find((x) => x.id === id);
+    if (!d) return;
+    this.activeDormer = { roofId, id };
+    this.dormerSettings = { style: d.style, width: d.width, height: d.height };
+    audioEngine.playBuildSelect();
+  }
+
+  private dormerTelemetry(): BuildingTelemetry['dormer'] {
+    const roof = this.getSelectedShingleRoof();
+    if (!roof || !this.buildingManager) return null;
+    return {
+      tool: this.dormerTool,
+      ...this.dormerSettings,
+      editing: !!this.activeDormer,
+      count: this.buildingManager.getRoofDormers(roof.id).length,
+      hint: this.dormerHint ? t(this.dormerHint) : null,
+    };
+  }
+
+  /** Dormer panel buttons. Returns a message to show, or null. */
+  public dormerAction(action: DormerAction): { ok: boolean; message: string } | null {
+    const bm = this.buildingManager;
+    const roof = this.getSelectedShingleRoof();
+    if (!bm || !roof) return null;
+    const step = (v: number, delta: number, r: { min: number; max: number; step: number }) =>
+      +THREE.MathUtils.clamp(Math.round((v + delta * r.step) / r.step) * r.step, r.min, r.max).toFixed(2);
+    const next = { ...this.dormerSettings };
+    switch (action.kind) {
+      case 'tool':
+        this.dormerTool = !this.dormerTool;
+        if (this.dormerTool) this.activeDormer = null;
+        else bm.clearDormerPreviews();
+        audioEngine.playBuildSelect();
+        return this.dormerTool ? { ok: true, message: t('build.dormer.aim') } : null;
+      case 'done':
+        this.dormerTool = false;
+        this.activeDormer = null;
+        bm.clearDormerPreviews();
+        audioEngine.playBuildSelect();
+        return null;
+      case 'delete':
+        if (!this.activeDormer) return null;
+        bm.removeDormer(roof.id, this.activeDormer.id);
+        this.activeDormer = null;
+        audioEngine.playBuildDemolish();
+        return null;
+      case 'style': next.style = action.style; break;
+      case 'width': next.width = step(next.width, action.delta, DORMER_WIDTH); break;
+      case 'height': next.height = step(next.height, action.delta, DORMER_HEIGHT); break;
+    }
+    if (this.activeDormer) {
+      const reason = bm.updateDormer(roof.id, this.activeDormer.id, next);
+      if (reason) {
+        audioEngine.playBuildSelect();
+        return { ok: false, message: t(reason) };
+      }
+    }
+    this.dormerSettings = next;
+    audioEngine.playBuildSelect();
+    return null;
   }
 
   /** The wall a house roof would be built from: the selected wall, else the one under the cursor */
@@ -761,11 +932,34 @@ export class BuildAbility implements IAbility {
     return aimed && isSolidWallPiece(aimed.type) ? aimed : null;
   }
 
-  /** One roof over the whole house of the selected / aimed wall. Returns the message to show. */
-  public roofWholeHouse(): { ok: boolean; message: string } {
-    const wall = this.houseRoofWall();
+  /**
+   * Picks (or, picked again, drops) the whole-house roof tool: the next wall clicked gets that roof
+   * over its whole house. Returns the hint to show.
+   */
+  public setHouseRoofTool(kind: HouseRoofKind | null): { ok: boolean; message: string } | null {
+    if (kind === null || this.houseRoofTool === kind) {
+      this.houseRoofTool = null;
+      audioEngine.playBuildSelect();
+      return null;
+    }
+    if (!this.isBuildModeActive) {
+      this.isBuildModeActive = true;
+      if (this.isPaintingModeActive) this.setPaintingMode(false);
+    }
+    this.currentPieceType = null;
+    this.selectedIndex = -1;
+    this.ghostRenderer?.setVisible(false);
+    this.pieceSelectionSystem?.deselect();
+    this.houseRoofTool = kind;
+    audioEngine.playBuildSelect();
+    return { ok: true, message: t('build.houseRoof.pickWall') };
+  }
+
+  /** One roof over the whole house of a wall (the selected / aimed one by default). Returns the message to show. */
+  public roofWholeHouse(kind: HouseRoofKind = 'hip', fromWall?: BuiltPiece | null): { ok: boolean; message: string } {
+    const wall = fromWall === undefined ? this.houseRoofWall() : fromWall;
     if (!this.buildingManager || !wall) return { ok: false, message: t('build.houseRoof.noWall') };
-    const res = this.buildingManager.placeHouseRoof(wall.id);
+    const res = this.buildingManager.placeHouseRoof(wall.id, kind);
     if (res.ok === false) {
       audioEngine.playBuildSelect();
       return { ok: false, message: t(res.reason) };
@@ -774,24 +968,32 @@ export class BuildAbility implements IAbility {
     return { ok: true, message: t('build.houseRoof.done') };
   }
 
-  /** The floor tile walls would go around: the selected tile, else the one under the cursor */
-  private outlineFloorTile(): BuiltPiece | null {
+  /** The piece an outline fill starts from: the selected wall / tile, else the one under the cursor */
+  private fillTarget(): BuiltPiece | null {
+    const fits = (p: BuiltPiece | null | undefined) => !!p && (isSolidWallPiece(p.type) || isOutlineTile(p.type));
     const selected = this.pieceSelectionSystem?.getSelectedPiece();
-    if (selected && isOutlineTile(selected.type)) return selected;
+    if (fits(selected)) return selected!;
     const aimed = this.aimedPieceId ? this.buildingManager?.getPiece(this.aimedPieceId) : null;
-    return aimed && isOutlineTile(aimed.type) ? aimed : null;
+    return fits(aimed) ? aimed! : null;
   }
 
-  /** Walls on every outer edge of the selected / aimed floor. Returns the message to show. */
-  public wallFloorOutline(): { ok: boolean; message: string } {
-    const tile = this.outlineFloorTile();
-    if (!this.buildingManager || !tile) return { ok: false, message: t('build.floorWalls.noFloor') };
-    const res = this.buildingManager.placeFloorOutlineWalls(tile.id);
+  private fillTargetKind(): OutlineFillKind | null {
+    const target = this.fillTarget();
+    return target && this.buildingManager ? this.buildingManager.getOutlineFillKind(target.id) : null;
+  }
+
+  /** Walls along the floor outline, or the ceiling inside the walls. Returns the message to show. */
+  public fillOutline(from?: BuiltPiece | null): { ok: boolean; message: string } {
+    const target = from ?? this.fillTarget();
+    if (!this.buildingManager || !target) return { ok: false, message: t('build.fill.noPiece') };
+    const res = this.buildingManager.fillOutline(target.id);
     if (res.ok === false) {
       audioEngine.playBuildSelect();
       return { ok: false, message: t(res.reason) };
     }
-    return { ok: true, message: t('build.floorWalls.done', { n: String(res.placed) }) };
+    // The selected piece may offer another fill now (a filled ceiling offers walls above it)
+    this.pieceSelectionSystem?.refresh();
+    return { ok: true, message: t(res.kind === 'walls' ? 'build.fill.wallsDone' : 'build.fill.ceilingDone', { n: String(res.placed) }) };
   }
 
   /** Restyles the selected roof, and makes the style the one new roofs get */

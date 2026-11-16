@@ -2,12 +2,13 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { FURNITURE_PIECE_DEFS, buildFurnitureTemplate, isFurniturePiece } from '../furniture/FurnitureCatalog';
 import { BuildingPieceDef, BuildingPieceType, BuiltPiece, PieceCategory, SocketType, isGlassRoofPiece, isProceduralRoofPiece, shapeOf } from '../types/BuildingTypes';
+import type { RoofType } from '../ProceduralRoofSystem';
 import { ProceduralRoofGenerator } from '../ProceduralRoofSystem';
 import { GreenhouseRoofGenerator } from '../GreenhouseRoofGenerator';
 import type { ProceduralRoofConfig } from '../ProceduralRoofSystem';
 import { BUILDING_CONFIG } from '../../config/constants';
 import { createGlassMaterial } from '../../scene/GlassMatcap';
-import { BUILDING_MATERIALS, GREENHOUSE_GLASS_FAR, WINDOW_GLASS_FAR, addFarGlassTwins } from './BuildingMaterials';
+import { BUILDING_MATERIALS, DORMER_GLASS, GREENHOUSE_GLASS_FAR, WINDOW_GLASS_FAR, addFarGlassTwins } from './BuildingMaterials';
 import { MODULE_SIZE, HALF_SIZE, WALL_THICKNESS, FLOOR_THICKNESS } from './BuildingConstants';
 import { applyDefaultWallFaces } from './DefaultWallMaterials';
 import type { PieceMeshTemplate } from './meshes/PieceMeshTemplate';
@@ -1427,6 +1428,117 @@ export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
     ],
   },
 
+  // BROKEN-PITCH ROOFS (ЛАМАНИЙ / МАНСАРДНИЙ ДАХ)
+  [BuildingPieceType.ROOF_GAMBREL_2X2]: {
+    type: BuildingPieceType.ROOF_GAMBREL_2X2,
+    name: 'Gambrel Roof',
+    ukrainianName: 'Ламаний дах',
+    category: PieceCategory.ROOFS,
+    dimensions: new THREE.Vector3(MODULE_SIZE, 0.85, MODULE_SIZE),
+    woodCost: 4,
+    stoneCost: 0,
+    maxHealth: 150,
+    iconName: 'Home',
+    description: 'Двосхилий дах із переломом: круті нижні схили й пологий верх, як у старій стодолі. Дає високе горище.',
+    sockets: [
+      {
+        id: 'bottom_center',
+        type: SocketType.WALL_BOTTOM,
+        localPosition: new THREE.Vector3(0, 0, 0),
+        localNormal: new THREE.Vector3(0, -1, 0),
+        localUp: new THREE.Vector3(0, 0, 1),
+        compatibleWith: [SocketType.WALL_TOP, SocketType.FLOOR_EDGE],
+      },
+      {
+        id: 'eave_left',
+        type: SocketType.ROOF_EAVE,
+        localPosition: new THREE.Vector3(-HALF_SIZE, 0, 0),
+        localNormal: new THREE.Vector3(-1, 0, 0),
+        localUp: new THREE.Vector3(0, 1, 0),
+        compatibleWith: [SocketType.WALL_TOP, SocketType.FLOOR_EDGE, SocketType.ROOF_EAVE],
+      },
+      {
+        id: 'eave_right',
+        type: SocketType.ROOF_EAVE,
+        localPosition: new THREE.Vector3(HALF_SIZE, 0, 0),
+        localNormal: new THREE.Vector3(1, 0, 0),
+        localUp: new THREE.Vector3(0, 1, 0),
+        compatibleWith: [SocketType.WALL_TOP, SocketType.FLOOR_EDGE, SocketType.ROOF_EAVE],
+      },
+      {
+        id: 'ridge_front',
+        type: SocketType.ROOF_RIDGE,
+        localPosition: new THREE.Vector3(0, 0.85, -HALF_SIZE),
+        localNormal: new THREE.Vector3(0, 0, -1),
+        localUp: new THREE.Vector3(0, 1, 0),
+        compatibleWith: [SocketType.ROOF_RIDGE],
+      },
+      {
+        id: 'ridge_back',
+        type: SocketType.ROOF_RIDGE,
+        localPosition: new THREE.Vector3(0, 0.85, HALF_SIZE),
+        localNormal: new THREE.Vector3(0, 0, 1),
+        localUp: new THREE.Vector3(0, 1, 0),
+        compatibleWith: [SocketType.ROOF_RIDGE],
+      },
+    ],
+  },
+
+  [BuildingPieceType.ROOF_MANSARD_2X2]: {
+    type: BuildingPieceType.ROOF_MANSARD_2X2,
+    name: 'Mansard Roof',
+    ukrainianName: 'Мансардний дах',
+    category: PieceCategory.ROOFS,
+    dimensions: new THREE.Vector3(MODULE_SIZE, 0.85, MODULE_SIZE),
+    woodCost: 5,
+    stoneCost: 0,
+    maxHealth: 160,
+    iconName: 'Shield',
+    description: 'Чотирисхилий дах із переломом: майже вертикальні нижні схили з усіх боків і пологий верх. Під ним цілий мансардний поверх.',
+    sockets: [
+      {
+        id: 'bottom_center',
+        type: SocketType.WALL_BOTTOM,
+        localPosition: new THREE.Vector3(0, 0, 0),
+        localNormal: new THREE.Vector3(0, -1, 0),
+        localUp: new THREE.Vector3(0, 0, 1),
+        compatibleWith: [SocketType.WALL_TOP, SocketType.FLOOR_EDGE],
+      },
+      {
+        id: 'eave_north',
+        type: SocketType.ROOF_EAVE,
+        localPosition: new THREE.Vector3(0, 0, -HALF_SIZE),
+        localNormal: new THREE.Vector3(0, 0, -1),
+        localUp: new THREE.Vector3(0, 1, 0),
+        compatibleWith: [SocketType.WALL_TOP, SocketType.FLOOR_EDGE, SocketType.ROOF_EAVE],
+      },
+      {
+        id: 'eave_south',
+        type: SocketType.ROOF_EAVE,
+        localPosition: new THREE.Vector3(0, 0, HALF_SIZE),
+        localNormal: new THREE.Vector3(0, 0, 1),
+        localUp: new THREE.Vector3(0, 1, 0),
+        compatibleWith: [SocketType.WALL_TOP, SocketType.FLOOR_EDGE, SocketType.ROOF_EAVE],
+      },
+      {
+        id: 'eave_west',
+        type: SocketType.ROOF_EAVE,
+        localPosition: new THREE.Vector3(-HALF_SIZE, 0, 0),
+        localNormal: new THREE.Vector3(-1, 0, 0),
+        localUp: new THREE.Vector3(0, 1, 0),
+        compatibleWith: [SocketType.WALL_TOP, SocketType.FLOOR_EDGE, SocketType.ROOF_EAVE],
+      },
+      {
+        id: 'eave_east',
+        type: SocketType.ROOF_EAVE,
+        localPosition: new THREE.Vector3(HALF_SIZE, 0, 0),
+        localNormal: new THREE.Vector3(1, 0, 0),
+        localUp: new THREE.Vector3(0, 1, 0),
+        compatibleWith: [SocketType.WALL_TOP, SocketType.FLOOR_EDGE, SocketType.ROOF_EAVE],
+      },
+    ],
+  },
+
   // 1-PITCHED SHED ROOFS (ОДНОСХИЛИЙ ДАХ)
   [BuildingPieceType.ROOF_SHED_2X2]: {
     type: BuildingPieceType.ROOF_SHED_2X2,
@@ -2427,11 +2539,13 @@ function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
     case BuildingPieceType.ROOF_HIP_4X4:
     case BuildingPieceType.ROOF_SHED_2X2:
     case BuildingPieceType.ROOF_SHED_2X4:
-    case BuildingPieceType.ROOF_SHED_4X4: {
+    case BuildingPieceType.ROOF_SHED_4X4:
+    case BuildingPieceType.ROOF_GAMBREL_2X2:
+    case BuildingPieceType.ROOF_MANSARD_2X2: {
       const geo = ProceduralRoofGenerator.createBufferGeometry(getDefaultRoofConfig(type));
       return {
         geometry: geo,
-        materials: [BUILDING_MATERIALS.roofHeartopia, BUILDING_MATERIALS.roofTrim, BUILDING_MATERIALS.roofGableWall],
+        materials: [BUILDING_MATERIALS.roofHeartopia, BUILDING_MATERIALS.roofTrim, BUILDING_MATERIALS.roofGableWall, DORMER_GLASS],
         boundingBox: new THREE.Box3().setFromBufferAttribute(geo.getAttribute('position') as THREE.BufferAttribute),
       };
     }
@@ -2752,14 +2866,18 @@ export function createRoofGeometry(type: BuildingPieceType, config: Partial<Proc
 export { isProceduralRoofPiece } from '../types/BuildingTypes';
 
 export function getDefaultRoofConfig(type: BuildingPieceType) {
-  let roofType: 'gable' | 'hip' | 'shed' = 'gable';
+  let roofType: RoofType = 'gable';
   if (type.includes('HIP')) roofType = 'hip';
   else if (type.includes('SHED')) roofType = 'shed';
+  else if (type.includes('GAMBREL')) roofType = 'gambrel';
+  else if (type.includes('MANSARD')) roofType = 'mansard';
 
   switch (shapeOf(type)) {
     case BuildingPieceType.ROOF_GABLE_2X2:
     case BuildingPieceType.ROOF_HIP_2X2:
     case BuildingPieceType.ROOF_SHED_2X2:
+    case BuildingPieceType.ROOF_GAMBREL_2X2:
+    case BuildingPieceType.ROOF_MANSARD_2X2:
       return {
         minX: -1.0,
         maxX: 1.0,

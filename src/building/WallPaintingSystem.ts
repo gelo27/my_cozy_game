@@ -275,8 +275,6 @@ export class WallPaintingSystem {
       description: 'Теплі вертикальні рейки з масиву золотого дуба з виразною текстурою волокон та фасками',
       material: new THREE.MeshLambertMaterial({
         map: wainscotOak.texture,
-        bumpMap: wainscotOak.bumpMap,
-        bumpScale: 0.04,
         }),
       thumbnailUrl: wainscotOak.dataUrl,
     });
@@ -308,8 +306,6 @@ export class WallPaintingSystem {
       description: 'Елегантний англійський заміський вайнскотінг заспокійливого оливково-шавлієвого відтінку',
       material: new THREE.MeshLambertMaterial({
         map: wainscotSage.texture,
-        bumpMap: wainscotSage.bumpMap,
-        bumpScale: 0.035,
         }),
       thumbnailUrl: wainscotSage.dataUrl,
     });
@@ -341,8 +337,6 @@ export class WallPaintingSystem {
       description: 'Глибокі темно-сині рельєфні дерев’яні панелі у стилі Хемптонс з вишуканими світлотінями',
       material: new THREE.MeshLambertMaterial({
         map: wainscotNavy.texture,
-        bumpMap: wainscotNavy.bumpMap,
-        bumpScale: 0.04,
         }),
       thumbnailUrl: wainscotNavy.dataUrl,
     });
@@ -374,8 +368,6 @@ export class WallPaintingSystem {
       description: 'Розкішне темне горіхове дерево зі скульптурним карнизом і глибокими тіньовими стиками',
       material: new THREE.MeshLambertMaterial({
         map: wainscotWalnut.texture,
-        bumpMap: wainscotWalnut.bumpMap,
-        bumpScale: 0.04,
         }),
       thumbnailUrl: wainscotWalnut.dataUrl,
     });
@@ -564,8 +556,6 @@ export class WallPaintingSystem {
       description: 'Класичний паркет ялинкою з натурального золотистого дуба з виразними фасками',
       material: new THREE.MeshLambertMaterial({
         map: herringbone.texture,
-        bumpMap: herringbone.bumpMap,
-        bumpScale: 0.03,
         }),
       thumbnailUrl: herringbone.dataUrl,
     });
@@ -581,8 +571,6 @@ export class WallPaintingSystem {
       description: 'Широкі масивні дошки темного шляхетного горіха з латунними цвяхами',
       material: new THREE.MeshLambertMaterial({
         map: darkWalnutFloor.texture,
-        bumpMap: darkWalnutFloor.bumpMap,
-        bumpScale: 0.035,
         }),
       thumbnailUrl: darkWalnutFloor.dataUrl,
     });
@@ -692,8 +680,6 @@ export class WallPaintingSystem {
       description: 'Аристократична дерев’яна кесонна стеля з глибокими нішами та розетками',
       material: new THREE.MeshLambertMaterial({
         map: darkCoffered.texture,
-        bumpMap: darkCoffered.bumpMap,
-        bumpScale: 0.04,
         }),
       thumbnailUrl: darkCoffered.dataUrl,
     });
@@ -724,8 +710,6 @@ export class WallPaintingSystem {
       description: 'Масивні відкриті дубові балки з кованими накладками на білій штукатурці',
       material: new THREE.MeshLambertMaterial({
         map: rusticBeams.texture,
-        bumpMap: rusticBeams.bumpMap,
-        bumpScale: 0.045,
         }),
       thumbnailUrl: rusticBeams.dataUrl,
     });

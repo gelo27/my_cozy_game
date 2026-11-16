@@ -43,7 +43,8 @@ import {
   LampCeiling,
   Warehouse,
 } from 'lucide-react';
-import { BuildingPieceType, BuildingTelemetry, PieceCategory } from '../building/types/BuildingTypes';
+import { BuildingPieceType, BuildingTelemetry, DormerAction, HouseRoofKind, PieceCategory } from '../building/types/BuildingTypes';
+import { DORMER_STYLES } from '../building/RoofDormers';
 import { BUILDING_PIECES } from '../building/config/BuildingPiecesConfig';
 import { DEFAULT_ROOF_STYLE, RoofStyle } from '../building/ProceduralRoofSystem';
 import { InputManager } from '../input/InputManager';
@@ -66,8 +67,18 @@ interface BuildingHUDProps {
   onSetRoofStyle?: (style: RoofStyle) => void;
   /** One roof over the whole house of the selected / aimed wall */
   onRoofWholeHouse?: () => void;
-  onWallFloorOutline?: () => void;
+  /** Picks the whole-house roof tool: the next wall clicked gets that roof over its house */
+  onSelectHouseRoofTool?: (kind: HouseRoofKind) => void;
+  /** Dormer panel of the selected roof */
+  onDormerAction?: (action: DormerAction) => void;
+  onFillOutline?: () => void;
 }
+
+/** Whole-house roofs in the roofs shelf (orange): pick one, then click a wall of the house */
+const HOUSE_ROOF_ITEMS: Array<{ kind: HouseRoofKind; name: TKey; icon: React.ReactNode }> = [
+  { kind: 'gable', name: 'build.houseRoof.gable', icon: <Home className="w-5 h-5" /> },
+  { kind: 'hip', name: 'build.houseRoof.hip', icon: <Box className="w-5 h-5" /> },
+];
 
 interface PieceItemConfig {
   type: BuildingPieceType;
@@ -243,6 +254,20 @@ const PIECE_ITEMS: PieceItemConfig[] = [
     icon: <Home className="w-5 h-5" />,
     dimBadge: '1-похилий',
   },
+  {
+    type: BuildingPieceType.ROOF_GAMBREL_2X2,
+    category: PieceCategory.ROOFS,
+    slot: 4,
+    icon: <Home className="w-5 h-5" />,
+    dimBadge: 'Ламаний',
+  },
+  {
+    type: BuildingPieceType.ROOF_MANSARD_2X2,
+    category: PieceCategory.ROOFS,
+    slot: 5,
+    icon: <Box className="w-5 h-5" />,
+    dimBadge: 'Мансардний',
+  },
 
   // Pillars
   {
@@ -383,7 +408,9 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
   onConfirmAll,
   onSetRoofStyle,
   onRoofWholeHouse,
-  onWallFloorOutline,
+  onSelectHouseRoofTool,
+  onDormerAction,
+  onFillOutline,
 }) => {
   useLang();
   const {
@@ -657,15 +684,15 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
               </div>
 
               {/* Walls on every outer edge of the selected / aimed floor */}
-              {telemetry.canWallFloor && onWallFloorOutline && (
+              {telemetry.fillKind && onFillOutline && (
                 <button
-                  id="btn-wall-floor-outline"
-                  onClick={onWallFloorOutline}
-                  title={t('build.floorWallsTitle')}
+                  id="btn-fill-outline"
+                  onClick={onFillOutline}
+                  title={t(telemetry.fillKind === 'walls' ? 'build.floorWallsTitle' : 'build.fill.ceilingTitle')}
                   className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border bg-amber-600/90 hover:bg-amber-500 text-white border-amber-400/60 transition-all"
                 >
                   <Home className="w-3.5 h-3.5" />
-                  <span>{t('build.floorWalls')}</span>
+                  <span>{t(telemetry.fillKind === 'walls' ? 'build.floorWalls' : 'build.fill.ceiling')}</span>
                   <span className="text-amber-100/70 font-normal">[K]</span>
                 </button>
               )}
@@ -707,6 +734,68 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* Dormers of the selected roof: tool, style and size (no hotkeys, all here) */}
+              {telemetry.dormer && onDormerAction && (() => {
+                const d = telemetry.dormer;
+                const chip = 'px-2.5 py-1 rounded-lg text-xs font-medium border transition-all';
+                const idle = 'bg-stone-800/80 text-stone-300 border-stone-700 hover:bg-stone-700';
+                const stepper = (label: TKey, value: number, kind: 'width' | 'height') => (
+                  <div className="flex items-center gap-1">
+                    <span className="text-stone-400">{t(label)}</span>
+                    <button id={`btn-dormer-${kind}-down`} onClick={() => onDormerAction({ kind, delta: -1 })} className={`${chip} ${idle} px-2`}>−</button>
+                    <span className="min-w-[3.2rem] text-center text-stone-100 tabular-nums">{t('build.dormer.metres', { v: value.toFixed(1) })}</span>
+                    <button id={`btn-dormer-${kind}-up`} onClick={() => onDormerAction({ kind, delta: 1 })} className={`${chip} ${idle} px-2`}>+</button>
+                  </div>
+                );
+                const hint = d.hint ?? (d.editing ? t('build.dormer.editing') : d.count > 0 && !d.tool ? t('build.dormer.clickToEdit') : null);
+                return (
+                  <div id="dormer-panel" className="flex flex-col gap-1.5 px-3 py-2 bg-stone-900/90 rounded-xl border border-amber-500/30 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-amber-300 font-semibold flex items-center gap-1.5">
+                        <AppWindow className="w-3.5 h-3.5 text-amber-400" />
+                        <span>{t('build.dormer.title')}{d.count > 0 ? ` · ${d.count}` : ''}</span>
+                      </span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          id="btn-dormer-tool"
+                          onClick={() => onDormerAction({ kind: 'tool' })}
+                          className={`${chip} ${d.tool ? 'bg-amber-600 text-white border-amber-300 ring-1 ring-amber-400' : 'bg-amber-600/80 hover:bg-amber-500 text-white border-amber-400/60'}`}
+                        >
+                          {t(d.tool ? 'build.dormer.stop' : 'build.dormer.place')}
+                        </button>
+                        {d.editing && (
+                          <>
+                            <button id="btn-dormer-delete" onClick={() => onDormerAction({ kind: 'delete' })} className={`${chip} bg-rose-800/80 hover:bg-rose-700 text-white border-rose-500/60`}>
+                              {t('build.dormer.delete')}
+                            </button>
+                            <button id="btn-dormer-done" onClick={() => onDormerAction({ kind: 'done' })} className={`${chip} ${idle}`}>
+                              {t('build.dormer.done')}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {DORMER_STYLES.map((style) => (
+                        <button
+                          key={style}
+                          id={`btn-dormer-style-${style}`}
+                          onClick={() => onDormerAction({ kind: 'style', style })}
+                          className={`${chip} ${d.style === style ? 'bg-amber-700 text-white border-amber-300 ring-1 ring-amber-400 shadow-sm' : idle}`}
+                        >
+                          {t(`build.dormer.style.${style}` as TKey)}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      {stepper('build.dormer.width', d.width, 'width')}
+                      {stepper('build.dormer.height', d.height, 'height')}
+                    </div>
+                    {hint && <div className="text-stone-400">{hint}</div>}
+                  </div>
+                );
+              })()}
 
               {/* Modular Pieces Horizontal Shelf / Carousel */}
               <div className="flex items-center gap-2 overflow-x-auto py-1 px-1 no-scrollbar">
@@ -759,6 +848,33 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
                     </button>
                   );
                 })}
+
+                {/* Whole-house roofs: pick, then click a wall of the house */}
+                {onSelectHouseRoofTool && (activeCategory === 'ALL' || activeCategory === PieceCategory.ROOFS) &&
+                  HOUSE_ROOF_ITEMS.map((item) => {
+                    const isSelected = telemetry.houseRoofTool === item.kind;
+                    return (
+                      <button
+                        key={`house-roof-${item.kind}`}
+                        id={`btn-house-roof-${item.kind}`}
+                        onClick={() => onSelectHouseRoofTool(item.kind)}
+                        title={t('build.houseRoof.toolTitle')}
+                        className={`group relative flex flex-col items-center justify-between min-w-[82px] max-w-[90px] h-[82px] p-1.5 rounded-xl transition-all border text-left shrink-0 ${
+                          isSelected
+                            ? 'bg-amber-500 border-amber-200 ring-2 ring-amber-300/70 shadow-lg scale-102'
+                            : 'bg-amber-600/85 border-amber-400/70 hover:bg-amber-500'
+                        }`}
+                      >
+                        <span className="absolute top-1 right-1 text-[9px] font-mono text-amber-50 bg-black/30 px-1 rounded">
+                          {t('build.houseRoof.badge')}
+                        </span>
+                        <div className="mt-3.5 text-white transition-transform group-hover:scale-110">{item.icon}</div>
+                        <div className="w-full text-center text-[9px] font-semibold leading-none text-white truncate">
+                          {t(item.name)}
+                        </div>
+                      </button>
+                    );
+                  })}
               </div>
 
 

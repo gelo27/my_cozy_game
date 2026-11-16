@@ -195,7 +195,11 @@ export class SaveSystem {
     if (data.pets?.length) w.gameplay.pets.deserialize(data.pets);
     w.gameplay.storage?.deserialize(data.storage);
     if (data.workers && w.gameplay.workers) w.gameplay.workers.deserialize(data.workers);
+    this.onApplied?.();
   }
+
+  /** Called after a save was applied (the engine then uploads the new world to the GPU in one go). */
+  public onApplied: (() => void) | null = null;
 
   // ---------------------------------------------------------------- slots
 
@@ -287,6 +291,23 @@ export class SaveSystem {
     a.download = `${name}.world.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  /**
+   * The world a first session starts in (no autosave yet): public/worlds/default.world.json.
+   * False when it is missing or doesn't match this save version (the generated world is used then).
+   */
+  public async loadDefaultWorld(): Promise<boolean> {
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}worlds/default.world.json`);
+      if (!res.ok) return false;
+      const data = (await res.json()) as WorldSaveData;
+      if (data.version !== SAVE_VERSION || !data.terrain) return false;
+      this.apply(data);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   public importFile(file: File): Promise<boolean> {

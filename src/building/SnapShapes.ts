@@ -49,6 +49,8 @@ export function getRoofDimensions(type: BuildingPieceType): { width: number; len
     case BuildingPieceType.ROOF_GABLE_2X2:
     case BuildingPieceType.ROOF_HIP_2X2:
     case BuildingPieceType.ROOF_SHED_2X2:
+    case BuildingPieceType.ROOF_GAMBREL_2X2:
+    case BuildingPieceType.ROOF_MANSARD_2X2:
       return { width: 2.0, length: 2.0, height: 0.85 };
     case BuildingPieceType.ROOF_GABLE_2X4:
     case BuildingPieceType.ROOF_HIP_2X4:

@@ -41,7 +41,15 @@ function holdsEdge(type: BuildingPieceType): boolean {
   return c === PieceCategory.WALLS || c === PieceCategory.WINDOWS || c === PieceCategory.DOORS || c === PieceCategory.RAILINGS;
 }
 
-export function planFloorOutlineWalls(seed: BuiltPiece, near: Near): FloorOutlineResult {
+/** The wall the outline is built from: the given 2 m wall (any height), else the standard one */
+export function outlineWallType(type?: BuildingPieceType): BuildingPieceType {
+  const d = type ? BUILDING_PIECES[type]?.dimensions : undefined;
+  return type && d && BUILDING_PIECES[type].category === PieceCategory.WALLS && Math.abs(d.x - MODULE_SIZE) < 1e-3
+    ? type
+    : OUTLINE_WALL_TYPE;
+}
+
+export function planFloorOutlineWalls(seed: BuiltPiece, near: Near, wallType: BuildingPieceType = OUTLINE_WALL_TYPE): FloorOutlineResult {
   if (!isOutlineTile(seed.type)) return { ok: false, reason: 'build.floorWalls.noFloor' };
 
   const right = new THREE.Vector3(1, 0, 0).applyQuaternion(seed.quaternion).setY(0).normalize();
@@ -79,7 +87,7 @@ export function planFloorOutlineWalls(seed: BuiltPiece, near: Near): FloorOutlin
   }
 
   // 2. Wall height, as when a wall snaps onto this floor's edge by hand
-  const halfH = BUILDING_PIECES[OUTLINE_WALL_TYPE].dimensions.y / 2;
+  const halfH = BUILDING_PIECES[outlineWallType(wallType)].dimensions.y / 2;
   const onGround = seed.position.y <= BUILDING_CONFIG.GROUND_SURFACE_Y + 0.35;
   const wallY = (onGround ? BUILDING_CONFIG.GROUND_SURFACE_Y : top) + halfH;
   const rot90 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);

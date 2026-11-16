@@ -125,7 +125,7 @@ function clipPolygonByPlane(
   return output;
 }
 
-function subtractConvexPolygon(
+export function subtractConvexPolygon(
   poly: THREE.Vector2[],
   obstacle: WallObstacle
 ): THREE.Vector2[][] {
@@ -252,6 +252,52 @@ export function boxObstacle(piece: BuiltPiece, width: number, height: number, th
   return createWallObstacle(at(-hw, ht), at(-hw, -ht), at(hw, ht), at(hw, -ht), piece.position.y - height / 2, piece.position.y + height / 2);
 }
 
+/** How far (m) a wall top may sit above a slab's top and still count as covered by it */
+const COVER_TOLERANCE = 0.005;
+
+/** True when the top of `wall` ends inside the slab running from `yBase` to `yTop` (the slab lies over it) */
+export function slabCoversWallTop(yBase: number, yTop: number, wallTop: number): boolean {
+  return wallTop > yBase + COVER_TOLERANCE && wallTop <= yTop + COVER_TOLERANCE;
+}
+
+/** Footprint of floor slab `piece`, standing from its bottom to its top */
+export function floorObstacle(piece: BuiltPiece): WallObstacle {
+  const is1x1 = piece.type === BuildingPieceType.WOOD_FLOOR_1X1;
+  const half = is1x1 ? 0.5 : MODULE_SIZE / 2;
+  const size = half * 2;
+  return boxObstacle(piece, size, FLOOR_THICKNESS, size);
+}
+
+/** Pieces of convex polygon `poly` left outside every obstacle, counter-clockwise in (x, z) */
+export function subtractObstacles(poly: THREE.Vector2[], obstacles: WallObstacle[]): THREE.Vector2[][] {
+  let current: THREE.Vector2[][] = [ccw(poly)];
+  for (const o of obstacles) {
+    if (current.length === 0) break;
+    const next: THREE.Vector2[][] = [];
+    for (const p of current) for (const d of subtractConvexPolygon(p, o)) next.push(d);
+    current = next;
+  }
+  return current.filter((p) => p.length >= 3 && Math.abs(signedArea(p)) >= 1e-4);
+}
+
+function signedArea(poly: THREE.Vector2[]): number {
+  let area = 0;
+  for (let k = 0; k < poly.length; k++) {
+    const n = poly[(k + 1) % poly.length];
+    area += poly[k].x * n.y - n.x * poly[k].y;
+  }
+  return area * 0.5;
+}
+
+function ccw(poly: THREE.Vector2[]): THREE.Vector2[] {
+  return signedArea(poly) < 0 ? poly.slice().reverse() : poly;
+}
+
+function insideObstacle(pt: THREE.Vector2, w: WallObstacle): boolean {
+  if (pt.x < w.minX - 0.001 || pt.x > w.maxX + 0.001 || pt.y < w.minZ - 0.001 || pt.y > w.maxZ + 0.001) return false;
+  return w.planes.every((pl) => (pt.x - pl.point.x) * pl.normal.x + (pt.y - pl.point.y) * pl.normal.y <= 1e-4);
+}
+
 export interface FloorStyleIndex {
   /** Material index of the slab's side edges */
   edge: number;
@@ -270,7 +316,12 @@ export function emitFloor(b: MeshBuffers, piece: BuiltPiece, neighbourFloors: Bu
   const yBase = piece.position.y - halfH;
   const yTop = piece.position.y + halfH;
 
+  // Walls standing in the slab cut its underside (the ceiling stops at the wall faces). Walls that
+  // end inside it (their top flush with the slab's top: the storey below) are covered by the slab's
+  // top, so the floor of the storey above runs on over them; only walls rising through it cut the top.
   const cutting = walls.filter((w) => yTop > w.yBase + 0.005 && yBase < w.yTop - 0.005);
+  const rising = cutting.filter((w) => !slabCoversWallTop(yBase, yTop, w.yTop));
+  const covered = cutting.filter((w) => slabCoversWallTop(yBase, yTop, w.yTop));
   const r3 = new THREE.Vector3(1, 0, 0).applyQuaternion(piece.quaternion);
   const f3 = new THREE.Vector3(0, 0, 1).applyQuaternion(piece.quaternion);
   const fR = new THREE.Vector2(r3.x, r3.z).normalize();
@@ -278,39 +329,31 @@ export function emitFloor(b: MeshBuffers, piece: BuiltPiece, neighbourFloors: Bu
   const c = new THREE.Vector2(piece.position.x, piece.position.z);
   const at = (lx: number, lz: number) => c.clone().addScaledVector(fR, lx).addScaledVector(fF, lz);
 
-  const polys: THREE.Vector2[][] = [];
+  const topPolys: THREE.Vector2[][] = [];
+  const bottomPolys: THREE.Vector2[][] = [];
   for (let iz = 0; iz < cells; iz++) {
     for (let ix = 0; ix < cells; ix++) {
       const lx0 = -half + ix * CELL, lx1 = lx0 + CELL;
       const lz0 = -half + iz * CELL, lz1 = lz0 + CELL;
-      let current: THREE.Vector2[][] = [[at(lx0, lz0), at(lx1, lz0), at(lx1, lz1), at(lx0, lz1)]];
-      for (const wall of cutting) {
-        if (current.length === 0) break;
-        const next: THREE.Vector2[][] = [];
-        for (const poly of current) for (const d of subtractConvexPolygon(poly, wall)) next.push(d);
-        current = next;
-      }
-      for (const poly of current) {
-        if (poly.length < 3) continue;
-        let area = 0;
-        for (let k = 0; k < poly.length; k++) {
-          const n = poly[(k + 1) % poly.length];
-          area += poly[k].x * n.y - n.x * poly[k].y;
-        }
-        if (Math.abs(area) * 0.5 >= 1e-4) polys.push(poly);
-      }
+      const cell = [at(lx0, lz0), at(lx1, lz0), at(lx1, lz1), at(lx0, lz1)];
+      const top = subtractObstacles(cell, rising);
+      topPolys.push(...top);
+      if (covered.length === 0) bottomPolys.push(...top);
+      else for (const poly of top) bottomPolys.push(...subtractObstacles(poly, covered));
     }
   }
 
   b.beginGroup();
-  for (const poly of polys) b.polygon(poly, yTop, true, CHECKER_TILE_SIZE);
+  for (const poly of topPolys) b.polygon(poly, yTop, true, CHECKER_TILE_SIZE);
   b.endGroup(style.faceKey(piece.id, 'top'), 0);
 
   b.beginGroup();
-  for (const poly of polys) b.polygon(poly, yBase, false, CHECKER_TILE_SIZE);
+  for (const poly of bottomPolys) b.polygon(poly, yBase, false, CHECKER_TILE_SIZE);
   b.endGroup(style.faceKey(piece.id, 'bottom'), 0);
 
-  // Side faces only on exposed edges (not against another slab, not inside a wall)
+  // Side faces only on exposed edges (not against another slab, not inside a wall). Edges over a
+  // covered wall stay out: the wall below already closes the slab there.
+  const polys = topPolys;
   b.beginGroup();
   for (const poly of polys) {
     for (let k = 0; k < poly.length; k++) {
@@ -322,6 +365,7 @@ export function emitFloor(b: MeshBuffers, piece: BuiltPiece, neighbourFloors: Bu
       const n = new THREE.Vector2(edge.y, -edge.x).normalize();
       const probe = pA.clone().add(pB).multiplyScalar(0.5).addScaledVector(n, 0.02);
       if (isPointInAnyFloor(probe, piece.position.y, neighbourFloors, walls)) continue;
+      if (covered.some((w) => insideObstacle(probe, w))) continue;
       const v = FLOOR_THICKNESS / CHECKER_TILE_SIZE;
       const u = len / CHECKER_TILE_SIZE;
       b.quad(

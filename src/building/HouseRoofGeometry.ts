@@ -48,10 +48,11 @@ function pointInPolygon(poly: P2[], x: number, z: number): boolean {
   return inside;
 }
 
-/** L∞ distance from (x, z) to the boundary of a right-angled polygon */
-function linfToBoundary(poly: P2[], x: number, z: number): number {
+/** L∞ distance from (x, z) to the boundary of a right-angled polygon (edges in `skip` left out) */
+function linfToBoundary(poly: P2[], x: number, z: number, skip?: Set<number>): number {
   let best = Infinity;
   for (let i = 0; i < poly.length; i++) {
+    if (skip?.has(i)) continue;
     const [ax, az] = poly[i];
     const [bx, bz] = poly[(i + 1) % poly.length];
     let d: number;
@@ -127,6 +128,39 @@ function offsetPolygon(poly: P2[], d: number): P2[] {
   });
 }
 
+/**
+ * Edges of a gable house roof that end a wing with an upright gable instead of a hip: the edges whose
+ * hip face would be a triangle (both corners convex, the square of half its length fits right in
+ * front of it). Where two such edges meet at one apex (a square end) only the ones along X are kept.
+ */
+export function houseGableEdges(poly: P2[]): Set<number> {
+  const n = poly.length;
+  const convex = (i: number) => {
+    const a = poly[(i + n - 1) % n], b = poly[i], c = poly[(i + 1) % n];
+    return (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]) > 0;
+  };
+  const byApex = new Map<string, Array<{ i: number; alongX: boolean }>>();
+  for (let i = 0; i < n; i++) {
+    const a = poly[i], b = poly[(i + 1) % n];
+    if (!convex(i) || !convex((i + 1) % n)) continue;
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const o = outward(a, b);
+    const mx = (a[0] + b[0]) / 2 - (o[0] * len) / 2, mz = (a[1] + b[1]) / 2 - (o[1] * len) / 2;
+    if (!pointInPolygon(poly, mx, mz) || Math.abs(linfToBoundary(poly, mx, mz) - len / 2) > 1e-6) continue;
+    const key = `${Math.round(mx * KEY_SCALE)},${Math.round(mz * KEY_SCALE)}`;
+    if (!byApex.has(key)) byApex.set(key, []);
+    byApex.get(key)!.push({ i, alongX: Math.abs(b[0] - a[0]) > 1e-6 });
+  }
+  const out = new Set<number>();
+  for (const group of byApex.values()) {
+    const mixed = group.some((e) => e.alongX) && group.some((e) => !e.alongX);
+    for (const e of group) if (!mixed || e.alongX) out.add(e.i);
+  }
+  // Two gables never share a corner (the eave between them would have nowhere to go)
+  for (let i = 0; i < n; i++) if (out.has(i) && out.has((i + 1) % n)) out.delete((i + 1) % n);
+  return out;
+}
+
 /** Lattice step all footprint coordinates sit on (relative to its first point) */
 function latticeStep(poly: P2[]): number {
   const [ox, oz] = poly[0];
@@ -193,15 +227,20 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
   }
   const c = g / 2;
 
+  // Gable roof: the wing ends are upright gables, so the slopes ignore those edges (the roof runs
+  // out over them at full height, `gableO` past the wall)
+  const gables = cfg.roofType === 'gable' ? houseGableEdges(poly) : new Set<number>();
+  const gableO = Math.max(0, cfg.gableOverhang ?? cfg.overhang ?? 0.3);
+  const H = (x: number, z: number) => linfToBoundary(poly, x, z, gables);
+
   // Vertices by lattice-rounded key; `hp` is the skeleton height (L∞ distance inside the walls)
   const verts = new Map<string, { x: number; z: number; hp: number }>();
   const keyOf = (x: number, z: number) => `${Math.round(x * KEY_SCALE)},${Math.round(z * KEY_SCALE)}`;
   const vertex = (x: number, z: number, hp?: number): string => {
     const key = keyOf(x, z);
-    if (!verts.has(key)) verts.set(key, { x, z, hp: hp ?? linfToBoundary(poly, x, z) });
+    if (!verts.has(key)) verts.set(key, { x, z, hp: hp ?? H(x, z) });
     return key;
   };
-  const H = (x: number, z: number) => linfToBoundary(poly, x, z);
 
   const pieces: Piece[] = [];
   let subdivided = false;
@@ -269,17 +308,54 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
 
   // Eave strips: each wall edge's slope carried on out to the eave line at the same pitch
   const delta = HALF_WALL + eaveO;
-  const eave = offsetPolygon(poly, delta);
+  const gd = HALF_WALL + gableO;
   const n = poly.length;
-  for (let i = 0; i < n; i++) {
+  const outs = poly.map((v, i) => outward(v, poly[(i + 1) % n]));
+  const dist = (i: number) => (gables.has(i) ? gd : delta);
+  // Eave / rake corner at vertex i: pushed out past both its edges
+  const eave: P2[] = poly.map((v, i) => {
+    const ip = (i + n - 1) % n;
+    return [v[0] + dist(ip) * outs[ip][0] + dist(i) * outs[i][0], v[1] + dist(ip) * outs[ip][1] + dist(i) * outs[i][1]];
+  });
+  /** Lattice points along edge i (both ends included) */
+  const edgePoints = (i: number): P2[] => {
     const a = poly[i], b = poly[(i + 1) % n];
-    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-    const steps = Math.max(1, Math.round(len / c));
-    const inner: string[] = [];
-    for (let s = 0; s <= steps; s++) {
-      const t = s / steps;
-      inner.push(vertex(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0));
+    const steps = Math.max(1, Math.round(Math.hypot(b[0] - a[0], b[1] - a[1]) / c));
+    return Array.from({ length: steps + 1 }, (_, s) => [a[0] + ((b[0] - a[0]) * s) / steps, a[1] + ((b[1] - a[1]) * s) / steps] as P2);
+  };
+  /** Point `p` pushed out past gable edge i to the rake line */
+  const rake = (p: P2, i: number): P2 => [p[0] + gd * outs[i][0], p[1] + gd * outs[i][1]];
+  const rakePoints = new Map<number, string[]>();
+  for (const i of gables) {
+    // The faces reaching the gable carry on straight out over it (level across the edge)
+    const pts = edgePoints(i);
+    const hps = pts.map(([x, z]) => H(x, z));
+    const inner = pts.map(([x, z], s) => vertex(x, z, hps[s]));
+    const outer = pts.map((p, s) => {
+      const q = rake(p, i);
+      return vertex(q[0], q[1], hps[s]);
+    });
+    rakePoints.set(i, outer);
+    const alongX = Math.abs(outs[i][1]) > 0.5;
+    for (let s = 0; s + 1 < pts.length; s++) {
+      const dt = alongX ? pts[s + 1][0] - pts[s][0] : pts[s + 1][1] - pts[s][1];
+      const dh = hps[s + 1] - hps[s];
+      const t0 = alongX ? pts[s][0] : pts[s][1];
+      const sg = Math.sign(dh / dt);
+      const plane: FacePlane = Math.abs(dh) > 1e-9
+        ? { axis: alongX ? 'x' : 'z', s: sg, k: hps[s] - sg * t0 }
+        : { axis: alongX ? 'x' : 'z', s: 0, k: 1e6 + i * 1000 + s };
+      pieces.push({ loop: [inner[s], inner[s + 1], outer[s + 1], outer[s]], plane });
     }
+  }
+  for (let i = 0; i < n; i++) {
+    if (gables.has(i)) continue;
+    const a = poly[i], b = poly[(i + 1) % n];
+    const ip = (i + n - 1) % n, inx = (i + 1) % n;
+    const inner: string[] = edgePoints(i).map(([x, z]) => vertex(x, z, 0));
+    // Next to a gable the eave runs on out to the rake
+    if (gables.has(ip)) inner.unshift(vertex(...rake(a, ip), 0));
+    if (gables.has(inx)) inner.push(vertex(...rake(b, inx), 0));
     const ea = eave[i], eb = eave[(i + 1) % n];
     // Inner edge runs a→b (interior on its left), so the strip outside it is b→a, then out
     const loop = [...inner.reverse(), vertex(ea[0], ea[1], -delta), vertex(eb[0], eb[1], -delta)];
@@ -408,12 +484,13 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
   const run = maxHp + HALF_WALL;
   const { slope, drop } = solvePitch(h, run, thickness);
   const ye = drop - slope * eaveO;
+  const yOf = (hp: number) => ye + slope * (hp + delta);
   const points = new Map<string, THREE.Vector3>();
   const point = (k: string): THREE.Vector3 => {
     let p = points.get(k);
     if (!p) {
       const v = verts.get(k)!;
-      p = new THREE.Vector3(v.x, ye + slope * (v.hp + delta), v.z);
+      p = new THREE.Vector3(v.x, yOf(v.hp), v.z);
       points.set(k, p);
     }
     return p;
@@ -455,16 +532,39 @@ export function solveHouseRoofShape(cfg: ProceduralRoofConfig, footprint: P2[]):
     if (convex) creases.push([point(a), point(b)]);
   }
 
-  const outline = eave.map(([x, z]) => point(vertex(x, z, -delta)));
+  // Eave line, out along each rake where a gable is
+  const outline: THREE.Vector3[] = [];
+  eave.forEach(([x, z], i) => {
+    outline.push(point(vertex(x, z, -delta)));
+    for (const k of rakePoints.get(i) ?? []) outline.push(point(k));
+  });
   const ceiling = offsetPolygon(poly, HALF_WALL).map(([x, z]) => new THREE.Vector3(x, 0, z));
+
+  // Gables: on the wall's outer face, from its top up to the roof's underside
+  const attic: RoofShape['attic'] = [];
+  for (const i of gables) {
+    const o = outs[i], ip = (i + n - 1) % n, inx = (i + 1) % n;
+    const pts = edgePoints(i);
+    const hps = pts.map(([x, z]) => H(x, z));
+    const a = poly[i], b = poly[inx];
+    const wallPts = [new THREE.Vector3(a[0] + HALF_WALL * (outs[ip][0] + o[0]), 0, a[1] + HALF_WALL * (outs[ip][1] + o[1]))];
+    for (let s = 1; s + 1 < pts.length; s++) {
+      // Only where the profile bends (a fan over straight runs would make slivers)
+      if (Math.abs(hps[s - 1] + hps[s + 1] - 2 * hps[s]) < 1e-9) continue;
+      wallPts.push(new THREE.Vector3(pts[s][0] + HALF_WALL * o[0], yOf(hps[s]) - drop, pts[s][1] + HALF_WALL * o[1]));
+    }
+    wallPts.push(new THREE.Vector3(b[0] + HALF_WALL * (outs[inx][0] + o[0]), 0, b[1] + HALF_WALL * (outs[inx][1] + o[1])));
+    attic.push({ pts: wallPts, out: new THREE.Vector3(o[0], 0, o[1]) });
+  }
 
   return {
     top,
     outline,
     drop,
     creases,
-    attic: [],
-    soffit: { y: ye - drop, inner: ceiling },
+    attic,
+    // A hip roof's eaves are boxed in level; a gable's rakes would cut through a level soffit
+    soffit: gables.size > 0 ? undefined : { y: ye - drop, inner: ceiling },
     ceiling,
     capWidth: Math.min(0.11, run * 0.3),
     capRise: 0.06,
@@ -506,9 +606,10 @@ export function houseRoofCoverage(shape: RoofShape, samplesPerMetre = 20): { ins
  * Distance from the outer wall line to the highest point of a house roof over `footprint` (its
  * widest wing decides it), for picking a pitch.
  */
-export function houseRoofRun(footprint: P2[]): number {
+export function houseRoofRun(footprint: P2[], gable = false): number {
   const poly = normalizeFootprint(footprint);
   if (!poly) return 1;
+  const skip = gable ? houseGableEdges(poly) : undefined;
   const c = latticeStep(poly) / 2;
   const xs = poly.map((p) => p[0]), zs = poly.map((p) => p[1]);
   const x0 = Math.min(...xs), z0 = Math.min(...zs);
@@ -517,7 +618,7 @@ export function houseRoofRun(footprint: P2[]): number {
   for (let i = 0; i <= nx; i++) {
     for (let j = 0; j <= nz; j++) {
       const x = x0 + i * c, z = z0 + j * c;
-      if (pointInPolygon(poly, x + 1e-4, z + 1e-4) || pointInPolygon(poly, x - 1e-4, z - 1e-4)) best = Math.max(best, linfToBoundary(poly, x, z));
+      if (pointInPolygon(poly, x + 1e-4, z + 1e-4) || pointInPolygon(poly, x - 1e-4, z - 1e-4)) best = Math.max(best, linfToBoundary(poly, x, z, skip));
     }
   }
   return best + HALF_WALL;

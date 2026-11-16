@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { WALL_THICKNESS } from './config/BuildingConstants';
 import type { ProceduralRoofConfig } from './ProceduralRoofSystem';
 import { normalizeFootprint, solveHouseRoofShape } from './HouseRoofGeometry';
+import { withDormers, type DormerGeometry, type DormerLayout } from './RoofDormers';
 
 /**
  * Shape of a procedural roof in its local space (y = 0 is the top of the walls it sits on;
@@ -18,6 +19,11 @@ export interface RoofShape {
   outline: THREE.Vector3[];
   /** Vertical slab thickness (the underside is the top moved down by it) */
   drop: number;
+  /**
+   * Underside point of each top vertex, when the slab is not one vertical thickness throughout
+   * (slopes of different pitch keep the same board width; eave ends cut square to the slope)
+   */
+  under?: Map<THREE.Vector3, THREE.Vector3>;
   /** Ridge and hip lines that get a raised cap; both ends are vertices of the adjacent top polygons */
   creases: Array<[THREE.Vector3, THREE.Vector3]>;
   /** Frontons and attic walls with their outward direction */
@@ -32,6 +38,9 @@ export interface RoofShape {
   /** Ridge cap half width and rise */
   capWidth: number;
   capRise: number;
+  /** Dormers standing on the slopes, and where each one of the config's dormers went */
+  dormers?: DormerGeometry;
+  dormerLayout?: DormerLayout[];
 }
 
 const HALF_WALL = WALL_THICKNESS / 2;
@@ -52,7 +61,23 @@ export function solvePitch(rise: number, run: number, thickness: number): { slop
   return { slope: Math.max(slope, 0), drop };
 }
 
+/** The roof with its dormers */
 export function solveRoofShape(cfg: ProceduralRoofConfig): RoofShape {
+  return withDormers(solveBaseRoofShape(cfg), cfg.dormers);
+}
+
+/** The roof alone, without dormers (cached per config object: dormer placement asks it often) */
+const baseCache = new WeakMap<ProceduralRoofConfig, RoofShape>();
+export function solveBaseRoofShape(cfg: ProceduralRoofConfig): RoofShape {
+  let shape = baseCache.get(cfg);
+  if (!shape) {
+    shape = solveBareRoof(cfg);
+    baseCache.set(cfg, shape);
+  }
+  return shape;
+}
+
+function solveBareRoof(cfg: ProceduralRoofConfig): RoofShape {
   // A roof over a whole house outline (L, T, U...): one hip roof following the walls
   if (cfg.footprint) {
     const footprint = normalizeFootprint(cfg.footprint);
@@ -126,6 +151,9 @@ export function solveRoofShape(cfg: ProceduralRoofConfig): RoofShape {
     };
   }
 
+  if (cfg.roofType === 'gambrel') return solveGambrel(X0, X1, Z0, Z1, h, thickness, eaveO, gableO, ceiling);
+  if (cfg.roofType === 'mansard') return solveMansard(X0, X1, Z0, Z1, h, thickness, eaveO, ceiling);
+
   // Gable: ridge along Z, slopes facing -X and +X
   const run = (X1 - X0) / 2;
   const { slope, drop } = solvePitch(h, run, thickness);
@@ -149,6 +177,135 @@ export function solveRoofShape(cfg: ProceduralRoofConfig): RoofShape {
   };
 }
 
+// Broken-pitch roofs: a steep lower slope from the eave up to a knee, then a shallow upper slope.
+// The knee sits KNEE_IN of the run in from the wall line, KNEE_UP of the height up.
+const KNEE_IN = 0.3;
+const KNEE_UP = 0.62;
+// A mansard's lower slopes are close to upright walls, its top a low, flat-looking hip
+const MANSARD_KNEE_IN = 0.17;
+const MANSARD_KNEE_UP = 0.78;
+/** How far below the wall top the eave of a steep lower slope may hang */
+const MAX_EAVE_HANG = 0.3;
+
+/** Gambrel: a gable with a knee in each slope (ridge along Z, frontons at both Z ends) */
+function solveGambrel(
+  X0: number, X1: number, Z0: number, Z1: number,
+  h: number, thickness: number, eaveOverhang: number, gableO: number, ceiling: THREE.Vector3[]
+): RoofShape {
+  const run = (X1 - X0) / 2;
+  const midX = (X0 + X1) / 2;
+  const kIn = run * KNEE_IN;
+  const { slope, drop } = solvePitch(h * KNEE_UP, kIn, thickness);
+  const yk = drop + slope * kIn;
+  // On a steep slope a full overhang would hang far down the wall: keep the eave a short kick,
+  // but long enough that the square-cut end's lower edge comes out past the wall face and below
+  // its top (shorter, the cut ends inside the wall line and leaves a slot over the wall)
+  const t = drop / Math.sqrt(1 + slope * slope);
+  const cutReach = (t * slope) / Math.sqrt(1 + slope * slope);
+  const eaveO = Math.max(Math.min(eaveOverhang, MAX_EAVE_HANG / Math.max(slope, 0.01)), cutReach + 0.03);
+  const ye = drop - slope * eaveO;
+  const ez0 = Z0 - gableO, ez1 = Z1 + gableO;
+  const xL = X0 + kIn, xR = X1 - kIn;
+  const eL0 = V(X0 - eaveO, ye, ez0), eL1 = V(X0 - eaveO, ye, ez1);
+  const eR0 = V(X1 + eaveO, ye, ez0), eR1 = V(X1 + eaveO, ye, ez1);
+  const kL0 = V(xL, yk, ez0), kL1 = V(xL, yk, ez1), kR0 = V(xR, yk, ez0), kR1 = V(xR, yk, ez1);
+  const r0 = V(midX, h, ez0), r1 = V(midX, h, ez1);
+
+  // Underside of the profile: each slope's top line moved in by the same board width `t`
+  // (perpendicular), meeting the next slope's at the knee and ridge; the eave end is cut square to
+  // the slope instead of plumb, so it never runs out into a long point. `t` is what the lower
+  // slope's vertical thickness `drop` is across, so its underside still rests on the wall edge.
+  const upSlope = (h - yk) / Math.max(midX - xL, 0.05);
+  const nLow = new THREE.Vector2(-slope, 1).normalize();   // up-out normal of the left lower slope
+  const nUp = new THREE.Vector2(-upSlope, 1).normalize();  // left upper slope
+  const nUpR = new THREE.Vector2(upSlope, 1).normalize();  // right upper slope
+  const miter = (a: THREE.Vector2, b: THREE.Vector2) => a.clone().add(b).multiplyScalar(t / (1 + a.dot(b)));
+  const kneeIn = miter(nLow, nUp);    // knee: left lower meets left upper (mirrored on the right)
+  const ridgeIn = miter(nUp, nUpR);
+  const eaveIn = nLow.clone().multiplyScalar(t);
+  const under = new Map<THREE.Vector3, THREE.Vector3>();
+  const set = (p: THREE.Vector3, d: THREE.Vector2, mirror: boolean) =>
+    under.set(p, V(p.x - (mirror ? -d.x : d.x), p.y - d.y, p.z));
+  for (const [e, k] of [[eL0, kL0], [eL1, kL1]]) { set(e, eaveIn, false); set(k, kneeIn, false); }
+  for (const [e, k] of [[eR0, kR0], [eR1, kR1]]) { set(e, eaveIn, true); set(k, kneeIn, true); }
+  set(r0, ridgeIn, false);
+  set(r1, ridgeIn, false);
+  const u = (q: THREE.Vector3, z: number) => { const w = under.get(q)!; return V(w.x, w.y, z); };
+  // Frontons reach up to that underside
+  const fronton = (z: number) => [V(X0, 0, z), u(kL0, z), u(r0, z), u(kR0, z), V(X1, 0, z)];
+  return {
+    under,
+    top: [[eL0, eL1, kL1, kL0], [kL0, kL1, r1, r0], [eR1, eR0, kR0, kR1], [kR1, kR0, r0, r1]],
+    outline: [eL0, kL0, r0, kR0, eR0, eR1, kR1, r1, kL1, eL1],
+    drop,
+    // Ridge, and a trim along each knee so the break in the slope reads from afar
+    creases: [[r0, r1], [kL0, kL1], [kR0, kR1]],
+    attic: [
+      { pts: fronton(Z0), out: V(0, 0, -1) },
+      { pts: fronton(Z1), out: V(0, 0, 1) },
+    ],
+    ceiling,
+    capWidth: Math.min(0.11, run * 0.3),
+    capRise: 0.06,
+  };
+}
+
+/** Mansard: steep lower slopes on all four sides up to a knee ring, a low hip roof on top */
+function solveMansard(
+  X0: number, X1: number, Z0: number, Z1: number,
+  h: number, thickness: number, eaveOverhang: number, ceiling: THREE.Vector3[]
+): RoofShape {
+  const wo = X1 - X0, lo = Z1 - Z0;
+  const run = Math.min(wo, lo) / 2;
+  const kIn = run * MANSARD_KNEE_IN;
+  // The eave board stays one plank deep however tall the roof gets (the steep slope's vertical
+  // thickness would grow with the height); the slab is closed underneath by the soffit anyway
+  const drop = Math.min(thickness * 1.2, h * 0.2);
+  const yk = Math.max(h * MANSARD_KNEE_UP, drop + 0.05);
+  const slope = (yk - drop) / Math.max(kIn, 0.05);
+  // On a steep slope a full overhang would hang far down the wall: keep the eave a short kick
+  const eaveO = Math.min(eaveOverhang, MAX_EAVE_HANG / Math.max(slope, 0.01));
+  const ye = drop - slope * eaveO;
+  // Eave ring and knee ring
+  const ex0 = X0 - eaveO, ex1 = X1 + eaveO, ez0 = Z0 - eaveO, ez1 = Z1 + eaveO;
+  const kx0 = X0 + kIn, kx1 = X1 - kIn, kz0 = Z0 + kIn, kz1 = Z1 - kIn;
+  const eLF = V(ex0, ye, ez0), eRF = V(ex1, ye, ez0), eRB = V(ex1, ye, ez1), eLB = V(ex0, ye, ez1);
+  const kLF = V(kx0, yk, kz0), kRF = V(kx1, yk, kz0), kRB = V(kx1, yk, kz1), kLB = V(kx0, yk, kz1);
+  // Low hip over the knee ring, its ridge along the longer side
+  const kw = kx1 - kx0, kl = kz1 - kz0;
+  const reach = Math.min(kw, kl) / 2;
+  const midX = (X0 + X1) / 2, midZ = (Z0 + Z1) / 2;
+  const alongZ = kl >= kw;
+  const r0 = alongZ ? V(midX, h, kz0 + reach) : V(kx0 + reach, h, midZ);
+  let r1 = alongZ ? V(midX, h, kz1 - reach) : V(kx1 - reach, h, midZ);
+  const square = r0.distanceTo(r1) < 1e-3;
+  if (square) r1 = r0;
+  const upper = alongZ
+    ? [[kLF, kRF, r0], [kRB, kLB, r1], [kLB, kLF, r0, r1], [kRF, kRB, r1, r0]]
+    : [[kLF, kLB, r0], [kRB, kRF, r1], [kRF, kLF, r0, r1], [kLB, kRB, r1, r0]];
+  const lower = [[eLF, eRF, kRF, kLF], [eRF, eRB, kRB, kRF], [eRB, eLB, kLB, kRB], [eLB, eLF, kLF, kLB]];
+  const creases: Array<[THREE.Vector3, THREE.Vector3]> = [
+    [eLF, kLF], [eRF, kRF], [eRB, kRB], [eLB, kLB],
+    // Trim round the knee ring, where the steep sides meet the low top
+    [kLF, kRF], [kRF, kRB], [kRB, kLB], [kLB, kLF],
+    ...(alongZ
+      ? [[kLF, r0], [kRF, r0], [kLB, r1], [kRB, r1]]
+      : [[kLF, r0], [kLB, r0], [kRF, r1], [kRB, r1]]) as Array<[THREE.Vector3, THREE.Vector3]>,
+  ];
+  if (!square) creases.push([r0, r1]);
+  return {
+    top: [...lower, ...upper.map((poly) => poly.filter((p, i) => poly.indexOf(p) === i))],
+    outline: [eLF, eRF, eRB, eLB],
+    drop,
+    creases,
+    attic: [],
+    soffit: { y: ye - drop, inner: ceiling },
+    ceiling,
+    capWidth: Math.min(0.11, run * 0.3),
+    capRise: 0.06,
+  };
+}
+
 /** Footprint of a roof at the wall centre lines, in its local space */
 export function roofFootprint(cfg: Pick<ProceduralRoofConfig, 'minX' | 'maxX' | 'minZ' | 'maxZ'>) {
   return {
@@ -165,14 +322,14 @@ export function roofFootprint(cfg: Pick<ProceduralRoofConfig, 'minX' | 'maxX' | 
 
 /** Per-material triangle soup with flat normals and face-planar metre UVs */
 class RoofBuilder {
-  readonly buckets = [0, 1, 2].map(() => ({ p: [] as number[], n: [] as number[], u: [] as number[] }));
+  readonly buckets = [0, 1, 2, 3].map(() => ({ p: [] as number[], n: [] as number[], u: [] as number[] }));
   private readonly t = new THREE.Vector3();
   private readonly b = new THREE.Vector3();
 
   constructor(private readonly uvScale: number) {}
 
   /** Triangle fan of a planar polygon, wound so its normal points along `hint` */
-  polygon(pts: THREE.Vector3[], mat: 0 | 1 | 2, hint: THREE.Vector3, uvOf?: (q: THREE.Vector3, k: number) => [number, number]): void {
+  polygon(pts: THREE.Vector3[], mat: 0 | 1 | 2 | 3, hint: THREE.Vector3, uvOf?: (q: THREE.Vector3, k: number) => [number, number]): void {
     if (pts.length < 3) return;
     const n = new THREE.Vector3();
     for (let i = 0; i < pts.length; i++) {
@@ -231,18 +388,19 @@ const faceNormal = (poly: THREE.Vector3[]) => {
 
 /**
  * Material 0: shingles and ridge caps; 1: white trim (fascia, underside, attic ceiling);
- * 2: frontons / attic walls (the outer wall finish below).
+ * 2: frontons / attic walls (the outer wall finish below); 3: dormer window glass.
  */
 export function emitRoof(shape: RoofShape, uvScale: number) {
   const b = new RoofBuilder(uvScale);
   const UP = V(0, 1, 0);
   const DOWN = V(0, -1, 0);
   const down = V(0, -shape.drop, 0);
+  const dn = (p: THREE.Vector3) => shape.under?.get(p) ?? p.clone().add(down);
 
   // Top surface and the underside a slab thickness below it
   for (const poly of shape.top) {
     b.polygon(poly, 0, UP);
-    if (!shape.soffit) b.polygon(poly.map((p) => p.clone().add(down)), 1, DOWN);
+    if (!shape.soffit) b.polygon(poly.map(dn), 1, DOWN);
   }
   if (shape.soffit) {
     // Level soffit ring between the fascia's bottom edge and the walls
@@ -267,18 +425,18 @@ export function emitRoof(shape: RoofShape, uvScale: number) {
   for (let i = 0; i < shape.outline.length; i++) {
     const a = shape.outline[i], c = shape.outline[(i + 1) % shape.outline.length];
     const out = new THREE.Vector3((c.z - a.z) * side, 0, -(c.x - a.x) * side);
-    b.polygon([a, c, c.clone().add(down), a.clone().add(down)], 1, out);
+    b.polygon([a, c, dn(c), dn(a)], 1, out);
   }
 
   // Raised ridge / hip caps: a shallow tent over each crease, its tiles laid along it. A hip cap
   // runs on past the eave corner and is closed underneath, so it reads as a solid cap end.
-  if (shape.capWidth > 0) {
+  const caps = (creases: Array<[THREE.Vector3, THREE.Vector3]>, top: THREE.Vector3[][], atEave: (p: THREE.Vector3) => boolean) => {
     const ext = 0.05;
-    for (const [p, q] of shape.creases) {
+    for (const [p, q] of creases) {
       const t = new THREE.Vector3().subVectors(q, p);
       if (t.lengthSq() < 1e-6) continue;
       t.normalize();
-      const sides = shape.top.filter((poly) => poly.includes(p) && poly.includes(q));
+      const sides = top.filter((poly) => poly.includes(p) && poly.includes(q));
       if (sides.length !== 2) continue;
       const us = sides.map((poly) => {
         const u = new THREE.Vector3().crossVectors(faceNormal(poly), t).normalize();
@@ -286,8 +444,8 @@ export function emitRoof(shape: RoofShape, uvScale: number) {
         return u.multiplyScalar(shape.capWidth);
       });
       // Eave-corner ends of a sloping crease stick out past the corner
-      const startOut = shape.outline.includes(p) && p.y < q.y - 1e-3;
-      const endOut = shape.outline.includes(q) && q.y < p.y - 1e-3;
+      const startOut = atEave(p) && p.y < q.y - 1e-3;
+      const endOut = atEave(q) && q.y < p.y - 1e-3;
       const a = startOut ? p.clone().addScaledVector(t, -ext) : p;
       const c = endOut ? q.clone().addScaledVector(t, ext) : q;
       const lift = V(0, shape.capRise, 0);
@@ -314,6 +472,15 @@ export function emitRoof(shape: RoofShape, uvScale: number) {
         b.polygon([c.clone().add(u0), k.clone().add(u0), k.clone().add(u1), c.clone().add(u1)], 0, DOWN);
       }
     }
+  };
+  if (shape.capWidth > 0) caps(shape.creases, shape.top, (p) => shape.outline.includes(p));
+
+  // Dormers: shingled roofs with their caps, walls, trim and window glass
+  if (shape.dormers) {
+    const d = shape.dormers;
+    for (const poly of d.top) b.polygon(poly, 0, UP);
+    for (const part of d.parts) b.polygon(part.pts, part.mat, part.out);
+    if (shape.capWidth > 0) caps(d.creases, d.top, (p) => d.eaves.has(p));
   }
 
   // Attic ceiling and frontons / attic walls
@@ -334,5 +501,9 @@ export function roofColliderTriangles(shape: RoofShape): number[] {
   };
   for (const poly of shape.top) fan(poly);
   for (const wall of shape.attic) fan(wall.pts);
+  if (shape.dormers) {
+    for (const poly of shape.dormers.top) fan(poly);
+    for (const part of shape.dormers.parts) if (part.mat === 2 || part.mat === 3) fan(part.pts);
+  }
   return out;
 }

@@ -1,10 +1,11 @@
 import * as THREE from 'three';
-import { BuiltPiece, BuildingPieceType, shapeOf } from './types/BuildingTypes';
+import { BuiltPiece, BuildingPieceType, shapeOf, isSolidWallPiece } from './types/BuildingTypes';
 import { BuildingManager } from './BuildingManager';
 import { audioEngine } from '../audio/AudioEngine';
 import { isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface } from './config/BuildingPiecesConfig';
 import { ProceduralRoofConfig } from './ProceduralRoofSystem';
 import { BUILDING_CONFIG } from '../config/constants';
+import type { OutlineFillKind } from './OutlineFill';
 
 export type ArrowSide =
   | 'left'
@@ -106,6 +107,8 @@ export function getPieceDimensions(type: BuildingPieceType, piece?: BuiltPiece):
     case BuildingPieceType.ROOF_GABLE_2X2:
     case BuildingPieceType.ROOF_HIP_2X2:
     case BuildingPieceType.ROOF_SHED_2X2:
+    case BuildingPieceType.ROOF_GAMBREL_2X2:
+    case BuildingPieceType.ROOF_MANSARD_2X2:
       return new THREE.Vector3(2.0, 0.85, 2.0);
     case BuildingPieceType.ROOF_GABLE_2X4:
     case BuildingPieceType.ROOF_HIP_2X4:
@@ -434,7 +437,9 @@ export function getPieceExtensionConfigs(type: BuildingPieceType, piece?: BuiltP
     case BuildingPieceType.ROOF_HIP_4X4:
     case BuildingPieceType.ROOF_SHED_2X2:
     case BuildingPieceType.ROOF_SHED_2X4:
-    case BuildingPieceType.ROOF_SHED_4X4: {
+    case BuildingPieceType.ROOF_SHED_4X4:
+    case BuildingPieceType.ROOF_GAMBREL_2X2:
+    case BuildingPieceType.ROOF_MANSARD_2X2: {
       let minX = -dim.x / 2;
       let maxX = dim.x / 2;
       let minZ = -dim.z / 2;
@@ -554,6 +559,31 @@ export class PieceSelectionSystem {
   private lastAudioStep: number = 0;
   private lastAudioTime: number = 0;
 
+  // Diagonal (corner) floor drag: a rectangle of tiles grown from the selected tile, previewed while
+  // dragging and placed on release, so pulling back shrinks it again
+  /** Signed tile index (from the selected tile) of the rectangle's far corner: the tile under the cursor */
+  private cornerCellX = 1;
+  private cornerCellZ = 1;
+  private cornerPreview: THREE.Group | null = null;
+  // Flat cell highlight like the paint-mode aim reticle: a see-through fill with a framed edge
+  private static cornerFreeMat = new THREE.MeshBasicMaterial({
+    color: 0x38bdf8, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+  });
+  private static cornerBlockedMat = new THREE.MeshBasicMaterial({
+    color: 0xef4444, transparent: true, opacity: 0.3, depthWrite: false, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+  });
+  private static cornerFrameFreeMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, depthTest: false, transparent: true, opacity: 0.95 });
+  private static cornerFrameBlockedMat = new THREE.LineBasicMaterial({ color: 0xef4444, depthTest: false, transparent: true, opacity: 0.95 });
+
+  /** Tells which outline fill the selected piece offers (set by the build ability) */
+  public fillKindResolver: ((piece: BuiltPiece) => OutlineFillKind | null) | null = null;
+  /** Fill button in the middle of the selected piece */
+  private fillButton: { kind: OutlineFillKind; group: THREE.Group; sprite: THREE.Sprite; hitBox: THREE.Mesh } | null = null;
+  private fillHovered = false;
+  private static fillTextures = new Map<OutlineFillKind, THREE.CanvasTexture>();
+
   constructor(scene: THREE.Scene, buildingManager?: BuildingManager) {
     this.scene = scene;
     this.buildingManager = buildingManager || null;
@@ -611,6 +641,7 @@ export class PieceSelectionSystem {
   }
 
   public deselect(): void {
+    this.clearCornerPreview();
     this.selectedPiece = null;
     this.isDragging = false;
     this.dragSide = null;
@@ -636,6 +667,8 @@ export class PieceSelectionSystem {
     this.arrows = [];
     this.hitBoxMeshes = [];
     this.hoveredSide = null;
+    this.fillButton = null;
+    this.fillHovered = false;
   }
 
   /**
@@ -846,6 +879,7 @@ export class PieceSelectionSystem {
 
     // 2. Build High-Contrast 3D Arrows for all valid extension directions
     const configs = getPieceExtensionConfigs(piece.type, piece);
+    const fillKind = this.fillKindResolver?.(piece) ?? null;
 
     for (const config of configs) {
       if (isProceduralRoofPiece(piece.type)) {
@@ -870,6 +904,96 @@ export class PieceSelectionSystem {
         this.createArrow(config);
       }
     }
+
+    // 3. Outline fill button in the middle of the piece
+    // (the walls icon only on a wall; a floor tile shows just the ceiling icon when it lies on walls,
+    // its outline walls stay on [K] and the HUD button)
+    if (fillKind === 'ceiling' || (fillKind === 'walls' && isSolidWallPiece(piece.type))) this.createFillButton(fillKind);
+  }
+
+  /** Round icon: a dashed outline being filled (amber for walls, blue for a ceiling) */
+  private static fillTexture(kind: OutlineFillKind): THREE.CanvasTexture {
+    const cached = PieceSelectionSystem.fillTextures.get(kind);
+    if (cached) return cached;
+    const S = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = S;
+    const g = canvas.getContext('2d')!;
+    g.beginPath();
+    g.arc(S / 2, S / 2, S / 2 - 4, 0, Math.PI * 2);
+    g.fillStyle = kind === 'walls' ? '#d97706' : '#0284c7';
+    g.fill();
+    g.lineWidth = 6;
+    g.strokeStyle = '#050811';
+    g.stroke();
+    g.strokeStyle = '#ffffff';
+    g.lineWidth = 7;
+    g.lineJoin = 'round';
+    if (kind === 'walls') {
+      // An L-shaped outline traced all round
+      g.beginPath();
+      g.moveTo(34, 34); g.lineTo(94, 34); g.lineTo(94, 64); g.lineTo(64, 64); g.lineTo(64, 94); g.lineTo(34, 94);
+      g.closePath();
+      g.stroke();
+    } else {
+      // A square outline filled with tiles
+      g.strokeRect(34, 34, 60, 60);
+      g.fillStyle = '#ffffff';
+      for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) g.fillRect(42 + i * 24, 42 + j * 24, 20, 20);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    PieceSelectionSystem.fillTextures.set(kind, tex);
+    return tex;
+  }
+
+  private createFillButton(kind: OutlineFillKind): void {
+    const group = new THREE.Group();
+    group.renderOrder = 100000;
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: PieceSelectionSystem.fillTexture(kind), depthTest: false, depthWrite: false, toneMapped: false })
+    );
+    sprite.scale.set(0.42, 0.42, 1);
+    sprite.renderOrder = 100000;
+    group.add(sprite);
+    const hitBox = new THREE.Mesh(
+      new THREE.SphereGeometry(0.24, 8, 8),
+      new THREE.MeshBasicMaterial({ visible: false, depthTest: false })
+    );
+    hitBox.userData = { fillButton: true };
+    group.add(hitBox);
+    this.containerGroup.add(group);
+    this.hitBoxMeshes.push(hitBox);
+    this.fillButton = { kind, group, sprite, hitBox };
+  }
+
+  /** The hit box the ray passes closest to (relative to its size), so close arrows never steal each other's clicks */
+  private pickHitBox(rayOrigin: THREE.Vector3, rayDirection: THREE.Vector3): THREE.Object3D | null {
+    if (!this.selectedPiece || this.hitBoxMeshes.length === 0) return null;
+    this.raycaster.set(rayOrigin, rayDirection);
+    this.raycaster.far = 100.0;
+    const intersects = this.raycaster.intersectObjects(this.hitBoxMeshes, false);
+    let best: THREE.Object3D | null = null;
+    let bestScore = Infinity;
+    const c = new THREE.Vector3();
+    for (const hit of intersects) {
+      hit.object.getWorldPosition(c);
+      const scale = hit.object.getWorldScale(new THREE.Vector3()).x || 1;
+      const score = this.raycaster.ray.distanceToPoint(c) / scale;
+      if (score < bestScore) { bestScore = score; best = hit.object; }
+    }
+    return best;
+  }
+
+  /** The fill the button under the ray offers, if the ray is on it */
+  public raycastFillButton(rayOrigin: THREE.Vector3, rayDirection: THREE.Vector3): OutlineFillKind | null {
+    const hit = this.pickHitBox(rayOrigin, rayDirection);
+    return hit?.userData?.fillButton && this.fillButton ? this.fillButton.kind : null;
+  }
+
+  /** Rebuilds arrows and the fill button after the building around the selected piece changed */
+  public refresh(): void {
+    if (this.selectedPiece && !this.isDragging) this.rebuildVisuals();
   }
 
   /**
@@ -959,18 +1083,8 @@ export class PieceSelectionSystem {
    * Raycasts against the extension arrow hitboxes from camera ray.
    */
   public raycastArrows(rayOrigin: THREE.Vector3, rayDirection: THREE.Vector3): ArrowSide | null {
-    if (!this.selectedPiece || this.hitBoxMeshes.length === 0) return null;
-
-    this.raycaster.set(rayOrigin, rayDirection);
-    this.raycaster.far = 100.0;
-    const intersects = this.raycaster.intersectObjects(this.hitBoxMeshes, false);
-
-    if (intersects.length > 0) {
-      const hitObj = intersects[0].object as any;
-      return hitObj.userData?.arrowSide || null;
-    }
-
-    return null;
+    const hit = this.pickHitBox(rayOrigin, rayDirection);
+    return (hit?.userData?.arrowSide as ArrowSide | undefined) ?? null;
   }
 
   /**
@@ -1024,6 +1138,15 @@ export class PieceSelectionSystem {
       this.dragStartIntersection.copy(hit);
     } else {
       this.dragStartIntersection.copy(this.selectedPiece.position);
+    }
+
+    // Corner arrows: start with the 2x2 block a plain click gives, placed on release
+    if (isCornerSide(side)) {
+      const { signX, signZ } = getCornerSigns(side);
+      this.cornerCellX = signX;
+      this.cornerCellZ = signZ;
+      this.updateCornerPreview();
+      return;
     }
 
     // Trigger initial click extension or step
@@ -1103,58 +1226,33 @@ export class PieceSelectionSystem {
       return;
     }
 
-    // Handle 2D Rectangular Drag-to-Duplicate for floor corner arrows
+    // Corner arrows: the rectangle follows the cursor both ways (grows and shrinks)
     if (isCornerSide(this.dragSide)) {
       const ray = new THREE.Ray(rayOrigin, rayDir);
       const currentHit = new THREE.Vector3();
       if (!ray.intersectPlane(this.dragPlane, currentHit)) return;
 
-      const delta = currentHit.clone().sub(this.selectedPiece.position);
+      // Measured from where the arrow was grabbed, so the rectangle does not jump on the first move
+      const delta = currentHit.clone().sub(this.dragStartIntersection);
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.selectedPiece.quaternion);
       const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.selectedPiece.quaternion);
-      const localDeltaX = delta.dot(right);
-      const localDeltaZ = delta.dot(forward);
-
       const { signX, signZ } = getCornerSigns(this.dragSide);
       const dim = getPieceDimensions(this.selectedPiece.type, this.selectedPiece);
-      const stepX = dim.x;
-      const stepZ = dim.z;
-
-      const dragX = localDeltaX * signX;
-      const dragZ = localDeltaZ * signZ;
-
+      // The grab starts on the diagonal tile; from there each tile-width of cursor travel moves the
+      // far corner one tile, either way (past the selected tile the rectangle flips to that side)
       const maxSpan = 12;
-      const countX = Math.min(maxSpan, Math.max(0, Math.floor((dragX + stepX * 0.4) / stepX)));
-      const countZ = Math.min(maxSpan, Math.max(0, Math.floor((dragZ + stepZ * 0.4) / stepZ)));
+      const cellX = THREE.MathUtils.clamp(signX + Math.round(delta.dot(right) / dim.x), -maxSpan, maxSpan);
+      const cellZ = THREE.MathUtils.clamp(signZ + Math.round(delta.dot(forward) / dim.z), -maxSpan, maxSpan);
 
-      let placedNewCount = 0;
-      for (let ix = 0; ix <= countX; ix++) {
-        for (let iz = 0; iz <= countZ; iz++) {
-          if (ix === 0 && iz === 0) continue;
-          const offset = new THREE.Vector3(ix * signX * stepX, 0, iz * signZ * stepZ);
-          if (this.isDirectionFree(offset, dim)) {
-            const worldOffset = offset.clone().applyQuaternion(this.selectedPiece.quaternion);
-            const newPos = this.selectedPiece.position.clone().add(worldOffset);
-            if (!isPieceBelowSurface(this.selectedPiece.type, newPos, this.selectedPiece.quaternion, this.selectedPiece)) {
-              const newPiece = buildingManager.placePiece(this.selectedPiece.type, newPos, this.selectedPiece.quaternion);
-              if (newPiece) {
-                buildingManager.copyPieceStyle(this.selectedPiece.id, newPiece.id);
-                placedNewCount++;
-                this.dragPiecesPlacedCount++;
-              }
-            }
-          }
+      if (cellX !== this.cornerCellX || cellZ !== this.cornerCellZ) {
+        this.cornerCellX = cellX;
+        this.cornerCellZ = cellZ;
+        this.updateCornerPreview();
+        const now = performance.now();
+        if (now - this.lastAudioTime > 60) {
+          audioEngine.playBuildSelect();
+          this.lastAudioTime = now;
         }
-      }
-
-      if (placedNewCount > 0) {
-        // placePiece already plays the placement sound for each new piece
-        if (this.selectedPiece.type === BuildingPieceType.WOOD_FLOOR_2X2 || this.selectedPiece.type === BuildingPieceType.WOOD_FLOOR_1X1) {
-          buildingManager.confirmFloors();
-        } else if (this.selectedPiece.type === BuildingPieceType.STONE_FOUNDATION_2X2) {
-          buildingManager.confirmFoundations();
-        }
-        this.rebuildVisuals();
       }
       return;
     }
@@ -1186,19 +1284,150 @@ export class PieceSelectionSystem {
       // Rebuild Rapier physics collider on drag release for finalized geometry
       buildingManager.updateRoofConfig(this.selectedPiece.id, {}, true);
     } else if (this.selectedPiece && this.dragSide && isCornerSide(this.dragSide)) {
-      if (this.selectedPiece.type === BuildingPieceType.WOOD_FLOOR_2X2 || this.selectedPiece.type === BuildingPieceType.WOOD_FLOOR_1X1) {
-        buildingManager.confirmFloors();
-      } else if (this.selectedPiece.type === BuildingPieceType.STONE_FOUNDATION_2X2) {
-        buildingManager.confirmFoundations();
-      }
+      this.placeCornerRect(this.dragSide, buildingManager);
     } else if (this.isDragging && this.dragPiecesPlacedCount === 0 && this.dragSide) {
       this.extendSelectedPiece(this.dragSide, buildingManager);
     }
+    this.clearCornerPreview();
     this.isDragging = false;
     this.dragSide = null;
     this.dragPiecesPlacedCount = 0;
     this.startRoofConfig = null;
     this.lastAudioStep = 0;
+  }
+
+  /** Local offsets of the corner-drag rectangle's tiles (the selected tile itself left out) */
+  private cornerRectOffsets(_side: ArrowSide): THREE.Vector3[] {
+    if (!this.selectedPiece) return [];
+    const dim = getPieceDimensions(this.selectedPiece.type, this.selectedPiece);
+    const out: THREE.Vector3[] = [];
+    const x0 = Math.min(0, this.cornerCellX), x1 = Math.max(0, this.cornerCellX);
+    const z0 = Math.min(0, this.cornerCellZ), z1 = Math.max(0, this.cornerCellZ);
+    for (let ix = x0; ix <= x1; ix++) {
+      for (let iz = z0; iz <= z1; iz++) {
+        if (ix === 0 && iz === 0) continue;
+        out.push(new THREE.Vector3(ix * dim.x, 0, iz * dim.z));
+      }
+    }
+    return out;
+  }
+
+  /** "3×4": the rectangle's size in tiles, drawn by its far corner */
+  private static sizeLabel(text: string): THREE.Sprite {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 128;
+    const g = canvas.getContext('2d')!;
+    g.fillStyle = 'rgba(5,8,17,0.82)';
+    g.beginPath();
+    g.roundRect(8, 16, 240, 96, 40);
+    g.fill();
+    g.fillStyle = '#facc15';
+    g.font = 'bold 64px sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(text, 128, 66);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false, toneMapped: false }));
+    sprite.scale.set(1.4, 0.7, 1);
+    sprite.renderOrder = 100001;
+    return sprite;
+  }
+
+  /** See-through tiles where the drag will place floor (red where something is in the way) */
+  private updateCornerPreview(): void {
+    if (!this.selectedPiece || !this.dragSide) return;
+    this.clearCornerPreview();
+    const piece = this.selectedPiece;
+    const dim = getPieceDimensions(piece.type, piece);
+    const group = new THREE.Group();
+    group.position.copy(piece.position);
+    group.quaternion.copy(piece.quaternion);
+    // Flat cells on the tile's top face, each with its own frame (blue = floor goes here, red = blocked)
+    const topY = dim.y / 2 + 0.006;
+    const geom = new THREE.PlaneGeometry(dim.x, dim.z);
+    geom.rotateX(-Math.PI / 2);
+    const freeEdges: number[] = [];
+    const blockedEdges: number[] = [];
+    // Frames on the exact tile edges: neighbouring cells share one line, no gap between them
+    const hx = dim.x / 2, hz = dim.z / 2;
+    for (const offset of this.cornerRectOffsets(this.dragSide)) {
+      const free = this.isDirectionFree(offset, dim);
+      const cell = new THREE.Mesh(geom, free ? PieceSelectionSystem.cornerFreeMat : PieceSelectionSystem.cornerBlockedMat);
+      cell.position.set(offset.x, topY, offset.z);
+      cell.renderOrder = 99998;
+      group.add(cell);
+      const x0 = offset.x - hx, x1 = offset.x + hx, z0 = offset.z - hz, z1 = offset.z + hz;
+      (free ? freeEdges : blockedEdges).push(
+        x0, topY, z0, x1, topY, z0,  x1, topY, z0, x1, topY, z1,
+        x1, topY, z1, x0, topY, z1,  x0, topY, z1, x0, topY, z0,
+      );
+    }
+    const frameGeoms: THREE.BufferGeometry[] = [];
+    for (const [edges, mat] of [
+      [freeEdges, PieceSelectionSystem.cornerFrameFreeMat],
+      [blockedEdges, PieceSelectionSystem.cornerFrameBlockedMat],
+    ] as const) {
+      if (edges.length === 0) continue;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(edges, 3));
+      const frame = new THREE.LineSegments(g, mat);
+      frame.renderOrder = 99999;
+      group.add(frame);
+      frameGeoms.push(g);
+    }
+    const label = PieceSelectionSystem.sizeLabel(`${Math.abs(this.cornerCellX) + 1}×${Math.abs(this.cornerCellZ) + 1}`);
+    label.position.set(this.cornerCellX * dim.x, dim.y / 2 + 0.9, this.cornerCellZ * dim.z);
+    group.add(label);
+    group.userData.geom = geom;
+    group.userData.frameGeoms = frameGeoms;
+    group.userData.label = label;
+    this.scene.add(group);
+    this.cornerPreview = group;
+  }
+
+  private clearCornerPreview(): void {
+    if (!this.cornerPreview) return;
+    this.scene.remove(this.cornerPreview);
+    (this.cornerPreview.userData.geom as THREE.BufferGeometry | undefined)?.dispose();
+    for (const g of (this.cornerPreview.userData.frameGeoms as THREE.BufferGeometry[] | undefined) ?? []) g.dispose();
+    const label = this.cornerPreview.userData.label as THREE.Sprite | undefined;
+    if (label) {
+      label.material.map?.dispose();
+      label.material.dispose();
+    }
+    this.cornerPreview = null;
+  }
+
+  /** Places the corner-drag rectangle and selects its far corner tile, so the drag can go on from it */
+  private placeCornerRect(side: ArrowSide, buildingManager: BuildingManager): void {
+    const piece = this.selectedPiece;
+    if (!piece) return;
+    const dim = getPieceDimensions(piece.type, piece);
+    let farthest: BuiltPiece | null = null;
+    let farthestD = -1;
+    let placed = 0;
+    for (const offset of this.cornerRectOffsets(side)) {
+      if (!this.isDirectionFree(offset, dim)) continue;
+      const newPos = piece.position.clone().add(offset.clone().applyQuaternion(piece.quaternion));
+      if (isPieceBelowSurface(piece.type, newPos, piece.quaternion, piece)) continue;
+      // One placement sound for the whole rectangle
+      const newPiece = buildingManager.placePiece(piece.type, newPos, piece.quaternion, undefined, placed > 0);
+      if (!newPiece) continue;
+      buildingManager.copyPieceStyle(piece.id, newPiece.id);
+      placed++;
+      const d = Math.abs(offset.x) + Math.abs(offset.z);
+      if (d > farthestD) { farthestD = d; farthest = newPiece; }
+    }
+    if (placed === 0) return;
+    if (piece.type === BuildingPieceType.WOOD_FLOOR_2X2 || piece.type === BuildingPieceType.WOOD_FLOOR_1X1) {
+      buildingManager.confirmFloors();
+    } else if (piece.type === BuildingPieceType.STONE_FOUNDATION_2X2) {
+      buildingManager.confirmFoundations();
+    }
+    this.dragPiecesPlacedCount = placed;
+    if (farthest) this.selectPiece(farthest);
   }
 
   /**
@@ -1363,8 +1592,10 @@ export class PieceSelectionSystem {
 
     // Check hover
     let currentHovered: ArrowSide | null = null;
+    this.fillHovered = false;
     if (!this.isDragging && rayOrigin && rayDirection) {
       currentHovered = this.raycastArrows(rayOrigin, rayDirection);
+      this.fillHovered = !!this.raycastFillButton(rayOrigin, rayDirection);
     } else if (this.isDragging) {
       currentHovered = this.dragSide;
     }
@@ -1388,6 +1619,19 @@ export class PieceSelectionSystem {
     // Animate arrows: subtle bounce along outward direction + hover scaling + CONSTANT SCREEN-SPACE SCALE
     const bounceOffset = Math.sin(this.animTime * 6.0) * 0.035;
 
+    // On a wall the fill button sits above the middle and the corner-turn arrows below it, kept a
+    // screen-constant distance apart so neither covers the other
+    const pieceScreenScale = Math.max(0.1, camPos.distanceTo(this.containerGroup.position)) * tanFovHalf * 0.25;
+    const wallH = getPieceDimensions(this.selectedPiece.type, this.selectedPiece).y;
+    const isWallLike = isSolidWallPiece(this.selectedPiece.type);
+    const fillLift = this.fillButton && isWallLike ? Math.min(wallH / 2 - 0.12, Math.max(0.28, 0.42 * pieceScreenScale)) : 0;
+    if (this.fillButton) {
+      const s = pieceScreenScale * (this.fillHovered ? 1.25 : 1.0);
+      const y = isWallLike ? fillLift : wallH / 2 + 0.6 * pieceScreenScale;
+      this.fillButton.group.position.set(0, y, 0);
+      this.fillButton.group.scale.setScalar(s);
+    }
+
     for (const arrow of this.arrows) {
       const isHovered = arrow.side === this.hoveredSide;
       const isActiveDrag = this.isDragging && arrow.side === this.dragSide;
@@ -1402,7 +1646,14 @@ export class PieceSelectionSystem {
       const constantScreenScale = dist * tanFovHalf * 0.25;
 
       // Position bounce
-      const targetPos = arrow.baseLocalPos.clone().addScaledVector(
+      let basePos = isWallTurnSide(arrow.side) && fillLift > 0 ? arrow.baseLocalPos.clone().setY(-fillLift) : arrow.baseLocalPos;
+      if (isActiveDrag && isCornerSide(arrow.side)) {
+        // The grabbed arrow rides on the rectangle's far corner
+        const { signX, signZ } = getCornerSigns(arrow.side);
+        const d = getPieceDimensions(this.selectedPiece.type, this.selectedPiece);
+        basePos = basePos.clone().add(new THREE.Vector3((this.cornerCellX - signX) * d.x, 0, (this.cornerCellZ - signZ) * d.z));
+      }
+      const targetPos = basePos.clone().addScaledVector(
         arrow.direction,
         (isHovered ? bounceOffset * 1.5 + 0.05 : bounceOffset) * Math.min(constantScreenScale, 1.2)
       );

@@ -34,6 +34,8 @@ export enum BuildingPieceType {
   ROOF_SHED_2X2 = 'ROOF_SHED_2X2',
   ROOF_SHED_2X4 = 'ROOF_SHED_2X4',
   ROOF_SHED_4X4 = 'ROOF_SHED_4X4',
+  ROOF_GAMBREL_2X2 = 'ROOF_GAMBREL_2X2',
+  ROOF_MANSARD_2X2 = 'ROOF_MANSARD_2X2',
   WOOD_POLE_2M = 'WOOD_POLE_2M',
   CHECKER_PILLAR_1M = 'CHECKER_PILLAR_1M',
   CORNER_RUSTICATED_QUOIN_1M = 'CORNER_RUSTICATED_QUOIN_1M',
@@ -120,6 +122,7 @@ export interface BuildingPieceDef {
 }
 
 import type { ProceduralRoofConfig, RoofStyle } from '../ProceduralRoofSystem';
+import type { DormerStyle } from '../RoofDormers';
 
 export interface BuiltPiece {
   id: string;
@@ -217,6 +220,8 @@ export const PIECE_TRAITS: Record<BuildingPieceType, PieceTraits> = {
   [T.ROOF_SHED_2X2]: { kind: 'roof', proceduralRoof: true },
   [T.ROOF_SHED_2X4]: { kind: 'roof', proceduralRoof: true },
   [T.ROOF_SHED_4X4]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_GAMBREL_2X2]: { kind: 'roof', proceduralRoof: true },
+  [T.ROOF_MANSARD_2X2]: { kind: 'roof', proceduralRoof: true },
 
   [T.WOOD_POLE_2M]: { kind: 'pillar' },
   [T.CHECKER_PILLAR_1M]: { kind: 'pillar' },
@@ -394,6 +399,9 @@ export interface BuildPreviewState {
   canAfford: boolean;
 }
 
+/** Roof kinds that can cover a whole house outline */
+export type HouseRoofKind = 'gable' | 'hip';
+
 export interface BuildingTelemetry {
   isBuildModeActive: boolean;
   selectedPieceType: BuildingPieceType | null;
@@ -427,9 +435,36 @@ export interface BuildingTelemetry {
   isRoofSelected?: boolean;
   /** A wall is selected or under the cursor: "roof the whole house" can run */
   canRoofHouse?: boolean;
-  /** A floor tile is selected or aimed at: its outline can be walled in */
-  canWallFloor?: boolean;
+  /** Whole-house roof tool picked in the dock: the next wall clicked gets this roof over its house */
+  houseRoofTool?: HouseRoofKind | null;
+  /** The outline fill the selected / aimed wall or floor tile offers */
+  fillKind?: 'walls' | 'ceiling' | null;
+  /** Dormer panel of the selected shingle roof */
+  dormer?: DormerTelemetry | null;
 }
+
+export interface DormerTelemetry {
+  /** The dormer tool is on: the next click on the roof's slope places one */
+  tool: boolean;
+  style: DormerStyle;
+  width: number;
+  height: number;
+  /** A placed dormer is picked: style and size buttons change it */
+  editing: boolean;
+  /** Dormers on the selected roof */
+  count: number;
+  /** Localized hint (why the hovered spot does not fit, what to do next), or null */
+  hint: string | null;
+}
+
+/** What the dormer panel asks for */
+export type DormerAction =
+  | { kind: 'tool' }
+  | { kind: 'style'; style: DormerStyle }
+  | { kind: 'width'; delta: number }
+  | { kind: 'height'; delta: number }
+  | { kind: 'delete' }
+  | { kind: 'done' };
 
 export interface SavedPieceData {
   id: string;

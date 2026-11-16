@@ -113,6 +113,8 @@ const BADGE_WORDS: [string, string][] = [
   ['2-похилий', 'Gable'],
   ['4-похилий', 'Hip'],
   ['1-похилий', 'Shed'],
+  ['Ламаний', 'Gambrel'],
+  ['Мансардний', 'Mansard'],
   ['Чекер', 'Checker'],
   ['Русти', 'Rustic'],
   ['Прямі', 'Straight'],

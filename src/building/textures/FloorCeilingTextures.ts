@@ -2,7 +2,6 @@ import * as THREE from 'three';
 
 export interface GeneratedTextureResult {
   texture: THREE.CanvasTexture;
-  bumpMap?: THREE.CanvasTexture;
   dataUrl: string;
 }
 
@@ -16,15 +15,9 @@ export function createHerringboneParquetTexture(): GeneratedTextureResult {
   canvas.height = 512;
   const ctx = canvas.getContext('2d')!;
 
-  const bumpCanvas = document.createElement('canvas');
-  bumpCanvas.width = 512;
-  bumpCanvas.height = 512;
-  const bctx = bumpCanvas.getContext('2d')!;
 
   ctx.fillStyle = '#b6834d';
   ctx.fillRect(0, 0, 512, 512);
-  bctx.fillStyle = '#808080';
-  bctx.fillRect(0, 0, 512, 512);
 
   const slatW = 32;
   const slatL = 96;
@@ -56,12 +49,6 @@ export function createHerringboneParquetTexture(): GeneratedTextureResult {
       ctx.strokeRect(0.5, 0.5, slatW - 1, slatL - 1);
       ctx.restore();
 
-      // Bump
-      bctx.fillStyle = '#e0e0e0';
-      bctx.fillRect(px + 2, y + 2, slatW - 4, slatL - 4);
-      bctx.strokeStyle = '#202020';
-      bctx.lineWidth = 2;
-      bctx.strokeRect(px + 0.5, y + 0.5, slatW - 1, slatL - 1);
 
       // Group 2: horizontal slat next to it
       const hx = px + slatW;
@@ -85,11 +72,6 @@ export function createHerringboneParquetTexture(): GeneratedTextureResult {
       ctx.strokeRect(0.5, 0.5, slatL - 1, slatW - 1);
       ctx.restore();
 
-      bctx.fillStyle = '#e0e0e0';
-      bctx.fillRect(hx + 2, hy + 2, slatL - 4, slatW - 4);
-      bctx.strokeStyle = '#202020';
-      bctx.lineWidth = 2;
-      bctx.strokeRect(hx + 0.5, hy + 0.5, slatL - 1, slatW - 1);
     }
   }
 
@@ -98,11 +80,8 @@ export function createHerringboneParquetTexture(): GeneratedTextureResult {
   texture.wrapT = THREE.RepeatWrapping;
   texture.colorSpace = THREE.SRGBColorSpace;
 
-  const bumpMap = new THREE.CanvasTexture(bumpCanvas);
-  bumpMap.wrapS = THREE.RepeatWrapping;
-  bumpMap.wrapT = THREE.RepeatWrapping;
 
-  return { texture, bumpMap, dataUrl: canvas.toDataURL('image/png') };
+  return { texture, dataUrl: canvas.toDataURL('image/png') };
 }
 
 /**
@@ -114,15 +93,9 @@ export function createDarkWalnutFloorTexture(): GeneratedTextureResult {
   canvas.height = 512;
   const ctx = canvas.getContext('2d')!;
 
-  const bumpCanvas = document.createElement('canvas');
-  bumpCanvas.width = 512;
-  bumpCanvas.height = 512;
-  const bctx = bumpCanvas.getContext('2d')!;
 
   ctx.fillStyle = '#301f14';
   ctx.fillRect(0, 0, 512, 512);
-  bctx.fillStyle = '#808080';
-  bctx.fillRect(0, 0, 512, 512);
 
   const plankH = 64;
   for (let y = 0; y < 512; y += plankH) {
@@ -158,12 +131,6 @@ export function createDarkWalnutFloorTexture(): GeneratedTextureResult {
     ctx.fillStyle = '#140a05';
     ctx.fillRect(0, y + plankH - 2, 512, 2);
 
-    // Bump
-    bctx.fillStyle = '#e8e8e8';
-    bctx.fillRect(0, y + 2, 512, plankH - 4);
-    bctx.fillStyle = '#101010';
-    bctx.fillRect(0, y + plankH - 2, 512, 2);
-    bctx.fillRect(jointX, y, 3, plankH);
   }
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -171,11 +138,8 @@ export function createDarkWalnutFloorTexture(): GeneratedTextureResult {
   texture.wrapT = THREE.RepeatWrapping;
   texture.colorSpace = THREE.SRGBColorSpace;
 
-  const bumpMap = new THREE.CanvasTexture(bumpCanvas);
-  bumpMap.wrapS = THREE.RepeatWrapping;
-  bumpMap.wrapT = THREE.RepeatWrapping;
 
-  return { texture, bumpMap, dataUrl: canvas.toDataURL('image/png') };
+  return { texture, dataUrl: canvas.toDataURL('image/png') };
 }
 
 /**
@@ -535,15 +499,9 @@ export function createDarkWoodCofferedCeilingTexture(): GeneratedTextureResult {
   canvas.height = 512;
   const ctx = canvas.getContext('2d')!;
 
-  const bumpCanvas = document.createElement('canvas');
-  bumpCanvas.width = 512;
-  bumpCanvas.height = 512;
-  const bctx = bumpCanvas.getContext('2d')!;
 
   ctx.fillStyle = '#3f2514';
   ctx.fillRect(0, 0, 512, 512);
-  bctx.fillStyle = '#808080';
-  bctx.fillRect(0, 0, 512, 512);
 
   const boxSize = 256;
   const frameW = 36;
@@ -588,15 +546,6 @@ export function createDarkWoodCofferedCeilingTexture(): GeneratedTextureResult {
       ctx.lineWidth = 2;
       ctx.stroke();
 
-      // Bump map
-      bctx.fillStyle = '#ffffff'; // high beams
-      bctx.fillRect(x, y, boxSize, boxSize);
-      bctx.fillStyle = '#202020'; // sunken center
-      bctx.fillRect(inX, inY, inSize, inSize);
-      bctx.fillStyle = '#707070'; // rosette
-      bctx.beginPath();
-      bctx.arc(cx, cy, 24, 0, Math.PI * 2);
-      bctx.fill();
     }
   }
 
@@ -605,11 +554,8 @@ export function createDarkWoodCofferedCeilingTexture(): GeneratedTextureResult {
   texture.wrapT = THREE.RepeatWrapping;
   texture.colorSpace = THREE.SRGBColorSpace;
 
-  const bumpMap = new THREE.CanvasTexture(bumpCanvas);
-  bumpMap.wrapS = THREE.RepeatWrapping;
-  bumpMap.wrapT = THREE.RepeatWrapping;
 
-  return { texture, bumpMap, dataUrl: canvas.toDataURL('image/png') };
+  return { texture, dataUrl: canvas.toDataURL('image/png') };
 }
 
 /**
@@ -681,16 +627,10 @@ export function createRusticOakBeamsCeilingTexture(): GeneratedTextureResult {
   canvas.height = 512;
   const ctx = canvas.getContext('2d')!;
 
-  const bumpCanvas = document.createElement('canvas');
-  bumpCanvas.width = 512;
-  bumpCanvas.height = 512;
-  const bctx = bumpCanvas.getContext('2d')!;
 
   // Warm cream stucco base
   ctx.fillStyle = '#fbf9f5';
   ctx.fillRect(0, 0, 512, 512);
-  bctx.fillStyle = '#707070';
-  bctx.fillRect(0, 0, 512, 512);
 
   // Stucco grain
   ctx.fillStyle = 'rgba(180, 170, 155, 0.15)';
@@ -738,9 +678,6 @@ export function createRusticOakBeamsCeilingTexture(): GeneratedTextureResult {
       ctx.fill();
     }
 
-    // Bump map for high beam relief
-    bctx.fillStyle = '#ffffff';
-    bctx.fillRect(0, by, 512, beamH);
   }
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -748,11 +685,8 @@ export function createRusticOakBeamsCeilingTexture(): GeneratedTextureResult {
   texture.wrapT = THREE.RepeatWrapping;
   texture.colorSpace = THREE.SRGBColorSpace;
 
-  const bumpMap = new THREE.CanvasTexture(bumpCanvas);
-  bumpMap.wrapS = THREE.RepeatWrapping;
-  bumpMap.wrapT = THREE.RepeatWrapping;
 
-  return { texture, bumpMap, dataUrl: canvas.toDataURL('image/png') };
+  return { texture, dataUrl: canvas.toDataURL('image/png') };
 }
 
 /**

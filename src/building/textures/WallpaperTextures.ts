@@ -32,7 +32,6 @@ export interface WainscotTextureOptions {
 
 export function createWainscotTexture(options: WainscotTextureOptions): {
   texture: THREE.CanvasTexture;
-  bumpMap: THREE.CanvasTexture;
   dataUrl: string;
 } {
   const canvas = document.createElement('canvas');
@@ -40,17 +39,11 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
   canvas.height = 512;
   const ctx = canvas.getContext('2d')!;
 
-  const bumpCanvas = document.createElement('canvas');
-  bumpCanvas.width = 512;
-  bumpCanvas.height = 512;
-  const bctx = bumpCanvas.getContext('2d')!;
 
   // 1. Base Fill
   ctx.fillStyle = options.baseColor;
   ctx.fillRect(0, 0, 512, 512);
 
-  bctx.fillStyle = '#808080'; // Neutral bump
-  bctx.fillRect(0, 0, 512, 512);
 
   // 2. Vertical Beadboard Slats (16 slats of 32px each across 512px)
   const slatWidth = 32;
@@ -73,14 +66,6 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
     ctx.fillStyle = slatGrad;
     ctx.fillRect(x, slatsY, slatWidth, slatsH);
 
-    // Bump for slat (convex cushion)
-    const bumpGrad = bctx.createLinearGradient(x, 0, x + slatWidth, 0);
-    bumpGrad.addColorStop(0, '#c0c0c0');
-    bumpGrad.addColorStop(0.5, '#e0e0e0');
-    bumpGrad.addColorStop(0.9, '#a0a0a0');
-    bumpGrad.addColorStop(1, '#202020'); // deep groove
-    bctx.fillStyle = bumpGrad;
-    bctx.fillRect(x, slatsY, slatWidth, slatsH);
 
     // Left micro-bevel highlight line
     ctx.strokeStyle = options.highlightColor;
@@ -106,9 +91,6 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
     ctx.fillStyle = beadGrad;
     ctx.fillRect(x + 15, slatsY, 2, slatsH);
 
-    // Bump for bead
-    bctx.fillStyle = '#ffffff';
-    bctx.fillRect(x + 15.5, slatsY, 1, slatsH);
   }
 
   // 3. Natural Wood Grain over the slats
@@ -171,14 +153,6 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
   ctx.fillStyle = dropShadowGrad;
   ctx.fillRect(0, 36, 512, 10);
 
-  const railBump = bctx.createLinearGradient(0, 0, 0, 46);
-  railBump.addColorStop(0, '#f0f0f0');
-  railBump.addColorStop(0.2, '#ffffff');
-  railBump.addColorStop(0.75, '#e8e8e8');
-  railBump.addColorStop(0.78, '#101010');
-  railBump.addColorStop(1, '#808080');
-  bctx.fillStyle = railBump;
-  bctx.fillRect(0, 0, 512, 46);
 
   // 5. Bottom Baseboard Molding (y = 466 to 512)
   const baseStartY = 512 - bottomMoldingH;
@@ -203,13 +177,6 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
   ctx.fillStyle = shoeGrad;
   ctx.fillRect(0, 504, 512, 8);
 
-  const baseBump = bctx.createLinearGradient(0, baseStartY, 0, 512);
-  baseBump.addColorStop(0, '#d0d0d0');
-  baseBump.addColorStop(0.2, '#f0f0f0');
-  baseBump.addColorStop(0.85, '#e0e0e0');
-  baseBump.addColorStop(1, '#202020');
-  bctx.fillStyle = baseBump;
-  bctx.fillRect(0, baseStartY, 512, bottomMoldingH);
 
   // 6. Compose the real wall: panel squeezed into the bottom metre, painted wall above it.
   // 256px per metre in both directions keeps the texture's proportions true on any wall.
@@ -237,22 +204,12 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
   wctx.restore();
   wctx.drawImage(canvas, 0, fullH - panelH, 512, panelH);
 
-  const wallBump = document.createElement('canvas');
-  wallBump.width = 512;
-  wallBump.height = fullH;
-  const wbctx = wallBump.getContext('2d')!;
-  wbctx.fillStyle = '#808080';
-  wbctx.fillRect(0, 0, 512, fullH - panelH);
-  wbctx.drawImage(bumpCanvas, 0, fullH - panelH, 512, panelH);
 
   const texture = new THREE.CanvasTexture(wall);
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping; // taller walls just continue the paint colour
   texture.colorSpace = THREE.SRGBColorSpace;
 
-  const bumpMap = new THREE.CanvasTexture(wallBump);
-  bumpMap.wrapS = THREE.RepeatWrapping;
-  bumpMap.wrapT = THREE.ClampToEdgeWrapping;
 
   // Thumbnail: the bottom 2m of the wall, so the swatch shows the panel under painted wall
   const thumb = document.createElement('canvas');
@@ -260,7 +217,7 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
   thumb.height = 256;
   thumb.getContext('2d')!.drawImage(wall, 0, fullH - 512, 512, 512, 0, 0, 256, 256);
 
-  return { texture, bumpMap, dataUrl: thumb.toDataURL('image/png') };
+  return { texture, dataUrl: thumb.toDataURL('image/png') };
 }
 
 export function createFloralWallpaperTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {

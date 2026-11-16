@@ -3,6 +3,8 @@ import { BuiltPiece, isGlassRoofPiece, isProceduralRoofPiece, isSolidWallPiece }
 import { describeWallSeg } from './continuous/WallJoints';
 import type { WallPaintingSystem } from './WallPaintingSystem';
 import { DEFAULT_ROOF_STYLE, PROCEDURAL_ROOF_MATERIALS, getRoofShingleMaterial } from './ProceduralRoofSystem';
+import { houseGableEdges, normalizeFootprint } from './HouseRoofGeometry';
+import { DORMER_GLASS } from './config/BuildingMaterials';
 
 /**
  * Materials of a procedural roof: its own shingle style, white trim, and frontons / attic walls in
@@ -19,7 +21,15 @@ function atticLines(roof: BuiltPiece): Array<[THREE.Vector3, THREE.Vector3]> {
   const c = roof.roofConfig;
   if (!c) return [];
   const V = (x: number, z: number) => new THREE.Vector3(x, 0, z);
-  if (c.roofType === 'gable') return [[V(c.minX, c.minZ), V(c.maxX, c.minZ)], [V(c.minX, c.maxZ), V(c.maxX, c.maxZ)]];
+  const fp = c.footprint ? normalizeFootprint(c.footprint) : null;
+  if (fp) {
+    if (c.roofType !== 'gable') return [];
+    return [...houseGableEdges(fp)].map((i) => {
+      const a = fp[i], b = fp[(i + 1) % fp.length];
+      return [V(a[0], a[1]), V(b[0], b[1])] as [THREE.Vector3, THREE.Vector3];
+    });
+  }
+  if (c.roofType === 'gable' || c.roofType === 'gambrel') return [[V(c.minX, c.minZ), V(c.maxX, c.minZ)], [V(c.minX, c.maxZ), V(c.maxX, c.maxZ)]];
   if (c.roofType === 'shed') {
     return [[V(c.minX, c.maxZ), V(c.maxX, c.maxZ)], [V(c.minX, c.minZ), V(c.minX, c.maxZ)], [V(c.maxX, c.minZ), V(c.maxX, c.maxZ)]];
   }
@@ -62,11 +72,13 @@ function roofMesh(roof: BuiltPiece): THREE.Mesh | null {
 /**
  * Applies the roof's style and the attic finish. Attic UVs come out of the generator in metres;
  * they are scaled to the wall finish's tile size, remembered so repeated calls stay exact.
+ * Returns whether the roof's look changed.
  */
-export function dressRoof(roof: BuiltPiece, paint: WallPaintingSystem, near: Near): void {
-  if (!isProceduralRoofPiece(roof.type) || isGlassRoofPiece(roof.type)) return;
+export function dressRoof(roof: BuiltPiece, paint: WallPaintingSystem, near: Near): boolean {
+  if (!isProceduralRoofPiece(roof.type) || isGlassRoofPiece(roof.type)) return false;
   const mesh = roofMesh(roof);
-  if (!mesh) return;
+  if (!mesh) return false;
+  let changed = false;
 
   let attic: THREE.Material = PROCEDURAL_ROOF_MATERIALS.gableWall;
   let tile = { width: 1, height: 1 };
@@ -80,12 +92,13 @@ export function dressRoof(roof: BuiltPiece, paint: WallPaintingSystem, near: Nea
 
   const shingle = getRoofShingleMaterial(roof.roofStyle ?? DEFAULT_ROOF_STYLE);
   const current = mesh.material as THREE.Material[];
-  if (!Array.isArray(current) || current[0] !== shingle || current[1] !== PROCEDURAL_ROOF_MATERIALS.woodTrim || current[2] !== attic) {
-    mesh.material = [shingle, PROCEDURAL_ROOF_MATERIALS.woodTrim, attic];
+  if (!Array.isArray(current) || current[0] !== shingle || current[1] !== PROCEDURAL_ROOF_MATERIALS.woodTrim || current[2] !== attic || current[3] !== DORMER_GLASS) {
+    mesh.material = [shingle, PROCEDURAL_ROOF_MATERIALS.woodTrim, attic, DORMER_GLASS];
+    changed = true;
   }
 
   const prev = (mesh.userData.atticTile as { width: number; height: number } | undefined) ?? { width: 1, height: 1 };
-  if (prev.width === tile.width && prev.height === tile.height) return;
+  if (prev.width === tile.width && prev.height === tile.height) return changed;
   const group = mesh.geometry.groups.find((g) => g.materialIndex === 2);
   const uv = mesh.geometry.getAttribute('uv') as THREE.BufferAttribute | undefined;
   if (group && uv) {
@@ -94,6 +107,7 @@ export function dressRoof(roof: BuiltPiece, paint: WallPaintingSystem, near: Nea
     uv.needsUpdate = true;
   }
   mesh.userData.atticTile = { ...tile };
+  return true;
 }
 
 /** Marks a freshly generated roof geometry as having metre UVs again */

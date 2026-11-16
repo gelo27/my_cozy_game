@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
+import type { HouseRoofKind } from './types/BuildingTypes';
 import {
   BuildingPieceType,
   BuiltPiece,
@@ -21,13 +22,18 @@ import {
   getWallSize,
 } from './types/BuildingTypes';
 import { GreenhouseBatch } from './GreenhouseBatch';
+import { StaticPieceBatch } from './StaticPieceBatch';
 import { BUILDING_PIECES, BUILDING_MATERIALS, createPieceMeshGroup, getPieceMeshTemplate, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface, createRoofGeometry, addFarGlassTwins } from './config/BuildingPiecesConfig';
 import { ProceduralRoofGenerator, ProceduralRoofConfig, RoofStyle, DEFAULT_ROOF_STYLE } from './ProceduralRoofSystem';
 import { findHouseOutline } from './HouseOutline';
 import { houseRoofRun } from './HouseRoofGeometry';
-import { planFloorOutlineWalls, OUTLINE_WALL_TYPE } from './FloorOutlineWalls';
+import { planFloorOutlineWalls, outlineWallType } from './FloorOutlineWalls';
+import { outlineFillKind, OutlineFillKind, floorTileUnderWall, planCeiling, CEILING_TILE_TYPE } from './OutlineFill';
+import { isSolidWallPiece as isSolidWall } from './types/BuildingTypes';
 import type { TKey } from '../i18n/en';
 import { dressRoof, resetRoofAtticTile } from './RoofDressing';
+import { solveBaseRoofShape } from './RoofGeometry';
+import { DORMER_SNAP, layOutDormers, pickRoofTop, planContains, slopeOutAt, type DormerFailure, type RoofDormer } from './RoofDormers';
 import { PhysicsWorld, NPC_GHOST_COLLIDERS } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { ParticleManager } from '../particles/ParticleManager';
@@ -142,6 +148,9 @@ export class BuildingManager {
   public readonly greenhouseBatch: GreenhouseBatch;
   private dirtyGreenhouse = false;
   private readonly liveGreenhouseIds = new Set<string>();
+  /** Windows, doors, roofs, furniture... merged per chunk and material (see StaticPieceBatch) */
+  public readonly staticBatch: StaticPieceBatch;
+  private lastFlushAt = 0;
 
   // Reusable scratch objects to eliminate per-frame allocations during raycasts
   private static readonly _tempRay = new THREE.Ray();
@@ -161,6 +170,7 @@ export class BuildingManager {
       near: (center, radius) => this.getPiecesTouchingRadius(center, radius),
     });
     this.greenhouseBatch = new GreenhouseBatch(this.group);
+    this.staticBatch = new StaticPieceBatch(this.group);
   }
 
   private markGreenhouseDirty(type: BuildingPieceType): void {
@@ -214,6 +224,28 @@ export class BuildingManager {
       this.dirtyGreenhouse = false;
       this.greenhouseBatch.rebuild(this.pieces.values(), (id) => this.liveGreenhouseIds.has(id));
     }
+    const now = performance.now();
+    const dt = this.lastFlushAt ? Math.min(0.25, (now - this.lastFlushAt) / 1000) : 0;
+    this.lastFlushAt = now;
+    this.staticBatch.flush(dt, this.pieces);
+    this.syncAttachedPieces();
+  }
+
+  /**
+   * Pieces drawn by a bake or batch keep their own meshes (the source those are rebuilt from), but
+   * hidden: those are taken out of the scene graph, or every frame's matrix update would still walk
+   * their few thousand objects. Shown ones (pending, live, unbatched) are put back. The group sits at
+   * the world origin, so a detached piece's matrices stay the same.
+   */
+  private syncAttachedPieces(): void {
+    for (const piece of this.pieces.values()) {
+      const g = piece.meshGroup;
+      if (g.visible) {
+        if (g.parent !== this.group) this.group.add(g);
+      } else if (g.parent === this.group) {
+        this.group.remove(g);
+      }
+    }
   }
 
   private updateRoofDressing(): void {
@@ -226,14 +258,35 @@ export class BuildingManager {
   }
 
   private dressRoof(piece: BuiltPiece): void {
-    dressRoof(piece, this.wallPaintingSystem, (c, r) => this.getPiecesNear(c, r));
+    if (dressRoof(piece, this.wallPaintingSystem, (c, r) => this.getPiecesNear(c, r))) this.staticBatch.markPiece(piece);
+  }
+
+  /** What a piece's own meshes show changed outside the manager (the window glow swapped its glass). */
+  public markPieceVisualChanged(piece: BuiltPiece): void {
+    this.staticBatch.markPiece(piece);
   }
 
   /**
-   * Puts one hip roof over the whole house `wallId` belongs to, following its outer walls (valleys
-   * at inner corners). A house roof already standing on the same outline is replaced.
+   * Per frame, with the final camera position: hides batched glass that would only discard and
+   * furniture of far chunks (see StaticPieceBatch.updateView).
    */
-  public placeHouseRoof(wallId: string): { ok: true; piece: BuiltPiece } | { ok: false; reason: TKey } {
+  public updateDrawDistance(cameraPos: THREE.Vector3): void {
+    this.staticBatch.updateView(cameraPos);
+    this.greenhouseBatch.updateView(cameraPos);
+  }
+
+  /** Shows every batch mesh that distance hides, for one GPU warm-up draw (updateDrawDistance undoes it). */
+  public revealAllForWarmup(): void {
+    this.staticBatch.revealAll();
+    this.greenhouseBatch.revealAll();
+  }
+
+  /**
+   * Puts one roof over the whole house `wallId` belongs to, following its outer walls (valleys at
+   * inner corners): a hip roof, or a gable one with upright gables at the ends of its wings. A house
+   * roof already standing on the same outline is replaced.
+   */
+  public placeHouseRoof(wallId: string, kind: HouseRoofKind = 'hip'): { ok: true; piece: BuiltPiece } | { ok: false; reason: TKey } {
     const wall = this.pieces.get(wallId);
     if (!wall) return { ok: false, reason: 'build.houseRoof.noWall' };
     const found = findHouseOutline(wall, (c, r) => this.getPiecesNear(c, r));
@@ -244,13 +297,15 @@ export class BuildingManager {
       if (p.roofConfig?.footprint && p.position.distanceTo(origin) < 0.2) this.demolishPiece(p.id);
     }
 
-    const piece = this.placePiece(BuildingPieceType.ROOF_HIP_4X4, origin, quaternion);
+    const type = kind === 'gable' ? BuildingPieceType.ROOF_GABLE_4X4 : BuildingPieceType.ROOF_HIP_4X4;
+    const piece = this.placePiece(type, origin, quaternion);
     if (!piece) return { ok: false, reason: 'build.houseRoof.failed' };
     const xs = footprint.map((p) => p[0]), zs = footprint.map((p) => p[1]);
     // About 30 degrees, in the height arrow's 0.25 m steps
-    const height = THREE.MathUtils.clamp(Math.round((houseRoofRun(footprint) * 0.6 + 0.12) / 0.25) * 0.25, 0.5, 5);
+    const run = houseRoofRun(footprint, kind === 'gable');
+    const height = THREE.MathUtils.clamp(Math.round((run * 0.6 + 0.12) / 0.25) * 0.25, 0.5, 5);
     this.updateRoofConfig(piece.id, {
-      roofType: 'hip',
+      roofType: kind,
       footprint,
       minX: Math.min(...xs),
       maxX: Math.max(...xs),
@@ -266,18 +321,64 @@ export class BuildingManager {
    * Walls on every outer edge of the floor this tile belongs to (2 m walls on the tile edges).
    * Edges that already hold a wall, window, door or railing are skipped.
    */
-  public placeFloorOutlineWalls(floorId: string): { ok: true; placed: number } | { ok: false; reason: TKey } {
+  public placeFloorOutlineWalls(
+    floorId: string,
+    fromWall?: BuiltPiece
+  ): { ok: true; placed: number } | { ok: false; reason: TKey } {
     const floor = this.pieces.get(floorId);
     if (!floor) return { ok: false, reason: 'build.floorWalls.noFloor' };
-    const plan = planFloorOutlineWalls(floor, (c, r) => this.getPiecesNear(c, r));
+    // Started from a wall: the outline gets that wall's kind (height) and look
+    const wallType = outlineWallType(fromWall?.type);
+    const plan = planFloorOutlineWalls(floor, (c, r) => this.getPiecesNear(c, r), wallType);
     if (plan.ok === false) return { ok: false, reason: plan.reason };
     if (plan.walls.length === 0) return { ok: false, reason: 'build.floorWalls.nothing' };
     let placed = 0;
     plan.walls.forEach((w, i) => {
       // One sound for the whole outline
-      if (this.placePiece(OUTLINE_WALL_TYPE, w.position, w.quaternion, undefined, i > 0)) placed++;
+      const wall = this.placePiece(wallType, w.position, w.quaternion, undefined, i > 0);
+      if (!wall) return;
+      placed++;
+      if (fromWall && fromWall.type === wallType) this.copyPieceStyle(fromWall.id, wall.id);
     });
     return placed > 0 ? { ok: true, placed } : { ok: false, reason: 'build.floorWalls.failed' };
+  }
+
+  private fillKindCache = new Map<string, OutlineFillKind | null>();
+  private fillKindCacheRevision = -1;
+
+  /** Which outline fill a piece offers (walls along its floor, or the ceiling inside its walls) */
+  public getOutlineFillKind(pieceId: string): OutlineFillKind | null {
+    if (this.fillKindCacheRevision !== this.revision) {
+      this.fillKindCache.clear();
+      this.fillKindCacheRevision = this.revision;
+    }
+    if (this.fillKindCache.has(pieceId)) return this.fillKindCache.get(pieceId)!;
+    const piece = this.pieces.get(pieceId);
+    const kind = piece ? outlineFillKind(piece, (c, r) => this.getPiecesNear(c, r)) : null;
+    this.fillKindCache.set(pieceId, kind);
+    return kind;
+  }
+
+  /** Runs the outline fill a wall or floor tile offers */
+  public fillOutline(pieceId: string): { ok: true; kind: OutlineFillKind; placed: number } | { ok: false; reason: TKey } {
+    const piece = this.pieces.get(pieceId);
+    if (!piece) return { ok: false, reason: 'build.fill.noPiece' };
+    const near = (c: THREE.Vector3, r: number) => this.getPiecesNear(c, r);
+    const kind = this.getOutlineFillKind(pieceId);
+    if (!kind) return { ok: false, reason: 'build.fill.nothing' };
+    if (kind === 'walls') {
+      const tile = isSolidWall(piece.type) ? floorTileUnderWall(piece, near) : piece;
+      if (!tile) return { ok: false, reason: 'build.fill.noPiece' };
+      const res = this.placeFloorOutlineWalls(tile.id, isSolidWall(piece.type) ? piece : undefined);
+      return res.ok === true ? { ok: true, kind, placed: res.placed } : { ok: false, reason: res.reason };
+    }
+    const plan = planCeiling(piece, near);
+    if (plan.ok === false) return plan;
+    let placed = 0;
+    plan.tiles.forEach((t, i) => {
+      if (this.placePiece(CEILING_TILE_TYPE, t.position, t.quaternion, undefined, i > 0)) placed++;
+    });
+    return placed > 0 ? { ok: true, kind, placed } : { ok: false, reason: 'build.fill.nothing' };
   }
 
   /** Gives one roof a shingle style; returns false for anything that is not a shingle roof */
@@ -468,6 +569,7 @@ export class BuildingManager {
     this.spatialGrid.insert(builtPiece);
     this.trackPieceSize(builtPiece);
     this.markGreenhouseDirty(type);
+    this.staticBatch.markPiece(builtPiece);
     this.cachedPiecesArray = null; // Invalidate cached pieces array
     this.revision++;
 
@@ -542,9 +644,12 @@ export class BuildingManager {
         else this.liveGreenhouseIds.add(piece.id);
         if (updatePhysics || !wasLive) this.dirtyGreenhouse = true;
       } else {
-        ProceduralRoofGenerator.updateBufferGeometry((roofMesh as THREE.Mesh).geometry, updatedConfig);
+        ProceduralRoofGenerator.updateBufferGeometry((roofMesh as THREE.Mesh).geometry, this.roofDrawConfig(piece.id, updatedConfig));
         resetRoofAtticTile(piece);
         this.dressRoof(piece);
+        // While dragging / previewing a dormer the roof is drawn on its own; the final size is baked
+        this.staticBatch.setLive(piece, !updatePhysics);
+        this.staticBatch.markPiece(piece);
       }
 
       piece.meshGroup.updateMatrix();
@@ -565,6 +670,186 @@ export class BuildingManager {
     }
 
     return piece;
+  }
+
+  // ------------------------------------------------------------------------------------- dormers
+
+  /** Dormer drawn on a roof while the dormer tool hovers it (shown, not stored), per roof id */
+  private readonly dormerPreview = new Map<string, RoofDormer>();
+  private dormerSerial = 0;
+  private lastDormerCheck: { key: string; cfg: ProceduralRoofConfig; reason: DormerFailure | null } | null = null;
+  private lastDormerFit: { key: string; cfg: ProceduralRoofConfig; res: { x: number; z: number; reason: DormerFailure | null } } | null = null;
+
+  /** The config a roof is drawn with: its own plus the dormer being previewed on it */
+  private roofDrawConfig(pieceId: string, cfg: ProceduralRoofConfig): ProceduralRoofConfig {
+    const preview = this.dormerPreview.get(pieceId);
+    return preview ? { ...cfg, dormers: [...(cfg.dormers ?? []), preview] } : cfg;
+  }
+
+  private shingleRoof(pieceId: string): BuiltPiece | null {
+    const piece = this.pieces.get(pieceId);
+    return piece && isProceduralRoofPiece(piece.type) && !isGlassRoofPiece(piece.type) ? piece : null;
+  }
+
+  private roofCfg(piece: BuiltPiece): ProceduralRoofConfig {
+    if (!piece.roofConfig) piece.roofConfig = getDefaultRoofConfig(piece.type) as ProceduralRoofConfig;
+    return piece.roofConfig;
+  }
+
+  public getRoofDormers(pieceId: string): RoofDormer[] {
+    const piece = this.shingleRoof(pieceId);
+    return piece ? [...(piece.roofConfig?.dormers ?? [])] : [];
+  }
+
+  /** Where a list of dormers would go on a roof: the failure of the first one that does not fit */
+  private checkDormers(piece: BuiltPiece, dormers: RoofDormer[], mustFit: Set<string>): DormerFailure | null {
+    const layout = layOutDormers(solveBaseRoofShape(this.roofCfg(piece)).top, dormers).layout;
+    const bad = layout.find((l) => !l.ok && mustFit.has(l.id));
+    return bad ? bad.reason ?? 'build.dormer.noFit' : null;
+  }
+
+  /** Ids of a roof's dormers that are drawn now */
+  private fittingDormers(piece: BuiltPiece): Set<string> {
+    const dormers = piece.roofConfig?.dormers ?? [];
+    const layout = layOutDormers(solveBaseRoofShape(this.roofCfg(piece)).top, dormers).layout;
+    return new Set(layout.filter((l) => l.ok).map((l) => l.id));
+  }
+
+  /** The point on a roof's slopes (roof local x, z, snapped) under a world ray */
+  public pickDormerSpot(pieceId: string, rayOrigin: THREE.Vector3, rayDir: THREE.Vector3, snap = true): { x: number; z: number } | null {
+    const piece = this.shingleRoof(pieceId);
+    if (!piece) return null;
+    const inv = piece.quaternion.clone().invert();
+    const o = rayOrigin.clone().sub(piece.position).applyQuaternion(inv);
+    const d = rayDir.clone().applyQuaternion(inv).normalize();
+    const hit = pickRoofTop(solveBaseRoofShape(this.roofCfg(piece)).top, o, d);
+    if (!hit) return null;
+    if (!snap) return { x: hit.x, z: hit.z };
+    const r = (v: number) => Math.round(v / DORMER_SNAP) * DORMER_SNAP;
+    return { x: r(hit.x), z: r(hit.z) };
+  }
+
+  /** The drawn dormer of a roof under a world ray, or null */
+  public dormerUnderRay(pieceId: string, rayOrigin: THREE.Vector3, rayDir: THREE.Vector3): string | null {
+    const piece = this.shingleRoof(pieceId);
+    const spot = piece ? this.pickDormerSpot(pieceId, rayOrigin, rayDir, false) : null;
+    if (!piece || !spot) return null;
+    const layout = layOutDormers(solveBaseRoofShape(this.roofCfg(piece)).top, piece.roofConfig?.dormers ?? []).layout;
+    const hit = layout.find((l) => l.ok && l.plan && planContains(l.plan, spot.x, spot.z));
+    return hit ? hit.id : null;
+  }
+
+  /**
+   * Where a dormer aimed at a spot goes: the spot itself, or, when it does not fit there (too high
+   * up a low roof), the nearest spot down the slope where it does. Returns the spot and, when none
+   * fits, why not.
+   */
+  public fitDormer(pieceId: string, dormer: Omit<RoofDormer, 'id'>): { x: number; z: number; reason: DormerFailure | null } {
+    const piece = this.shingleRoof(pieceId);
+    if (!piece) return { x: dormer.x, z: dormer.z, reason: 'build.dormer.noSlope' };
+    const key = `${pieceId}|${dormer.x}|${dormer.z}|${dormer.width}|${dormer.height}|${dormer.style}`;
+    const cfg = this.roofCfg(piece);
+    if (this.lastDormerFit?.key === key && this.lastDormerFit.cfg === cfg) return this.lastDormerFit.res;
+    const dormers = cfg.dormers ?? [];
+    const tryAt = (x: number, z: number) =>
+      this.checkDormers(piece, [...dormers, { ...dormer, x, z, id: '__fit' }], new Set(['__fit']));
+    let res: { x: number; z: number; reason: DormerFailure | null } = { x: dormer.x, z: dormer.z, reason: tryAt(dormer.x, dormer.z) };
+    const out = res.reason === 'build.dormer.noFit' ? slopeOutAt(solveBaseRoofShape(cfg).top, dormer.x, dormer.z) : null;
+    if (out) {
+      // Down the slope in snap steps, on the snap grid along the slope's axis
+      const r = (v: number) => Math.round(v / DORMER_SNAP) * DORMER_SNAP;
+      for (let i = 1; i <= 16; i++) {
+        const x = Math.abs(out.x) > 0.7 ? r(dormer.x + out.x * DORMER_SNAP * i) : dormer.x + out.x * DORMER_SNAP * i;
+        const z = Math.abs(out.z) > 0.7 ? r(dormer.z + out.z * DORMER_SNAP * i) : dormer.z + out.z * DORMER_SNAP * i;
+        const reason = tryAt(x, z);
+        if (!reason) { res = { x, z, reason: null }; break; }
+        if (reason === 'build.dormer.noSlope' || reason === 'build.dormer.tooFlat') break;
+      }
+    }
+    this.lastDormerFit = { key, cfg, res };
+    return res;
+  }
+
+  /**
+   * Shows (or, with null, hides) a dormer the tool would place. Returns why it does not fit, or null
+   * when it does (a dormer that does not fit is not drawn).
+   */
+  public setDormerPreview(pieceId: string, dormer: Omit<RoofDormer, 'id'> | null): DormerFailure | null {
+    const piece = this.shingleRoof(pieceId);
+    if (!piece) return null;
+    const prev = this.dormerPreview.get(pieceId);
+    let next: RoofDormer | undefined;
+    let reason: DormerFailure | null = null;
+    if (dormer) {
+      const candidate = { ...dormer, id: '__preview' };
+      // The cursor rests on one snapped spot for many frames: check each spot once
+      const key = `${pieceId}|${dormer.x}|${dormer.z}|${dormer.width}|${dormer.height}|${dormer.style}`;
+      const cfg = this.roofCfg(piece);
+      if (this.lastDormerCheck?.key === key && this.lastDormerCheck.cfg === cfg) {
+        reason = this.lastDormerCheck.reason;
+      } else {
+        reason = this.checkDormers(piece, [...(cfg.dormers ?? []), candidate], new Set([candidate.id]));
+        // The check may have filled in a default config: key on the one the roof now has
+        this.lastDormerCheck = { key, cfg: this.roofCfg(piece), reason };
+      }
+      if (!reason) next = candidate;
+    }
+    const same = (a?: RoofDormer, b?: RoofDormer) =>
+      a === b || (!!a && !!b && a.x === b.x && a.z === b.z && a.width === b.width && a.height === b.height && a.style === b.style);
+    if (!same(prev, next)) {
+      if (next) this.dormerPreview.set(pieceId, next);
+      else this.dormerPreview.delete(pieceId);
+      this.updateRoofConfig(pieceId, {}, false);
+    }
+    return reason;
+  }
+
+  /** Hides every dormer preview */
+  public clearDormerPreviews(): void {
+    for (const id of [...this.dormerPreview.keys()]) {
+      this.dormerPreview.delete(id);
+      if (this.pieces.has(id)) this.updateRoofConfig(id, {}, false);
+    }
+  }
+
+  private commitDormers(piece: BuiltPiece, dormers: RoofDormer[]): void {
+    this.dormerPreview.delete(piece.id);
+    this.updateRoofConfig(piece.id, { dormers: dormers.length ? dormers : undefined }, true);
+  }
+
+  /** Puts a dormer on a roof's slope. Returns its id, or why it does not fit. */
+  public addDormer(pieceId: string, dormer: Omit<RoofDormer, 'id'>): { ok: true; id: string } | { ok: false; reason: DormerFailure } {
+    const piece = this.shingleRoof(pieceId);
+    if (!piece) return { ok: false, reason: 'build.dormer.noSlope' };
+    const d: RoofDormer = { ...dormer, id: `dormer_${Date.now().toString(36)}_${this.dormerSerial++}` };
+    const dormers = [...(piece.roofConfig?.dormers ?? []), d];
+    const reason = this.checkDormers(piece, dormers, new Set([d.id]));
+    if (reason) return { ok: false, reason };
+    this.commitDormers(piece, dormers);
+    audioEngine.playBuildPlace();
+    return { ok: true, id: d.id };
+  }
+
+  /** Changes one dormer (style, size). Refused when it, or a dormer drawn before, would no longer fit. */
+  public updateDormer(pieceId: string, dormerId: string, patch: Partial<Omit<RoofDormer, 'id'>>): DormerFailure | null {
+    const piece = this.shingleRoof(pieceId);
+    const dormers = piece?.roofConfig?.dormers ?? [];
+    if (!piece || !dormers.some((d) => d.id === dormerId)) return 'build.dormer.noSlope';
+    const next = dormers.map((d) => (d.id === dormerId ? { ...d, ...patch } : d));
+    const mustFit = this.fittingDormers(piece);
+    mustFit.add(dormerId);
+    const reason = this.checkDormers(piece, next, mustFit);
+    if (reason) return reason;
+    this.commitDormers(piece, next);
+    return null;
+  }
+
+  public removeDormer(pieceId: string, dormerId: string): boolean {
+    const piece = this.shingleRoof(pieceId);
+    const dormers = piece?.roofConfig?.dormers ?? [];
+    if (!piece || !dormers.some((d) => d.id === dormerId)) return false;
+    this.commitDormers(piece, dormers.filter((d) => d.id !== dormerId));
+    return true;
   }
 
   /**
@@ -660,6 +945,7 @@ export class BuildingManager {
     this.spatialGrid.remove(piece);
     this.spatialGrid.insert(piece);
     this.markGreenhouseDirty(piece.type);
+    this.staticBatch.markPiece(piece);
     this.cachedPiecesArray = null;
     this.revision++;
 
@@ -733,6 +1019,7 @@ export class BuildingManager {
 
     piece.meshGroup.matrixWorldNeedsUpdate = true;
     piece.meshGroup.updateMatrixWorld(true);
+    this.staticBatch.markPiece(piece);
 
     // Rebuild physics collider for open/closed state
     this.rebuildDoorPhysicsCollider(piece);
@@ -1311,6 +1598,7 @@ export class BuildingManager {
     this.largePieces.delete(piece);
     this.liveGreenhouseIds.delete(piece.id);
     this.markGreenhouseDirty(piece.type);
+    this.staticBatch.removePiece(piece);
     this.cachedPiecesArray = null;
     this.revision++;
 
@@ -1565,7 +1853,9 @@ export class BuildingManager {
 
       case BuildingPieceType.ROOF_GABLE_2X2:
       case BuildingPieceType.ROOF_HIP_2X2:
-      case BuildingPieceType.ROOF_SHED_2X2: {
+      case BuildingPieceType.ROOF_SHED_2X2:
+      case BuildingPieceType.ROOF_GAMBREL_2X2:
+      case BuildingPieceType.ROOF_MANSARD_2X2: {
         colliderDesc = this.physics.rapier.ColliderDesc.cuboid(HALF_SIZE, 0.42, HALF_SIZE)
           .setFriction(0.6)
           .setRestitution(0.0)
@@ -1989,6 +2279,7 @@ export class BuildingManager {
     this.clear();
     this.continuousWallSystem.dispose();
     this.greenhouseBatch.dispose();
+    this.staticBatch.dispose();
     if (this.group.parent) {
       this.group.parent.remove(this.group);
     }

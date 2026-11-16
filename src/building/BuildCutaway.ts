@@ -133,6 +133,17 @@ type Patchable = THREE.Material & { isMeshLambertMaterial?: boolean; isMeshStand
 
 /** Our onBeforeCompile per patched material, to notice when someone replaced it later */
 const patched = new WeakMap<THREE.Material, THREE.Material['onBeforeCompile']>();
+/** What the patch wrapped: the material's own onBeforeCompile and program key */
+const wrapped = new WeakMap<THREE.Material, { compile: THREE.Material['onBeforeCompile']; key: THREE.Material['customProgramCacheKey'] }>();
+
+/**
+ * The material's onBeforeCompile / customProgramCacheKey beneath the cutaway patch (its own ones
+ * when not patched), so code that rebuilds a material can tell whether it had a shader patch.
+ */
+export function unpatchedShaderHooks(m: THREE.Material): { compile: THREE.Material['onBeforeCompile']; key: THREE.Material['customProgramCacheKey'] } {
+  if (patched.get(m) === m.onBeforeCompile) return wrapped.get(m)!;
+  return { compile: m.onBeforeCompile, key: m.customProgramCacheKey };
+}
 
 function patchMaterial(m: Patchable): void {
   if (!(m.isMeshLambertMaterial || m.isMeshStandardMaterial || m.isMeshPhongMaterial || m.isMeshToonMaterial)) return;
@@ -156,6 +167,7 @@ function patchMaterial(m: Patchable): void {
   };
   m.needsUpdate = true;
   patched.set(m, hook);
+  wrapped.set(m, { compile: prev, key: prevKey });
 }
 
 /** Patches the lit materials of every mesh under `root` (cheap to repeat: patched ones are skipped). */

@@ -120,6 +120,8 @@ export const BUILDING_MATERIALS = {
 export const GREENHOUSE_GLASS_FAR = createGlassMaterial({ color: 0xc4dcd8, side: THREE.DoubleSide, dither: 'far' });
 /** Window / door glass seen from afar: the blue-grey the tinted pane reads as over a dark room. */
 export const WINDOW_GLASS_FAR = createGlassMaterial({ color: 0x93b4cc, dither: 'far' });
+/** Dormer window panes: the far window glass at every distance (opaque, no dither hand-over). */
+export const DORMER_GLASS = createGlassMaterial({ color: 0x93b4cc });
 
 /** Warm lamp light seen through a pane at night, full strength (the levels scale it). */
 const ROOM_GLOW = new THREE.Color(1.0, 0.62, 0.26);
@@ -147,6 +149,19 @@ const FAR_GLASS = new Map<THREE.Material, THREE.Material>([
   [BUILDING_MATERIALS.greenhouseGlass, GREENHOUSE_GLASS_FAR],
   [BUILDING_MATERIALS.windowGlass, WINDOW_GLASS_FAR],
 ]);
+
+/** Which half of the near/far glass hand-over a material draws (null: not dithered glass). */
+const GLASS_LOD = new Map<THREE.Material, 'near' | 'far'>();
+for (const m of [BUILDING_MATERIALS.greenhouseGlass, ...WINDOW_GLASS_LEVELS.near]) GLASS_LOD.set(m, 'near');
+for (const m of [GREENHOUSE_GLASS_FAR, ...WINDOW_GLASS_LEVELS.far]) GLASS_LOD.set(m, 'far');
+
+/**
+ * 'near': the blended glass, which draws nothing past GLASS_DITHER_FAR; 'far': its opaque twin,
+ * which draws nothing closer than GLASS_DITHER_NEAR. Batches hide the half that would only discard.
+ */
+export function glassLodOf(material: THREE.Material): 'near' | 'far' | null {
+  return GLASS_LOD.get(material) ?? null;
+}
 
 /** Skips a geometry group (three.js does not draw groups whose material is invisible). */
 const SKIP_GROUP = new THREE.MeshBasicMaterial({ visible: false });

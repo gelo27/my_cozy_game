@@ -9,12 +9,12 @@ import {
   isWindowOrDoorPiece,
 } from './types/BuildingTypes';
 import { BUILDING_MATERIALS } from './config/BuildingPiecesConfig';
-import { WALL_THICKNESS } from './config/BuildingConstants';
+import { FLOOR_THICKNESS, WALL_THICKNESS } from './config/BuildingConstants';
 import type { WallPaintingSystem, WallFaceSide } from './WallPaintingSystem';
 import { FaceStyle, MeshBuffers, PaintableMesh } from './continuous/MeshBuffers';
 import { describeWallSeg, solveWall, summarizeWall, SolvedSegmentCorners, WallSeg } from './continuous/WallJoints';
 import { emitWall, findWallOpenings } from './continuous/WallGeometry';
-import { boxObstacle, createWallObstacle, emitFloor, WallObstacle } from './continuous/FloorGeometry';
+import { boxObstacle, createWallObstacle, emitFloor, floorObstacle, slabCoversWallTop, WallObstacle } from './continuous/FloorGeometry';
 import { emitFoundation, foundationLookup } from './continuous/FoundationGeometry';
 
 export type { SolvedSegmentCorners } from './continuous/WallJoints';
@@ -57,7 +57,8 @@ function layerOf(type: BuildingPieceType): Layer | null {
 /** Layers whose meshes a change of this piece type can alter */
 function layersAffectedBy(type: BuildingPieceType): Layer[] {
   if (isSolidWallPiece(type) || isWindowOrDoorPiece(type)) return ['walls', 'floors'];
-  if (isFloorPiece(type)) return ['floors'];
+  // A floor can lie over wall tops, which then leave out their top edge
+  if (isFloorPiece(type)) return ['walls', 'floors'];
   if (isFoundationPiece(type)) return ['foundations'];
   return [];
 }
@@ -296,9 +297,13 @@ export class ContinuousWallSystem {
       const around = this.source.near(wall.position, seg.halfW + NEIGHBOUR_MARGIN);
       const neighbours = around.filter((p) => p.isConfirmed && isSolidWallPiece(p.type)).map((p) => this.segOf(p, segCache));
       const openings = findWallOpenings(wall, around.filter((p) => isWindowOrDoorPiece(p.type)));
+      // Floor slabs lying over this wall's top hide it (the floor of the storey above runs on over it)
+      const covers = around
+        .filter((p) => isFloorPiece(p.type) && slabCoversWallTop(p.position.y - FLOOR_THICKNESS / 2, p.position.y + FLOOR_THICKNESS / 2, seg.yTop))
+        .map(floorObstacle);
       const solved = solveWall(seg, neighbours);
       this.lastSolvedCorners.set(wall.id, summarizeWall(solved));
-      emitWall(b, solved, openings, style);
+      emitWall(b, solved, openings, style, covers);
       wall.meshGroup.visible = false;
     }
     this.replaceChunk('walls', key, b, this.paint.getAllMaterials(), true);

@@ -1,5 +1,5 @@
 import { t } from '../i18n/i18n';
-import { BuildingPieceType, BuildingTelemetry } from '../building/types/BuildingTypes';
+import { BuildingPieceType, BuildingTelemetry, HouseRoofKind, DormerAction } from '../building/types/BuildingTypes';
 import { PaintingToolMode } from '../building/WallPaintingSystem';
 import { RoofStyle } from '../building/ProceduralRoofSystem';
 import { GameEngine } from '../engine/GameEngine';
@@ -85,11 +85,23 @@ export function useBuildingControls(
 
     setRoofStyle: (style: RoofStyle) => withBuild(build => build.setRoofStyle(style)),
 
-    wallFloorOutline: () =>
+    fillOutline: () =>
       withBuild(build => {
-        const res = build.wallFloorOutline();
+        const res = build.fillOutline();
         showToast({ text: res.message, type: res.ok ? 'success' : 'warn' });
         if (res.ok) addLog('event', res.message);
+      }),
+
+    dormerAction: (action: DormerAction) =>
+      withBuild(build => {
+        const res = build.dormerAction(action);
+        if (res) showToast({ text: res.message, type: res.ok ? 'success' : 'warn' });
+      }),
+
+    selectHouseRoofTool: (kind: HouseRoofKind) =>
+      withBuild(build => {
+        const res = build.setHouseRoofTool(kind);
+        if (res) showToast({ text: res.message, type: 'success' });
       }),
 
     roofWholeHouse: () =>

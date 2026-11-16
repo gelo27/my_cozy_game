@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { BuildingPieceType, BuiltPiece, isGreenhousePiece } from './types/BuildingTypes';
 import { BUILDING_MATERIALS, GREENHOUSE_GLASS_FAR } from './config/BuildingPiecesConfig';
+import { GLASS_DITHER_FAR, GLASS_DITHER_NEAR } from '../scene/GlassMatcap';
 
 /** World is cut into CHUNK x CHUNK metre cells; each cell with greenhouse pieces gets its own batch. */
 const CHUNK = 32;
@@ -98,6 +99,30 @@ export class GreenhouseBatch {
         meshes.glassFar.geometry.dispose();
         meshes.glassFar.geometry = glass;
       }
+    }
+  }
+
+  /**
+   * Per frame: the blended glass draws nothing beyond GLASS_DITHER_FAR and the opaque far glass
+   * nothing closer than GLASS_DITHER_NEAR, so chunks wholly outside those ranges skip that draw.
+   */
+  public updateView(cameraPos: THREE.Vector3): void {
+    for (const m of this.chunks.values()) {
+      const box = m.glassNear.geometry.boundingBox;
+      if (!box || box.isEmpty()) continue;
+      m.glassNear.visible = box.distanceToPoint(cameraPos) < GLASS_DITHER_FAR;
+      const dx = Math.max(Math.abs(cameraPos.x - box.min.x), Math.abs(cameraPos.x - box.max.x));
+      const dy = Math.max(Math.abs(cameraPos.y - box.min.y), Math.abs(cameraPos.y - box.max.y));
+      const dz = Math.max(Math.abs(cameraPos.z - box.min.z), Math.abs(cameraPos.z - box.max.z));
+      m.glassFar.visible = Math.sqrt(dx * dx + dy * dy + dz * dz) > GLASS_DITHER_NEAR;
+    }
+  }
+
+  /** Shows both glass halves of every chunk (for a GPU warm-up draw; updateView undoes it). */
+  public revealAll(): void {
+    for (const m of this.chunks.values()) {
+      m.glassNear.visible = m.glassNear.geometry.getAttribute('position').count > 0;
+      m.glassFar.visible = m.glassNear.visible;
     }
   }
 

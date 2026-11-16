@@ -3,6 +3,7 @@ import { BuiltPiece, getWallSize, isDoorPiece, isDoorwayPiece } from '../types/B
 import { WALL_THICKNESS } from '../config/BuildingConstants';
 import { MeshBuffers } from './MeshBuffers';
 import { SolvedWall, WallRow } from './WallJoints';
+import { slabCoversWallTop, subtractObstacles, WallObstacle } from './FloorGeometry';
 
 /**
  * Emits the merged mesh of solved walls: both faces (cut around windows and doors), the reveals
@@ -69,6 +70,11 @@ function solidIntervals(min: number, max: number, holes: Array<{ minX: number; m
 }
 
 const v3 = (p: THREE.Vector2, y: number) => new THREE.Vector3(p.x, y, p.y);
+
+/** Slabs whose body holds a wall top at height y */
+function coversAt(covers: WallObstacle[], y: number): WallObstacle[] {
+  return covers.filter((c) => slabCoversWallTop(c.yBase, c.yTop, y));
+}
 const UP = new THREE.Vector3(0, 1, 0);
 const DOWN = new THREE.Vector3(0, -1, 0);
 
@@ -78,7 +84,11 @@ export interface WallStyleIndex {
   faceKey: (pieceId: string, side: 'left' | 'right') => string;
 }
 
-export function emitWall(b: MeshBuffers, solved: SolvedWall, openings: WallOpening[], style: WallStyleIndex): void {
+/**
+ * `covers` are the footprints of floor slabs that lie over this wall's top (the floor of the storey
+ * above): the top edge is left out under them, so it never shows through or z-fights with the floor.
+ */
+export function emitWall(b: MeshBuffers, solved: SolvedWall, openings: WallOpening[], style: WallStyleIndex, covers: WallObstacle[] = []): void {
   const { seg, rows } = solved;
   const piece = seg.piece;
   const center = new THREE.Vector2(piece.position.x, piece.position.z);
@@ -98,10 +108,14 @@ export function emitWall(b: MeshBuffers, solved: SolvedWall, openings: WallOpeni
     emitReveals(b, row, rowOps, along, halfW, py, seg.yBase, seg.yTop);
     emitCaps(b, row, openings, halfW, py);
     if (r === 0) emitEdge(b, row, row.y0, false, openings, along, py);
-    if (r === rows.length - 1) emitEdge(b, row, row.y1, true, openings, along, py);
+    if (r === rows.length - 1) emitEdge(b, row, row.y1, true, openings, along, py, covers);
     for (const hub of solved.hubs) {
       if (hub.y0 !== row.y0) continue;
-      if (hub.top) b.polygon(hub.points, hub.y1, true, TRIM_TILE);
+      if (hub.top) {
+        const over = coversAt(covers, hub.y1);
+        if (over.length === 0) b.polygon(hub.points, hub.y1, true, TRIM_TILE);
+        else for (const p of subtractObstacles(hub.points, over)) b.polygon(p, hub.y1, true, TRIM_TILE);
+      }
       if (hub.bottom) b.polygon(hub.points, hub.y0, false, TRIM_TILE);
     }
     b.endGroup(null, style.edge);
@@ -229,7 +243,17 @@ function emitCaps(b: MeshBuffers, row: WallRow, ops: WallOpening[], halfW: numbe
  * Top or bottom edge of the wall at height y, left out over openings that reach it (a door at the
  * floor, a tall window at the top) but kept on the solid parts beside them.
  */
-function emitEdge(b: MeshBuffers, row: WallRow, y: number, top: boolean, ops: WallOpening[], along: (p: THREE.Vector2) => number, py: number): void {
+function emitEdge(
+  b: MeshBuffers,
+  row: WallRow,
+  y: number,
+  top: boolean,
+  ops: WallOpening[],
+  along: (p: THREE.Vector2) => number,
+  py: number,
+  covers: WallObstacle[] = []
+): void {
+  const over = top ? coversAt(covers, y) : [];
   const holes = ops.filter((op) => (top ? py + op.maxY >= y - 0.005 : py + op.minY <= y + 0.005));
   const xsl = along(row.startLeft), xel = along(row.endLeft);
   const xsr = along(row.startRight), xer = along(row.endRight);
@@ -243,7 +267,16 @@ function emitEdge(b: MeshBuffers, row: WallRow, y: number, top: boolean, ops: Wa
     const r1 = x1 >= hi - EPS ? row.endRight : onEdge(row.startRight, row.endRight, xsr, xer, x1);
     const len = Math.max(l0.distanceTo(l1), r0.distanceTo(r1)) / TRIM_TILE;
     const T = WALL_THICKNESS / TRIM_TILE;
-    if (top) b.quad(v3(l0, y), v3(l1, y), v3(r1, y), v3(r0, y), [0, 0, len, 0, len, T, 0, T], UP);
+    if (top && over.length > 0) {
+      const quad = [l0, l1, r1, r0];
+      const left = subtractObstacles(quad, over);
+      // Untouched by any slab: keep the strip's own along-the-wall UVs
+      if (left.length === 1 && left[0].length === 4 && left[0].every((p) => quad.some((q) => q.distanceToSquared(p) < 1e-10))) {
+        b.quad(v3(l0, y), v3(l1, y), v3(r1, y), v3(r0, y), [0, 0, len, 0, len, T, 0, T], UP);
+      } else {
+        for (const p of left) b.polygon(p, y, true, TRIM_TILE);
+      }
+    } else if (top) b.quad(v3(l0, y), v3(l1, y), v3(r1, y), v3(r0, y), [0, 0, len, 0, len, T, 0, T], UP);
     else b.quad(v3(l0, y), v3(r0, y), v3(r1, y), v3(l1, y), [0, 0, len, 0, len, T, 0, T], DOWN);
   }
 }

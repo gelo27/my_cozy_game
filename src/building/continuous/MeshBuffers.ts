@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { TEX_LAYER_ATTRIBUTE, textureArraySlot } from '../TextureArrayMaterials';
 
 /**
  * Growable vertex/index buffers for the merged building meshes, plus the bookkeeping that lets a
@@ -110,6 +111,8 @@ export class MeshBuffers {
  */
 export class PaintableMesh {
   readonly mesh: THREE.Mesh;
+  /** The materials group indices refer to (may be a live, growing palette) */
+  private readonly baseMaterials: THREE.Material[];
   private readonly groups: FaceGroup[];
   private readonly rawIndices: Uint32Array;
   /** Metre UVs of tiled faces, parallel to the uv attribute */
@@ -124,12 +127,16 @@ export class PaintableMesh {
     geo.setAttribute('position', new THREE.Float32BufferAttribute(buffers.positions, 3));
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(buffers.normals, 3));
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(buffers.uvs, 2));
+    const vertexCount = buffers.vertexCount;
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(vertexCount * 3).fill(1), 3));
+    geo.setAttribute(TEX_LAYER_ATTRIBUTE, new THREE.Float32BufferAttribute(new Float32Array(vertexCount).fill(-1), 1));
     this.groups = buffers.groups;
     this.rawIndices = new Uint32Array(buffers.indices);
     this.meterUVs = new Float32Array(buffers.uvs);
     for (const g of this.groups) if (g.key) this.keys.add(g.key);
+    this.baseMaterials = Array.isArray(materials) ? materials : [materials];
 
-    this.mesh = new THREE.Mesh(geo, materials);
+    this.mesh = new THREE.Mesh(geo, this.baseMaterials.slice());
     this.mesh.name = name;
     this.mesh.castShadow = false;
     this.mesh.receiveShadow = false;
@@ -176,15 +183,46 @@ export class PaintableMesh {
     return true;
   }
 
-  /** Rebuilds the draw order: triangles sorted by material, one geometry group per material. */
+  /**
+   * Rebuilds the draw order: triangles sorted by material, one geometry group per material. Plain
+   * textured materials are drawn by their texture-array stand-in (layer and colour per vertex), so
+   * all of them together cost one draw.
+   */
   private mergeGroups(): void {
     const geo = this.mesh.geometry;
+    const drawMaterials = this.baseMaterials.slice();
+    const arrayIndex = new Map<THREE.Material, number>();
+    const colorAttr = geo.getAttribute('color') as THREE.BufferAttribute;
+    const layerAttr = geo.getAttribute(TEX_LAYER_ATTRIBUTE) as THREE.BufferAttribute;
+    const colors = colorAttr.array as Float32Array;
+    const layers = layerAttr.array as Float32Array;
     const byMaterial = new Map<number, FaceGroup[]>();
     for (const g of this.groups) {
-      let list = byMaterial.get(g.materialIndex);
-      if (!list) byMaterial.set(g.materialIndex, (list = []));
+      const material = this.baseMaterials[g.materialIndex];
+      const slot = material ? textureArraySlot(material) : null;
+      let drawIndex = g.materialIndex;
+      if (slot) {
+        let i = arrayIndex.get(slot.material);
+        if (i === undefined) {
+          i = drawMaterials.push(slot.material) - 1;
+          arrayIndex.set(slot.material, i);
+        }
+        drawIndex = i;
+        const { r, g: gr, b } = slot.color;
+        for (let v = g.vStart, end = g.vStart + g.vCount; v < end; v++) {
+          colors[v * 3] = r;
+          colors[v * 3 + 1] = gr;
+          colors[v * 3 + 2] = b;
+          layers[v] = slot.layer;
+        }
+      }
+      let list = byMaterial.get(drawIndex);
+      if (!list) byMaterial.set(drawIndex, (list = []));
       list.push(g);
     }
+    colorAttr.needsUpdate = true;
+    layerAttr.needsUpdate = true;
+    this.mesh.material = drawMaterials;
     const total = this.groups.reduce((n, g) => n + g.count, 0);
     const merged = new Uint32Array(total);
     const triKeys: Array<string | null> = new Array(total / 3);

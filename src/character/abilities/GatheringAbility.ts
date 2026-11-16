@@ -7,6 +7,7 @@ import { PropTreeField, PropTreeNode } from '../../gathering/PropTreeField';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { GATHERING_CONFIG, GatherTool, ROCK_TYPES, RockKind } from '../../gathering/GatheringConfig';
 import { audioEngine } from '../../audio/AudioEngine';
+import { hitFx } from '../../gameplay/HitFeedback';
 import type { PestSystem, Pest } from '../../gameplay/Pests';
 import { APPLE_SAPLING_ID, AppleOrchard, AppleTreeNode } from '../../gathering/AppleOrchard';
 import { WebField, WEB_REACH } from '../../world/SpiderWebs';
@@ -339,16 +340,25 @@ export class GatheringAbility implements IAbility {
       return;
     }
     if (target.type === 'rock') {
-      this.rocks!.hit(target.node, direction);
+      // hit() returns whether the node broke, not whether the blow landed
+      const rock = target.node;
+      if (rock.isDepleted) return;
+      const broke = this.rocks!.hit(rock, direction);
+      this.hitStar(rock, direction, rock.radius * 0.6, broke);
       return;
     }
     if (target.type === 'propTree') {
-      this.propTrees!.hit(target.node, direction);
+      const tree = target.node;
+      const broke = this.propTrees!.hit(tree, direction);
+      this.hitStar(tree, direction, tree.bush ? 0.5 : 1.0, broke);
       return;
     }
     if (target.type === 'apple') {
       if (knock) this.orchard?.knock(target.node.id, direction);
-      else this.orchard?.chop(target.node.id, direction);
+      else {
+        const broke = this.orchard?.chop(target.node.id, direction) ?? false;
+        this.hitStar(target.node, direction, 1.0, broke);
+      }
       return;
     }
 
@@ -358,7 +368,15 @@ export class GatheringAbility implements IAbility {
       node.kind === 'tree'
         ? node.position.clone().addScaledVector(direction, -node.radius).setY(1.0)
         : node.position.clone();
-    this.forest!.checkHit(hitPoint, direction, 1, true);
+    const res = this.forest!.checkHit(hitPoint, direction, 1, true);
+    if (res?.hit) hitFx.star(res.hitPoint ?? hitPoint, res.isFatal);
+  }
+
+  /** The impact star (as on an enemy) on the side of `node` facing the swing, `height` above its base. */
+  private hitStar(node: { position: THREE.Vector3; radius: number }, direction: THREE.Vector3, height: number, final: boolean): void {
+    const at = node.position.clone().addScaledVector(direction, -node.radius);
+    at.y = node.position.y + height;
+    hitFx.star(at, final);
   }
 
   private findTarget(playerPos: THREE.Vector3): FieldTarget | null {

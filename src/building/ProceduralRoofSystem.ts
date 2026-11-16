@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { emitRoof, roofColliderTriangles, solveRoofShape } from './RoofGeometry';
+import type { RoofDormer } from './RoofDormers';
 
-export type RoofType = 'gable' | 'hip' | 'shed';
+export type RoofType = 'gable' | 'hip' | 'shed' | 'gambrel' | 'mansard';
 
 export interface ProceduralRoofConfig {
   minX: number;
@@ -15,6 +16,8 @@ export interface ProceduralRoofConfig {
    * The roof follows it as one hip roof (valleys at inner corners); min/max are its bounds.
    */
   footprint?: Array<[number, number]>;
+  /** Dormers standing on the roof's slopes */
+  dormers?: RoofDormer[];
 
   // Constraints & dimensions
   minSize?: number;
@@ -280,6 +283,7 @@ export const PROCEDURAL_ROOF_MATERIALS = {
  * - Material 0: shingles and raised ridge / hip caps
  * - Material 1: white trim (fascia, rake boards, underside, attic ceiling)
  * - Material 2: frontons and attic walls (follow the outer finish of the wall below)
+ * - Material 3: dormer window glass (opaque)
  */
 export class ProceduralRoofGenerator {
   public static generateBuffers(config: Partial<ProceduralRoofConfig>): RoofBuffers {
@@ -287,7 +291,7 @@ export class ProceduralRoofGenerator {
     const buckets = emitRoof(solveRoofShape(cfg), cfg.uvScale ?? 1);
 
     const counts = buckets.map((bk) => bk.p.length / 3);
-    const total = counts[0] + counts[1] + counts[2];
+    const total = counts.reduce((a, c) => a + c, 0);
     const positions = new Float32Array(total * 3);
     const normals = new Float32Array(total * 3);
     const uvs = new Float32Array(total * 2);
@@ -310,6 +314,7 @@ export class ProceduralRoofGenerator {
         { start: 0, count: counts[0], materialIndex: 0 },
         { start: counts[0], count: counts[1], materialIndex: 1 },
         { start: counts[0] + counts[1], count: counts[2], materialIndex: 2 },
+        { start: counts[0] + counts[1] + counts[2], count: counts[3], materialIndex: 3 },
       ],
     };
   }

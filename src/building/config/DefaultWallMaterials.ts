@@ -36,8 +36,6 @@ const whiteWainscot = createWainscotTexture({
 
 export const WHITE_WAINSCOT_MATERIAL = new THREE.MeshLambertMaterial({
   map: whiteWainscot.texture,
-  bumpMap: whiteWainscot.bumpMap,
-  bumpScale: 0.035,
 });
 export const WHITE_WAINSCOT_THUMBNAIL = whiteWainscot.dataUrl;
 

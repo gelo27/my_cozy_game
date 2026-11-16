@@ -26,6 +26,7 @@ import { FarmingManager } from '../farming/FarmingManager';
 import { FarmInteractionPrompt } from '../farming/types/FarmingTypes';
 import { ForestZone } from '../forest/ForestZone';
 import { FURNITURE_LIGHTS, FURNITURE_MATERIALS } from '../building/furniture/FurnitureCatalog';
+import { keepOwnMaterial } from '../building/TextureArrayMaterials';
 import type { ExtraLight } from '../world/NightLighting';
 import { CoastAudio, CoastState } from '../audio/CoastAudio';
 import { AmbientAudio } from '../audio/AmbientAudio';
@@ -477,6 +478,8 @@ export class GameEngine {
       farmingManager.setWorld(terrain, physics);
       // Lamp furniture inside buildings and the landmarks' torches feed the night lighting
       let exploration: ExplorationManager | null = null;
+      // Their colour / emissive follow the night: they keep their own draw in the building batches
+      keepOwnMaterial(FURNITURE_MATERIALS.bulb, FURNITURE_MATERIALS.shade);
       nightLighting.setExtraLights(
         () => {
           const out: ExtraLight[] = exploration ? exploration.getLights() : [];
@@ -756,14 +759,19 @@ export class GameEngine {
         saves: null as unknown as SaveSystem,
       };
       this.world.saves = new SaveSystem(this.world);
+      // A save loaded during play uploads its world before the next frame (the start-up load is
+      // covered by prewarmShaders)
+      this.world.saves.onApplied = () => (this.gpuWarmupPending = true);
 
-      // Resume the last session, or dress a fresh world
-      if (!this.world.saves.load(AUTOSAVE_SLOT)) {
+      // Resume the last session, else start in the shipped default world, else dress a fresh one
+      if (this.world.saves.load(AUTOSAVE_SLOT)) {
+        callbacks.onLog('info', 'Відновлено останнє автозбереження.');
+      } else if (await this.world.saves.loadDefaultWorld()) {
+        callbacks.onLog('info', 'Завантажено стандартний світ.');
+      } else {
         props.populateDefault();
         exploration.clearSiteProps();
         gameplay.pets.spawnDefaults(SPAWN_POSITION);
-      } else {
-        callbacks.onLog('info', 'Відновлено останнє автозбереження.');
       }
       if (!gameplay.pets.pets.length) gameplay.pets.spawnDefaults(SPAWN_POSITION);
       // Hedgehogs and baby dragons in the wilds, sharks in the sea, spiders in the caves (not saved:
@@ -810,11 +818,45 @@ export class GameEngine {
       this.world?.terrain.updateLod(this.camera.camera.position);
       const timeout = new Promise<void>((r) => setTimeout(r, 4000));
       await Promise.race([this.renderer.compileAsync(this.scene, this.camera.camera).then(() => undefined), timeout]);
+      this.flushBuildings();
+      this.warmUpGpuUploads(this.camera.camera);
     } catch (err) {
       console.warn('Shader prewarm failed', err);
     }
     this.shaderPrewarmMs = performance.now() - t0;
     this.shaderPrewarmPrograms = this.renderer.info.programs?.length ?? 0;
+  }
+
+  private flushBuildings(): void {
+    this.world?.character.buildAbility?.buildingManager?.flushPendingRegeneration();
+  }
+
+  /** Set when a save was loaded during play: the next frame first runs warmUpGpuUploads. */
+  private gpuWarmupPending = false;
+
+  /**
+   * Draws the whole scene once with frustum culling off (and the building batches' distance-hidden
+   * glass and furniture shown), so every geometry buffer and texture is uploaded to the GPU now,
+   * behind the loading screen or in the one frame after a load, instead of in the frame the camera
+   * first turns towards it (25-30 ms hitches). Compiling the shaders (compileAsync) does not upload
+   * those. The drawn image is the same frame, so nothing shows.
+   */
+  private warmUpGpuUploads(camera: THREE.Camera): void {
+    const buildings = this.world?.character.buildAbility?.buildingManager;
+    buildings?.revealAllForWarmup();
+    const culled: THREE.Object3D[] = [];
+    this.scene.traverseVisible((o) => {
+      if (o.frustumCulled) {
+        o.frustumCulled = false;
+        culled.push(o);
+      }
+    });
+    try {
+      this.renderer.render(this.scene, camera);
+    } finally {
+      for (const o of culled) o.frustumCulled = true;
+      buildings?.updateDrawDistance(camera.position);
+    }
   }
 
   // Loop state
@@ -1123,6 +1165,8 @@ export class GameEngine {
     w.wildlife.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), tpCamera.camera, !!w.exploration.inCave);
     w.shadows.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
     w.windowGlow.update(dt);
+    // Batched glass / furniture visibility by distance, from the camera this frame renders with
+    buildings?.updateDrawDistance(this.camera.camera.position);
     w.interiors.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
     tpCamera.drawZoom = editing ? 0 : w.gameplay.slingshot.isDrawing ? w.gameplay.slingshot.power : 0;
@@ -1158,6 +1202,10 @@ export class GameEngine {
 
     w.terrain.updateLod(tpCamera.camera.position);
     hitchLog.mark(7);
+    if (this.gpuWarmupPending) {
+      this.gpuWarmupPending = false;
+      this.warmUpGpuUploads(tpCamera.camera);
+    }
     this.renderer.render(this.scene, tpCamera.camera);
     hitchLog.mark(8);
 

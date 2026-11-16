@@ -22,8 +22,9 @@ for (const family of [WINDOW_GLASS_LEVELS.near, WINDOW_GLASS_LEVELS.far]) {
  *
  * Cheap by design: the lamp-to-pane test runs only when something was built, moved or removed
  * (a few lamps times the panes around them), and a pane changes only its material: the lit glass
- * variants differ from the plain one in a uniform, so they share its shader programs and no draw
- * call is added. The night amount itself is one shared uniform (setGlassNight).
+ * variants differ from the plain one in a uniform, so they share its shader programs (in the
+ * static batch each lit level is one more draw per chunk). A changed pane re-bakes its batch chunk.
+ * The night amount itself is one shared uniform (setGlassNight).
  */
 export class WindowGlow {
   /** Statistics for the dev tools. */
@@ -95,7 +96,7 @@ export class WindowGlow {
       const level = sum >= BRIGHT_AT ? 2 : sum >= DIM_AT ? 1 : 0;
       if (level) lit++;
       // Applied every time (cheap, a no-op when right): a rebuilt mesh starts with the plain glass
-      if (level !== (this.levels.get(p.id) ?? 0) || level) this.apply(p, level);
+      if ((level !== (this.levels.get(p.id) ?? 0) || level) && this.apply(p, level)) this.buildings.markPieceVisualChanged(p);
       if (level) this.levels.set(p.id, level);
       else this.levels.delete(p.id);
     }
@@ -104,8 +105,9 @@ export class WindowGlow {
     this.stats.lit = lit;
   }
 
-  /** Swaps the pane's glass (near and far twins) to the variant for `level`. */
-  private apply(piece: BuiltPiece, level: number): void {
+  /** Swaps the pane's glass (near and far twins) to the variant for `level`; true when it changed. */
+  private apply(piece: BuiltPiece, level: number): boolean {
+    let any = false;
     piece.meshGroup.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
@@ -118,11 +120,18 @@ export class WindowGlow {
           changed = true;
           return e.family[level];
         });
-        if (changed) mesh.material = next;
+        if (changed) {
+          mesh.material = next;
+          any = true;
+        }
       } else {
         const e = LEVEL_OF.get(mesh.material);
-        if (e && e.level !== level) mesh.material = e.family[level];
+        if (e && e.level !== level) {
+          mesh.material = e.family[level];
+          any = true;
+        }
       }
     });
+    return any;
   }
 }

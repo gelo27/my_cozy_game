@@ -16,6 +16,8 @@ export type HitWeapon = 'melee' | 'pebble';
 
 /** Scale of the impact star (1 was the original size). */
 const STAR_SIZE = 1.7;
+/** Star on a tree / rock blow: about half an enemy hit's (that one reads too big on a trunk). */
+const GATHER_STAR_SIZE = 0.9;
 
 function starTexture(): THREE.Texture {
   const s = 128;
@@ -106,6 +108,11 @@ class HitFeedback {
 
     this.burst(at, STAR_SIZE * (kill ? 1.5 : 1) * (weapon === 'melee' ? 1.1 : 0.75));
     critterSounds.impact(at, kind, weapon, kill);
+  }
+
+  /** Just the impact star of an axe blow on an enemy (a tree chopped, an ore vein struck); `final` = the breaking blow. */
+  public star(at: THREE.Vector3, final = false): void {
+    this.burst(at, GATHER_STAR_SIZE * (final ? 1.4 : 1));
   }
 
   /** World time multiplier for this frame (hit-stop); call once per frame with real dt. */

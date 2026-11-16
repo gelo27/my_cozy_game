@@ -239,7 +239,9 @@ export default function App() {
                         onConfirmAll={building.confirmAll}
                         onSetRoofStyle={building.setRoofStyle}
                         onRoofWholeHouse={building.roofWholeHouse}
-                        onWallFloorOutline={building.wallFloorOutline}
+                        onSelectHouseRoofTool={building.selectHouseRoofTool}
+                        onDormerAction={building.dormerAction}
+                        onFillOutline={building.fillOutline}
                       />
                     )}
                     {buildingTelemetry.isPaintingModeActive && (

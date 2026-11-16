@@ -3,6 +3,7 @@ import { BuildingManager } from './BuildingManager';
 import { BuildingPieceType, BuildingSceneExportData, SavedPieceData, isSwingDoorPiece } from './types/BuildingTypes';
 import { isProceduralRoofPiece } from './config/BuildingPiecesConfig';
 import { normalizeRoofStyle } from './ProceduralRoofSystem';
+import { sanitizeDormers } from './RoofDormers';
 import { normalizeFootprint } from './HouseRoofGeometry';
 import { audioEngine } from '../audio/AudioEngine';
 
@@ -16,6 +17,11 @@ function roundTo(val: number, decimals: number = 3): number {
 
 /** A saved roof config, with a house roof's outline checked (an unusable one is dropped) */
 function sanitizeRoofConfig(cfg: any): any {
+  if ('dormers' in cfg) {
+    const { dormers, ...rest } = cfg;
+    const clean = sanitizeDormers(dormers);
+    cfg = clean ? { ...rest, dormers: clean } : rest;
+  }
   if (!('footprint' in cfg)) return cfg;
   const footprint = normalizeFootprint(cfg.footprint);
   const { footprint: _drop, ...rest } = cfg;
@@ -59,6 +65,11 @@ export function exportBuildingScene(buildingManager: BuildingManager): BuildingS
     if (piece.roofConfig) {
       saved.roofConfig = { ...piece.roofConfig };
       // House roof: its wall outline, rounded like the positions
+      if (piece.roofConfig.dormers?.length) {
+        saved.roofConfig.dormers = piece.roofConfig.dormers.map((d) => ({ ...d, x: roundTo(d.x, 3), z: roundTo(d.z, 3) }));
+      } else {
+        delete saved.roofConfig.dormers;
+      }
       if (piece.roofConfig.footprint) {
         saved.roofConfig.footprint = piece.roofConfig.footprint.map(([x, z]) => [roundTo(x, 3), roundTo(z, 3)] as [number, number]);
       }

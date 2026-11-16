@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { BuiltPiece, isSolidWallPiece } from './types/BuildingTypes';
+import { BuiltPiece, getWallHalfHeight, getWallHalfWidth, isGlassWallPiece, isSolidWallPiece, isWindowOrDoorPiece } from './types/BuildingTypes';
 import { describeWallSeg, wallSegsTouch, WallSeg, WALL_JOINT_TOLERANCE, WALL_T_TOLERANCE } from './continuous/WallJoints';
 import type { TKey } from '../i18n/en';
 import { normalizeFootprint } from './HouseRoofGeometry';
@@ -11,6 +11,9 @@ import { normalizeFootprint } from './HouseRoofGeometry';
  * collected; the top storey's walls are turned into a planar graph of centre lines (joints merged,
  * T-junctions split), stray walls that lead nowhere are trimmed, and the outer face of what is left
  * is the outline. Inner walls drop out on their own: they only bound rooms inside it.
+ *
+ * Windows, doors, doorways and glass panels standing in the wall line as panels of their own
+ * (instead of being cut into a wall) close the outline too.
  */
 
 type Near = (center: THREE.Vector3, radius: number) => BuiltPiece[];
@@ -31,13 +34,34 @@ export type HouseOutlineResult = { ok: true; outline: HouseOutline } | { ok: fal
 
 const MAX_WALLS = 600;
 const SAME_LEVEL = 0.15;
+
+/** Panels that can stand in a wall line besides wooden walls */
+const isWallLinePanel = (p: BuiltPiece) => isWindowOrDoorPiece(p.type) || isGlassWallPiece(p.type);
+
+/** Centre-line segment of a wall or panel (glass panels take their size from their wooden shape) */
+function segOf(p: BuiltPiece): WallSeg {
+  const seg = describeWallSeg(p);
+  if (!isGlassWallPiece(p.type)) return seg;
+  const hw = getWallHalfWidth(p.type), hh = getWallHalfHeight(p.type);
+  const c = seg.p1.clone().add(seg.p2).multiplyScalar(0.5);
+  return {
+    ...seg,
+    p1: c.clone().addScaledVector(seg.dir, -hw),
+    p2: c.clone().addScaledVector(seg.dir, hw),
+    halfW: hw,
+    yBase: p.position.y - hh,
+    yTop: p.position.y + hh,
+  };
+}
+/** A node lies on a wall's centre line within this (walls a hair off true from rounded rotations) */
+const LINE_TOL = 0.02;
 /** Walls must run along the seed wall or across it, within this |cos| */
 const AXIS_COS = 0.9995;
 
-export function findHouseOutline(seed: BuiltPiece, near: Near): HouseOutlineResult {
+export function findHouseOutline(seed: BuiltPiece, near: Near, atLevel?: number): HouseOutlineResult {
   if (!isSolidWallPiece(seed.type)) return { ok: false, reason: 'build.houseRoof.noWall' };
 
-  // 1. Every wall joined to the seed, at any storey
+  // 1. Every wall (and window / door panel) joined to the seed, at any storey
   const seedSeg = describeWallSeg(seed);
   const segs = new Map<string, WallSeg>([[seed.id, seedSeg]]);
   const queue = [seedSeg];
@@ -45,22 +69,52 @@ export function findHouseOutline(seed: BuiltPiece, near: Near): HouseOutlineResu
     const s = queue.pop()!;
     const mid = new THREE.Vector3((s.p1.x + s.p2.x) / 2, (s.yBase + s.yTop) / 2, (s.p1.y + s.p2.y) / 2);
     for (const p of near(mid, s.halfW + 3)) {
-      if (segs.has(p.id) || !isSolidWallPiece(p.type)) continue;
-      const o = describeWallSeg(p);
+      if (segs.has(p.id) || !(isSolidWallPiece(p.type) || isWallLinePanel(p))) continue;
+      const o = segOf(p);
       if (!wallSegsTouch(s, o)) continue;
       segs.set(p.id, o);
       queue.push(o);
     }
   }
+  const all = Array.from(segs.values());
+  const walls = all.filter((s) => isSolidWallPiece(s.piece.type));
 
-  // 2. The top storey: walls whose tops are level with the highest one
-  const level = Math.max(...Array.from(segs.values()).map((s) => s.yTop));
-  const top = Array.from(segs.values()).filter((s) => Math.abs(s.yTop - level) < SAME_LEVEL);
+  // 2. The top storey (or the storey asked for): walls whose tops are level with it
+  const level = atLevel ?? Math.max(...walls.map((s) => s.yTop));
+  const top = walls.filter((s) => Math.abs(s.yTop - level) < SAME_LEVEL);
+  if (top.length === 0) return { ok: false, reason: 'build.houseRoof.notClosed' };
+  // Openings of that storey standing in a gap of the wall line (not cut into a wall): they are
+  // lower than the walls, so they belong to it when they stand within its walls' height
+  const storeyBase = Math.min(...top.map((s) => s.yBase));
+  const storeyWalls = top.slice();
+  // Cut into one of this storey's walls (a wall of the storey below only touches it)
+  const inWall = (o: WallSeg) => {
+    const c = o.p1.clone().add(o.p2).multiplyScalar(0.5);
+    return storeyWalls.some((w) => {
+      if (Math.abs(w.dir.dot(o.dir)) < AXIS_COS || o.yTop <= w.yBase + 0.05 || o.yBase >= w.yTop - 0.05) return false;
+      const d = c.clone().sub(w.p1);
+      return Math.abs(d.dot(w.left)) < WALL_T_TOLERANCE && d.dot(w.dir) > -0.02 && d.dot(w.dir) < w.halfW * 2 + 0.02;
+    });
+  };
+  for (const o of all) {
+    if (isSolidWallPiece(o.piece.type)) continue;
+    if (o.yBase < storeyBase - SAME_LEVEL || o.yTop > level + SAME_LEVEL || inWall(o)) continue;
+    top.push(o);
+  }
 
   // 3. Roof frame: X along the seed wall
+  // Saved rotations are rounded (a quarter turn comes back a hair off), so a seed running along a
+  // world axis is snapped onto it; and coordinates are measured from the seed, so a tiny tilt of
+  // the frame does not grow into centimetres far from the world origin
   const ax = new THREE.Vector2(seedSeg.dir.x, seedSeg.dir.y);
+  if (Math.abs(ax.x) > AXIS_COS) ax.set(Math.sign(ax.x), 0);
+  else if (Math.abs(ax.y) > AXIS_COS) ax.set(0, Math.sign(ax.y));
   const az = new THREE.Vector2(-ax.y, ax.x);
-  const toLocal = (p: THREE.Vector2): P2 => [p.dot(ax), p.dot(az)];
+  const frameOrigin = seedSeg.p1.clone().add(seedSeg.p2).multiplyScalar(0.5);
+  const toLocal = (p: THREE.Vector2): P2 => {
+    const d = p.clone().sub(frameOrigin);
+    return [d.dot(ax), d.dot(az)];
+  };
   for (const s of top) {
     // Neither along the seed wall nor square to it
     if (Math.abs(s.dir.dot(ax)) < AXIS_COS && Math.abs(s.dir.dot(az)) < AXIS_COS) {
@@ -129,7 +183,7 @@ export function findHouseOutline(seed: BuiltPiece, near: Near): HouseOutlineResu
     const lo = Math.min(nodes[l.a][k], nodes[l.b][k]), hi = Math.max(nodes[l.a][k], nodes[l.b][k]);
     const on = nodes
       .map((n, i) => ({ n, i }))
-      .filter(({ n }) => Math.abs(n[1 - k] - l.at) < 1e-3 && n[k] >= lo - 1e-3 && n[k] <= hi + 1e-3)
+      .filter(({ n }) => Math.abs(n[1 - k] - l.at) < LINE_TOL && n[k] >= lo - LINE_TOL && n[k] <= hi + LINE_TOL)
       .sort((u, v) => u.n[k] - v.n[k]);
     for (let i = 0; i + 1 < on.length; i++) link(on[i].i, on[i + 1].i);
   }
@@ -193,7 +247,7 @@ export function findHouseOutline(seed: BuiltPiece, near: Near): HouseOutlineResu
   const xs = footprint.map((p) => p[0]), zs = footprint.map((p) => p[1]);
   const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cz = (Math.min(...zs) + Math.max(...zs)) / 2;
   footprint = footprint.map(([x, z]) => [Math.round((x - cx) * 1000) / 1000, Math.round((z - cz) * 1000) / 1000]);
-  const world = ax.clone().multiplyScalar(cx).add(az.clone().multiplyScalar(cz));
+  const world = ax.clone().multiplyScalar(cx).add(az.clone().multiplyScalar(cz)).add(frameOrigin);
   // Local X → world (ax.x, 0, ax.y); local Z → world (az.x, 0, az.y)
   const basis = new THREE.Matrix4().makeBasis(
     new THREE.Vector3(ax.x, 0, ax.y),
