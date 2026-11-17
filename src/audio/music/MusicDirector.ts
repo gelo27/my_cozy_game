@@ -20,12 +20,31 @@ export interface MusicWorldState {
   inCave: boolean;
   underwater: boolean;
   sleeping: boolean;
+  /** A line is out (casting, waiting for a bite, reeling in). */
+  fishing: boolean;
+  /** Metres from the listener to the sea's waterline (Infinity far inland). */
+  shore: number;
   /** 0 nothing, 1 an enemy is after the player, 2 it is attacking / close. */
   threat: number;
 }
 
 type Mode = 'ambient' | 'cave' | 'danger' | 'sleep';
 export type TimeSlot = 'day' | 'evening' | 'night';
+/** Places with their own tracks (a mood tag of the same name), most important first. */
+export type Place = 'underwater' | 'fishing' | 'beach';
+const PLACES: readonly Place[] = ['underwater', 'fishing', 'beach'];
+/** Mood tags that are weather (a place track that names none plays in any weather). */
+const WEATHERS = new Set(['clear', 'cloudy', 'rain', 'storm', 'fog', 'snow']);
+
+/**
+ * How long a place must hold before its music is wanted, and how long it lingers once left: a quick
+ * dive or a step onto the sand does not swap the music, a fishing trip keeps its tune between casts.
+ */
+const PLACE_ENTER: Record<Place, number> = { underwater: 2.5, fishing: 2, beach: 6 };
+const PLACE_LEAVE: Record<Place, number> = { underwater: 1.5, fishing: 25, beach: 12 };
+/** On the beach: this close to the waterline to arrive, this far to have left it (m). */
+const BEACH_IN = 24;
+const BEACH_OUT = 45;
 
 /** Weather that may borrow another weather's tracks while it has none of its own. */
 const WEATHER_FALLBACK: Record<string, string> = { cloudy: 'clear' };
@@ -82,6 +101,10 @@ class MusicDirector {
   private layerChase = 0;
   private layerAttack = 0;
   private readonly history: string[] = [];
+  /** Per place: seconds its state has differed from what is current (see PLACE_ENTER / PLACE_LEAVE). */
+  private readonly placeTime: Record<Place, number> = { underwater: 0, fishing: 0, beach: 0 };
+  private readonly placeOn: Record<Place, boolean> = { underwater: false, fishing: false, beach: false };
+  private place: Place | null = null;
   private clock = 0;
   private lastUpdateMs = 0;
   private state: MusicWorldState | null = null;
@@ -89,7 +112,7 @@ class MusicDirector {
   private forcedThreat = 0;
   private forcedThreatLeft = 0;
   /** Developer panel: pretend it is this time slot / weather / place (null fields follow the world). */
-  public readonly override: { slot: TimeSlot | null; weather: string | null; place: 'cave' | 'danger' | 'attack' | null } = {
+  public readonly override: { slot: TimeSlot | null; weather: string | null; place: 'cave' | 'danger' | 'attack' | Place | null } = {
     slot: null,
     weather: null,
     place: null,
@@ -164,6 +187,9 @@ class MusicDirector {
       }
       if (o.weather) s.weather = o.weather;
       if (o.place === 'cave') s.inCave = true;
+      else if (o.place === 'underwater') s.underwater = true;
+      else if (o.place === 'fishing') s.fishing = true;
+      else if (o.place === 'beach') s.shore = 0;
       else if (o.place) s.threat = Math.max(s.threat, o.place === 'attack' ? 2 : 1);
     }
     this.state = s;
@@ -174,6 +200,7 @@ class MusicDirector {
     else this.dangerHold = Math.max(0, this.dangerHold - dt);
     const mode: Mode = this.dangerHold > 0 ? 'danger' : s.sleeping ? 'sleep' : s.inCave ? 'cave' : 'ambient';
     if (mode !== this.mode) this.switchMode(this.mode, mode);
+    this.updatePlace(dt, s);
 
     if (!this.musicAudible) {
       // Music switched off: stop doing any work, start fresh when it comes back
@@ -185,8 +212,9 @@ class MusicDirector {
     else if (this.mode === 'danger') this.updateDanger(dt, s);
     // Asleep there is no music at all
 
-    // Underwater the music sinks back
-    this.duck!.gain.setTargetAtTime(s.underwater ? 0.45 : 1, ctx.currentTime, 0.25);
+    // Underwater the music sinks back, unless it is the underwater music itself
+    const own = !!this.track?.song.mood.includes('underwater');
+    this.duck!.gain.setTargetAtTime(s.underwater && !own ? 0.45 : 1, ctx.currentTime, 0.25);
   }
 
   private switchMode(from: Mode, to: Mode): void {
@@ -213,7 +241,8 @@ class MusicDirector {
     } else if (from === 'sleep') this.silence = rand(30, 60);
     // Danger brings its own room (the cave's stone when it is underground); the cave its echo
     if (to === 'cave') this.setSpace('cave', 0.5);
-    else if (to !== 'danger' && (from === 'cave' || from === 'danger')) this.setSpace('hall', 0.25);
+    else if (to !== 'danger' && from === 'cave') this.setSpace('hall', 0.25);
+    else if (to !== 'danger' && from === 'danger') this.setSpace(this.space ?? 'hall', 0.25);
   }
 
   /**
@@ -284,15 +313,68 @@ class MusicDirector {
     return 'day';
   }
 
-  /** Whether a track belongs here: underground only the cave tracks, outside the time and weather ones. */
+  /**
+   * Places come and go with hysteresis (PLACE_ENTER / PLACE_LEAVE). The current place is the most
+   * important one that holds and has a track for this time and weather. Arriving cuts the silence
+   * short, so the place's music comes soon; diving in or surfacing changes the music at once.
+   */
+  private updatePlace(dt: number, s: MusicWorldState): void {
+    const raw: Record<Place, boolean> = {
+      underwater: s.underwater && !s.inCave,
+      fishing: s.fishing && !s.inCave,
+      beach: !s.inCave && !s.underwater && s.shore < (this.placeOn.beach ? BEACH_OUT : BEACH_IN),
+    };
+    for (const p of PLACES) {
+      if (raw[p] === this.placeOn[p]) this.placeTime[p] = 0;
+      else if ((this.placeTime[p] += dt) >= (raw[p] ? PLACE_ENTER[p] : PLACE_LEAVE[p])) {
+        this.placeOn[p] = raw[p];
+        this.placeTime[p] = 0;
+      }
+    }
+    const slot = this.timeSlot(s);
+    const next = PLACES.find((p) => this.placeOn[p] && this.placeTracks(p, slot, s.weather).length > 0) ?? null;
+    if (next === this.place) return;
+    const from = this.place;
+    this.place = next;
+    if (this.mode !== 'ambient') return;
+    if (next === 'underwater' || from === 'underwater') {
+      if (this.track && !this.forcedTrack) {
+        this.track.fadeOut(3);
+        this.track = null;
+      }
+      if (this.loading && !this.forcedTrack) {
+        this.trackReq++;
+        this.loading = false;
+      }
+      this.moodEnded = false;
+      this.silence = next ? rand(1, 3) : rand(12, 30);
+    } else if (next) this.silence = Math.min(this.silence, rand(3, 8));
+  }
+
+  /** Tracks written for a place that suit this time and weather. */
+  private placeTracks(place: Place, slot: TimeSlot, weather: string) {
+    return findSongs('track', (m) => m.includes(place) && this.placeFits(m, slot, weather));
+  }
+
+  /** A place track names its times; if it names no weather it plays in any. */
+  private placeFits(mood: readonly string[], slot: TimeSlot, weather: string): boolean {
+    if (!mood.includes(slot)) return false;
+    const weathers = mood.filter((m) => WEATHERS.has(m));
+    const fb = WEATHER_FALLBACK[weather];
+    return !weathers.length || weathers.includes(weather) || (!!fb && weathers.includes(fb));
+  }
+
+  /** Whether a track belongs here: underground the cave tracks, at a place its own, else the time and weather ones. */
   private fitsNow(mood: readonly string[], slot: TimeSlot, weather: string): boolean {
     if (this.mode === 'cave') return mood.includes('cave');
+    if (this.place) return mood.includes(this.place) && this.placeFits(mood, slot, weather);
     const fb = WEATHER_FALLBACK[weather];
     return this.fits(mood, slot, weather) || (!!fb && this.fits(mood, slot, fb));
   }
 
+  /** An outdoor track for this time and weather (place tracks only play at their place). */
   private fits(mood: readonly string[], slot: TimeSlot, weather: string): boolean {
-    if (!mood.includes(slot)) return false;
+    if (!mood.includes(slot) || PLACES.some((p) => mood.includes(p))) return false;
     return mood.includes(weather) || mood.includes('any');
   }
 
@@ -313,7 +395,8 @@ class MusicDirector {
       this.track = null;
       this.forcedTrack = false;
       // A track that ended because the weather or time changed gives way sooner
-      this.silence = this.moodEnded ? rand(10, 25) : rand(60, 240);
+      // At a place (a fishing trip, the beach) its music comes back sooner
+      this.silence = this.moodEnded ? (this.place ? rand(2, 6) : rand(10, 25)) : this.place ? rand(20, 60) : rand(60, 240);
       this.moodEnded = false;
     }
     if (this.loading) return;
@@ -329,9 +412,14 @@ class MusicDirector {
   }
 
   private pickTrack(slot: TimeSlot, weather: string): CompiledSong | null {
-    let list = findSongs('track', (m) => (this.mode === 'cave' ? m.includes('cave') : this.fits(m, slot, weather)));
+    let list =
+      this.mode === 'cave'
+        ? findSongs('track', (m) => m.includes('cave'))
+        : this.place
+          ? this.placeTracks(this.place, slot, weather)
+          : findSongs('track', (m) => this.fits(m, slot, weather));
     const fb = WEATHER_FALLBACK[weather];
-    if (!list.length && fb && this.mode !== 'cave') list = findSongs('track', (m) => this.fits(m, slot, fb));
+    if (!list.length && fb && this.mode !== 'cave' && !this.place) list = findSongs('track', (m) => this.fits(m, slot, fb));
     if (!list.length) return null;
     // Never the same track twice in a row (nor the one before, when there is a choice)
     const fresh = list.filter((s) => !this.history.includes(s.id));
@@ -358,7 +446,7 @@ class MusicDirector {
       } else if (this.mode !== mode || this.track || !this.musicAudible) return;
       this.forcedTrack = forced;
       this.setSpace(song.space, song.wet);
-      const p = new SongPlayer(this.ctx!, this.pool!, song, this.duck!, false, levels);
+      const p = new SongPlayer(this.ctx!, this.pool!, song, this.duck!, false, levels, isMobileDevice());
       p.start(this.ctx!.currentTime + 0.1, 4);
       this.track = p;
       this.history.push(song.id);
@@ -377,8 +465,10 @@ class MusicDirector {
     const pick = findSongs('loop', (m) => m.includes('danger'))[0];
     const song = pick && getSong(pick.id);
     if (!song) return;
+    // The room already loaded stays (only its level changes): swapping the reverb impulse means
+    // rendering it and re-partitioning the convolver right on the hit, which a phone hears as a stutter
     if (this.state?.inCave) this.setSpace('cave', 0.3);
-    else this.setSpace(song.space, song.wet);
+    else this.setSpace(this.space ?? song.space, song.wet);
     const begin = () => {
       this.dangerLoading = false;
       if (this.mode !== 'danger' || this.danger || !this.musicAudible) return;
@@ -387,7 +477,7 @@ class MusicDirector {
       this.layerAttack = attack ? 1 : 0;
       this.layerChase = 0;
       // The chase layer starts silent and swells in on the first update
-      const p = new SongPlayer(this.ctx!, this.pool!, song, this.duck!, true, { attack: this.layerAttack, chase: 0 });
+      const p = new SongPlayer(this.ctx!, this.pool!, song, this.duck!, true, { attack: this.layerAttack, chase: 0 }, isMobileDevice());
       p.start(this.ctx!.currentTime + 0.03, 0);
       this.danger = p;
     };
@@ -414,11 +504,12 @@ class MusicDirector {
       mode: this.mode,
       space: this.space,
       slot: this.state ? this.timeSlot(this.state) : null,
+      place: this.place,
       weather: this.state?.weather ?? null,
       track: this.track ? { id: this.track.song.id, left: Math.round(this.track.remaining) } : null,
       danger: this.danger ? { chase: this.layerChase, attack: this.layerAttack, hold: Math.ceil(this.dangerHold) } : null,
       silence: Math.max(0, Math.round(this.silence)),
-      voices: this.pool ? { now: this.pool.active, peak: this.pool.peak, limit: this.pool.limit, stolen: this.pool.stolen } : null,
+      voices: this.pool ? { now: this.pool.active, peak: this.pool.peak, limit: this.pool.limit, stolen: this.pool.stolen, dropped: this.pool.dropped } : null,
       sampleKB: this.bank ? Math.round(this.bank.totalBytes / 1024) : 0,
       renderMs: this.bank ? Math.round(this.bank.lastRenderMs) : 0,
       renderedOn: this.bank?.renderedOn ?? '',

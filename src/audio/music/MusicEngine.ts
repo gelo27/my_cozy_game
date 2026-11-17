@@ -7,6 +7,9 @@ interface Voice {
   gain: GainNode;
   start: number;
   end: number;
+  /** End of the written note (later only its tail rings) and its loudness: what stealing weighs. */
+  noteEnd: number;
+  vel: number;
   owner: SongPlayer;
 }
 
@@ -23,6 +26,8 @@ export class VoicePool {
   public peak = 0;
   /** Voices cut short by the cap (developer panel: should stay rare). */
   public stolen = 0;
+  /** Notes never started because the cap was full of louder ones. */
+  public dropped = 0;
 
   constructor(
     private readonly ctx: AudioContext,
@@ -50,16 +55,25 @@ export class VoicePool {
     // phone's long lookahead queues many that cost nothing yet)
     let sounding = 0;
     for (;;) {
-      let k = -1;
+      // Victim: a ringing tail first (the one nearest its end), else the quietest held note
+      let tail = -1, held = -1;
       sounding = 0;
       for (let i = 0; i < this.voices.length; i++) {
         const v = this.voices[i];
         if (v.start > t || v.end <= t) continue;
         sounding++;
-        if (k < 0 || v.end < this.voices[k].end) k = i;
+        if (v.noteEnd <= t) {
+          if (tail < 0 || v.end < this.voices[tail].end) tail = i;
+        } else if (held < 0 || v.vel < this.voices[held].vel) held = i;
       }
       if (sounding < this.limit) break;
-      // Steal the one closest to its end at that moment (a fading tail, not a note just struck)
+      // Full of louder notes: a quiet one (a ghost note, a soft repeat) is simply not played. On a
+      // phone this keeps a dense arrangement from creating and killing nodes many times a second
+      if (tail < 0 && vel <= this.voices[held].vel) {
+        this.dropped++;
+        return;
+      }
+      const k = tail >= 0 ? tail : held;
       this.release(this.voices.splice(k, 1)[0], Math.max(now, t), 0.015);
       this.stolen++;
     }
@@ -93,7 +107,7 @@ export class VoicePool {
     src.connect(g).connect(out);
     src.start(t);
     src.stop(end);
-    this.voices.push({ src, gain: g, start: t, end, owner });
+    this.voices.push({ src, gain: g, start: t, end, noteEnd: t + dur, vel, owner });
   }
 
   /** Silences a player's voices (already sounding ones fade, queued ones never start). */
@@ -145,7 +159,9 @@ export class SongPlayer {
     public readonly song: CompiledSong,
     dest: AudioNode,
     public readonly loop: boolean,
-    layerLevels: Readonly<Record<string, number>>
+    layerLevels: Readonly<Record<string, number>>,
+    /** Phones: parts marked `lite: false` (doublings, ghost notes) are left out. */
+    private readonly lite = false
   ) {
     this.out = ctx.createGain();
     this.partLayer = song.parts.map((p) => p.layer);
@@ -163,7 +179,7 @@ export class SongPlayer {
         }
         target = lg;
       }
-      const pan = getPatch(p.patch)?.pan ?? 0;
+      const pan = p.pan ?? getPatch(p.patch)?.pan ?? 0;
       if (pan === 0 || !ctx.createStereoPanner) return target;
       const sp = ctx.createStereoPanner();
       sp.pan.value = pan;
@@ -243,9 +259,10 @@ export class SongPlayer {
         this.finishedAt = Infinity;
         return;
       }
+      const shift = song.stepShift[this.step % 4] * song.stepDur;
       for (const n of song.table[this.step]) {
-        if (this.muted(n.part)) continue;
-        this.pool.play(this, n.patch, n.midi, this.nextTime, n.len * song.stepDur, n.vel, this.partBus[n.part]);
+        if (this.muted(n.part) || (this.lite && song.parts[n.part].heavy)) continue;
+        this.pool.play(this, n.patch, n.midi, this.nextTime + shift, n.len * song.stepDur, n.vel, this.partBus[n.part]);
       }
       this.nextTime += song.stepDur;
       this.step++;

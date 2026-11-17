@@ -23,6 +23,10 @@ export interface SongPartDef {
   vol?: number;
   /** Octave shift. */
   oct?: number;
+  /** false: an extra (doubling, ghost notes) that phones leave out to save voices. */
+  lite?: boolean;
+  /** Stereo position -1..1 for this part (default: the patch's own), so two parts on one patch can sit apart. */
+  pan?: number;
   /** This song's colour of the instrument (brighter, longer...): see Tone in patches.ts. */
   tone?: Tone;
 }
@@ -40,6 +44,8 @@ export interface SongJson {
   /** MIDI note of degree 0. */
   root: number;
   scale: number[];
+  /** Swing 0..0.6: how late the off-beat eighths land (0 straight, ~0.33 triplet feel). 4/4 grids only. */
+  swing?: number;
   /** Overall level of this song (default 1). */
   gain?: number;
   /** Reverb space (default hall) and how much of it (default 0.25). */
@@ -75,7 +81,9 @@ export interface CompiledSong {
   total: number;
   /** Notes starting at each step. */
   table: NoteEvent[][];
-  parts: { patch: string; layer: string | null }[];
+  parts: { patch: string; layer: string | null; pan: number | null; heavy: boolean }[];
+  /** Delay of each step within a beat, in steps (swing). */
+  stepShift: number[];
   /** Step index where each section of the form starts (first is 0). */
   sectionStarts: number[];
   /** Step a loop returns to after its last step. */
@@ -107,7 +115,7 @@ export function compileSong(song: SongJson): CompiledSong {
   }
   const partIds = Object.keys(song.parts);
   const patchOf = (id: string) => tonedName(song.parts[id].i, song.parts[id].tone);
-  const parts = partIds.map((id) => ({ patch: patchOf(id), layer: song.parts[id].layer ?? null }));
+  const parts = partIds.map((id) => ({ patch: patchOf(id), layer: song.parts[id].layer ?? null, pan: song.parts[id].pan ?? null, heavy: song.parts[id].lite === false }));
 
   const expand = (seq: string): ({ pat: string; tr: number } | null)[] => {
     const bars: ({ pat: string; tr: number } | null)[] = [];
@@ -166,6 +174,9 @@ export function compileSong(song: SongJson): CompiledSong {
     bar0 += sec.bars;
   }
   const stepDur = 60 / song.bpm / 4;
+  // Swing moves the second eighth of each beat late (and the sixteenths around it with it)
+  const sw = song.steps % 4 === 0 ? Math.max(0, Math.min(0.6, song.swing ?? 0)) : 0;
+  const stepShift = [0, sw, 2 * sw, sw];
   return {
     id: song.id,
     kind: song.kind,
@@ -179,6 +190,7 @@ export function compileSong(song: SongJson): CompiledSong {
     total,
     table,
     parts,
+    stepShift,
     sectionStarts,
     loopStep: song.loop && form.includes(song.loop) ? sectionStarts[form.indexOf(song.loop)] : 0,
     patches: [...new Set(parts.map((p) => p.patch))],

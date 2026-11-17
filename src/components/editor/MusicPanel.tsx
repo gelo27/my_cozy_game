@@ -7,7 +7,7 @@ const MODE_LABELS: Record<string, string> = { ambient: 'Звичайна', cave:
 const SPACE_LABELS: Record<string, string> = { room: 'Кімната', hall: 'Зала', field: 'Відкрите поле', cave: 'Печера' };
 const SLOT_LABELS: Record<TimeSlot, string> = { day: 'День', evening: 'Вечір', night: 'Ніч' };
 const KIND_LABELS: Record<string, string> = { track: 'Треки', loop: 'Тривога' };
-const PLACE_LABELS = { cave: 'Печера', danger: 'Помітили', attack: 'Атака' } as const;
+const PLACE_LABELS = { cave: 'Печера', underwater: 'Під водою', fishing: 'Риболовля', beach: 'Пляж', danger: 'Помітили', attack: 'Атака' } as const;
 
 const time = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 

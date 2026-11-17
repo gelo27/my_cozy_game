@@ -258,7 +258,7 @@ export class GameEngine {
   private coastState: CoastState | null = null;
   /** Reused every frame (no per-frame garbage). */
   private readonly musicState: MusicWorldState = {
-    timeOfDay: 12, night: 0, weather: 'clear', rain: 0, inCave: false, underwater: false, sleeping: false, threat: 0,
+    timeOfDay: 12, night: 0, weather: 'clear', rain: 0, inCave: false, underwater: false, sleeping: false, fishing: false, shore: Infinity, threat: 0,
   };
   /** Fake god rays while the camera is under water. */
   private lightShafts: LightShafts | null = null;
@@ -1464,6 +1464,8 @@ export class GameEngine {
     ms.inCave = !!w.exploration.inCave;
     ms.underwater = underwater;
     ms.sleeping = w.gameplay.sleeping;
+    ms.fishing = w.gameplay.fishing.busy;
+    ms.shore = this.coast.shoreDistance;
     ms.threat = w.gameplay.pests.threatLevel(playerPos);
     music.update(dt, ms);
 

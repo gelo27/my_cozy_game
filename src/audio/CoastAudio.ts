@@ -96,6 +96,11 @@ export class CoastAudio {
   private shoreAt = 0;
   private readonly nearest = new THREE.Vector3();
 
+  /** Metres from the listener to the sea's waterline at the last scan (Infinity far inland). */
+  public get shoreDistance(): number {
+    return this.shoreDist;
+  }
+
   public update(s: CoastState, dt: number): void {
     const ctx = audioEngine.context;
     if (!ctx) return;

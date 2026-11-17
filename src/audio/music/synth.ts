@@ -120,6 +120,18 @@ function modal(sr: number, f: number, p: SynthParams, r: () => number, drum: boo
     y += (r() * 2 - 1 - y) * tone;
     d[i] += y * click * (1 - i / cl);
   }
+  // Vibraphone / electric piano tremolo, and a little valve-amp warmth
+  const [tRate, tDepth] = p.trem ?? [0, 0];
+  if (tDepth > 0) {
+    const w = (2 * Math.PI * tRate) / sr;
+    for (let i = 0; i < n; i++) d[i] *= 1 - tDepth * 0.5 * (1 - Math.cos(w * i));
+  }
+  const drive = p.drive ?? 0;
+  if (drive > 0) {
+    normalize(d, 1);
+    const k = 1 + drive * 3, nk = Math.tanh(k);
+    for (let i = 0; i < n; i++) d[i] = Math.tanh(k * d[i]) / nk;
+  }
   normalize(d, 0.9);
   fadeOut(d, sr, Math.min(0.4, p.dur * 0.25));
   return d;

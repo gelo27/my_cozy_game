@@ -52,6 +52,9 @@ export interface SynthParams {
   snap?: number;
   snapTau?: number;
   snapTone?: number;
+  /** modal: amplitude tremolo [Hz, depth 0..1] (vibraphone fan, electric piano); soft saturation 0..1. */
+  trem?: [number, number];
+  drive?: number;
   /** Highest sample rate worth rendering at (dull sounds save memory at 16 kHz). */
   srCap?: number;
 }
@@ -201,6 +204,244 @@ export const PATCHES: Record<string, Patch> = {
     pan: -0.2,
     unpitched: true,
   },
+  // --- Keys and mallets ---
+
+  /** Electric piano (tine): warm fundamental, a bell "tine" on the attack, slow amp tremolo. */
+  rhodes: {
+    synth: {
+      kind: 'modal',
+      roots: [48, 64],
+      dur: 2.2,
+      click: 0.05,
+      clickTone: 0.2,
+      modes: [[1, 1, 2.1], [1.0025, 0.45, 1.8], [2, 0.22, 0.8], [3, 0.07, 0.35], [7.02, 0.16, 0.05], [12.1, 0.05, 0.02]],
+      trem: [4.2, 0.22],
+      drive: 0.25,
+    },
+    ring: 1.8,
+    pan: -0.05,
+  },
+  /** Vibraphone: long metal bars with the motor's tremolo. */
+  vibes: {
+    synth: { kind: 'modal', roots: [60, 72], dur: 2.6, click: 0.07, clickTone: 0.45, modes: [[1, 1, 2.6], [3.99, 0.22, 0.5], [10.1, 0.04, 0.08]], trem: [5.5, 0.35] },
+    ring: 2.2,
+    pan: 0.2,
+  },
+  /** Celesta: small hammered steel plates in a wooden box. Soft, sweet, high. */
+  celesta: {
+    synth: { kind: 'modal', roots: [72, 84], dur: 1.6, click: 0.05, clickTone: 0.3, modes: [[1, 1, 1.3], [2.01, 0.18, 0.5], [3.02, 0.06, 0.2], [4.1, 0.04, 0.1]] },
+    ring: 1.3,
+    pan: 0.25,
+  },
+  /** Glockenspiel: bright, glassy, short. */
+  glock: {
+    synth: { kind: 'modal', roots: [84], dur: 1.6, click: 0.12, clickTone: 0.85, modes: [[1, 1, 1.3], [2.71, 0.32, 0.35], [5.15, 0.14, 0.12], [8.9, 0.05, 0.05]] },
+    ring: 1.3,
+    pan: 0.3,
+  },
+
+  // --- Plucked strings ---
+
+  /** Mandolin: paired steel strings near the bridge, bright and short (tremolo-picked on long notes). */
+  mandolin: {
+    synth: { kind: 'ks', roots: [67, 79], dur: 1.1, t60: 1.1, bright: 0.7, pos: 0.1, body: 0.25 },
+    ring: 0.35,
+    pan: 0.25,
+  },
+  /** Ukulele: nylon, small body, plucked mid-string. */
+  ukulele: {
+    synth: { kind: 'ks', roots: [60, 72], dur: 1.2, t60: 1.2, bright: 0.42, pos: 0.28, body: 0.55 },
+    ring: 0.6,
+    pan: -0.25,
+  },
+  /** Steel-string acoustic guitar. */
+  steel: {
+    synth: { kind: 'ks', roots: [43, 55, 67], dur: 2, t60: 2.8, bright: 0.6, pos: 0.15, body: 0.3 },
+    ring: 1.4,
+    pan: -0.2,
+  },
+  /** Hammered dulcimer: struck near the end, long and shimmering. */
+  dulcimer: {
+    synth: { kind: 'ks', roots: [60, 72], dur: 2, t60: 3, bright: 0.75, pos: 0.07, body: 0.1 },
+    ring: 1.6,
+    pan: -0.15,
+  },
+  /** Koto-like zither: thin, bright, a quick bloom and fade. */
+  koto: {
+    synth: { kind: 'ks', roots: [55, 67, 79], dur: 1.7, t60: 1.9, bright: 0.62, pos: 0.06, body: 0.15 },
+    ring: 1.2,
+    pan: -0.25,
+  },
+  /** Pizzicato strings: a short woody pluck. */
+  pizz: {
+    synth: { kind: 'ks', roots: [43, 55, 67], dur: 0.9, t60: 0.55, bright: 0.3, pos: 0.22, body: 0.8, srCap: 22050 },
+    ring: 0.4,
+    pan: 0.1,
+  },
+
+  // --- Winds and voices ---
+
+  /** Oboe: nasal double reed, bright formant, quick vibrato. */
+  oboe: {
+    synth: { kind: 'sustain', roots: [67, 79], dur: 1, onset: 0.07, harmonics: 16, rolloff: 5, breath: 0.05, vib: 12, vibRate: 5.5, chiff: 0.2, formant: [1250, 2.2] },
+    ring: 0,
+    pan: 0.2,
+    loop: true,
+    attack: 0.04,
+    release: 0.16,
+  },
+  /** Clarinet: hollow (odd harmonics), dark low register, almost no vibrato. */
+  clarinet: {
+    synth: { kind: 'sustain', roots: [55, 67], dur: 1, onset: 0.08, harmonics: 12, rolloff: 3, odd: 0.85, breath: 0.06, vib: 4, vibRate: 5, chiff: 0.2, formant: [1500, 0.5] },
+    ring: 0,
+    pan: -0.15,
+    loop: true,
+    attack: 0.05,
+    release: 0.18,
+  },
+  /** Harmonica: two reeds slightly apart, breathy, a hand-wah vibrato. */
+  harmonica: {
+    synth: { kind: 'sustain', roots: [60, 72], dur: 1, onset: 0.05, harmonics: 14, rolloff: 4, odd: 0.25, breath: 0.12, vib: 16, vibRate: 5.5, chorus: 1, chiff: 0.25, formant: [1800, 1] },
+    ring: 0,
+    pan: 0.15,
+    loop: true,
+    attack: 0.04,
+    release: 0.12,
+  },
+  /** French horn: round, dark, distant. */
+  horn: {
+    synth: { kind: 'sustain', roots: [48, 60], dur: 1, onset: 0.12, harmonics: 12, rolloff: 2.6, breath: 0.02, vib: 5, vibRate: 5, chorus: 1, chiff: 0.08, formant: [450, 1.2], srCap: 22050 },
+    ring: 0,
+    pan: -0.2,
+    loop: true,
+    attack: 0.14,
+    release: 0.4,
+  },
+  /** Choir "ooh": several voices, a low vowel formant. */
+  choir: {
+    synth: { kind: 'sustain', roots: [55, 67], dur: 1, onset: 0.4, harmonics: 10, rolloff: 1.8, breath: 0.05, vib: 9, vibRate: 4.6, chorus: 2, formant: [380, 1.8], srCap: 22050 },
+    ring: 0,
+    pan: 0,
+    loop: true,
+    attack: 0.6,
+    release: 1.2,
+  },
+  /** Bamboo flute (shakuhachi-like): very breathy, wide slow vibrato. */
+  bamboo: {
+    synth: { kind: 'sustain', roots: [62, 74], dur: 1, onset: 0.18, harmonics: 5, rolloff: 0.9, odd: 0.3, breath: 0.38, vib: 22, vibRate: 4.2, chiff: 0.9 },
+    ring: 0,
+    pan: 0.2,
+    loop: true,
+    attack: 0.1,
+    release: 0.35,
+  },
+
+  // --- Shore and fishing ---
+
+  /** Steel pan: harmonic partials (octave, twelfth) tuned into the hammered dome, a soft metallic bloom. */
+  steeldrum: {
+    synth: { kind: 'modal', roots: [60, 72], dur: 1.6, click: 0.12, clickTone: 0.45, modes: [[1, 1, 0.75], [2, 0.55, 0.5], [3, 0.22, 0.3], [4.02, 0.12, 0.16], [5.03, 0.05, 0.08]], drive: 0.15 },
+    ring: 0.9,
+    pan: 0.15,
+  },
+  /** Banjo: bright steel over a drum-head body, short and twangy. */
+  banjo: {
+    synth: { kind: 'ks', roots: [55, 67, 79], dur: 1.1, t60: 0.85, bright: 0.85, pos: 0.07, body: 0.35 },
+    ring: 0.45,
+    pan: -0.25,
+  },
+  /** Whistling: almost a pure tone, a little air, a lively vibrato. */
+  whistle: {
+    synth: { kind: 'sustain', roots: [74, 86], dur: 1, onset: 0.06, harmonics: 2, rolloff: 0.35, breath: 0.07, vib: 18, vibRate: 5.6, chiff: 0.25 },
+    ring: 0,
+    pan: 0.15,
+    loop: true,
+    attack: 0.035,
+    release: 0.1,
+  },
+  /** Tenor saxophone, soft and breathy (a bossa sax, not a honk). */
+  sax: {
+    synth: { kind: 'sustain', roots: [55, 67], dur: 1, onset: 0.07, harmonics: 18, rolloff: 3.5, breath: 0.13, vib: 11, vibRate: 5, chiff: 0.15, formant: [850, 1.9], srCap: 22050 },
+    ring: 0,
+    pan: 0.15,
+    loop: true,
+    attack: 0.06,
+    release: 0.18,
+  },
+
+  // --- Echo Grotto set: stone and glass ---
+
+  /** Bell-bar vibraphone (inharmonic partials of a free bar) with the motor tremolo; damped at note end. */
+  grottovibe: {
+    synth: { kind: 'modal', roots: [67, 79], dur: 2.4, click: 0.1, clickTone: 0.5, modes: [[1, 1, 0.6], [2.756, 0.48, 0.34], [5.404, 0.18, 0.15], [8.933, 0.06, 0.05]], trem: [5.5, 0.2] },
+    ring: 0.45,
+    pan: -0.08,
+  },
+  /** Crystal bells: a high glassy strike. */
+  crystal: {
+    synth: { kind: 'modal', roots: [81, 93], dur: 1.6, click: 0.16, clickTone: 0.95, modes: [[1, 1, 0.36], [2.756, 0.5, 0.22], [5.404, 0.22, 0.1], [8.933, 0.08, 0.04], [11.5, 0.03, 0.02]] },
+    ring: 1.4,
+    pan: 0.32,
+  },
+  /** Lithophone: a tuned stone slab, a dull knock and a short ring. */
+  litho: {
+    synth: { kind: 'modal', roots: [60, 72], dur: 0.8, click: 0.55, clickTone: 0.35, modes: [[1, 1, 0.15], [2.4, 0.35, 0.075], [4.1, 0.12, 0.033]] },
+    ring: 0.6,
+    pan: -0.22,
+  },
+  /** Stone bass: a near-sine with a whisper of second harmonic (heard on small speakers). */
+  stonebass: {
+    synth: { kind: 'sustain', roots: [33, 45], dur: 1, onset: 0.02, harmonics: 2, rolloff: 0.7, breath: 0, vib: 0, srCap: 16000 },
+    ring: 0,
+    pan: 0,
+    loop: true,
+    attack: 0.012,
+    release: 0.06,
+  },
+
+  // --- Soft kit ---
+
+  /** Soft kick: a felt beater on a deep drum. */
+  kick: {
+    synth: { kind: 'drum', roots: [36], dur: 0.6, drop: 0.9, dropTau: 0.03, click: 0.25, clickTone: 0.2, modes: [[1, 1, 0.22], [1.6, 0.15, 0.06]], srCap: 16000 },
+    ring: 0.4,
+    pan: 0,
+    unpitched: true,
+  },
+  /** Rim click / woodblock. */
+  rim: {
+    synth: { kind: 'modal', roots: [76], dur: 0.25, click: 0.4, clickTone: 0.7, modes: [[1, 1, 0.035], [2.3, 0.45, 0.02], [3.9, 0.2, 0.012]] },
+    ring: 0.15,
+    pan: 0.15,
+    unpitched: true,
+  },
+  /** Soft closed hat. */
+  hat: {
+    synth: { kind: 'noise', roots: [60], dur: 0.12, rise: 0.0015, tau: 0.025, dark: 0.15 },
+    ring: 0.08,
+    pan: 0.25,
+    unpitched: true,
+  },
+  /** Lo-fi snare: dull skin and loose wires. */
+  losnare: {
+    synth: { kind: 'drum', roots: [55], dur: 0.45, drop: 0.08, dropTau: 0.02, click: 0.3, clickTone: 0.4, modes: [[1, 0.7, 0.06], [1.7, 0.3, 0.035]], snap: 0.9, snapTau: 0.09, snapTone: 0.35, srCap: 22050 },
+    ring: 0.3,
+    pan: -0.05,
+    unpitched: true,
+  },
+  triangle: {
+    synth: { kind: 'modal', roots: [93], dur: 2, click: 0.05, clickTone: 0.95, modes: [[1, 1, 1.6], [2.93, 0.45, 1.1], [5.2, 0.25, 0.7], [7.6, 0.12, 0.4]] },
+    ring: 1.6,
+    pan: 0.35,
+    unpitched: true,
+  },
+  /** Timpani: a soft orchestral roll or swell hit. */
+  timp: {
+    synth: { kind: 'drum', roots: [41, 48], dur: 2, drop: 0.06, dropTau: 0.08, click: 0.2, clickTone: 0.15, modes: [[1, 1, 1.2], [1.5, 0.4, 0.7], [1.98, 0.25, 0.45], [2.44, 0.1, 0.3]], srCap: 16000 },
+    ring: 1.6,
+    pan: -0.1,
+  },
+
   // --- Caves ---
 
   /** Glass harmonica: a few pure partials swelling in slowly, a slight waver. Ghostly. */
