@@ -19,12 +19,14 @@ import { promptStore } from './components/promptStore';
 import { GameHUD } from './components/game/GameHUD';
 import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
 import { WorkersPanel } from './components/game/WorkersPanel';
+import { WorkerRadialMenu } from './components/game/WorkerRadialMenu';
 import { StoragePanel } from './components/game/StoragePanel';
 import { WorldMap } from './components/game/WorldMap';
 import { SavingBadge } from './components/game/SavingBadge';
 import { PauseMenu } from './components/game/PauseMenu';
 import { EditorUI } from './components/editor/EditorUI';
 import { useLang, dataName, t } from './i18n/i18n';
+import { uiScreens } from './ui/UiScreens';
 import { ErrorOverlay, JsonDropOverlay, LoadingOverlay, ToastPill } from './components/ViewportOverlays';
 
 export default function App() {
@@ -47,8 +49,6 @@ export default function App() {
   const [showConsole, setShowConsole] = useState(false);
   const [showCharacterInspector, setShowCharacterInspector] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  /** What Escape should close first (read from the engine's key handler, so kept in a ref). */
-  const openUiRef = useRef({ inventory: false, map: false, building: false });
   const pausedAtRef = useRef(0);
 
   useLang();
@@ -67,21 +67,32 @@ export default function App() {
     [showToast]
   );
 
-  /** `undefined` toggles the backpack; the input manager unlocks the cursor while it is open. */
+  // Open state of the App-side screens, kept in refs too: UiScreens asks for them synchronously
+  const inventoryOpenRef = useRef(false);
+  const mapOpenRef = useRef(false);
+
+  /**
+   * `undefined` toggles the backpack; the input manager unlocks the cursor while it is open. Opening
+   * goes through UiScreens: it closes whatever else is open, or is refused (pause menu, asleep).
+   */
   const handleToggleInventory = (open?: boolean) => {
-    setIsInventoryOpen((prev) => {
-      const next = open ?? !prev;
-      if (next !== prev) engineRef.current?.input.setInventoryMode(next);
-      return next;
-    });
+    const prev = inventoryOpenRef.current;
+    const next = open ?? !prev;
+    if (next === prev || (next && !uiScreens.request('inventory'))) return;
+    inventoryOpenRef.current = next;
+    setIsInventoryOpen(next);
+    engineRef.current?.input.setInventoryMode(next);
+    // The abilities check the inventory manager's flag (no tool use behind the open backpack)
+    engineRef.current?.world?.inventoryManager.setOpen(next);
   };
 
   const setPaused = (paused: boolean) => {
     const e = engineRef.current;
     if (!e || e.mode === 'editor') return;
+    if (paused && !uiScreens.request('pause')) return;
     e.setPaused(paused);
     pausedAtRef.current = paused ? performance.now() : 0;
-    e.input.setInventoryMode(paused || openUiRef.current.inventory || openUiRef.current.map || !!e.world?.gameplay.panel);
+    e.input.setInventoryMode(paused || inventoryOpenRef.current || mapOpenRef.current || !!e.world?.gameplay.panel);
     setIsPaused(paused);
   };
 
@@ -89,8 +100,8 @@ export default function App() {
   const handlePauseHotkey = () => {
     const e = engineRef.current;
     if (!e) return;
-    const ui = openUiRef.current;
-    if (!e.isPaused && (ui.inventory || ui.map || ui.building)) return;
+    // Escape closes an open screen first (the engine and the build mode handle that); it pauses only while just playing
+    if (!e.isPaused && uiScreens.current !== null) return;
     // The same Escape that released the mouse (and so already paused) must not resume at once
     if (e.isPaused && performance.now() - pausedAtRef.current < 250) return;
     setPaused(!e.isPaused);
@@ -98,12 +109,23 @@ export default function App() {
 
   /** The map frees the cursor like the backpack. */
   const handleToggleMap = (open?: boolean) => {
-    setIsMapOpen((prev) => {
-      const next = open ?? !prev;
-      if (next !== prev) engineRef.current?.input.setInventoryMode(next);
-      return next;
-    });
+    const prev = mapOpenRef.current;
+    const next = open ?? !prev;
+    if (next === prev || (next && !uiScreens.request('map'))) return;
+    mapOpenRef.current = next;
+    setIsMapOpen(next);
+    engineRef.current?.input.setInventoryMode(next);
   };
+
+  // The App-side screens in UiScreens (the engine registers build, paint, panels and the editor)
+  useEffect(() => {
+    const off = [
+      uiScreens.register('inventory', { isOpen: () => inventoryOpenRef.current, close: () => handleToggleInventory(false) }),
+      uiScreens.register('map', { isOpen: () => mapOpenRef.current, close: () => handleToggleMap(false) }),
+      uiScreens.register('pause', { isOpen: () => !!engineRef.current?.isPaused, close: () => setPaused(false) }),
+    ];
+    return () => off.forEach((f) => f());
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -168,7 +190,11 @@ export default function App() {
   const isEditor = mode === 'editor';
   const isBuildingUI = !!(buildingTelemetry?.isBuildModeActive || buildingTelemetry?.isPaintingModeActive);
   const closePanel = () => world?.gameplay.openPanel(null);
-  openUiRef.current = { inventory: isInventoryOpen, map: isMapOpen, building: isBuildingUI };
+  // The touch controls make room for the build / paint HUD (ControlsOverlay reads html[data-building])
+  useEffect(() => {
+    if (isBuildingUI) document.documentElement.dataset.building = '1';
+    else delete document.documentElement.dataset.building;
+  }, [isBuildingUI]);
 
   return (
     <div className="flex h-[100dvh] w-screen bg-[#0c0c0c] text-[#e0e0e0] select-none overflow-hidden">
@@ -222,7 +248,7 @@ export default function App() {
 
                 {buildingTelemetry && (
                   <>
-                    {isBuildingUI && (
+                    {isBuildingUI && !buildingTelemetry.isPaintingModeActive && (
                       <BuildingHUD
                         telemetry={buildingTelemetry}
                         inputManager={engine?.input}
@@ -246,8 +272,10 @@ export default function App() {
                       <HeartopiaPaintingHUD
                         telemetry={buildingTelemetry}
                         onTogglePaintMode={building.togglePaintMode}
+                        onSwitchToBuild={building.switchToBuild}
                         onSelectWallpaper={building.selectWallpaper}
                         onSelectTool={building.selectPaintingTool}
+                        onApply={building.place}
                         onUndo={building.undoPaint}
                         onRedo={building.redoPaint}
                       />
@@ -292,6 +320,7 @@ export default function App() {
                 {hud?.panel === 'cook' && <CookingPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'shop' && <ShopPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'workers' && <WorkersPanel gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
+                {hud?.panel === 'workerMenu' && <WorkerRadialMenu gameplay={world.gameplay} />}
                 {hud?.panel === 'storage' && <StoragePanel gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
               </>
             )}

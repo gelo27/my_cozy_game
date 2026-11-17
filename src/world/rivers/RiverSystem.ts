@@ -27,13 +27,9 @@ export interface FallSound {
   loud: number;
 }
 
+/** River value noise: the shared noise texture's green channel (texNoise4 comes with WATER_DETAIL_GLSL). */
 const NOISE_GLSL = /* glsl */ `
-float rHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float rNoise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(rHash(i), rHash(i + vec2(1, 0)), f.x), mix(rHash(i + vec2(0, 1)), rHash(i + vec2(1, 1)), f.x), f.y);
-}`;
+float rNoise(vec2 p) { return texNoise4(p).g; }`;
 
 /**
  * Renders the rivers and lakes and keeps the terrain in step with them.
@@ -315,8 +311,8 @@ varying vec3 vWN;
 ${lake ? '' : 'varying vec2 vFlow;'}
 uniform float uTime;
 uniform float uDay;
-${NOISE_GLSL}
 ${WATER_DETAIL_GLSL}
+${NOISE_GLSL}
 ${WATER_RIPPLE_GLSL}
 ${WATER_SURFACE_GLSL}`
         )

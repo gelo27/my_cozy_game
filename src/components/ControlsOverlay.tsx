@@ -142,7 +142,7 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, 
             onTouchMove={handleLeftZoneTouchMove}
             onTouchEnd={handleLeftZoneTouchEnd}
             onTouchCancel={handleLeftZoneTouchEnd}
-            className="pointer-events-auto absolute bottom-20 short:bottom-14 left-0 w-[45%] h-[55%] touch-none z-20"
+            className="pointer-events-auto absolute bottom-20 short:bottom-14 [html[data-building]_&]:bottom-[150px] short:[html[data-building]_&]:bottom-[120px] [html[data-building]_&]:h-[45%] left-0 w-[45%] h-[55%] touch-none z-20"
           >
             {isJoystickActive && joystickCenterPos ? (
               <div
@@ -162,7 +162,7 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, 
           </div>
 
           {/* Action cluster, kept above the hotbar */}
-          <div className="pointer-events-auto absolute bottom-20 right-3 short:bottom-3 short:right-2 [html[data-fishing]_&]:hidden grid grid-cols-2 gap-2 items-end select-none">
+          <div className="pointer-events-auto absolute bottom-20 right-3 short:bottom-3 short:right-2 [html[data-fishing]_&]:hidden [html[data-building]_&]:hidden grid grid-cols-2 gap-2 items-end select-none">
             <button
               onTouchStart={tap('interactJustPressed')}
               onTouchEnd={release('interactHeld')}

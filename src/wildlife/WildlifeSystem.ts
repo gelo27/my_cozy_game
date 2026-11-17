@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { TerrainSystem } from '../world/TerrainSystem';
 import type { PropSystem } from '../world/PropSystem';
+import { TREE_TYPES } from '../world/PropSystem';
 import type { WeatherSystem } from '../world/WeatherSystem';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
@@ -118,7 +119,7 @@ export class WildlifeSystem {
       grid[iz * GRID + ix] = Math.min(255, grid[iz * GRID + ix] + 1);
     };
     for (const p of this.props.list()) {
-      if (p.type === 'tree_pine' || p.type === 'tree_round') add(this.treeGrid, p.position.x, p.position.z);
+      if (TREE_TYPES.has(p.type)) add(this.treeGrid, p.position.x, p.position.z);
       else if (p.type === 'flowers') add(this.flowerGrid, p.position.x, p.position.z);
     }
     // The choppable forest by the farm is not made of props

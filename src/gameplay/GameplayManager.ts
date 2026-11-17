@@ -30,13 +30,16 @@ import { CompanionNPC } from '../npc/CompanionNPC';
 import { MAX_WORKERS, WORKER_HIRE_COST, WorkerManager } from '../npc/WorkerManager';
 import { CROP_DEFINITIONS, CROP_TYPES } from '../farming/types/FarmingTypes';
 import { DISH_ORDER, WorkerNPC } from '../npc/WorkerNPC';
+import type { WorkerRole } from '../npc/TaskBoard';
 import { FarmStorage, STORAGE_CHEST } from '../npc/FarmStorage';
 import { t, dataName, getLang } from '../i18n/i18n';
+import { interactionFocus, FOCUS_HELD, FOCUS_TOOL } from './InteractionFocus';
+import { uiScreens } from '../ui/UiScreens';
 
 /** Flour from one crate of wheat at the millstone (3 flour bake one loaf). */
 const FLOUR_PER_CRATE = 3;
 
-export type GameplayPanel = 'cook' | 'shop' | 'workers' | 'storage' | null;
+export type GameplayPanel = 'cook' | 'shop' | 'workers' | 'storage' | 'workerMenu' | null;
 
 /** Coins a pest knocks out of the player's pockets per hit. */
 const HIT_COIN_LOSS = 5;
@@ -73,7 +76,7 @@ function clockLabel(hour: number): string {
 export interface GameplayPrompt {
   text: string;
   key: string;
-  action: 'fish' | 'pet' | 'cook' | 'shop' | 'storage' | 'npc' | 'worker' | 'explore' | 'mill' | 'sleep' | 'flowers';
+  action: 'fish' | 'pet' | 'cook' | 'shop' | 'storage' | 'npc' | 'worker' | 'explore' | 'mill' | 'sleep' | 'flowers' | 'door';
   secondary?: { text: string; key: string; action: 'treat' };
 }
 
@@ -100,11 +103,14 @@ export interface GameplayHudState {
 
 /** The exploration layer as gameplay sees it: its E-prompt and doorway state. */
 export interface ExplorePort {
-  prompt: { text: string } | null;
+  prompt: { text: string; pos?: THREE.Vector3 } | null;
   fading: boolean;
   inCave: string | null;
   interact(): void;
 }
+
+/** Pets follow the player everywhere: they count this much (metres) farther than they stand. */
+const PET_PENALTY = 0.8;
 
 /** Falls up to this height (metres) are harmless (a jump is ~1.6 m, a storey ~3 m). */
 const FALL_SAFE_HEIGHT = 4.5;
@@ -134,6 +140,10 @@ export class GameplayManager {
   public storage: FarmStorage | null = null;
   /** The farmhand the current 'worker' prompt is about. */
   private promptWorker: WorkerNPC | null = null;
+  /** Where the current prompt's target stands (null: the player's own tool) and its focus bias */
+  private promptAt: { at: THREE.Vector3 | null; bias: number } | null = null;
+  /** The farmhand the radial job menu ('workerMenu' panel) is open for. */
+  public menuWorker: WorkerNPC | null = null;
   public explore: ExplorePort | null = null;
   /** Tulip clumps picked by hand with E (wired by the engine). */
   public flowers: FlowerBeds | null = null;
@@ -480,7 +490,13 @@ export class GameplayManager {
     }
 
     const m = input.movement;
-    const ownedByOthers = !!(this.character.farmingAbility?.currentPrompt || this.character.gatheringAbility?.currentPrompt);
+    // The prompt competes with the doors, fields, trees and vehicles (InteractionFocus); a cast or a
+    // fish on the line owns E outright
+    if (this.fishing.busy) interactionFocus.offer('play', null, FOCUS_HELD);
+    else if (this.prompt && this.promptAt) interactionFocus.offer('play', this.promptAt.at, this.promptAt.bias);
+    const focused = interactionFocus.allows('play');
+    // Nothing anywhere wants E: the slingshot may draw on it
+    const ownedByOthers = interactionFocus.current !== null && !focused;
     // Swimming / diving: whatever is in hand is put away and can't be used
     const swimming = this.character.telemetry.isSwimming;
     if (swimming && this.fishing.busy) this.fishing.cancel();
@@ -492,8 +508,8 @@ export class GameplayManager {
     if (this.updateSlingshot(pos, input, equipped === 'slingshot', ownedByOthers)) return;
 
     if (this.updateFishing(dt, pos, facing, input, equipped === 'fishing_rod')) return;
-    if (keysG && this.prompt?.secondary) this.runAction('treat');
-    if (pressed && this.prompt && !ownedByOthers) this.runAction(this.prompt.action);
+    if (keysG && focused && this.prompt?.secondary) this.runAction('treat');
+    if (pressed && this.prompt && focused) this.runAction(this.prompt.action);
   }
 
   /** The touch fishing button (hold to cast / reel). */
@@ -524,7 +540,7 @@ export class GameplayManager {
 
     const f = this.fishing;
     // Charging starts as soon as the held button points at water (turning to the water while holding works too)
-    const wantsCast = m.shoot || this.fishTouchHold || (m.interact && this.prompt?.action === 'fish');
+    const wantsCast = m.shoot || this.fishTouchHold || (m.interact && this.prompt?.action === 'fish' && interactionFocus.allows('play'));
     if (!f.busy && !blocked && this.fishArmed && wantsCast && f.canAim(pos, this.castDir)) {
       this.fishArmed = false;
       f.beginAim();
@@ -575,11 +591,36 @@ export class GameplayManager {
   private computePrompt(pos: THREE.Vector3, facing: THREE.Vector3, ignoreTools = false): GameplayPrompt | null {
     // The shovel's probe (ignoreTools) asks without changing what the HUD shows
     if (!ignoreTools) this.flowerTarget = null;
+    if (!ignoreTools) this.promptAt = null;
     if (this.fishing.busy) return null;
-    if (!ignoreTools && (this.character.farmingAbility?.currentPrompt || this.character.gatheringAbility?.currentPrompt)) return null;
 
-    // Chests, cave doorways and beach finds come first: they sit at fixed spots
-    if (this.explore?.prompt) return { text: this.explore.prompt.text, key: 'E', action: 'explore' };
+    // Every activity in reach is a candidate; the nearest wins (favouring the one the player faces),
+    // as InteractionFocus then does between this and the doors, fields, trees and vehicles
+    let best: GameplayPrompt | null = null;
+    let bestAt: THREE.Vector3 | null = null;
+    let bestScore = Infinity;
+    let bestWorker: WorkerNPC | null = null;
+    let bestClump: PropInstance | null = null;
+    const fl = Math.hypot(facing.x, facing.z) || 1;
+    const consider = (p: GameplayPrompt, at: THREE.Vector3 | null, bias = 0): boolean => {
+      let score = -bias;
+      if (at) {
+        const dx = at.x - pos.x;
+        const dz = at.z - pos.z;
+        const d = Math.hypot(dx, dz);
+        const dot = d > 1e-3 ? (dx * facing.x + dz * facing.z) / (d * fl) : 1;
+        score += d + (1 - dot) * 0.6;
+      }
+      if (score >= bestScore) return false;
+      bestScore = score;
+      best = p;
+      bestAt = at;
+      return true;
+    };
+
+    // Chests, cave doorways and beach finds
+    const ex = this.explore?.prompt;
+    if (ex) consider({ text: ex.text, key: 'E', action: 'explore' }, ex.pos ?? null);
 
     // A bed: sleep through the night (once a night, evenings and early mornings only)
     this.bedInReach = this.findBedNear(pos, BED_REACH);
@@ -589,49 +630,72 @@ export class GameplayManager {
         : this.lastSleepNight === this.nightIndex()
           ? t('sleep.already')
           : t('sleep.go', { time: clockLabel(worldSettings.timeOfDay + SLEEP_HOURS) });
-      return { text, key: 'E', action: 'sleep' };
+      consider({ text, key: 'E', action: 'sleep' }, this.bedInReach.position);
     }
 
-    // Fixed stations win over pets: pets follow the player and would otherwise hijack every prompt
+    // The rod in hand aimed at water: a deliberate tool use
     if (!this.character.telemetry.isSwimming && this.inventory.getEquippedItemId() === 'fishing_rod' && this.fishing.canAim(pos, facing)) {
-      return { text: t('play.cast'), key: 'E', action: 'fish' };
+      consider({ text: t('play.cast'), key: 'E', action: 'fish' }, null, FOCUS_TOOL);
     }
-    if (this.storage && this.props.findNearest(STORAGE_CHEST, pos, 2.2)) return { text: t('storage.open'), key: 'E', action: 'storage' };
-    if (this.props.findNearest('campfire', pos, 2.6)) return { text: t('play.cook'), key: 'E', action: 'cook' };
-    if (this.props.findNearest('mailbox', pos, 2.4)) return { text: t('play.shop'), key: 'E', action: 'shop' };
-    if (this.props.findNearest('millstone', pos, 2.4)) {
+    const chest = this.storage ? this.props.findNearest(STORAGE_CHEST, pos, 2.2) : null;
+    if (chest) consider({ text: t('storage.open'), key: 'E', action: 'storage' }, chest.position);
+    const fire = this.props.findNearest('campfire', pos, 2.6);
+    if (fire) consider({ text: t('play.cook'), key: 'E', action: 'cook' }, fire.position);
+    const mailbox = this.props.findNearest('mailbox', pos, 2.4);
+    if (mailbox) consider({ text: t('play.shop'), key: 'E', action: 'shop' }, mailbox.position);
+    const mill = this.props.findNearest('millstone', pos, 2.4);
+    if (mill) {
       const crates = this.inventory.getItemCount('crate_wheat');
-      return { text: crates > 0 ? t('play.mill', { n: FLOUR_PER_CRATE, have: crates }) : t('play.millNeed'), key: 'E', action: 'mill' };
+      consider({ text: crates > 0 ? t('play.mill', { n: FLOUR_PER_CRATE, have: crates }) : t('play.millNeed'), key: 'E', action: 'mill' }, mill.position);
     }
 
     const npc = this.companion;
-    if (npc && npc.getPosition(this.tmp).distanceTo(pos) < 2.6) {
-      return { text: t(npc.following ? 'npc.stay' : 'npc.follow', { name: npc.name }), key: 'E', action: 'npc' };
+    if (npc) {
+      const at = npc.getPosition(new THREE.Vector3());
+      if (at.distanceTo(pos) < 2.6) consider({ text: t(npc.following ? 'npc.stay' : 'npc.follow', { name: npc.name }), key: 'E', action: 'npc' }, at);
     }
     const worker = this.workers?.nearest(pos, 2.4);
-    if (worker) {
-      if (!ignoreTools) this.promptWorker = worker;
-      return { text: t('worker.talk', { name: worker.name }), key: 'E', action: 'worker' };
-    }
+    if (worker && consider({ text: t('worker.talk', { name: worker.name }), key: 'E', action: 'worker' }, worker.getPosition())) bestWorker = worker;
 
-    // Tulips stand still: they come before the pets, who follow the player everywhere
     const clump = this.flowers?.findPickTarget(pos, facing);
-    if (clump) {
-      if (!ignoreTools) this.flowerTarget = clump;
-      return { text: t('flower.pick'), key: 'E', action: 'flowers' };
-    }
+    if (clump && consider({ text: t('flower.pick'), key: 'E', action: 'flowers' }, clump.position)) bestClump = clump;
 
+    // Pets follow the player everywhere: they lose to anything else about as near
     const pet = this.pets.nearest(pos, 2.2);
     if (pet) {
       const hasTreat = this.inventory.hasItem('pet_treat');
-      return {
-        text: t('play.pet', { name: pet.name }),
-        key: 'E',
-        action: 'pet',
-        secondary: hasTreat ? { text: t('play.treat'), key: 'G', action: 'treat' } : undefined,
-      };
+      consider(
+        {
+          text: t('play.pet', { name: pet.name }),
+          key: 'E',
+          action: 'pet',
+          secondary: hasTreat ? { text: t('play.treat'), key: 'G', action: 'treat' } : undefined,
+        },
+        pet.group.position,
+        -PET_PENALTY
+      );
     }
-    return null;
+
+    if (!ignoreTools) {
+      if (best && (best as GameplayPrompt).action === 'worker') this.promptWorker = bestWorker;
+      if (best && (best as GameplayPrompt).action === 'flowers') this.flowerTarget = bestClump;
+      this.promptAt = best ? { at: bestAt, bias: (best as GameplayPrompt).action === 'fish' ? FOCUS_TOOL : (best as GameplayPrompt).action === 'pet' ? -PET_PENALTY : 0 } : null;
+    }
+    return best;
+  }
+
+  private doorPromptCache: GameplayPrompt | null = null;
+
+  /**
+   * The prompt for the door in reach (shown while the door holds the interact focus). The same object
+   * while its text stays, so the HUD re-renders only when the door opens or closes.
+   */
+  public doorPrompt(): GameplayPrompt | null {
+    const door = this.character.buildAbility?.buildingManager?.getNearbyDoor(this.character.getPosition());
+    if (!door) return null;
+    const text = t(door.piece.isOpen ? 'door.close' : 'door.open');
+    if (this.doorPromptCache?.text !== text) this.doorPromptCache = { text, key: 'E', action: 'door' };
+    return this.doorPromptCache;
   }
 
   private setPrompt(p: GameplayPrompt | null): void {
@@ -658,9 +722,14 @@ export class GameplayManager {
     } else if (action === 'worker') {
       const w = this.promptWorker ?? this.workers?.nearest(pos, 2.4);
       if (w && this.workers) {
-        const role = this.workers.cycleRole(w);
-        audioEngine.at(w.getPosition()).playBuildSelect();
-        this.onNotify(t('worker.roleSet', { name: w.name, role: this.workers.roleLabel(role), energy: Math.round(w.energy) }), 'info');
+        // A radial menu of jobs (WorkerRadialMenu) instead of cycling through them
+        this.openPanel('workerMenu');
+        if (this.panel === 'workerMenu') {
+          if (this.menuWorker && this.menuWorker !== w) this.menuWorker.talking = false;
+          this.menuWorker = w;
+          w.talking = true; // stops working while the menu is open
+          audioEngine.at(w.getPosition()).playBuildSelect();
+        }
       }
       this.promptTimer = 0;
     } else if (action === 'pet') {
@@ -679,6 +748,11 @@ export class GameplayManager {
       this.trySleep();
     } else if (action === 'flowers') {
       this.pickFlowers(pos);
+    } else if (action === 'door') {
+      // The touch button (the E key reaches the door through BuildAbility)
+      const bm = this.character.buildAbility?.buildingManager;
+      const door = bm?.getNearbyDoor(pos);
+      if (bm && door) bm.toggleDoor(door.piece.id, pos);
     }
     this.revision++;
   }
@@ -710,7 +784,7 @@ export class GameplayManager {
     }
     if (!s.isDrawing) {
       const byMouse = m.shootJustPressed;
-      const byKey = !byMouse && m.interactJustPressed && !this.prompt && !ownedByOthers;
+      const byKey = !byMouse && m.interactJustPressed && interactionFocus.current === null && !ownedByOthers;
       if ((byMouse || byKey) && s.beginDraw()) this.slingDrawKey = byMouse ? 'shoot' : 'interact';
     }
     if (s.isDrawing) {
@@ -847,8 +921,28 @@ export class GameplayManager {
   }
 
   public openPanel(panel: GameplayPanel): void {
+    // One screen at a time (UiScreens): a panel replaces the backpack, the map or the build mode
+    if (panel && !this.panel && !uiScreens.request('panel')) return;
     this.panel = panel;
+    if (panel !== 'workerMenu' && this.menuWorker) {
+      this.menuWorker.talking = false; // back to work
+      this.menuWorker = null;
+    }
     this.revision++;
+  }
+
+  /** A job picked in the radial menu: the worker takes it and the menu closes. */
+  public setWorkerRole(w: WorkerNPC, role: WorkerRole): void {
+    if (!this.workers) return;
+    w.setRole(role);
+    audioEngine.at(w.getPosition()).playBuildSelect();
+    this.onNotify(t('worker.roleSet', { name: w.name, role: this.workers.roleLabel(role), energy: Math.round(w.energy) }), 'info');
+    if (this.panel === 'workerMenu') this.openPanel(null);
+  }
+
+  /** Player position (the radial menu closes when the player walks away from the worker). */
+  public get playerPosition(): THREE.Vector3 {
+    return this.character.getPosition();
   }
 
   // ---------------------------------------------------------------- cooking

@@ -139,11 +139,36 @@ ${INTERIOR_GLSL}`)
 ${INTERIOR_END}`);
 }
 
-const usable = (p: BuiltPiece): boolean => p.isConfirmed !== false && !isGreenhousePiece(p.type);
+// Pending (not yet merged) walls and floors count too: they stand and show the same as merged ones;
+// only placing a window or a door merges the walls it cuts, so a house without one stayed unshaded
+const usable = (p: BuiltPiece): boolean => !isGreenhousePiece(p.type);
 const isBlocker = (p: BuiltPiece): boolean =>
   usable(p) && (isSolidWallPiece(p.type) || isWindowPiece(p.type) || isDoorPiece(p.type) || isDoorwayPiece(p.type));
 const isCover = (p: BuiltPiece): boolean =>
   usable(p) && (isFloorPiece(p.type) || isFoundationPiece(p.type) || PIECE_TRAITS[p.type]?.kind === 'roof');
+
+/** Walls lower than this enclose no room (plinths under a porch floor, low garden walls). */
+const ROOM_WALL_MIN_H = 1.5;
+
+/**
+ * The walls that can bound a room: tall ones, and short ones another wall stands on (a stack of
+ * low walls makes a full one). A porch on low plinth walls under a roof stays outdoors.
+ */
+function roomWalls(segs: WallSeg[]): WallSeg[] {
+  const key = (x: number, z: number) => `${Math.round(x * 4)},${Math.round(z * 4)}`;
+  const bases = new Map<string, number[]>();
+  for (const s of segs) {
+    const k = key((s.p1.x + s.p2.x) / 2, (s.p1.y + s.p2.y) / 2);
+    let list = bases.get(k);
+    if (!list) bases.set(k, (list = []));
+    list.push(s.yBase);
+  }
+  return segs.filter((s) => {
+    if (s.yTop - s.yBase >= ROOM_WALL_MIN_H) return true;
+    const list = bases.get(key((s.p1.x + s.p2.x) / 2, (s.p1.y + s.p2.y) / 2));
+    return !!list && list.some((y) => Math.abs(y - s.yTop) < 0.2);
+  });
+}
 
 /** Rectangle of world cells, inclusive. */
 interface Rect {
@@ -412,7 +437,7 @@ export class InteriorLighting {
       const dz = bb ? Math.max(bb.min.z - cz, 0, cz - bb.max.z) : Math.abs(p.position.z - cz);
       return dx * dx + dz * dz <= reach * reach;
     });
-    const segs = pieces.filter(isBlocker).map((p) => describeWallSeg(p));
+    const segs = roomWalls(pieces.filter(isBlocker).map((p) => describeWallSeg(p)));
     const covers = pieces.filter(isCover);
 
     // Union of walls whose ends come within 1 m of each other

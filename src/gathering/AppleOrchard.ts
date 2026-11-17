@@ -9,6 +9,7 @@ import { TREE_MATERIAL } from '../world/TreeModels';
 import { vegetationSettings as veg } from '../world/VegetationSettings';
 import { AppleModels, FRUIT_PER_TREE, getAppleModels, loadAppleModels } from '../world/AppleTreeModel';
 import type { PropSystem } from '../world/PropSystem';
+import { TREE_TYPES } from '../world/PropSystem';
 import type { ParticleManager } from '../particles/ParticleManager';
 import type { FallingLeaves } from '../particles/FallingLeaves';
 import { audioEngine } from '../audio/AudioEngine';
@@ -288,7 +289,7 @@ export class AppleOrchard {
     }
     let close = false;
     this.props?.forEachNear(x, z, GAP_TREE + 0.5, (p) => {
-      const gap = p.type === 'tree_pine' || p.type === 'tree_round' ? GAP_TREE * p.scale : p.type === 'bush' || p.type === 'stump' ? GAP_BUSH * p.scale : 0;
+      const gap = TREE_TYPES.has(p.type) ? GAP_TREE * p.scale : p.type === 'bush' || p.type === 'stump' ? GAP_BUSH * p.scale : 0;
       if (gap > 0 && (p.position.x - x) ** 2 + (p.position.z - z) ** 2 < gap * gap) close = true;
     });
     if (close) return 'tooClose';

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { isCrownColor } from './DerivedTrees';
 
 /** Cut band on the trunk (m above the tree base): bottom rim, apex of the notch, top rim. */
 const BOT = 0.7;
@@ -19,7 +20,8 @@ interface RingPt {
   v: V;
 }
 
-const isGreen = (v: V): boolean => v[7] > v[6] && v[7] > v[8];
+/** Crown (leaf) vertex: green, or the maple's orange. */
+const isGreen = (v: V): boolean => isCrownColor(v[6], v[7], v[8]);
 const lerpV = (a: V, b: V, t: number): V => a.map((x, i) => x + (b[i] - x) * t) as V;
 
 /**

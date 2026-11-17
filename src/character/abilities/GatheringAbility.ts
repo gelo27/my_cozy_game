@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { interactionFocus, FOCUS_TOOL } from '../../gameplay/InteractionFocus';
 import { t, t as tr, plural, dataName } from '../../i18n/i18n';
 import { IAbility, CharacterContext } from './IAbility';
 import { ForestZone, ForestTarget } from '../../forest/ForestZone';
@@ -106,7 +107,9 @@ export class GatheringAbility implements IAbility {
       const pest = this.pests.findMeleeTarget(playerPos, facing, PEST_REACH);
       if (pest) {
         this.currentPrompt = null;
-        const triggered = this.wantsSwing(context);
+        // A pest in front of the axe is a fight: it wins over whatever else is around
+        interactionFocus.offer('gather', null, FOCUS_TOOL);
+        const triggered = interactionFocus.allows('gather') && this.wantsSwing(context);
         if (triggered && this.cooldown <= 0 && !this.pendingHit) this.swing({ type: 'pest', node: pest }, playerPos, tool, context);
         return;
       }
@@ -122,7 +125,8 @@ export class GatheringAbility implements IAbility {
         this.currentPrompt = {
           kind: 'tree', title: tr('web.title'), actionText: axe ? tr('web.cut') : tr('gather.needAxe'), hintText: '', progress: 0, canAct: axe,
         };
-        const triggered = this.wantsSwing(context);
+        if (axe) interactionFocus.offer('gather', web.position, FOCUS_TOOL);
+        const triggered = interactionFocus.allows('gather') && this.wantsSwing(context);
         if (axe && triggered && this.cooldown <= 0 && !this.pendingHit) {
           this.swing({ type: 'web', node: { position: web.position.clone(), radius: 0 } }, playerPos, 'axe', context);
         }
@@ -164,7 +168,10 @@ export class GatheringAbility implements IAbility {
     this.currentPrompt = target ? this.buildPrompt(target, tool) : null;
 
     if (!target || context.isBuildModeActive || this.inventory.isInventoryOpen()) return;
-    const triggered = this.wantsSwing(context);
+    // Competes with the other E targets only when this hand can do something to it
+    const usable = target.type === 'apple' && tool !== 'axe' ? target.node.canKnock : !!tool && tool === this.requiredTool(target);
+    if (usable) interactionFocus.offer('gather', target.node.position);
+    const triggered = usable && interactionFocus.allows('gather') && this.wantsSwing(context);
     if (!triggered || this.cooldown > 0 || this.pendingHit) return;
     // A ripe apple tree is knocked with bare hands (anything but the axe, which fells it)
     if (target.type === 'apple' && tool !== 'axe') {
@@ -189,7 +196,9 @@ export class GatheringAbility implements IAbility {
       progress: 0,
       canAct: ok,
     };
-    const triggered = context.input.interactJustPressed || context.input.shootJustPressed;
+    // Planting with a sapling / bulbs in hand is a deliberate tool use: it wins over targets around
+    if (ok) interactionFocus.offer('gather', null, FOCUS_TOOL);
+    const triggered = interactionFocus.allows('gather') && (context.input.interactJustPressed || context.input.shootJustPressed);
     if (!ok || !triggered || this.cooldown > 0 || context.model?.isActionLocked()) return;
     if (!this.inventory!.removeItem(APPLE_SAPLING_ID, 1)) return;
     if (!orchard.plantAtGhost()) {
@@ -227,7 +236,9 @@ export class GatheringAbility implements IAbility {
       progress: 0,
       canAct: ok,
     };
-    const triggered = context.input.interactJustPressed || context.input.shootJustPressed;
+    // Planting with a sapling / bulbs in hand is a deliberate tool use: it wins over targets around
+    if (ok) interactionFocus.offer('gather', null, FOCUS_TOOL);
+    const triggered = interactionFocus.allows('gather') && (context.input.interactJustPressed || context.input.shootJustPressed);
     if (!ok || !triggered || this.cooldown > 0 || context.model?.isActionLocked()) return;
     if (!this.inventory!.removeItem(itemId, 1)) return;
     // Turn to the spot (while aiming the body is free and may face elsewhere)
@@ -269,7 +280,9 @@ export class GatheringAbility implements IAbility {
       progress: 0,
       canAct: ok,
     };
-    const triggered = context.input.interactJustPressed || context.input.shootJustPressed;
+    // Planting with a sapling / bulbs in hand is a deliberate tool use: it wins over targets around
+    if (ok) interactionFocus.offer('gather', null, FOCUS_TOOL);
+    const triggered = interactionFocus.allows('gather') && (context.input.interactJustPressed || context.input.shootJustPressed);
     if (!ok || !triggered || this.cooldown > 0 || context.model?.isActionLocked()) return;
     if (!this.inventory!.removeItem(itemId, 1)) return;
     const gp = nursery.ghostPosition;

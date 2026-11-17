@@ -1300,12 +1300,43 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
 
   switch (type) {
     case TerrainTileType.GRASS:
+    case TerrainTileType.FLOWER_GRASS: {
+      // The flowered meadow repeats the base's blades stroke for stroke (same seed and colours),
+      // so its border against plain grass never shows: only the flowers differ
+      seed = TerrainTileType.GRASS * 9973 + 17;
       for (let i = 0; i < 2200; i++) {
         ctx.fillStyle = rnd() < 0.5 ? def.secondaryColor : def.accentColor;
         ctx.globalAlpha = 0.35 + rnd() * 0.4;
         wrapRect(rnd() * size, rnd() * size, 2, 4 + rnd() * 4);
       }
+      if (type === TerrainTileType.FLOWER_GRASS) {
+        // Small white five-petal flowers with a yellow eye, a few alone, most in loose clusters
+        seed = type * 9973 + 17;
+        const flower = (r: number, a: number) => {
+          ctx.globalAlpha = 0.35;
+          ctx.fillStyle = '#1f3d18';
+          ellipse(0.8, 1, r * 1.9, r * 1.6, 0); // a soft shadow on the grass
+          ctx.globalAlpha = 0.95;
+          for (let k = 0; k < 5; k++) {
+            const pa = a + (k / 5) * Math.PI * 2;
+            ctx.fillStyle = k % 2 ? '#f4f6ee' : '#fdfdf8';
+            ellipse(Math.cos(pa) * r, Math.sin(pa) * r, r * 0.95, r * 0.6, pa);
+          }
+          ctx.fillStyle = '#e8c03a';
+          ellipse(0, 0, r * 0.5, r * 0.5, 0);
+        };
+        for (let c = 0; c < 22; c++) {
+          const cx = rnd() * size, cy = rnd() * size;
+          const n = rnd() < 0.3 ? 1 : 2 + ((rnd() * 4) | 0);
+          for (let i = 0; i < n; i++) {
+            const d = i === 0 ? 0 : 5 + rnd() * 14, da = rnd() * Math.PI * 2;
+            const r = 1.6 + rnd() * 1.3, a = rnd() * Math.PI;
+            wrapShape(cx + Math.cos(da) * d, cy + Math.sin(da) * d, () => flower(r, a));
+          }
+        }
+      }
       break;
+    }
     case TerrainTileType.STONE_COBBLE:
       for (let y = 0; y < 8; y++) {
         for (let x = 0; x < 8; x++) {

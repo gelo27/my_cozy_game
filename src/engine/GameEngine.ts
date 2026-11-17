@@ -57,6 +57,7 @@ const TILE_SURFACE: Record<TerrainTileType, FootSurface> = {
   [TerrainTileType.FALLEN_LEAVES]: 'leaves',
   [TerrainTileType.DRY_GRASS]: 'grass',
   [TerrainTileType.BIRCH_GRASS]: 'grass',
+  [TerrainTileType.FLOWER_GRASS]: 'grass',
   [TerrainTileType.GRAVEL]: 'gravel',
   [TerrainTileType.ICE]: 'ice',
   [TerrainTileType.MUD]: 'mud',
@@ -127,6 +128,9 @@ import { setAlgaeDaylight } from '../world/AlgaeChains';
 import { setWebLight } from '../world/SpiderWebs';
 import { setGlassLight, setGlassNight } from '../scene/GlassMatcap';
 import { WindowGlow } from '../building/WindowGlow';
+import { interactionFocus } from '../gameplay/InteractionFocus';
+import { uiScreens } from '../ui/UiScreens';
+import { farmPromptActionable } from '../character/abilities/FarmingAbility';
 import { VIEW_DISTANCE, WORLD_HALF, WORLD_SIZE, isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { GameplayManager, GameplayHudState, GameplayPrompt } from '../gameplay/GameplayManager';
 import { lockOnSettings } from '../gameplay/LockOn';
@@ -314,7 +318,7 @@ export class GameEngine {
       return;
     }
     // The clump only while it still stands (it may have just been picked)
-    const c = w.gameplay.prompt?.action === 'flowers' ? w.gameplay.flowerTarget : null;
+    const c = interactionFocus.allows('play') && w.gameplay.prompt?.action === 'flowers' ? w.gameplay.flowerTarget : null;
     const clump = c && w.props.get(c.id) === c ? this.glowClump : null;
     if (clump && c) {
       clump.x = c.position.x;
@@ -455,6 +459,7 @@ export class GameEngine {
 
   public setMode(mode: EngineMode): void {
     if (!this.world || this.mode === mode || (mode === 'editor' && !DEV_TOOLS_ENABLED)) return;
+    if (mode === 'editor' && !uiScreens.request('editor')) return;
     const { character, editor } = this.world;
     if (mode === 'editor') {
       if (character.buildAbility?.isBuildModeActive) character.buildAbility.toggleBuildMode();
@@ -724,6 +729,23 @@ export class GameEngine {
         },
         interact: () => explorer.interact(character, this.camera),
       };
+      // One full-screen UI at a time (UiScreens): the engine-side screens
+      const build = character.buildAbility;
+      uiScreens.register('build', {
+        isOpen: () => !!build?.isBuildModeActive,
+        close: () => build?.isBuildModeActive && build.toggleBuildMode(),
+      });
+      uiScreens.register('paint', {
+        isOpen: () => !!build?.isPaintingModeActive,
+        close: () => build?.setPaintingMode(false),
+      });
+      uiScreens.register('panel', {
+        isOpen: () => gameplay.panel !== null,
+        close: () => gameplay.openPanel(null),
+      });
+      uiScreens.register('editor', { isOpen: () => this.mode === 'editor', close: () => {} });
+      // Nothing opens while asleep or during a doorway fade
+      uiScreens.setBlocked(() => gameplay.sleeping || explorer.fading);
       // Wooden jetty at the lighthouse with the motorboat moored alongside
       const lighthouse = exploration.sites.find((s) => s.kind === 'lighthouse')!;
       const pier = buildLighthousePier(lighthouse, terrain, scene, physics);
@@ -993,10 +1015,10 @@ export class GameEngine {
     if (mouseScroll !== 0 && !editing && !w.gameplay.fishing.adjustDepth(Math.sign(mouseScroll))) tpCamera.handleZoom(mouseScroll);
 
     // Vehicle forces are applied before the physics step; one interact press enters one vehicle
+    // (the focused one, see InteractionFocus)
     const truckDriving = !editing && vehicle.update(dt, inputManager, tpCamera, character);
-    const mopedDriving = !editing && !truckDriving && moped.update(dt, inputManager, tpCamera, character, !vehicle.isPlayerNear);
-    const boatDriving =
-      !editing && !truckDriving && !mopedDriving && w.boat.update(dt, inputManager, tpCamera, character, !vehicle.isPlayerNear && !moped.isPlayerNear);
+    const mopedDriving = !editing && !truckDriving && moped.update(dt, inputManager, tpCamera, character);
+    const boatDriving = !editing && !truckDriving && !mopedDriving && w.boat.update(dt, inputManager, tpCamera, character);
     const isDriving = truckDriving || mopedDriving || boatDriving;
     const ride = truckDriving ? vehicle : mopedDriving ? moped : boatDriving ? w.boat : null;
     {
@@ -1254,12 +1276,22 @@ export class GameEngine {
     buildings?.updateDrawDistance(this.camera.camera.position);
     w.interiors.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
+    // One target for E next frame, out of everything offered this frame (doors, fields, trees, stations...)
+    // ...and none while any screen (backpack, map, build mode, a panel) is open
+    if (editing || isDriving || w.gameplay.sleeping || uiScreens.current !== null) interactionFocus.clear();
+    else interactionFocus.resolve(character.getPosition(), character.getFacingDirection());
     tpCamera.drawZoom = editing ? 0 : w.gameplay.slingshot.isDrawing ? w.gameplay.slingshot.power : 0;
 
     // Push prompts to React only when they actually change (each push re-renders the HUD tree)
     if (this.frameCount % 4 === 0 && character.farmingAbility) {
-      const farm = character.farmingAbility.currentPrompt;
-      const gather = character.gatheringAbility.currentPrompt;
+      // Only the focused target shows its E prompt; a prompt with nothing to do (a growing crop, "need
+      // an axe") shows while nothing else is focused
+      const idle = interactionFocus.current === null;
+      const rawFarm = character.farmingAbility.currentPrompt;
+      const farm = rawFarm && (interactionFocus.allows('farm') || (idle && !farmPromptActionable(rawFarm))) ? rawFarm : null;
+      const rawGather = character.gatheringAbility.currentPrompt;
+      const gather = rawGather && (interactionFocus.allows('gather') || (idle && !rawGather.canAct)) ? rawGather : null;
+      const play = interactionFocus.allows('play') ? w.gameplay.prompt : interactionFocus.allows('door') ? w.gameplay.doorPrompt() : null;
       // Compared by what the HUD shows: the raw prompt also carries growthProgress and the plot id,
       // which change every frame on a growing crop / every bed while running across a field, and each
       // push is a React commit
@@ -1271,8 +1303,8 @@ export class GameEngine {
         callbacks.onFarmingPrompt(farm ? { ...farm } : null);
       }
       // Changes only through GameplayManager.setPrompt (a new object each time)
-      if (w.gameplay.prompt !== this.lastPlayPrompt) {
-        this.lastPlayPrompt = w.gameplay.prompt;
+      if (play !== this.lastPlayPrompt) {
+        this.lastPlayPrompt = play;
         callbacks.onGameplayPrompt(this.lastPlayPrompt);
       }
       if (!deepEqual(gather, this.lastGatherPrompt)) {
@@ -1524,6 +1556,8 @@ export class GameEngine {
       };
       w.props.forEachNear(playerPos.x, playerPos.z, R, visit, 'tree_pine');
       w.props.forEachNear(playerPos.x, playerPos.z, R, visit, 'tree_round');
+      w.props.forEachNear(playerPos.x, playerPos.z, R, visit, 'tree_maple');
+      w.props.forEachNear(playerPos.x, playerPos.z, R, visit, 'tree_birch');
       perches.length = Math.min(seen, 40);
       this.forestNear = Math.min(seen / 30, 1);
     }

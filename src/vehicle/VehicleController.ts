@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { interactionFocus } from '../gameplay/InteractionFocus';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { VehicleModel } from './VehicleModel';
@@ -158,8 +159,11 @@ export class VehicleController {
       const t = this.body.translation();
       const dx = cp.x - t.x, dy = cp.y - t.y, dz = cp.z - t.z;
       this.isPlayerNear = dx * dx + dy * dy + dz * dz < VEHICLE_CONFIG.INTERACT_RADIUS ** 2;
-      this.model.setPromptVisible(this.isPlayerNear);
-      if (this.isPlayerNear && m.interactJustPressed) this.enter(character, camera);
+      // Competes with the other E targets (InteractionFocus); the bias makes up for the body's size
+      if (this.isPlayerNear) interactionFocus.offer('truck', t, 1.5);
+      const focused = this.isPlayerNear && interactionFocus.allows('truck');
+      this.model.setPromptVisible(focused);
+      if (focused && m.interactJustPressed) this.enter(character, camera);
       // Parked: only simulate the suspension while the body is still settling
       if (!this.isPlayerInside) {
         if (!this.body.isSleeping()) {

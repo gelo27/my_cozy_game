@@ -22,6 +22,7 @@ import {
   getWallSize,
 } from './types/BuildingTypes';
 import { GreenhouseBatch } from './GreenhouseBatch';
+import { houseRoofRects } from './RoofFootprint';
 import { StaticPieceBatch } from './StaticPieceBatch';
 import { BUILDING_PIECES, BUILDING_MATERIALS, createPieceMeshGroup, getPieceMeshTemplate, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS, isProceduralRoofPiece, getDefaultRoofConfig, isPieceBelowSurface, createRoofGeometry, addFarGlassTwins } from './config/BuildingPiecesConfig';
 import { ProceduralRoofGenerator, ProceduralRoofConfig, RoofStyle, DEFAULT_ROOF_STYLE } from './ProceduralRoofSystem';
@@ -2177,6 +2178,12 @@ export class BuildingManager {
     for (const piece of this.pieces.values()) {
       if (!isProceduralRoofPiece(piece.type) && piece.type !== BuildingPieceType.WOOD_ROOF_26) continue;
       const cfg = piece.roofConfig;
+      // A house roof covers its outline only, not the yards in its bounds
+      const rects = houseRoofRects(piece, 0);
+      if (rects) {
+        out.push(...rects);
+        continue;
+      }
       if (cfg) {
         // The walls' footprint (the overhang drips just outside them)
         const box = new THREE.Box3();

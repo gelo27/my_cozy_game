@@ -154,7 +154,8 @@ export class WindowGlow {
         alive.add(p.id);
         if (level) litPanes++;
         // Applied every time (cheap, a no-op when right): a rebuilt mesh starts with the plain glass
-        if (level !== (this.levels.get(p.id) ?? 0) || level) this.apply(p, level);
+        // The building batch draws a copy of the piece's meshes: rebuild its chunk when the glass changed
+        if ((level !== (this.levels.get(p.id) ?? 0) || level) && this.apply(p, level)) this.buildings.markPieceVisualChanged(p);
         if (level) this.levels.set(p.id, level);
         else this.levels.delete(p.id);
       }
@@ -204,8 +205,9 @@ export class WindowGlow {
     this.spillRevision++;
   }
 
-  /** Swaps the pane's glass (near and far twins) to the variant for `level`. */
-  private apply(piece: BuiltPiece, level: number): void {
+  /** Swaps the pane's glass (near and far twins) to the variant for `level`; true when any changed. */
+  private apply(piece: BuiltPiece, level: number): boolean {
+    let any = false;
     piece.meshGroup.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
@@ -218,11 +220,18 @@ export class WindowGlow {
           changed = true;
           return e.family[level];
         });
-        if (changed) mesh.material = next;
+        if (changed) {
+          mesh.material = next;
+          any = true;
+        }
       } else {
         const e = LEVEL_OF.get(mesh.material);
-        if (e && e.level !== level) mesh.material = e.family[level];
+        if (e && e.level !== level) {
+          mesh.material = e.family[level];
+          any = true;
+        }
       }
     });
+    return any;
   }
 }

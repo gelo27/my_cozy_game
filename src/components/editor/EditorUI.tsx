@@ -4,14 +4,14 @@ import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, Package, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
-  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music, Skull, Fish, X,
+  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music, Skull, Fish, X, SprayCan, Eraser,
 } from 'lucide-react';
 import { RiverPanel } from './RiverPanel';
 import { MusicPanel } from './MusicPanel';
 import { CavePanel } from './CavePanel';
 import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
-import { EditorTool } from '../../editor/EditorController';
+import { EditorTool, isScatterable } from '../../editor/EditorController';
 import { PEST_KINDS, PestKind } from '../../gameplay/Pests';
 import { lockOnSettings } from '../../gameplay/LockOn';
 import { PROP_DEFS, PROP_DEF_MAP, PropCategory } from '../../world/PropSystem';
@@ -82,6 +82,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'cave', icon: Shell, label: 'Печери (6)' },
     { id: 'enemy', icon: Skull, label: 'Вороги (7)' },
     { id: 'duckweed', icon: Sprout, label: 'Ряска (8)' },
+    { id: 'scatter', icon: SprayCan, label: 'Пензель об’єктів (9)' },
   ];
   const tabs: { id: Tab; icon: React.ElementType; label: string }[] = [
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
@@ -272,6 +273,7 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
   if (s.tool === 'river') return <RiverPanel engine={engine} />;
   if (s.tool === 'cave') return <CavePanel engine={engine} />;
   if (s.tool === 'enemy') return <EnemyPanel engine={engine} />;
+  if (s.tool === 'scatter') return <ScatterPanel engine={engine} />;
 
   if (s.tool === 'duckweed') {
     return (
@@ -363,6 +365,152 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
       {!s.paintFill && (
         <Slider label="Радіус" value={s.brushRadius} min={1} max={20} step={1} onChange={(v) => editor.set('brushRadius', v)} fmt={(v) => `${(v / 2).toFixed(1)} м`} />
       )}
+    </>
+  );
+};
+
+/** Object brush (tool 9): a mix of types scattered to a density, with ground filters and erasing. */
+const ScatterPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
+  const editor = engine.world!.editor;
+  const s = editor.state;
+  const [category, setCategory] = useState<PropCategory>('nature');
+  const inCategory = PROP_DEFS.filter((d) => d.category === category && isScatterable(d.id));
+  const mix = new Set(s.scatterTypes);
+  const toggleType = (id: string) => editor.set('scatterTypes', mix.has(id) ? s.scatterTypes.filter((t) => t !== id) : [...s.scatterTypes, id]);
+  const tiles = new Set(s.scatterTiles);
+  const toggleTile = (id: TerrainTileType) => editor.set('scatterTiles', tiles.has(id) ? s.scatterTiles.filter((t) => t !== id) : [...s.scatterTiles, id]);
+  const chainType = s.scatterTypes.map((t) => PROP_DEF_MAP.get(t)).find((d) => d?.chain && !(d.chain === 'lily' && s.placeLilyAnchor === 'surface'));
+  const hasLily = s.scatterTypes.some((t) => PROP_DEF_MAP.get(t)?.chain === 'lily');
+  const area = Math.PI * s.brushRadius * s.brushRadius;
+  const perStamp = Math.max(1, Math.round((s.scatterDensity * area) / 100));
+
+  return (
+    <>
+      <Section title="Режим">
+        <div className="flex gap-1">
+          <button className={chip(!s.scatterErase)} onClick={() => editor.set('scatterErase', false)}>
+            <SprayCan className="w-3.5 h-3.5" /> Розставити
+          </button>
+          <button className={chip(s.scatterErase)} onClick={() => editor.set('scatterErase', true)}>
+            <Eraser className="w-3.5 h-3.5" /> Стерти
+          </button>
+        </div>
+        {s.scatterErase && (
+          <label className="flex items-center gap-2 text-zinc-300">
+            <input type="checkbox" checked={s.scatterEraseAll} onChange={(e) => editor.set('scatterEraseAll', e.target.checked)} className="accent-sky-500" />
+            Стирати всі типи (крім станцій)
+          </label>
+        )}
+      </Section>
+      <Section
+        title={`Набір пензля (${s.scatterTypes.length})`}
+        right={
+          s.scatterTypes.length > 0 && (
+            <button className="text-[10px] normal-case tracking-normal font-semibold text-zinc-400 hover:text-zinc-200" onClick={() => editor.set('scatterTypes', [])}>
+              Очистити
+            </button>
+          )
+        }
+      >
+        <div className="flex flex-wrap gap-1">
+          {(Object.keys(CATEGORY_LABELS) as PropCategory[])
+            .filter((c) => PROP_DEFS.some((d) => d.category === c && isScatterable(d.id)))
+            .map((c) => (
+              <button key={c} className={chip(category === c)} onClick={() => setCategory(c)}>
+                {CATEGORY_LABELS[c]}
+                {PROP_DEFS.some((d) => d.category === c && mix.has(d.id)) && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />}
+              </button>
+            ))}
+        </div>
+        <div className="grid grid-cols-3 gap-1">
+          {inCategory.map((d) => {
+            const Icon = ICONS[d.icon] ?? Box;
+            const on = mix.has(d.id);
+            return (
+              <button
+                key={d.id}
+                onClick={() => toggleType(d.id)}
+                className={`${btn} relative flex-col gap-1 py-2 text-[10px] ${on ? 'bg-emerald-600 text-white' : 'bg-white/5 hover:bg-white/10'}`}
+              >
+                <Icon className="w-5 h-5" />
+                {d.name}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex gap-1">
+          <button className={chip(false)} onClick={() => editor.set('scatterTypes', [...new Set([...s.scatterTypes, ...inCategory.map((d) => d.id)])])}>
+            Усі з категорії
+          </button>
+        </div>
+        {s.scatterTypes.length === 0 && <p className="text-[10px] text-amber-400">Оберіть хоча б один об’єкт.</p>}
+      </Section>
+      <Section title="Пензель">
+        <Slider label="Радіус" value={s.brushRadius} min={1} max={40} step={1} onChange={(v) => editor.set('brushRadius', v)} fmt={(v) => `${v} м`} />
+        <Slider
+          label="Щільність"
+          value={s.scatterDensity}
+          min={0.2}
+          max={40}
+          step={0.2}
+          onChange={(v) => editor.set('scatterDensity', v)}
+          fmt={(v) => `${v.toFixed(1)} / 100 м² · ≈${perStamp} у колі`}
+        />
+        <Slider label="Відстань між об’єктами" value={s.scatterSpacing} min={0.3} max={12} step={0.1} onChange={(v) => editor.set('scatterSpacing', v)} fmt={(v) => `${v.toFixed(1)} м`} />
+        <Slider label="Розмір від" value={s.scatterScaleMin} min={0.3} max={3} step={0.05} onChange={(v) => editor.set('scatterScaleMin', v)} fmt={(v) => `${v.toFixed(2)}×`} />
+        <Slider label="Розмір до" value={s.scatterScaleMax} min={0.3} max={3} step={0.05} onChange={(v) => editor.set('scatterScaleMax', v)} fmt={(v) => `${v.toFixed(2)}×`} />
+        <label className="flex items-center gap-2 text-zinc-300">
+          <input type="checkbox" checked={s.scatterRandomRot} onChange={(e) => editor.set('scatterRandomRot', e.target.checked)} className="accent-sky-500" />
+          Випадковий поворот
+        </label>
+        <label className="flex items-center gap-2 text-zinc-300">
+          <input type="checkbox" checked={s.scatterAvoidOthers} onChange={(e) => editor.set('scatterAvoidOthers', e.target.checked)} className="accent-sky-500" />
+          Не впритул до інших об’єктів
+        </label>
+      </Section>
+      <Section title="Де ставити">
+        <div className="flex gap-1">
+          {(['land', 'water', 'any'] as const).map((w) => (
+            <button key={w} className={chip(s.scatterWhere === w)} onClick={() => editor.set('scatterWhere', w)}>
+              {w === 'land' ? 'Суша' : w === 'water' ? 'Під водою' : 'Всюди'}
+            </button>
+          ))}
+        </div>
+        <Slider label="Макс. нахил схилу" value={s.scatterMaxSlope} min={0} max={90} step={1} onChange={(v) => editor.set('scatterMaxSlope', v)} fmt={(v) => (v >= 89 ? 'будь-який' : `${v}°`)} />
+        <span className="text-zinc-400">Тільки на покритті {tiles.size === 0 && <span className="text-zinc-500">(будь-якому)</span>}</span>
+        <div className="grid grid-cols-2 gap-1">
+          {Object.values(TILE_DEFINITIONS).map((t) => (
+            <button
+              key={t.id}
+              onClick={() => toggleTile(t.id as TerrainTileType)}
+              className={`${btn} justify-start gap-2 px-2 py-1 text-[10px] ${tiles.has(t.id as TerrainTileType) ? 'bg-sky-500 text-white' : 'bg-white/5 hover:bg-white/10'}`}
+            >
+              <span className="w-3 h-3 rounded" style={{ background: t.primaryColor }} />
+              {t.ukrainianName.split(' / ')[0]}
+            </button>
+          ))}
+        </div>
+      </Section>
+      {(chainType || hasLily) && (
+        <Section title="Стебла">
+          {hasLily && (
+            <div className="flex flex-wrap gap-1">
+              <button className={chip(s.placeLilyAnchor === 'surface')} onClick={() => editor.set('placeLilyAnchor', 'surface')}>
+                Латаття на поверхню
+              </button>
+              <button className={chip(s.placeLilyAnchor === 'bottom')} onClick={() => editor.set('placeLilyAnchor', 'bottom')}>
+                На дно
+              </button>
+            </div>
+          )}
+          {chainType?.chain && (
+            <ChainLengthSlider kind={chainType.chain} value={s.placeChainLength} scale={s.scatterScaleMax} head={s.placeLilyHead} onChange={(v) => editor.set('placeChainLength', v)} />
+          )}
+        </Section>
+      )}
+      <p className="text-zinc-500 leading-relaxed">
+        Тримайте ЛКМ і ведіть — пензель досипає коло до заданої щільності (на місці не накопичує). Shift — стерти, [ ] — розмір. Ctrl+Z скасовує весь мазок.
+      </p>
     </>
   );
 };

@@ -143,11 +143,11 @@ const ZENITH_KEYS: [number, number][] = [
 const SKY_KEYS: [number, number][] = [
   [0, 0x0b1430],
   [5, 0x1d2a52],
-  [6.5, 0xf2a98a],
+  [6.5, 0xf4a56c],
   [8, 0xbfe3f5],
   [12, 0xd9f0fb],
   [17.5, 0xc8e4f2],
-  [19.3, 0xf0a07a],
+  [19.3, 0xf39a5c],
   [20.6, 0x2a3466],
   [24, 0x0b1430],
 ];
@@ -223,6 +223,7 @@ export class WeatherSystem {
     night: 0,
     flash: 0,
     moonCloud: 1,
+    sunset: 0,
     rainbow: 0,
   };
   /** 1 right after a real rain, fading to 0 over about a game hour: a rainbow can show while it lasts. */
@@ -401,6 +402,8 @@ export class WeatherSystem {
     this.sunDir.set(Math.cos(dayPhase), elevation, 0.35).normalize();
     this.moonDir.set(-Math.cos(dayPhase), -elevation, -0.35).normalize();
     const warm = 1 - THREE.MathUtils.smoothstep(elevation, 0.1, 0.5);
+    // The last stretch above the horizon: the sun and its light turn orange (fades out below it)
+    const golden = (1 - THREE.MathUtils.smoothstep(elevation, 0.06, 0.4)) * THREE.MathUtils.smoothstep(elevation, -0.12, 0.0);
 
     // Lightning flashes during storms
     // (only once the storm clouds have built up, so an automatic storm doesn't flash out of a blue sky)
@@ -431,7 +434,8 @@ export class WeatherSystem {
       this.sun.color.setRGB(0.6, 0.7, 1.0);
       this.sun.intensity = 0.45 * moonK * (0.4 + cur.light * 0.6) + this.flash * 2;
     } else {
-      this.sun.color.setRGB(1, 1 - warm * 0.3, 1 - warm * 0.55);
+      // Golden hour: the light reaching the ground goes warm, then orange as the sun touches the horizon
+      this.sun.color.setRGB(1, 1 - warm * 0.22 - golden * 0.3, 1 - warm * 0.4 - golden * 0.42);
       this.sun.intensity = 1.35 * sunK * cur.light + this.flash * 2;
     }
     this.ambient.intensity = 0.24 + 0.38 * daylight * (0.6 + cur.light * 0.4) + this.flash;
@@ -455,8 +459,9 @@ export class WeatherSystem {
     this.sampleKeys(SKY_KEYS, t, this.sky).multiply(cur.tint);
     if (this.flash > 0) this.sky.lerp(WeatherSystem._c.setRGB(1, 1, 1), this.flash * 0.5);
     // Weather haze: tints the horizon and fog together (darker at night)
+    // (it gives way at sunrise / sunset so the horizon and fog can turn orange)
     if (cur.hazeMix > 0.001) {
-      this.sky.lerp(WeatherSystem._c.copy(cur.haze).multiplyScalar(daylight * 0.8 + 0.2), cur.hazeMix);
+      this.sky.lerp(WeatherSystem._c.copy(cur.haze).multiplyScalar(daylight * 0.8 + 0.2), cur.hazeMix * (1 - golden * 0.75));
     }
     this.fog.color.copy(this.sky);
     this.fog.density = cur.fog * FOG_SCALE;
@@ -467,9 +472,12 @@ export class WeatherSystem {
     this.sampleKeys(ZENITH_KEYS, t, sp.zenith).multiply(cur.tint);
     // Overcast skies flatten toward the horizon colour
     sp.zenith.lerp(sp.horizon, cur.dark * 0.6);
-    sp.sunColor.setRGB(1, 0.92 - warm * 0.35, 0.8 - warm * 0.55).multiplyScalar(cur.light * 0.6 + 0.4);
+    sp.sunColor.setRGB(1, 0.92 - warm * 0.25 - golden * 0.25, 0.8 - warm * 0.4 - golden * 0.3).multiplyScalar(cur.light * 0.6 + 0.4);
+    // Heavy cloud hides the glow (a grey dusk), a clear sky shows it in full
+    // (a clear sky already has dark 0.5, so only greyer than that counts)
+    sp.sunset = golden * (1 - THREE.MathUtils.smoothstep(cur.dark, 0.5, 1) * 0.85) * (1 - THREE.MathUtils.smoothstep(cur.cover, 0.55, 0.95) * 0.7);
     // Clouds: white by day, sunset-tinted, blue-grey under the moon, darker with bad weather
-    const dayCloud = WeatherSystem._c.setRGB(1, 1 - warm * 0.25, 1 - warm * 0.4);
+    const dayCloud = WeatherSystem._c.setRGB(1, 1 - warm * 0.22 - golden * 0.18, 1 - warm * 0.35 - golden * 0.35);
     // Night clouds sit just above the night sky: dim blue-grey, so they read as dark shapes, not glowing
     const nightCloud = WeatherSystem._c2.setRGB(0.085, 0.1, 0.145);
     // Ease toward the day colour only once real daylight returns (dusk clouds go dark early)

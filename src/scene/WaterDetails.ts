@@ -3,6 +3,7 @@ import { WORLD_SIZE, worldSettings } from '../world/WorldSettings';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { rippleSimUniforms, waterRippleSim } from './WaterRippleSim';
 import { duckweedSim } from './DuckweedSim';
+import { NOISE_TEX_GLSL, noiseTexUniform } from '../world/NoiseTexture';
 
 /**
  * Flat white water details, drawn crisp (step-like edges, antialiased with fwidth) for a clean
@@ -51,6 +52,8 @@ export const rippleUniforms = {
   uWdRipB: { value: Array.from({ length: RIPPLE_COUNT }, () => new THREE.Vector4(0, 1, 0, 0)) },
   /** How many sources the shaders loop over (0 = the loop is skipped). */
   uWdRipCount: { value: 0 },
+  /** Shared smooth noise (wdNoise in WATER_DETAIL_GLSL). */
+  uNoiseTex: noiseTexUniform,
   ...rippleSimUniforms,
 };
 
@@ -150,14 +153,13 @@ export function updateWaterDetails(dt: number): void {
   rippleUniforms.uWdRipCount.value = n;
 }
 
-/** Hash and value noise. */
+/**
+ * Value noise from the shared noise texture (needs `uNoiseTex`, part of rippleUniforms). Also
+ * declares texNoise / texNoise4 for the rest of the water shader.
+ */
 export const WATER_DETAIL_GLSL = /* glsl */ `
-float wdHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float wdNoise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(wdHash(i), wdHash(i + vec2(1, 0)), f.x), mix(wdHash(i + vec2(0, 1)), wdHash(i + vec2(1, 1)), f.x), f.y);
-}
+${NOISE_TEX_GLSL}
+float wdNoise(vec2 p) { return texNoise(p); }
 `;
 
 /**

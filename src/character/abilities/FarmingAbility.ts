@@ -6,6 +6,12 @@ import { FIELD_CELLS, FIELD_SEED_COST, ShovelTarget } from '../../farming/FieldM
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { FarmInteractionPrompt } from '../../farming/types/FarmingTypes';
 import { audioEngine } from '../../audio/AudioEngine';
+import { interactionFocus, FOCUS_TOOL } from '../../gameplay/InteractionFocus';
+
+/** The field prompt offers an action (not only shows how the crop is doing). */
+export function farmPromptActionable(p: FarmInteractionPrompt | null): boolean {
+  return !!p && (p.canHarvest || p.canWater || p.canPlant || !!p.canDig);
+}
 
 const SWING_TIME = 0.7;
 const SWING_IMPACT = 0.38;
@@ -90,6 +96,11 @@ export class FarmingAbility implements IAbility {
     // 1. Evaluate nearby farm plot / field interaction
     const seedCount = equippedId ? this.inventoryManager.getItemCount(equippedId) : 0;
     this.currentPrompt = this.farmingManager.getNearbyInteraction(playerPos, equippedId, 3.2, seedCount);
+    // A field with something to do competes with the other E targets (InteractionFocus)
+    if (!blocked && farmPromptActionable(this.currentPrompt)) {
+      interactionFocus.offer('farm', this.farmingManager.getTargetPosition(this.currentPrompt!.plotId) ?? playerPos);
+    }
+    const focused = interactionFocus.allows('farm');
 
     // If build mode or inventory is open, or watering / the harvest pick-up is still playing,
     // do not start anything new (the pouring stream below keeps running)
@@ -103,7 +114,7 @@ export class FarmingAbility implements IAbility {
     if (this.currentPrompt?.canHarvest) {
       const prompt = this.currentPrompt;
       const key = `h${prompt.plotId}`;
-      if (input.interactJustPressed || input.shootJustPressed) {
+      if (focused && (input.interactJustPressed || input.shootJustPressed)) {
         this.holdArmed = true;
         this.holdKey = key;
         this.holdTime = 0;
@@ -129,7 +140,7 @@ export class FarmingAbility implements IAbility {
     this.resetHold();
 
     // 2. Check for interaction trigger (E key or Left Click)
-    const interactTriggered = input.interactJustPressed || (input.shootJustPressed && this.currentPrompt !== null);
+    const interactTriggered = focused && (input.interactJustPressed || (input.shootJustPressed && this.currentPrompt !== null));
 
     if (interactTriggered && this.currentPrompt) {
       const prompt = this.currentPrompt;
@@ -232,7 +243,9 @@ export class FarmingAbility implements IAbility {
     else fields.showGhost(target.field.gx, target.field.gz, 'fill');
 
     // Hold E / LMB: a fresh press arms it, releasing or the frame moving to another spot cancels
-    const actionable = canAct && !!prompt.canDig;
+    // A shovel aimed at the ground is a deliberate tool use: it wins over targets around the player
+    if (canAct && prompt.canDig) interactionFocus.offer('farm', aim.point, FOCUS_TOOL);
+    const actionable = canAct && !!prompt.canDig && interactionFocus.allows('farm');
     const key = target.kind === 'dig' ? `d${target.gx},${target.gz}` : `f${target.field.id}`;
     if (actionable && (input.interactJustPressed || input.shootJustPressed)) {
       this.holdArmed = true;

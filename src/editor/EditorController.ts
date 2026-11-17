@@ -17,7 +17,16 @@ import type { PestKind, PestSystem } from '../gameplay/Pests';
 import { worldSettings } from '../world/WorldSettings';
 import { duckweed } from '../world/Duckweed';
 
-export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy' | 'duckweed';
+export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy' | 'duckweed' | 'scatter';
+
+/** Where the object brush may put things: dry land, under water, or both. */
+export type ScatterWhere = 'land' | 'water' | 'any';
+
+/** Props the object brush can scatter (webs need a passage to span, stations are one-offs). */
+export function isScatterable(type: string): boolean {
+  const def = PROP_DEF_MAP.get(type);
+  return !!def && !def.web && def.category !== 'stations';
+}
 
 export interface EditorState {
   tool: EditorTool;
@@ -49,6 +58,26 @@ export interface EditorState {
   placeRandomize: boolean;
   /** Enemy put down by the enemy tool. */
   enemyKind: PestKind;
+  /** Object brush: the mix of types it scatters (each new object picks one at random). */
+  scatterTypes: string[];
+  /** Object brush: objects of the mix per 100 m² it fills the brush circle up to. */
+  scatterDensity: number;
+  /** Object brush: least distance between scattered objects (m). */
+  scatterSpacing: number;
+  scatterScaleMin: number;
+  scatterScaleMax: number;
+  scatterRandomRot: boolean;
+  /** Object brush: steepest ground it still puts objects on (degrees). */
+  scatterMaxSlope: number;
+  scatterWhere: ScatterWhere;
+  /** Object brush: only on these ground covers (empty = any). */
+  scatterTiles: TerrainTileType[];
+  /** Object brush: keeps clear of other objects too (at half the spacing). */
+  scatterAvoidOthers: boolean;
+  /** Object brush removes instead of placing (Shift flips it while painting). */
+  scatterErase: boolean;
+  /** Erasing takes every object type (not stations), not only the brush's mix. */
+  scatterEraseAll: boolean;
   brushRadius: number;
   brushStrength: number;
   gizmoMode: 'translate' | 'rotate';
@@ -92,6 +121,18 @@ export class EditorController {
     placeWebAutoOrient: true,
     placeRandomize: true,
     enemyKind: 'spider',
+    scatterTypes: ['tree_pine', 'tree_round', 'bush'],
+    scatterDensity: 4,
+    scatterSpacing: 2.5,
+    scatterScaleMin: 0.8,
+    scatterScaleMax: 1.25,
+    scatterRandomRot: true,
+    scatterMaxSlope: 35,
+    scatterWhere: 'land',
+    scatterTiles: [],
+    scatterAvoidOthers: true,
+    scatterErase: false,
+    scatterEraseAll: false,
     brushRadius: 4,
     brushStrength: 2,
     gizmoMode: 'translate',
@@ -508,7 +549,7 @@ export class EditorController {
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
       this.deleteSelected();
     } else if (!e.ctrlKey && !this.looking) {
-      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave', Digit7: 'enemy', Digit8: 'duckweed' };
+      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave', Digit7: 'enemy', Digit8: 'duckweed', Digit9: 'scatter' };
       if (tools[e.code]) this.set('tool', tools[e.code]);
       if (e.code === 'KeyG') this.set('gizmoMode', 'translate');
       if (e.code === 'KeyR' && this.state.tool === 'select') this.set('gizmoMode', 'rotate');
@@ -517,7 +558,7 @@ export class EditorController {
         if (p) this.focusOn(p);
       }
       if (e.code === 'BracketLeft') this.set('brushRadius', Math.max(1, this.state.brushRadius - 1));
-      if (e.code === 'BracketRight') this.set('brushRadius', Math.min(20, this.state.brushRadius + 1));
+      if (e.code === 'BracketRight') this.set('brushRadius', Math.min(this.state.tool === 'scatter' ? 40 : 20, this.state.brushRadius + 1));
     }
   };
 
@@ -546,7 +587,7 @@ export class EditorController {
     if (tool === 'place' && this.lilyOnSurface()) this.castOntoSea();
     // Duckweed is painted on the water surface (sea, lakes, rivers), not on the bottom under it
     if (tool === 'duckweed') this.castOntoWater();
-    const brushTool = tool === 'sculpt' || tool === 'paint' || tool === 'duckweed';
+    const brushTool = tool === 'sculpt' || tool === 'paint' || tool === 'duckweed' || tool === 'scatter';
 
     this.updateCursor((brushTool || tool === 'enemy') && this.hasHit);
     this.updateGhost(tool === 'place' && this.hasHit);
@@ -559,6 +600,9 @@ export class EditorController {
       this.terrain.paintCircle(this.hit.x, this.hit.z, r * 0.5, this.state.paintTile);
     } else if (tool === 'duckweed') {
       duckweed.paint(this.hit.x, this.hit.z, r, this.state.duckweedRate, dt, this.state.duckweedErase);
+    } else if (tool === 'scatter') {
+      if (this.scatterErasing()) this.scatterErase(this.hit.x, this.hit.z, r);
+      else this.scatterFill(this.hit.x, this.hit.z, r);
     } else if (tool === 'place') {
       // Click places one; dragging scatters with spacing proportional to the prop size
       const spacing = Math.max(1.2, this.state.placeScale * 2);
@@ -581,6 +625,136 @@ export class EditorController {
       }
     }
   }
+
+  // ---------------------------------------------------------------- object brush
+
+  /** The object brush removes this frame: its erase mode, flipped while Shift is held. */
+  private scatterErasing(): boolean {
+    const shift = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+    return this.state.scatterErase !== shift;
+  }
+
+  /** Brush types that exist and can be scattered. */
+  private scatterMix(): string[] {
+    return this.state.scatterTypes.filter(isScatterable);
+  }
+
+  /** Every prop standing within `radius` of (x, z): batched ones through the grid, chains and webs (`withLoose`) by a scan. */
+  private propsNear(x: number, z: number, radius: number, withLoose: boolean): { id: number; type: string; x: number; z: number }[] {
+    const out: { id: number; type: string; x: number; z: number }[] = [];
+    const r2 = radius * radius;
+    const take = (p: { id: number; type: string; position: THREE.Vector3 }) => {
+      const dx = p.position.x - x;
+      const dz = p.position.z - z;
+      if (dx * dx + dz * dz <= r2) out.push({ id: p.id, type: p.type, x: p.position.x, z: p.position.z });
+    };
+    this.props.forEachNear(x, z, radius, take);
+    if (withLoose) {
+      for (const p of this.props.list()) {
+        const def = PROP_DEF_MAP.get(p.type);
+        if (def?.chain || def?.web) take(p);
+      }
+    }
+    return out;
+  }
+
+  /** Ground at (x, z) passes the brush's filters (on the island, slope, water, ground cover). */
+  private scatterGroundOk(x: number, z: number): boolean {
+    const st = this.state;
+    const t = this.terrain;
+    if (!t.isInside(x, z)) return false;
+    const ground = t.getHeight(x, z);
+    if (st.scatterMaxSlope < 89) {
+      const gx = t.getHeight(x + 0.5, z) - t.getHeight(x - 0.5, z);
+      const gz = t.getHeight(x, z + 0.5) - t.getHeight(x, z - 0.5);
+      if (Math.atan(Math.hypot(gx, gz)) * THREE.MathUtils.RAD2DEG > st.scatterMaxSlope) return false;
+    }
+    if (st.scatterWhere !== 'any') {
+      const wet = riverWorld.waterLevelAt(x, z) > ground + 0.05;
+      if (wet !== (st.scatterWhere === 'water')) return false;
+    }
+    if (st.scatterTiles.length && !st.scatterTiles.includes(t.getTile(Math.floor(x), Math.floor(z)))) return false;
+    return true;
+  }
+
+  /** Links of a chain prop scattered at (x, z): a surface lily just reaches the water there (null: too shallow). */
+  private scatterLinks(type: string, x: number, z: number, scale: number): number | null | undefined {
+    const chain = PROP_DEF_MAP.get(type)?.chain;
+    if (!chain) return undefined;
+    if (chain !== 'lily' || this.state.placeLilyAnchor !== 'surface') return this.state.placeChainLength;
+    const linkH = LILY.parts?.linkH ?? 0;
+    const depth = riverWorld.waterLevelAt(x, z) - this.terrain.getHeight(x, z);
+    if (!linkH || depth < 0.15) return null;
+    return LILY.clampLinks(Math.ceil(depth / (linkH * scale)));
+  }
+
+  /**
+   * Tops the brush circle up to the chosen density: random spots in it that pass the filters and
+   * keep the spacing get a random type of the mix. Holding still never piles objects up.
+   */
+  private scatterFill(cx: number, cz: number, r: number): void {
+    const st = this.state;
+    const mix = this.scatterMix();
+    if (!mix.length) return;
+    const mixSet = new Set(mix);
+    const spacing = Math.max(0.2, st.scatterSpacing);
+    const target = Math.max(1, Math.round((st.scatterDensity * Math.PI * r * r) / 100));
+    const loose = mix.some((t) => PROP_DEF_MAP.get(t)?.chain);
+    const near = this.propsNear(cx, cz, r + spacing, loose);
+    let have = 0;
+    for (const p of near) if (mixSet.has(p.type) && (p.x - cx) ** 2 + (p.z - cz) ** 2 <= r * r) have++;
+    // Capped per frame, so a big brush fills over a few frames instead of in one hitch
+    let need = Math.min(target - have, 40);
+    if (need <= 0) return;
+    const minS2 = spacing * spacing;
+    const otherS2 = (spacing * 0.5) ** 2;
+    const lo = Math.min(st.scatterScaleMin, st.scatterScaleMax);
+    const hi = Math.max(st.scatterScaleMin, st.scatterScaleMax);
+    let tries = Math.min(need * 10, 160);
+    let placed = 0;
+    while (need > 0 && tries-- > 0) {
+      const a = Math.random() * Math.PI * 2;
+      const d = r * Math.sqrt(Math.random());
+      const x = cx + Math.cos(a) * d;
+      const z = cz + Math.sin(a) * d;
+      let clear = true;
+      for (const p of near) {
+        const d2 = (p.x - x) ** 2 + (p.z - z) ** 2;
+        if (mixSet.has(p.type) ? d2 < minS2 : st.scatterAvoidOthers && d2 < otherS2) {
+          clear = false;
+          break;
+        }
+      }
+      if (!clear || !this.scatterGroundOk(x, z)) continue;
+      const type = mix[Math.floor(Math.random() * mix.length)];
+      const scale = lo + Math.random() * (hi - lo);
+      const rot = st.scatterRandomRot ? Math.random() * Math.PI * 2 : 0;
+      const links = this.scatterLinks(type, x, z, scale);
+      if (links === null) continue;
+      const id = this.props.add(type, x, z, rot, scale, undefined, true, links, st.placeAlgaeColors, null, null, null, st.placeLilyHead);
+      if (id === null) continue;
+      if (PROP_DEF_MAP.get(type)?.chain === 'lily' && st.placeLilyAnchor === 'surface') this.centreLilyHead(id, rot, scale);
+      near.push({ id, type, x, z });
+      need--;
+      placed++;
+    }
+    if (placed) this.touch();
+  }
+
+  /** Removes the brush mix's objects (or every object but the stations) inside the circle. */
+  private scatterErase(cx: number, cz: number, r: number): void {
+    const all = this.state.scatterEraseAll;
+    const mix = new Set(this.scatterMix());
+    const loose = all || [...mix].some((t) => PROP_DEF_MAP.get(t)?.chain);
+    let removed = 0;
+    for (const p of this.propsNear(cx, cz, r, loose)) {
+      if (all ? PROP_DEF_MAP.get(p.type)?.category === 'stations' : !mix.has(p.type)) continue;
+      this.props.remove(p.id);
+      removed++;
+    }
+    if (removed) this.touch();
+  }
+
 
   private lilyOnSurface(): boolean {
     return PROP_DEF_MAP.get(this.state.placeType)?.chain === 'lily' && this.state.placeLilyAnchor === 'surface';
@@ -751,7 +925,9 @@ export class EditorController {
     attr.needsUpdate = true;
     const colors: Record<string, number> = { raise: 0x22c55e, lower: 0xf97316, smooth: 0x38bdf8, flatten: 0xa855f7 };
     (this.cursor.material as THREE.LineBasicMaterial).color.setHex(
-      weed ? (this.state.duckweedErase ? 0xf97316 : 0x84cc16) : this.state.tool === 'paint' ? 0xfacc15 : colors[this.state.sculptKind]
+      weed ? (this.state.duckweedErase ? 0xf97316 : 0x84cc16)
+        : this.state.tool === 'scatter' ? (this.scatterErasing() ? 0xef4444 : 0x22c55e)
+        : this.state.tool === 'paint' ? 0xfacc15 : colors[this.state.sculptKind]
     );
   }
 

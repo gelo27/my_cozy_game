@@ -49,6 +49,15 @@ export function useBuildingControls(
         }
       }),
 
+    /** The paint mode's Build tab: painting off, build mode on. */
+    switchToBuild: () =>
+      withBuild(build => {
+        build.setPaintingMode(false);
+        input?.setPaintMode(false);
+        if (!build.isBuildModeActive) build.toggleBuildMode();
+        input?.setBuildMode(true);
+      }),
+
     selectWallpaper: (id: string) => withBuild(build => build.setWallpaper(id)),
 
     selectPaintingTool: (tool: PaintingToolMode) => withBuild(build => build.setPaintingTool(tool)),

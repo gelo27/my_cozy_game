@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { isMobileDevice } from './WorldSettings';
+import { NOISE_TEX_GLSL, noiseTexUniform } from './NoiseTexture';
 
 export interface SkyParams {
   zenith: THREE.Color;
@@ -18,13 +19,16 @@ export interface SkyParams {
   moonCloud: number;
   /** 0..1 strength of the rainbow opposite the sun (after a daytime rain), 0 skips it entirely. */
   rainbow: number;
+  /** 0..1 how low and visible the sun is: an orange disc and a glow along the horizon on its side. */
+  sunset: number;
 }
 
 /**
  * Procedural sky in a single draw call: gradient, sun, moon, twinkling stars and drifting fBm clouds.
  *
  * Drawn first with depth test/write off, so it costs exactly one pass over the visible sky pixels and
- * nothing behind geometry. Everything is analytic — no textures. Cloud octaves drop on mobile.
+ * nothing behind geometry. Smooth noise (clouds, moon craters, rainbow) reads the shared noise
+ * texture; stars stay hashed. Cloud octaves drop on mobile.
  */
 export class SkyDome {
   public readonly mesh: THREE.Mesh;
@@ -56,8 +60,10 @@ export class SkyDome {
         uMeteorT: { value: 0 },
         uMeteorAmp: { value: 0 },
         uTime: { value: 0 },
+        uNoiseTex: noiseTexUniform,
         uFlatColor: { value: new THREE.Color() },
         uFlat: { value: 0 },
+        uSunset: { value: 0 },
       },
       vertexShader: `
         varying vec3 vDir;
@@ -68,7 +74,7 @@ export class SkyDome {
       fragmentShader: `
         #define CLOUD_OCTAVES ${octaves}
         uniform vec3 uZenith, uHorizon, uSunDir, uMoonDir, uSunColor, uCloudLit, uCloudShade;
-        uniform float uCover, uDay, uNight, uFlash, uMoonCloud, uTime, uRainbow;
+        uniform float uCover, uDay, uNight, uFlash, uMoonCloud, uTime, uRainbow, uSunset;
         // Shooting star: path from uMeteorA to uMeteorB (unit dirs), uMeteorT = 0..1 progress
         uniform vec3 uMeteorA, uMeteorB;
         uniform float uMeteorT, uMeteorAmp;
@@ -77,22 +83,14 @@ export class SkyDome {
         uniform float uFlat;
         varying vec3 vDir;
 
-        float hash12(vec2 p) {
-          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-          p3 += dot(p3, p3.yzx + 33.33);
-          return fract((p3.x + p3.y) * p3.z);
-        }
         float hash13(vec3 p3) {
           p3 = fract(p3 * 0.1031);
           p3 += dot(p3, p3.zyx + 31.32);
           return fract((p3.x + p3.y) * p3.z);
         }
-        float vnoise(vec2 p) {
-          vec2 i = floor(p), f = fract(p);
-          vec2 u = f * f * (3.0 - 2.0 * f);
-          return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x),
-                     mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), u.x), u.y);
-        }
+        ${NOISE_TEX_GLSL}
+        // Smooth value noise: one fetch from the shared noise texture (was four hashes)
+        float vnoise(vec2 p) { return texNoise(p); }
         float fbm(vec2 p) {
           float v = 0.0, a = 0.5;
           for (int i = 0; i < CLOUD_OCTAVES; i++) {
@@ -122,6 +120,19 @@ export class SkyDome {
 
           // Gradient: horizon colour equals the fog colour, so terrain melts into the sky
           vec3 col = mix(uHorizon, uZenith, pow(clamp(h, 0.0, 1.0), 0.5));
+
+          // Sunrise / sunset: the low sky glows orange on the sun's side (deep orange at the horizon,
+          // gold above it, fading into the blue), with a faint pink band on the far side
+          if (uSunset > 0.001) {
+            vec2 sxz = normalize(uSunDir.xz + vec2(1e-4, 0.0));
+            float toward = dot(normalize(d.xz + vec2(1e-4, 0.0)), sxz) * 0.5 + 0.5;
+            float low = exp(-max(h, 0.0) * 5.0);
+            float side = pow(toward, 2.5);
+            // (deep values: ACES tone mapping bleaches bright orange to cream)
+            vec3 glow = mix(vec3(0.9, 0.42, 0.1), vec3(0.8, 0.22, 0.03), low);
+            col = mix(col, glow, clamp(uSunset * low * (0.2 + side * 0.8) * 1.15, 0.0, 1.0) * 0.9);
+            col = mix(col, vec3(0.93, 0.62, 0.66), uSunset * exp(-max(h, 0.0) * 9.0) * pow(1.0 - toward, 3.0) * 0.3);
+          }
 
           // Stars (hash per 3D cell on a sphere), twinkling, fade toward the horizon
           if (uNight > 0.01 && h > 0.0) {
@@ -169,8 +180,14 @@ export class SkyDome {
           // Sun: disc + wide warm glow (warmth comes from uSunColor near sunrise/sunset)
           float sd = dot(d, uSunDir);
           float sdp = max(sd, 0.0);
-          col += uSunColor * (pow(sdp, 900.0) * 1.5 + pow(sdp, 64.0) * 0.35 + pow(sdp, 6.0) * 0.12) * uDay;
-          col = mix(col, vec3(1.0, 0.98, 0.9), smoothstep(0.99955, 0.9997, sd) * uDay);
+          // At sunset the additive halo would wash out to white, so it gives way to an orange tint
+          col += uSunColor * (pow(sdp, 900.0) * 1.5 * (1.0 - uSunset) + (pow(sdp, 64.0) * 0.35 + pow(sdp, 6.0) * 0.12) * (1.0 - uSunset * 0.75)) * uDay;
+          // (uDay is only ~0.5 while the sun sits on the horizon, so the sunset parts use their own strength)
+          float sunVis = max(uDay, uSunset);
+          col = mix(col, vec3(0.8, 0.22, 0.03), clamp(uSunset * (pow(sdp, 900.0) * 1.5 + pow(sdp, 48.0) * 0.9 + pow(sdp, 8.0) * 0.45), 0.0, 1.0) * sunVis);
+          // Near the horizon the disc itself turns orange (its light crosses much more air)
+          vec3 discCol = mix(vec3(1.0, 0.98, 0.9), vec3(1.0, 0.55, 0.14), uSunset);
+          col = mix(col, discCol, smoothstep(0.99955, 0.9997, sd) * sunVis);
 
           // Clouds: a flat layer projected onto the dome, one fBm per pixel
           if (h > 0.0 && uCover > 0.01) {
@@ -253,6 +270,7 @@ export class SkyDome {
     u.uFlash.value = p.flash;
     u.uMoonCloud.value = p.moonCloud;
     u.uRainbow.value = p.rainbow;
+    u.uSunset.value = p.sunset;
     this.updateMeteor(dt, p);
   }
 

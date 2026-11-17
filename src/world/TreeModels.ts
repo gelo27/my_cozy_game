@@ -7,6 +7,7 @@ import { injectNightLights, FOLIAGE_NIGHT_LIGHTS } from './NightLighting';
 import { injectWaterline } from '../scene/WaterDetails';
 import { injectSnowCover } from './SnowCover';
 import { vegetationSettings as veg } from './VegetationSettings';
+import { BIRCH_PAINT, BIRCH_SHAPE, MAPLE_PAINT, MAPLE_SHAPE, TreePaint, crownBrightness, paintTree, reshapeOak } from './DerivedTrees';
 
 const TREES_URL = `${import.meta.env.BASE_URL}models/trees_pack.glb`;
 /** Uniform scale on top of the pack's own node scale (pine ~8.3 m, oak ~7.2 m tall). */
@@ -114,6 +115,18 @@ const pineNeedles = (): CrownLeafOptions => ({
   count: veg.pineCount, spacing: veg.pineSpacing, size: veg.pineLength, width: veg.pineWidth,
   offset: veg.pineOffset, innerShade: veg.pineInnerShade, seed: 4242, shape: 'scallop', lightFrom: 'axis',
 });
+/**
+ * Maple: five-lobed leaves, larger and about half as many as the oak's scales (each costs 10
+ * triangles to the scale's 4), so the near maple stays close to the oak's triangle count.
+ */
+const mapleLeaves = (): CrownLeafOptions => ({
+  ...oakLeaves(), count: Math.round(veg.oakCount * 0.5), size: veg.oakSize * 1.55, spacing: veg.oakSpacing * 1.35, seed: 9157, shape: 'maple',
+});
+/** Birch: smaller, denser round leaves on the slimmer crown. */
+const birchLeaves = (): CrownLeafOptions => ({ ...oakLeaves(), size: veg.oakSize * 0.72, spacing: veg.oakSpacing * 0.78, seed: 5521 });
+/** Colours of the oak-derived trees, applied after their leaves (the oak's crown brightness as reference). */
+const PAINT: Record<string, TreePaint> = { tree_maple: MAPLE_PAINT, tree_birch: BIRCH_PAINT };
+let oakCrownBrightness = 1;
 const bushLeaves = (): CrownLeafOptions => ({
   count: veg.bushCount, spacing: veg.bushSpacing, size: veg.bushSize, offset: veg.bushOffset,
   innerShade: veg.bushInnerShade, seed: 777, shape: 'scale', lightFrom: 'centre',
@@ -156,6 +169,10 @@ export function loadTreeModels(): Promise<TreeLods | null> {
       }
       if (!out.tree_pine || !out.tree_round) throw new Error('trees_pack.glb: pine or oak missing');
       out.bush = [bushSphere(2), bushSphere(1)];
+      // Maple and birch: the oak's LODs reshaped (shared material and LOD scheme, no new assets)
+      oakCrownBrightness = crownBrightness(out.tree_round[0]);
+      out.tree_maple = out.tree_round.map((g) => reshapeOak(g, MAPLE_SHAPE));
+      out.tree_birch = out.tree_round.map((g) => reshapeOak(g, BIRCH_SHAPE));
       raw = out;
       lods = buildLods(raw);
       return lods;
@@ -189,6 +206,8 @@ function buildLods(src: TreeLods): TreeLods {
   const out: TreeLods = {};
   const plans: [string, boolean, () => CrownLeafOptions][] = [
     ['tree_round', veg.oakLeaves, oakLeaves],
+    ['tree_maple', veg.oakLeaves, mapleLeaves],
+    ['tree_birch', veg.oakLeaves, birchLeaves],
     ['tree_pine', veg.pineNeedles, pineNeedles],
     ['bush', veg.bushLeaves, bushLeaves],
   ];
@@ -209,6 +228,8 @@ function buildLods(src: TreeLods): TreeLods {
           : addCrownLeaves(near, opts());
       if (list[0] !== near) near.dispose();
     }
+    const paint = PAINT[type];
+    if (paint) for (const g of list) paintTree(g, paint, oakCrownBrightness);
     out[type] = list;
   }
   return out;

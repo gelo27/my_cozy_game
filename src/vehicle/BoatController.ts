@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { interactionFocus } from '../gameplay/InteractionFocus';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { BoatModel, BOAT_HALF_LENGTH, BOAT_HALF_WIDTH } from './BoatModel';
@@ -135,8 +136,11 @@ export class BoatController {
       const cp = character.body.translation();
       const dx = cp.x - this.pos.x, dy = cp.y - this.surfaceY, dz = cp.z - this.pos.z;
       this.isPlayerNear = allowEnter && dx * dx + dz * dz < BOAT_CONFIG.INTERACT_RADIUS ** 2 && dy > -1 && dy < 2.6;
-      this.model.setPromptVisible(this.isPlayerNear);
-      if (this.isPlayerNear && m.interactJustPressed) this.enter(character, camera);
+      // Competes with the other E targets (InteractionFocus); the bias makes up for the body's size
+      if (this.isPlayerNear) interactionFocus.offer('boat', this.pos, 1.5);
+      const focused = this.isPlayerNear && interactionFocus.allows('boat');
+      this.model.setPromptVisible(focused);
+      if (focused && m.interactJustPressed) this.enter(character, camera);
       if (!this.isPlayerInside) {
         // Moored: drifts to a stop and only rides the swell
         this.drive(dt, 0, 0, true, false, false);

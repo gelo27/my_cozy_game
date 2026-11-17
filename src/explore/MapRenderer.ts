@@ -60,6 +60,7 @@ export function renderTerrainMap(terrain: TerrainSystem): HTMLCanvasElement {
         else if (tile === TerrainTileType.FALLEN_LEAVES) { r = 176; g = 104; b = 48; }
         else if (tile === TerrainTileType.DRY_GRASS) { r = 182; g = 162; b = 92; }
         else if (tile === TerrainTileType.BIRCH_GRASS) { r = 132; g = 186; b = 80; }
+        else if (tile === TerrainTileType.FLOWER_GRASS) { r += (240 - r) * 0.15; g += (240 - g) * 0.15; b += (230 - b) * 0.15; } // the meadow, a touch paler
         else if (tile === TerrainTileType.GRAVEL) { r = 150; g = 145; b = 136; }
         else if (tile === TerrainTileType.ICE) { r = 176; g = 212; b = 232; }
         else if (tile === TerrainTileType.MUD) { r = 96; g = 72; b = 52; }

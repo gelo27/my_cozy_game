@@ -25,9 +25,10 @@ export interface CrownLeafOptions {
   seed: number;
   /**
    * 'scale': round leaf scales (oak); 'scallop': long hanging clumps with a lobed rim that
-   * overhang the tier below (pine); 'needle': thin hanging needle blades.
+   * overhang the tier below (pine); 'needle': thin hanging needle blades; 'maple': a five-lobed
+   * maple leaf with short star points (11 vertices, 10 triangles).
    */
-  shape: 'scale' | 'scallop' | 'needle';
+  shape: 'scale' | 'scallop' | 'needle' | 'maple';
   /** Whole leaf pushed off the crown by this much (m), so the wind never sways it into the mesh. */
   offset: number;
   /**
@@ -93,6 +94,28 @@ const SCALLOP: typeof SHAPE = [
 ];
 /** Fan from the top vertex over the 9 rim vertices. */
 const SCALLOP_TRIS = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 7, 0, 7, 8, 0, 8, 9];
+
+/**
+ * Maple leaf: a fan from its middle (vertex 0) over a rim of five pointed lobes with notches
+ * between them, starting at the stem tucked under the row above. The rim is star-shaped about the
+ * middle, so the fan never folds over itself.
+ */
+const MAPLE: typeof SHAPE = [
+  { x: 0, y: 0.12, lift: 0.07, tone: 0.92, sway: 0.5 }, // middle
+  { x: 0, y: -0.3, lift: -0.06, tone: 0.6, sway: 0 }, // stem, tucked in
+  // Short star points (tips near the middle, shallow notches): a compact maple leaf
+  { x: -0.33, y: -0.11, lift: 0.03, tone: 0.8, sway: 0.35 }, // lower point
+  { x: -0.21, y: 0.05, lift: 0.06, tone: 0.88, sway: 0.5 },
+  { x: -0.39, y: 0.31, lift: 0.1, tone: 0.98, sway: 0.75 }, // side point
+  { x: -0.14, y: 0.35, lift: 0.1, tone: 0.96, sway: 0.75 },
+  { x: 0, y: 0.55, lift: 0.14, tone: 1.12, sway: 1 }, // top point
+  { x: 0.14, y: 0.35, lift: 0.1, tone: 0.96, sway: 0.75 },
+  { x: 0.39, y: 0.31, lift: 0.1, tone: 0.98, sway: 0.75 },
+  { x: 0.21, y: 0.05, lift: 0.06, tone: 0.88, sway: 0.5 },
+  { x: 0.33, y: -0.11, lift: 0.03, tone: 0.8, sway: 0.35 },
+];
+/** Fan from the middle over the 10 rim vertices (closing back to the stem). */
+const MAPLE_TRIS = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 7, 0, 7, 8, 0, 8, 9, 0, 9, 10, 0, 10, 1];
 
 export function addCrownLeaves(src: THREE.BufferGeometry, opts: CrownLeafOptions): THREE.BufferGeometry {
   const P = src.getAttribute('position');
@@ -226,8 +249,9 @@ export function addCrownLeaves(src: THREE.BufferGeometry, opts: CrownLeafOptions
 
     const needle = opts.shape === 'needle';
     const scallop = opts.shape === 'scallop';
-    const shape = needle ? NEEDLE : scallop ? SCALLOP : SHAPE;
-    const leafTris = needle ? NEEDLE_TRIS : scallop ? SCALLOP_TRIS : FAN;
+    const maple = opts.shape === 'maple';
+    const shape = needle ? NEEDLE : scallop ? SCALLOP : maple ? MAPLE : SHAPE;
+    const leafTris = needle ? NEEDLE_TRIS : scallop ? SCALLOP_TRIS : maple ? MAPLE_TRIS : FAN;
     const len = opts.size * (0.85 + rand() * 0.3);
     const wid = needle || scallop ? (opts.width ?? 0.07) * (0.85 + rand() * 0.3) : len * (0.85 + rand() * 0.2);
     const cr = C.getX(i0);

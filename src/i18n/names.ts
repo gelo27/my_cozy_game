@@ -167,6 +167,8 @@ export const EN_NAMES = {
   prop: {
     tree_pine: 'Pine',
     tree_round: 'Oak',
+    tree_maple: 'Maple',
+    tree_birch: 'Birch',
     bush: 'Bush',
     rock_small: 'Pebble',
     rock_big: 'Boulder',

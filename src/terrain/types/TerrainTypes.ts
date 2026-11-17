@@ -13,6 +13,7 @@ export enum TerrainTileType {
   ICE = 12,
   MUD = 13,
   PUDDLE = 14,
+  FLOWER_GRASS = 15,
 }
 
 /** Tiles that grow 3D grass blades (each in its own tint: GrassField). */
@@ -20,6 +21,7 @@ export const GRASSY_TILES: ReadonlySet<TerrainTileType> = new Set([
   TerrainTileType.GRASS,
   TerrainTileType.DRY_GRASS,
   TerrainTileType.BIRCH_GRASS,
+  TerrainTileType.FLOWER_GRASS,
 ]);
 
 /** Tile ids that no longer exist, mapped to what old saves should show instead. */
@@ -221,5 +223,18 @@ export const TILE_DEFINITIONS: Record<TerrainTileType, TileDefinition> = {
     borderColor: '#251c14',
     icon: '💧',
     description: 'Калюжа: наповнюється в дощ, по ній біжать брижі, потім висихає',
+  },
+  [TerrainTileType.FLOWER_GRASS]: {
+    id: TerrainTileType.FLOWER_GRASS,
+    name: 'Grass with White Flowers',
+    ukrainianName: 'Трава з білими квіточками',
+    category: 'nature',
+    // The grass base's colours: the layer is the same grass, only with flowers in it
+    primaryColor: '#3d7833',
+    secondaryColor: '#2d5c25',
+    accentColor: '#529e44',
+    borderColor: '#24481d',
+    icon: '🌼',
+    description: 'Звичайна трава, у якій тут і там цвітуть білі квіточки',
   },
 };

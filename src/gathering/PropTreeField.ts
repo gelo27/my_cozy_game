@@ -12,9 +12,11 @@ import { acquireDither, releaseDither, setDitherFade } from '../world/LodDither'
 import type { BushSway } from '../world/BushSway';
 import type { FallingLeaves } from '../particles/FallingLeaves';
 import { SEED_OF_TREE } from './TreeNursery';
+import { isCrownColor } from '../world/DerivedTrees';
+import { TREE_TYPES } from '../world/PropSystem';
 
 /** Placeable prop types that can be chopped with the axe. */
-const CHOPPABLE = new Set(['tree_pine', 'tree_round', 'bush']);
+const CHOPPABLE = new Set([...TREE_TYPES, 'bush']);
 /** Axe hits to clear a bush; a cleared bush is gone for good (removed from the saved world). */
 const BUSH_HITS = 2;
 /** Wood a cleared bush gives (one small log flies to the player). */
@@ -94,7 +96,9 @@ const AMBIENT_LEAF_RADIUS = 22;
 const GUST_GAP = 50;
 
 /** Colour of the leaves a tree sheds. */
-const LEAF_COLOR: Record<string, number> = { tree_round: 0x4a8a2e, tree_pine: 0x2f6a55, bush: 0x3f8a3a, apple_tree: 0x4a8a2e };
+const LEAF_COLOR: Record<string, number> = {
+  tree_round: 0x4a8a2e, tree_pine: 0x2f6a55, tree_maple: 0xe8861e, tree_birch: 0xa8cc48, bush: 0x3f8a3a, apple_tree: 0x4a8a2e,
+};
 /**
  * Hits to fell a prop tree: one fewer than the forest's, so the tree goes over on the hit that
  * shows the deep "X" (it no longer stands on a hair-thin core waiting for one more swing).
@@ -309,7 +313,7 @@ export class PropTreeField {
    */
   public forEachStandingTree(x: number, z: number, minR: number, maxR: number, fn: (propId: number, pos: THREE.Vector3, radius: number) => void): void {
     this.props.forEachNear(x, z, maxR, (p) => {
-      if (p.type !== 'tree_pine' && p.type !== 'tree_round') return;
+      if (!TREE_TYPES.has(p.type)) return;
       const st = this.states.get(p.id);
       if (st && (st.fall >= 0 || st.stumpId !== null)) return;
       const d = Math.hypot(p.position.x - x, p.position.z - z);
@@ -321,7 +325,7 @@ export class PropTreeField {
   /** The hit target for a standing prop tree by id (null when it is gone or falling). */
   public nodeOf(propId: number): PropTreeNode | null {
     const p = this.props.get(propId);
-    if (!p || (p.type !== 'tree_pine' && p.type !== 'tree_round')) return null;
+    if (!p || !TREE_TYPES.has(p.type)) return null;
     const st = this.states.get(propId);
     if (st && st.fall >= 0) return null;
     return { propId, position: p.position.clone(), radius: trunkRadius(p.type) * p.scale, health: st ? st.health : PROP_TREE_HITS, maxHealth: PROP_TREE_HITS };
@@ -449,7 +453,7 @@ export class PropTreeField {
   }
 
   private readonly ambientVisit = (p: PropInstance): void => {
-    if (p.type !== 'tree_round' && p.type !== 'tree_pine') return;
+    if (!TREE_TYPES.has(p.type)) return;
     const d = (p.position.x - this.ambientX) ** 2 + (p.position.z - this.ambientZ) ** 2;
     if (d < this.ambientBestD) {
       this.ambientBestD = d;
@@ -666,7 +670,7 @@ export class PropTreeField {
     const geo = (top.children[0] as THREE.Mesh).geometry;
     const P = geo.getAttribute('position');
     const C = geo.getAttribute('color');
-    const green = (i: number) => !!C && C.getY(i) > C.getX(i) && C.getY(i) > C.getZ(i);
+    const green = (i: number) => !!C && isCrownColor(C.getX(i), C.getY(i), C.getZ(i));
     // Bark right above the cut gives the trunk's radius there
     let rCut = 0;
     for (let i = 0; i < P.count; i++) {
@@ -780,7 +784,7 @@ export class PropTreeField {
       const C = g.getAttribute('color');
       let y0 = Infinity, y1 = -Infinity, r = 0;
       for (let i = 0; i < P.count; i++) {
-        if (!(C.getY(i) > C.getX(i) && C.getY(i) > C.getZ(i))) continue;
+        if (!isCrownColor(C.getX(i), C.getY(i), C.getZ(i))) continue;
         y0 = Math.min(y0, P.getY(i));
         y1 = Math.max(y1, P.getY(i));
         r = Math.max(r, Math.hypot(P.getX(i), P.getZ(i)));

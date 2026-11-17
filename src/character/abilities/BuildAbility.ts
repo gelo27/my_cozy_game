@@ -1,6 +1,8 @@
 import { t, localName } from '../../i18n/i18n';
 import type { TKey } from '../../i18n/en';
 import * as THREE from 'three';
+import { interactionFocus } from '../../gameplay/InteractionFocus';
+import { uiScreens } from '../../ui/UiScreens';
 import { cutawayRayStart } from '../../building/BuildCutaway';
 import { IAbility, CharacterContext } from './IAbility';
 import { DORMER_HEIGHT, DORMER_WIDTH, type DormerStyle } from '../../building/RoofDormers';
@@ -112,6 +114,8 @@ export class BuildAbility implements IAbility {
   }
 
   public toggleBuildMode(): boolean {
+    // One screen at a time: opening build mode closes the backpack, map, panels (UiScreens)
+    if (!this.isBuildModeActive && !uiScreens.request('build')) return false;
     this.isBuildModeActive = !this.isBuildModeActive;
     if (this.isBuildModeActive && this.isPaintingModeActive) {
       this.setPaintingMode(false);
@@ -133,6 +137,7 @@ export class BuildAbility implements IAbility {
   }
 
   public togglePaintingMode(): boolean {
+    if (!this.isPaintingModeActive && !uiScreens.request('paint')) return false;
     this.isPaintingModeActive = !this.isPaintingModeActive;
     if (this.isPaintingModeActive) {
       if (this.isBuildModeActive) {
@@ -233,8 +238,9 @@ export class BuildAbility implements IAbility {
       return;
     }
 
-    // Auto-switch to build mode when selecting any piece
+    // Auto-switch to build mode when selecting any piece (closing whatever else is open)
     if (!this.isBuildModeActive) {
+      if (!uiScreens.request('build')) return;
       this.isBuildModeActive = true;
       if (this.isPaintingModeActive) {
         this.isPaintingModeActive = false;
@@ -316,10 +322,16 @@ export class BuildAbility implements IAbility {
     return this.snappingEnabled;
   }
 
+  private escWasDown = false;
+
   public update(dt: number, context: CharacterContext): void {
     if (!this.enabled || !this.buildingManager || !this.ghostRenderer) return;
 
     const input = context.input as any;
+    // Esc acts once per press (held, it would deselect and then leave the mode on the next frame)
+    const escDown = !!input.keys?.['Escape'];
+    const escPressed = escDown && !this.escWasDown;
+    this.escWasDown = escDown;
 
     const playerPos = new THREE.Vector3(
       context.body.translation().x,
@@ -342,7 +354,7 @@ export class BuildAbility implements IAbility {
       }
 
       // Escape key exits painting mode
-      if (input.keys?.['Escape']) {
+      if (escPressed) {
         this.setPaintingMode(false);
         return;
       }
@@ -419,15 +431,17 @@ export class BuildAbility implements IAbility {
       if (this.ghostRenderer) {
         this.ghostRenderer.setVisible(false);
       }
+      // The door in reach competes with the other E targets (InteractionFocus)
+      const nearbyDoorInfo = this.buildingManager.getNearbyDoor(playerPos);
+      if (nearbyDoorInfo) interactionFocus.offer('door', nearbyDoorInfo.piece.position);
       // Check for door interaction (press E or click on door in world) when build mode is inactive
       if (input.interactJustPressed || input.isMouseDownJustPressed) {
         if (input.interactJustPressed) {
-          // Pressing E checks proximity trigger zone
-          const nearbyDoorInfo = this.buildingManager.getNearbyDoor(playerPos);
-          if (nearbyDoorInfo) {
+          // Pressing E opens the door in reach only when it is the focused target
+          if (nearbyDoorInfo && interactionFocus.allows('door')) {
             this.buildingManager.toggleDoor(nearbyDoorInfo.piece.id, playerPos);
-            return;
           }
+          return;
         }
         // Fallback to raycasting if click or no nearby door
         let rayOrigin = context.cameraPosition;
@@ -477,8 +491,12 @@ export class BuildAbility implements IAbility {
       input.buildSelectSlot = undefined;
     }
 
-    // Escape key deselects currently selected piece and active wall
-    if (input.keys?.['Escape']) {
+    // Escape deselects the piece in hand / the active wall; with nothing selected it leaves build mode
+    if (escPressed && !this.currentPieceType && !this.houseRoofTool && !this.dormerTool && !this.pieceSelectionSystem?.getSelectedPiece()) {
+      this.toggleBuildMode();
+      return;
+    }
+    if (escPressed) {
       this.houseRoofTool = null;
       this.dormerTool = false;
       this.currentPieceType = null;
@@ -613,6 +631,7 @@ export class BuildAbility implements IAbility {
     if (input.interactJustPressed) {
       const nearbyDoorInfo = this.buildingManager.getNearbyDoor(playerPos);
       if (nearbyDoorInfo) {
+        // Build mode: E is only the door's (nothing else acts while building)
         this.buildingManager.toggleDoor(nearbyDoorInfo.piece.id, playerPos);
       } else if (targetPiece && isSwingDoorPiece(targetPiece.type)) {
         this.buildingManager.toggleDoor(targetPiece.id, playerPos);

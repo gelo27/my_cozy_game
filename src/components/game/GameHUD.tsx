@@ -5,8 +5,7 @@ import {
 import { GameplayHudState, GameplayPrompt } from '../../gameplay/GameplayManager';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji, InventoryItem } from '../../inventory/types/InventoryTypes';
-import { WeatherType, WEATHER_LABELS } from '../../world/WeatherSystem';
-import { SEASON_LABELS } from '../../world/Seasons';
+import { WeatherType } from '../../world/WeatherSystem';
 import { t, dataName } from '../../i18n/i18n';
 import { worldSettings } from '../../world/WorldSettings';
 import { ItemIcon } from '../ItemIcon';
@@ -75,8 +74,10 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 }) => {
   const { slots, equipped } = useHotbar(inventory);
 
+  const panelOpen = !!hud?.panel;
   useEffect(() => {
-    if (hidden) return;
+    // An open panel owns the number keys (the worker radial menu picks jobs with 1-7)
+    if (hidden || panelOpen) return;
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
@@ -87,7 +88,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [hidden, slots, inventory]);
+  }, [hidden, panelOpen, slots, inventory]);
 
   if (hidden || !hud) return null;
   const WeatherIcon = hud.isNight && hud.weather === 'clear' ? Moon : WEATHER_ICON[hud.weather];
@@ -99,8 +100,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         <div className={`${panel} rounded-2xl px-3 py-1.5 touch:px-2.5 touch:py-1 flex items-center gap-2`}>
           <WeatherIcon className="w-4 h-4 text-amber-600" />
           <ClockLabel />
-          <span className="text-xs text-[#8a7556] hidden sm:inline">{dataName('weather', hud.weather, WEATHER_LABELS[hud.weather])}</span>
-          <span className="text-xs text-[#8a7556] hidden sm:inline">· {dataName('season', hud.season, SEASON_LABELS[hud.season])} {hud.seasonDay}</span>
+          <span className="text-xs text-[#8a7556] hidden sm:inline">Day {hud.seasonDay}</span>
         </div>
         <div className={`${panel} rounded-2xl px-3 py-1.5 touch:px-2.5 touch:py-1 flex items-center gap-1.5`}>
           <Coins className="w-4 h-4 text-yellow-500" />
@@ -122,7 +122,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         <HudButton label={t('hud.callMoped')} hotkey="V" onClick={onCallMoped}>
           <Bike className="w-5 h-5" />
         </HudButton>
-        <HudButton label={t('hud.backpack')} hotkey="Q" onClick={onOpenBackpack}>
+        {/* Backpack and build sit beside the hotbar on PC; phones keep them up here (no room below) */}
+        <HudButton label={t('hud.backpack')} hotkey="Q" onClick={onOpenBackpack} className="hidden touch:flex">
           <Backpack className="w-5 h-5" />
         </HudButton>
         {onOpenWorkers && (
@@ -130,7 +131,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <Users className="w-5 h-5" />
           </HudButton>
         )}
-        <HudButton label={t('hud.build')} hotkey="B" onClick={onToggleBuild}>
+        <HudButton label={t('hud.build')} hotkey="B" onClick={onToggleBuild} className="hidden touch:flex">
           <Hammer className="w-5 h-5" />
         </HudButton>
         {devToolsEnabled && (
@@ -148,9 +149,13 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
       {hud.fishing && <FishingWidget hud={hud} onHold={onFishHold} onDepth={onFishDepth} />}
 
-      {/* Hotbar */}
+      {/* Bottom centre: build | hotbar | backpack (the side buttons are PC only) */}
+      <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-2 touch:bottom-2">
+      <HudButton label={t('hud.build')} hotkey="B" onClick={onToggleBuild} className="flex touch:hidden pointer-events-auto" big>
+        <Hammer className="w-6 h-6" />
+      </HudButton>
       {slots.some(Boolean) && (
-        <div className={`absolute bottom-3 left-1/2 -translate-x-1/2 ${panel} rounded-2xl p-1.5 flex gap-1.5 pointer-events-auto touch:bottom-2 touch:p-1 touch:gap-1 touch:rounded-xl`}>
+        <div className={`${panel} rounded-2xl p-1.5 flex gap-1.5 pointer-events-auto touch:p-1 touch:gap-1 touch:rounded-xl`}>
           {slots.map((item, i) =>
             item ? (
               <button
@@ -180,19 +185,27 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           )}
         </div>
       )}
+      <HudButton label={t('hud.backpack')} hotkey="Q" onClick={onOpenBackpack} className="flex touch:hidden pointer-events-auto" big>
+        <Backpack className="w-6 h-6" />
+      </HudButton>
+      </div>
     </div>
   );
 };
 
-const HudButton: React.FC<{ label: string; hotkey: string; onClick(): void; children: React.ReactNode }> = ({
-  label, hotkey, onClick, children,
+/** A round HUD button; on PC its hotkey shows as a small badge in the corner (hidden on touch screens). */
+const HudButton: React.FC<{ label: string; hotkey: string; onClick(): void; children: React.ReactNode; className?: string; big?: boolean }> = ({
+  label, hotkey, onClick, children, className = 'flex', big,
 }) => (
   <button
     onClick={onClick}
     title={`${label} (${hotkey})`}
-    className={`${panel} rounded-2xl w-11 h-11 touch:w-9 touch:h-9 touch:rounded-xl touch:[&_svg]:w-4 touch:[&_svg]:h-4 flex items-center justify-center hover:bg-amber-50 active:scale-95 transition`}
+    className={`${panel} relative ${big ? 'w-14 h-14' : 'w-11 h-11'} rounded-2xl touch:w-9 touch:h-9 touch:rounded-xl touch:[&_svg]:w-4 touch:[&_svg]:h-4 items-center justify-center hover:bg-amber-50 active:scale-95 transition ${className}`}
   >
     {children}
+    <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-md bg-[#4a3b2a] text-white text-[10px] font-bold leading-[18px] text-center shadow touch:hidden">
+      {hotkey}
+    </span>
   </button>
 );
 

@@ -31,6 +31,8 @@ const VIEW_SCALE = isMobileDevice() ? 0.75 : 1;
 const VIEW_DIST: Record<string, number> = {
   tree_pine: 240,
   tree_round: 240,
+  tree_maple: 240,
+  tree_birch: 240,
   rock_big: 200,
   bush: 130,
   rock_small: 95,
@@ -46,7 +48,7 @@ const FADE_BAND: Record<string, number> = { flowers: 16 };
  * Trees and bushes (LOD types) dissolve over the last this-many metres of their draw distance: the
  * farthest LOD's list of a cell wears the distance dither while the cell reaches into the band.
  */
-const LOD_FADE_BAND: Record<string, number> = { tree_pine: 40, tree_round: 40, bush: 18 };
+const LOD_FADE_BAND: Record<string, number> = { tree_pine: 40, tree_round: 40, tree_maple: 40, tree_birch: 40, bush: 18 };
 const lodFadeRange = (type: string): FadeRange => (type === 'bush' ? BUSH_FADE_RANGE : TREE_FADE_RANGE);
 /**
  * Distances (from the camera, per tree) where a tree steps down to its next LOD (the trees pack
@@ -61,7 +63,7 @@ const LOD_DISTS = isMobileDevice() ? [30, 75] : [40, 100];
 const lodDists = (type: string, out: number[]): number[] => {
   const rock = ROCK_LOD_DISTS[type];
   if (rock) return rock;
-  if (type === 'tree_round') out[0] = veg.oakNearDist;
+  if (type === 'tree_round' || type === 'tree_maple' || type === 'tree_birch') out[0] = veg.oakNearDist;
   else if (type === 'tree_pine') out[0] = veg.pineNearDist;
   else if (type === 'bush') out[0] = veg.bushNearDist;
   else return LOD_DISTS;
@@ -89,11 +91,14 @@ const LEAF_REBUILD_DELAY = 300;
  * 2 trees thinned where they stood too close together.
  */
 export const FOREST_VERSION = 2;
+
+/** Every tree prop type (the trees pack's pine and oak, and the maple and birch made from the oak). */
+export const TREE_TYPES: ReadonlySet<string> = new Set(['tree_pine', 'tree_round', 'tree_maple', 'tree_birch']);
 /**
  * Room (m, at scale 1) generated props keep around them: about the crown radius for trees. Two
  * props stand at least ROOM_SHARE of their summed rooms apart (crowns may touch, not merge).
  */
-const ROOM: Record<string, number> = { tree_pine: 1.9, tree_round: 2.1, bush: 0.7, rock_big: 1.3, rock_small: 0.5 };
+const ROOM: Record<string, number> = { tree_pine: 1.9, tree_round: 2.1, tree_maple: 1.9, tree_birch: 1.4, bush: 0.7, rock_big: 1.3, rock_small: 0.5 };
 const ROOM_SHARE = 0.8;
 const ROOM_MAX = 2.1 * 1.35;
 
@@ -164,6 +169,9 @@ const M = {
   bark: new THREE.MeshLambertMaterial({ color: 0x6b4426 }),
   pine: withSnowCover(new THREE.MeshLambertMaterial({ color: 0x2f6b3a })),
   leaf: withSnowCover(new THREE.MeshLambertMaterial({ color: 0x4f9a3c })),
+  mapleLeaf: withSnowCover(new THREE.MeshLambertMaterial({ color: 0xe8861e })),
+  birchLeaf: withSnowCover(new THREE.MeshLambertMaterial({ color: 0xa8cc48 })),
+  birchBark: new THREE.MeshLambertMaterial({ color: 0xe6e1d4 }),
   bush: withSnowCover(new THREE.MeshLambertMaterial({ color: 0x3f8a3a })),
   rock: withSnowCover(new THREE.MeshLambertMaterial({ color: 0x8a8580, flatShading: true })),
   wood: new THREE.MeshLambertMaterial({ color: 0xa87444 }),
@@ -288,6 +296,28 @@ export const PROP_DEFS: PropDef[] = [
       b.ball(M.leaf, 1.5, 0, 3.1, 0);
       b.ball(M.leaf, 1.0, 0.9, 2.7, 0.4);
       b.ball(M.leaf, 1.0, -0.8, 2.8, -0.5);
+    },
+  },
+  {
+    // Made from the oak model (DerivedTrees): taller crown, maple leaves in orange and yellow
+    id: 'tree_maple', name: 'Клен', icon: 'TreeDeciduous', category: 'nature',
+    collider: { kind: 'cyl', r: 0.68, h: 3 },
+    build: (b) => {
+      b.cyl(M.bark, 0.2, 0.29, 2.4, 0, 1.2, 0, 6);
+      b.ball(M.mapleLeaf, 1.35, 0, 3.6, 0);
+      b.ball(M.mapleLeaf, 0.95, 0.75, 3.0, 0.35);
+      b.ball(M.mapleLeaf, 0.95, -0.7, 3.2, -0.4);
+    },
+  },
+  {
+    // Made from the oak model (DerivedTrees): slim white trunk, small tall crown, yellow-green leaves
+    id: 'tree_birch', name: 'Береза', icon: 'TreeDeciduous', category: 'nature',
+    collider: { kind: 'cyl', r: 0.4, h: 3 },
+    build: (b) => {
+      b.cyl(M.birchBark, 0.11, 0.17, 3.0, 0, 1.5, 0, 6);
+      b.ball(M.birchLeaf, 1.0, 0, 4.0, 0);
+      b.ball(M.birchLeaf, 0.7, 0.5, 3.4, 0.25);
+      b.ball(M.birchLeaf, 0.7, -0.45, 3.6, -0.3);
     },
   },
   {
@@ -480,6 +510,18 @@ const LOD_BUILDS: Record<string, (b: PropBuilder) => void> = {
     b.ball(M.leaf, 1.62, 0, 3.1, 0, 0);
     b.ball(M.leaf, 1.08, 0.9, 2.7, 0.4, 0);
     b.ball(M.leaf, 1.08, -0.8, 2.8, -0.5, 0);
+  },
+  tree_maple: (b) => {
+    b.cyl(M.bark, 0.2, 0.29, 2.4, 0, 1.2, 0, 4);
+    b.ball(M.mapleLeaf, 1.46, 0, 3.6, 0, 0);
+    b.ball(M.mapleLeaf, 1.03, 0.75, 3.0, 0.35, 0);
+    b.ball(M.mapleLeaf, 1.03, -0.7, 3.2, -0.4, 0);
+  },
+  tree_birch: (b) => {
+    b.cyl(M.birchBark, 0.11, 0.17, 3.0, 0, 1.5, 0, 4);
+    b.ball(M.birchLeaf, 1.08, 0, 4.0, 0, 0);
+    b.ball(M.birchLeaf, 0.76, 0.5, 3.4, 0.25, 0);
+    b.ball(M.birchLeaf, 0.76, -0.45, 3.6, -0.3, 0);
   },
 };
 
@@ -820,7 +862,7 @@ export class PropSystem {
       const dx = Math.max(x0 - camera.x, 0, camera.x - x0 - b.size);
       const dz = Math.max(z0 - camera.z, 0, camera.z - z0 - b.size);
       const d2 = dx * dx + dz * dz;
-      const view = b.def.id === 'tree_pine' || b.def.id === 'tree_round' ? treeView : b.viewDist;
+      const view = TREE_TYPES.has(b.def.id) ? treeView : b.viewDist;
       const band = FADE_BAND[b.def.id];
       if (band && !b.lods) {
         this.passFade(b, camera, Math.sqrt(d2), band);

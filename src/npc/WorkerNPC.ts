@@ -158,28 +158,25 @@ const CARRY_MAT = {
   seeds: new THREE.MeshLambertMaterial({ color: 0xd8c08a }),
 };
 
-/** Filled rounded rectangle (plain one on browsers without `roundRect`, older phones). */
-function pill(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  g.beginPath();
-  if (typeof g.roundRect === 'function') g.roundRect(x, y, w, h, r);
-  else g.rect(x, y, w, h);
-  g.fill();
-}
-
-/** Name tag: a small sprite above the head, redrawn only when its text changes. */
+/**
+ * Name tag: a sprite above the head, redrawn only when its text changes. No plate: the
+ * activity icons (and 🍽️ when hungry) on top, the name under them in white with a dark outline.
+ */
 class NameTag {
   public readonly sprite: THREE.Sprite;
   private readonly canvas = document.createElement('canvas');
   private readonly texture: THREE.CanvasTexture;
   private text = '';
 
-  constructor(private readonly name: string, private readonly tint: number) {
+  constructor(private readonly name: string, _tint: number) {
     this.canvas.width = 256;
-    this.canvas.height = 64;
+    this.canvas.height = 128;
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.texture, depthWrite: false, transparent: true }));
-    this.sprite.scale.set(2, 0.5, 1);
+    // Centre of the sprite sits half its height above the anchor: the name lands just over the head
+    this.sprite.center.set(0.5, 0.05);
+    this.sprite.scale.set(1.5, 0.75, 1);
     this.sprite.renderOrder = 5;
   }
 
@@ -188,20 +185,25 @@ class NameTag {
     if (text === this.text) return;
     this.text = text;
     const g = this.canvas.getContext('2d')!;
-    g.clearRect(0, 0, 256, 64);
-    g.font = 'bold 26px sans-serif';
-    const label = `${icon ? `${icon} ` : ''}${this.name}${hungry ? ' 🍽️' : ''}`;
-    const w = Math.min(248, g.measureText(label).width + 30);
-    const x = (256 - w) / 2;
-    g.fillStyle = 'rgba(40,30,20,0.62)';
-    pill(g, x, 12, w, 42, 21);
-    // A stripe of the worker's colour (the same as its dot in the panel)
-    g.fillStyle = `#${this.tint.toString(16).padStart(6, '0')}`;
-    pill(g, x + 10, 47, w - 20, 4, 2);
-    g.fillStyle = hungry ? '#ffd0c0' : '#fffaf0';
+    g.clearRect(0, 0, 256, 128);
     g.textAlign = 'center';
     g.textBaseline = 'middle';
-    g.fillText(label, 128, 32, 240);
+
+    // Icons row
+    const icons = [icon, hungry ? '🍽️' : ''].filter(Boolean).join(' ');
+    if (icons) {
+      g.font = '34px sans-serif';
+      g.fillText(icons, 128, 50, 240);
+    }
+
+    // Name: dark outline, white fill
+    g.font = 'bold 30px sans-serif';
+    g.lineJoin = 'round';
+    g.lineWidth = 7;
+    g.strokeStyle = 'rgba(25,18,10,0.9)';
+    g.strokeText(this.name, 128, 98, 240);
+    g.fillStyle = '#ffffff';
+    g.fillText(this.name, 128, 98, 240);
     this.texture.needsUpdate = true;
   }
 
@@ -338,10 +340,21 @@ export class WorkerNPC extends NPCAgent {
    * `dt` may be several frames at once (far workers update less often); `hours` is the in-game
    * time that passed in it.
    */
+  /** The player has the job menu open for this worker: it stops and waits. */
+  public talking = false;
+
   public update(dt: number, player: THREE.Vector3, hour: number, hours: number): void {
     const rate = ENERGY_RATE[this.activity] * (this.activity === 'sleep' && !this.sleepingInBed ? GROUND_SLEEP : 1);
     this.energy = THREE.MathUtils.clamp(this.energy + rate * hours, 0, 100);
     this.food = THREE.MathUtils.clamp(this.food + HUNGER_RATE[this.activity] * hours, 0, 100);
+
+    // Talking to the player (the job menu is open): stands still facing them, no new plans. A swing
+    // or a pick-up already under way finishes first
+    if (this.talking && this.activity !== 'sleep') {
+      this.updateTag(player);
+      this.drive(dt, null, 0, player, this.model.isActionLocked() ? null : player);
+      return;
+    }
 
     this.thinkTimer -= dt;
     if (this.thinkTimer <= 0) {
@@ -426,7 +439,7 @@ export class WorkerNPC extends NPCAgent {
     const near = Math.hypot(g.x - player.x, g.z - player.z) < TAG_DIST;
     this.tag.sprite.visible = near;
     if (!near) return;
-    this.tag.sprite.position.set(g.x, g.y + 1.2, g.z);
+    this.tag.sprite.position.set(g.x, g.y + 1.0, g.z);
     const icon = this.errand
       ? ERRAND_ICON[this.errand]
       : this.task && this.activity === 'work'

@@ -2,11 +2,13 @@ import type * as THREE from 'three';
 import { TERRAIN_CHUNK, TERRAIN_CHUNKS, TerrainSystem } from './TerrainSystem';
 import { WORLD_HALF, isMobileDevice } from './WorldSettings';
 import type { PropSystem } from './PropSystem';
+import { TREE_TYPES } from './PropSystem';
 import type { ForestZone } from '../forest/ForestZone';
 import type { RockField } from '../gathering/RockField';
 import type { PropTreeField } from '../gathering/PropTreeField';
 import type { BuildingManager } from '../building/BuildingManager';
 import { isGreenhousePiece } from '../building/types/BuildingTypes';
+import { houseRoofRects } from '../building/RoofFootprint';
 import type { GrassField } from './GrassField';
 import type { AppleOrchard } from '../gathering/AppleOrchard';
 
@@ -36,6 +38,8 @@ const GRASS_BLOCKERS: Record<string, number> = { well: 1.1, hay: 1.1, rock_big: 
 const PROP_CASTERS: Record<string, { r: number; k: number }> = {
   tree_pine: { r: 1.8, k: 0.55 },
   tree_round: { r: 2.9, k: 0.6 },
+  tree_maple: { r: 2.5, k: 0.58 },
+  tree_birch: { r: 1.7, k: 0.45 },
   bush: { r: 0.8, k: 0.4 },
   rock_big: { r: 1.2, k: 0.45 },
   well: { r: 1.0, k: 0.4 },
@@ -163,7 +167,7 @@ export class StaticShadows {
     for (const p of this.props.list()) {
       const def = PROP_CASTERS[p.type];
       if (!def) continue;
-      if ((p.type === 'tree_pine' || p.type === 'tree_round') && this.propTrees.isDown(p.id)) continue;
+      if (TREE_TYPES.has(p.type) && this.propTrees.isDown(p.id)) continue;
       addDisc({ x: p.position.x, z: p.position.z, r: def.r * p.scale, k: def.k });
       const br = GRASS_BLOCKERS[p.type];
       if (br) {
@@ -186,6 +190,17 @@ export class StaticShadows {
       // Every piece near the ground (floors and paths too) keeps the 3D grass out of its footprint
       if (bb.min.y - ground < 0.6) addBlock({ x0: bb.min.x, z0: bb.min.z, x1: bb.max.x, z1: bb.max.z, k: 1 });
       if (bb.max.y - ground < 0.4) continue; // floors and paths lie on the ground: no shade
+      // A house roof shades its wings (with the eaves), not the yards inside its bounding box
+      const cfg = piece.roofConfig;
+      const wings = houseRoofRects(piece, cfg?.eaveOverhang ?? cfg?.overhang ?? 0.25);
+      if (wings) {
+        for (const r of wings) {
+          const box: Box = { ...r, k: 0.6 };
+          n++;
+          this.bucketRange(box.x0, box.z0, box.x1, box.z1, (c) => this.buckets[c].boxes.push(box));
+        }
+        continue;
+      }
       // Greenhouse glass lets the light through: only its frame leaves a faint shade
       const box: Box = { x0: bb.min.x, z0: bb.min.z, x1: bb.max.x, z1: bb.max.z, k: isGreenhousePiece(piece.type) ? 0.12 : 0.6 };
       n++;

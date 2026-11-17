@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { interactionFocus } from '../gameplay/InteractionFocus';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { MopedModel, MOPED_WHEEL_RADIUS } from './MopedModel';
@@ -188,8 +189,11 @@ export class MopedController {
       const t = this.body.translation();
       const dx = cp.x - t.x, dy = cp.y - t.y, dz = cp.z - t.z;
       this.isPlayerNear = allowEnter && dx * dx + dy * dy + dz * dz < MOPED_CONFIG.INTERACT_RADIUS ** 2;
-      this.model.setPromptVisible(this.isPlayerNear);
-      if (this.isPlayerNear && m.interactJustPressed) this.enter(character, camera);
+      // Competes with the other E targets (InteractionFocus); the bias makes up for the body's size
+      if (this.isPlayerNear) interactionFocus.offer('moped', t, 0.5);
+      const focused = this.isPlayerNear && interactionFocus.allows('moped');
+      this.model.setPromptVisible(focused);
+      if (focused && m.interactJustPressed) this.enter(character, camera);
       if (!this.isPlayerInside) {
         this.park(dt);
         return false;

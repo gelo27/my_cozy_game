@@ -110,7 +110,7 @@ export class ExplorationManager {
   public fading = false;
   /** Bumped when anything the HUD / map shows changes. */
   public revision = 0;
-  public prompt: { text: string; action: Action } | null = null;
+  public prompt: { text: string; action: Action; pos?: THREE.Vector3 } | null = null;
 
   public onNotify: (text: string, type?: 'success' | 'info' | 'warning') => void = () => {};
   public onItems: (items: { itemId: string; amount: number }[]) => void = () => {};
@@ -481,35 +481,35 @@ export class ExplorationManager {
     }
   }
 
-  private computePrompt(pos: THREE.Vector3): { text: string; action: Action } | null {
+  private computePrompt(pos: THREE.Vector3): { text: string; action: Action; pos?: THREE.Vector3 } | null {
     const feet = this.tmp.set(pos.x, pos.y - 0.75, pos.z);
     const near = (p: THREE.Vector3, r: number) => Math.hypot(p.x - feet.x, p.z - feet.z) < r && Math.abs(p.y - feet.y) < 2.2;
 
     for (const c of this.chests) {
-      if (!c.opened && near(c.pos, 1.9)) return { text: t('explore.openChest'), action: { kind: 'chest', chest: c } };
+      if (!c.opened && near(c.pos, 1.9)) return { text: t('explore.openChest'), action: { kind: 'chest', chest: c }, pos: c.pos };
     }
     if (this.inCave) {
       for (const e of this.network.entrances) {
         if (!near(e.mouth, 2.2)) continue;
         const cave = this.caves.find((c) => c.site.id === e.id);
-        if (cave) return { text: t('explore.exitCave'), action: { kind: 'exitCave', cave } };
+        if (cave) return { text: t('explore.exitCave'), action: { kind: 'exitCave', cave }, pos: e.mouth };
       }
     }
     if (!this.inCave) {
       for (const c of this.caves) {
         const a = this.landmarks.get(c.site.id)?.action;
-        if (a && near(a, 2.6)) return { text: t('explore.enterCave'), action: { kind: 'enterCave', cave: c } };
+        if (a && near(a, 2.6)) return { text: t('explore.enterCave'), action: { kind: 'enterCave', cave: c }, pos: a };
       }
       const lh = this.sites.find((s) => s.kind === 'lighthouse');
       const lhAction = lh && this.landmarks.get(lh.id)?.action;
-      if (lh && lhAction && near(lhAction, 2.2)) return { text: t('explore.lookout'), action: { kind: 'lookout', site: lh } };
+      if (lh && lhAction && near(lhAction, 2.2)) return { text: t('explore.lookout'), action: { kind: 'lookout', site: lh }, pos: lhAction };
     }
     const node = this.forage.findNearest(feet);
-    if (node) return { text: t(`explore.pick.${node.kind}`), action: { kind: 'forage', node } };
+    if (node) return { text: t(`explore.pick.${node.kind}`), action: { kind: 'forage', node }, pos: node.position };
     return null;
   }
 
-  private setPrompt(p: { text: string; action: Action } | null): void {
+  private setPrompt(p: { text: string; action: Action; pos?: THREE.Vector3 } | null): void {
     if (p?.text === this.prompt?.text && p?.action.kind === this.prompt?.action.kind) {
       this.prompt = p;
       return;

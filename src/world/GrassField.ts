@@ -12,6 +12,7 @@ const BIRCH_GRASS_COL = new THREE.Color('#6aa636');
 const glsl = (c: THREE.Color) => `vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)})`;
 import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
 import { GrassTrail, TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
+import { NOISE_TEX_GLSL, noiseTexUniform } from './NoiseTexture';
 
 const N = WORLD_SIZE;
 const V = N + 1;
@@ -69,17 +70,22 @@ export class GrassField {
    * share, per 1 m vertex.
    */
   private readonly data = new Uint8Array(V * V * 4);
+  /** Share of white-flowered meadow (FLOWER_GRASS) around each 1 m vertex: some blades there flower. */
+  private readonly flowerData = new Uint8Array(V * V);
+  private readonly flowerTex: THREE.DataTexture;
   /** Blocked by buildings / props (0..255), per 1 m vertex: only the density reads it. */
   private readonly blocked = new Uint8Array(V * V);
   private readonly dataTex: THREE.DataTexture;
 
   private readonly uniforms = {
+    uNoiseTex: noiseTexUniform,
     uGrCenter: { value: new THREE.Vector2() },
     uGrTime: { value: 0 },
     uGrWind: { value: 0.3 },
     uGrSea: { value: worldSettings.waterLevel },
     uGrHeight: { value: null as THREE.Texture | null },
     uGrData: { value: null as THREE.Texture | null },
+    uGrFlower: { value: null as THREE.Texture | null },
     uGrRiver: { value: riverWorld.texture as THREE.Texture },
     uGrColor: { value: null as THREE.Texture | null },
     uGrSize: { value: veg.grassPatch },
@@ -115,13 +121,16 @@ export class GrassField {
   constructor(scene: THREE.Scene, private readonly terrain: TerrainSystem) {
     this.heightTex = new THREE.DataTexture(this.heightData, V, V, THREE.RedFormat, THREE.HalfFloatType);
     this.dataTex = new THREE.DataTexture(this.data, V, V, THREE.RGBAFormat);
-    for (const t of [this.heightTex, this.dataTex]) {
+    this.flowerTex = new THREE.DataTexture(this.flowerData, V, V, THREE.RedFormat);
+    this.flowerTex.unpackAlignment = 1; // 1 byte per texel, rows of odd width
+    for (const t of [this.heightTex, this.dataTex, this.flowerTex]) {
       t.magFilter = t.minFilter = THREE.LinearFilter;
       t.generateMipmaps = false;
       t.colorSpace = THREE.NoColorSpace;
     }
     this.uniforms.uGrHeight.value = this.heightTex;
     this.uniforms.uGrData.value = this.dataTex;
+    this.uniforms.uGrFlower.value = this.flowerTex;
     this.uniforms.uGrColor.value = terrain.grassLayer;
     this.uniforms.uGrTrail.value = this.trail.texture;
     terrain.setSnowTrail(this.trail.texture, this.trail.center);
@@ -262,10 +271,11 @@ export class GrassField {
     const d = this.data;
     const dryT = TerrainTileType.DRY_GRASS;
     const birchT = TerrainTileType.BIRCH_GRASS;
+    const flowerT = TerrainTileType.FLOWER_GRASS;
     for (let z = r.z0; z <= r.z1; z++) {
       for (let x = r.x0; x <= r.x1; x++) {
         // Share of the (up to) four cells around this vertex that grow grass, and which kind
-        let g = 0, n = 0, dry = 0, birch = 0;
+        let g = 0, n = 0, dry = 0, birch = 0, flower = 0;
         for (let dz = -1; dz <= 0; dz++) {
           const cz = z + dz;
           if (cz < 0 || cz >= N) continue;
@@ -278,6 +288,7 @@ export class GrassField {
               g++;
               if (t === dryT) dry++;
               else if (t === birchT) birch++;
+              else if (t === flowerT) flower++;
             }
           }
         }
@@ -294,6 +305,7 @@ export class GrassField {
         d[o] = (v * (255 - this.blocked[z * V + x]) + 0.5) | 0;
         d[o + 2] = g ? ((dry / g) * 255 + 0.5) | 0 : 0;
         d[o + 3] = g ? ((birch / g) * 255 + 0.5) | 0 : 0;
+        this.flowerData[z * V + x] = g ? ((flower / g) * 255 + 0.5) | 0 : 0;
       }
     }
     grow(this.uploadRect, r.x0, r.z0, r.x1, r.z1);
@@ -305,13 +317,19 @@ export class GrassField {
     const r = this.uploadRect;
     if (isEmpty(r)) return;
     const tex = this.dataTex;
+    const fl = this.flowerTex;
     if (r.z1 - r.z0 + 1 <= MAX_RANGE_ROWS) {
-      const count = (r.x1 - r.x0 + 1) * 4;
-      for (let z = r.z0; z <= r.z1; z++) tex.addUpdateRange((z * V + r.x0) * 4, count);
+      const count = r.x1 - r.x0 + 1;
+      for (let z = r.z0; z <= r.z1; z++) {
+        tex.addUpdateRange((z * V + r.x0) * 4, count * 4);
+        fl.addUpdateRange(z * V + r.x0, count);
+      }
     } else {
       tex.clearUpdateRanges();
+      fl.clearUpdateRanges();
     }
     tex.needsUpdate = true;
+    fl.needsUpdate = true;
     Object.assign(r, emptyRect());
   }
 
@@ -364,6 +382,7 @@ uniform float uGrWind;
 uniform float uGrSea;
 uniform sampler2D uGrHeight;
 uniform sampler2D uGrData;
+uniform sampler2D uGrFlower;
 uniform sampler2D uGrRiver;
 uniform sampler2D uGrColor;
 uniform float uGrSize;
@@ -378,12 +397,10 @@ varying vec3 vGrCol;
 varying float vGrTip;
 varying float vGrShade;
 varying float vGrBend;
-float grHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float grNoise(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(grHash(i), grHash(i + vec2(1, 0)), f.x), mix(grHash(i + vec2(0, 1)), grHash(i + vec2(1, 1)), f.x), f.y);
-}`
+varying float vGrFlower;
+${NOISE_TEX_GLSL}
+// Clumps and gusts: the shared noise texture's blue channel (one fetch instead of four hashes)
+float grNoise(vec2 p) { return texNoise4(p).b; }`
         )
         .replace('#include <beginnormal_vertex>', 'vec3 objectNormal = vec3(0.0, 1.0, 0.0);')
         .replace(
@@ -411,6 +428,11 @@ float grH = uGrHeightK * mix(0.5, 1.0, aGrRnd.x) * (0.45 + grClump * 1.0)
 // Snow: blades sink into it (the short ones vanish), the clumps first poke out where it is thin
 float grSnowK = uGrSnow * smoothstep(-0.2, 0.25, uGrSnow * 1.6 - 0.55 + (grClump - 0.5) * 1.2);
 grH *= clamp(1.0 - grSnowK * 1.25, 0.0, 1.0);
+// White flowers: on the flowered meadow about one blade in thirty stands a little taller and
+// carries a flower at its tip (none under snow); same value on all three vertices of a blade
+float grFlK = texture2D(uGrFlower, grUv).r;
+vGrFlower = (fract(aGrRnd.x * 91.7 + aGrRnd.z * 37.3) < 0.035 * grFlK && grSnowK < 0.25) ? 1.0 : 0.0;
+grH *= 1.0 + vGrFlower * 0.3;
 int grVi = gl_VertexID % 3;
 vGrTip = grVi == 2 ? 1.0 : 0.0;
 vGrBend = 0.0;
@@ -421,7 +443,7 @@ if (grH > 0.03) {
   float grA = (aGrRnd.y - 0.5) * 0.9;
   vec2 grSide = vec2(-grDir.y, grDir.x);
   grSide = vec2(grSide.x * cos(grA) - grSide.y * sin(grA), grSide.x * sin(grA) + grSide.y * cos(grA));
-  float grW = uGrWidth * mix(0.7, 1.3, aGrRnd.z) * min(1.0, grH * 4.0);
+  float grW = uGrWidth * mix(0.7, 1.3, aGrRnd.z) * min(1.0, grH * 4.0) * (1.0 + vGrFlower * 0.5);
   if (grVi == 0) transformed.xz -= grSide * grW;
   else if (grVi == 1) transformed.xz += grSide * grW;
   else {
@@ -467,6 +489,7 @@ varying vec3 vGrCol;
 varying float vGrTip;
 varying float vGrShade;
 varying float vGrBend;
+varying float vGrFlower;
 uniform float uGrShadeA;
 uniform float uGrShadeB;
 uniform float uGrBendLight;`
@@ -474,7 +497,10 @@ uniform float uGrBendLight;`
         // Darker at the base (dense blades shade each other), sunlit and a touch warmer at the tip
         .replace(
           '#include <map_fragment>',
-          'diffuseColor.rgb *= vGrCol * mix(uGrShadeA, uGrShadeB, vGrTip) * mix(vec3(1.0), vec3(1.06, 1.05, 0.9), vGrTip) * (1.0 + uGrBendLight * vGrBend);'
+          // A flowering blade: the tip turns into a white head with a faint yellow eye at its very point
+          'vec3 grC = vGrCol;\n' +
+          'if (vGrFlower > 0.5) grC = mix(grC, mix(vec3(0.92, 0.93, 0.88), vec3(0.95, 0.8, 0.3), smoothstep(0.95, 0.98, vGrTip)), smoothstep(0.84, 0.88, vGrTip));\n' +
+          'diffuseColor.rgb *= grC * mix(uGrShadeA, uGrShadeB, vGrTip) * mix(vec3(1.0), vec3(1.06, 1.05, 0.9), vGrTip) * (1.0 + uGrBendLight * vGrBend);'
         )
         // Lit like the ground under it (normal straight up), on both faces
         .replace(

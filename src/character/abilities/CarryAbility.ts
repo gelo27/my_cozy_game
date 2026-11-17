@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { IAbility, CharacterContext } from './IAbility';
 import { CARRY_CONFIG, COLLISION_GROUPS } from '../../config/constants';
+import { interactionFocus, FOCUS_HELD } from '../../gameplay/InteractionFocus';
 
 export class CarryAbility implements IAbility {
   private readonly headOriginScratch = new THREE.Vector3();
@@ -10,6 +11,10 @@ export class CarryAbility implements IAbility {
   public enabled: boolean = true;
   
   public isHolding: boolean = false;
+  /** The loose body in reach (refreshed every SCAN seconds) */
+  private candidate: RAPIER.RigidBody | null = null;
+  private scanTimer = 0;
+  private readonly scanOrigin = new THREE.Vector3();
   public heldBody: RAPIER.RigidBody | null = null;
 
   private savedCollisionGroups: number | null = null;
@@ -23,8 +28,24 @@ export class CarryAbility implements IAbility {
   public update(dt: number, context: CharacterContext): void {
     if (!this.enabled) return;
 
+    // Something in hand always takes E (throw); otherwise the nearest loose body competes with the
+    // other E targets (InteractionFocus), looked up a few times a second
+    if (this.isHolding) {
+      interactionFocus.offer('carry', null, FOCUS_HELD);
+    } else {
+      this.scanTimer -= dt;
+      if (this.scanTimer <= 0) {
+        this.scanTimer = 0.1;
+        const p = context.body.translation();
+        const body = context.physics.findNearestDynamicBody(this.scanOrigin.set(p.x, p.y, p.z), CARRY_CONFIG.PICKUP_RADIUS, context.body);
+        this.candidate = body && body.isValid() ? body : null;
+      }
+      if (this.candidate && !this.candidate.isValid()) this.candidate = null;
+      if (this.candidate) interactionFocus.offer('carry', this.candidate.translation());
+    }
+
     // Check for pickup or throw trigger
-    if (context.input.interactJustPressed) {
+    if (context.input.interactJustPressed && interactionFocus.allows('carry')) {
       if (this.isHolding) {
         this.throwObject(context);
       } else {
