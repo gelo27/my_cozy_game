@@ -6,7 +6,10 @@ import {defineConfig, type Plugin} from 'vite';
 
 function isLoopbackHostHeader(hostHeader: string): boolean {
   try {
-    const hostname = new URL(`http://${hostHeader}`).hostname.toLowerCase().replace(/^\\[|\\]$/g, '');
+    const rawHostname = new URL(`http://${hostHeader}`).hostname.toLowerCase();
+    const hostname = rawHostname.startsWith('[') && rawHostname.endsWith(']')
+      ? rawHostname.slice(1, -1)
+      : rawHostname;
     return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
   } catch {
     return false;
@@ -73,7 +76,7 @@ function devWorldDataPlugin(): Plugin {
           }
 
           const contentType = req.headers['content-type'] ?? '';
-          if (!/^application\\/json(?:\\s*;|$)/i.test(contentType)) {
+          if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
             res.statusCode = 415;
             res.end('Expected application/json');
             return;
