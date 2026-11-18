@@ -9,19 +9,32 @@ export class PhysicsWorld {
   public world!: RAPIER.World;
   public rapier!: typeof RAPIER;
   private initialized: boolean = false;
+  /** Set before disposal so an in-flight WASM initialization cannot recreate the world. */
+  private disposed = false;
+  /** Accumulates render-frame time and advances Rapier only in fixed-size steps. */
+  private accumulator = 0;
   private currentGravityY: number = PHYSICS_CONFIG.GRAVITY;
 
   public async init(): Promise<void> {
-    if (this.initialized) return;
-    
+    if (this.initialized || this.disposed) return;
+
     if (!rapierInitPromise) {
-      rapierInitPromise = RAPIER.init();
+      rapierInitPromise = RAPIER.init().catch((error) => {
+        // Allow a later attempt to initialize Rapier after a transient WASM load failure.
+        rapierInitPromise = null;
+        throw error;
+      });
     }
     await rapierInitPromise;
-    
+
+    // dispose() may run while the shared Rapier WASM promise is pending (for example,
+    // during React StrictMode's development-only mount/unmount check).
+    if (this.disposed || this.initialized) return;
+
     this.rapier = RAPIER;
     const gravity = new RAPIER.Vector3(0, this.currentGravityY, 0);
     this.world = new RAPIER.World(gravity);
+    this.accumulator = 0;
     this.initialized = true;
   }
 
@@ -52,7 +65,11 @@ export class PhysicsWorld {
   }
 
   public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.initialized = false;
+    this.accumulator = 0;
+    this.scratchRay = null;
     if (this.world) {
       try {
         this.world.free();
@@ -63,16 +80,33 @@ export class PhysicsWorld {
     }
   }
 
+  /**
+   * Advances Rapier with a fixed timestep. Render frames may be shorter or longer than one
+   * physics tick; the accumulator keeps the simulation rate independent of the display refresh.
+   * Catch-up work is capped to MAX_SUB_STEPS to avoid a spiral of death after a long frame.
+   */
   public step(dt: number): void {
-    if (!this.world || !this.initialized) return;
+    if (!this.world || !this.initialized || !Number.isFinite(dt) || dt <= 0) return;
+
+    const fixedStep = PHYSICS_CONFIG.FIXED_TIMESTEP;
+    const maxSubSteps = Math.max(1, Math.floor(PHYSICS_CONFIG.MAX_SUB_STEPS));
+    if (!Number.isFinite(fixedStep) || fixedStep <= 0) return;
+
+    this.accumulator = Math.min(this.accumulator + dt, fixedStep * maxSubSteps);
+
     try {
-      // Sub-stepping for rock-solid stability and prevent tunneling
-      const timestep = Math.min(Math.max(dt, 0.001), 0.05);
-      if (!Number.isFinite(timestep)) return;
-      this.world.timestep = timestep;
-      this.world.step();
+      let steps = 0;
+      while (this.accumulator + 1e-8 >= fixedStep && steps < maxSubSteps) {
+        this.world.timestep = fixedStep;
+        this.world.step();
+        this.accumulator -= fixedStep;
+        steps++;
+      }
+      if (this.accumulator < 1e-8) this.accumulator = 0;
     } catch (err) {
       console.warn('[PhysicsWorld] Step error:', err);
+      // Do not retain a large backlog after an exceptional physics step.
+      this.accumulator = Math.min(this.accumulator, fixedStep);
     }
   }
 
