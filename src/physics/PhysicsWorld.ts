@@ -5,6 +5,15 @@ import { PHYSICS_CONFIG, COLLISION_GROUPS } from '../config/constants';
 // Thread-safe WASM loader lock
 let rapierInitPromise: Promise<void> | null = null;
 
+interface InterpolatedBodyPose {
+  body: RAPIER.RigidBody;
+  previousPosition: THREE.Vector3;
+  currentPosition: THREE.Vector3;
+}
+
+/** A displacement this large in one fixed tick is treated as a teleport, not motion. */
+const INTERPOLATION_TELEPORT_DISTANCE_SQ = 4.0;
+
 export class PhysicsWorld {
   public world!: RAPIER.World;
   public rapier!: typeof RAPIER;
@@ -13,6 +22,8 @@ export class PhysicsWorld {
   private disposed = false;
   /** Accumulates render-frame time and advances Rapier only in fixed-size steps. */
   private accumulator = 0;
+  /** Bodies whose render transforms need fixed-step interpolation (currently the player). */
+  private readonly interpolatedBodies = new Map<number, InterpolatedBodyPose>();
   private currentGravityY: number = PHYSICS_CONFIG.GRAVITY;
 
   public async init(): Promise<void> {
@@ -69,6 +80,7 @@ export class PhysicsWorld {
     this.disposed = true;
     this.initialized = false;
     this.accumulator = 0;
+    this.interpolatedBodies.clear();
     this.scratchRay = null;
     if (this.world) {
       try {
@@ -77,6 +89,75 @@ export class PhysicsWorld {
         // Ignore if already freed
       }
       this.world = undefined as any;
+    }
+  }
+
+  /**
+   * Starts tracking a rigid body's last two simulated positions. Register after creating the body.
+   * This is deliberately opt-in: the game has many physics bodies that are not rendered as
+   * independently moving character roots.
+   */
+  public registerInterpolatedBody(body: RAPIER.RigidBody): void {
+    if (!body || !this.world || !this.initialized) return;
+    try {
+      if (!body.isValid()) return;
+      const p = body.translation();
+      const position = new THREE.Vector3(p.x, p.y, p.z);
+      this.interpolatedBodies.set(body.handle, {
+        body,
+        previousPosition: position.clone(),
+        currentPosition: position,
+      });
+    } catch {
+      // A body may be removed while a scene is being torn down.
+    }
+  }
+
+  /** Remove a body from render interpolation before its rigid body is destroyed. */
+  public unregisterInterpolatedBody(body: RAPIER.RigidBody): void {
+    if (!body) return;
+    this.interpolatedBodies.delete(body.handle);
+  }
+
+  /**
+   * Reset both samples after a deliberate teleport/respawn so the render transform cannot travel
+   * through the space between the old and new positions.
+   */
+  public resetBodyInterpolation(body: RAPIER.RigidBody): void {
+    if (!body || !this.world || !this.initialized) return;
+    try {
+      if (!body.isValid()) return;
+      const p = body.translation();
+      const state = this.interpolatedBodies.get(body.handle);
+      if (state) {
+        state.previousPosition.set(p.x, p.y, p.z);
+        state.currentPosition.set(p.x, p.y, p.z);
+      } else {
+        this.registerInterpolatedBody(body);
+      }
+    } catch {
+      // Ignore a body that became invalid during a reset.
+    }
+  }
+
+  /**
+   * Returns the render-only position between the previous and current fixed physics poses.
+   * Gameplay, collision queries and authoritative transforms must continue using body.translation().
+   */
+  public getInterpolatedBodyPosition(body: RAPIER.RigidBody, out: THREE.Vector3): THREE.Vector3 {
+    if (!body) return out;
+    try {
+      if (!body.isValid()) return out;
+      const state = this.interpolatedBodies.get(body.handle);
+      if (!state) {
+        const p = body.translation();
+        return out.set(p.x, p.y, p.z);
+      }
+      const fixedStep = PHYSICS_CONFIG.FIXED_TIMESTEP;
+      const alpha = THREE.MathUtils.clamp(this.accumulator / fixedStep, 0, 1);
+      return out.copy(state.previousPosition).lerp(state.currentPosition, alpha);
+    } catch {
+      return out;
     }
   }
 
@@ -97,8 +178,40 @@ export class PhysicsWorld {
     try {
       let steps = 0;
       while (this.accumulator + 1e-8 >= fixedStep && steps < maxSubSteps) {
+        // Snapshot the last completed pose before advancing one physics tick.
+        for (const [handle, state] of this.interpolatedBodies) {
+          try {
+            if (!state.body.isValid()) {
+              this.interpolatedBodies.delete(handle);
+              continue;
+            }
+            state.previousPosition.copy(state.currentPosition);
+          } catch {
+            this.interpolatedBodies.delete(handle);
+          }
+        }
+
         this.world.timestep = fixedStep;
         this.world.step();
+
+        // Save the new completed pose. Large one-tick jumps are teleports (for example respawn),
+        // so snap both samples instead of interpolating through the world.
+        for (const [handle, state] of this.interpolatedBodies) {
+          try {
+            if (!state.body.isValid()) {
+              this.interpolatedBodies.delete(handle);
+              continue;
+            }
+            const p = state.body.translation();
+            state.currentPosition.set(p.x, p.y, p.z);
+            if (state.previousPosition.distanceToSquared(state.currentPosition) > INTERPOLATION_TELEPORT_DISTANCE_SQ) {
+              state.previousPosition.copy(state.currentPosition);
+            }
+          } catch {
+            this.interpolatedBodies.delete(handle);
+          }
+        }
+
         this.accumulator -= fixedStep;
         steps++;
       }

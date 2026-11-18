@@ -1112,7 +1112,7 @@ export class GameEngine {
     } else {
       tpCamera.isHoldingObject = character.telemetry.isHoldingObject;
       tpCamera.isBuilding = character.telemetry.isBuildModeActive || isPaintingMode;
-      const cameraTargetPos = ride ? ride.getPosition() : character.getPosition();
+      const cameraTargetPos = ride ? ride.getPosition() : character.getRenderPosition();
       // Fishing takes the camera along the cast and under the water by the float
       const fishing = w.gameplay.fishing;
       if (fishing.cameraYawRequest !== null) {

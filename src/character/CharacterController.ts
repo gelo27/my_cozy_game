@@ -238,6 +238,8 @@ export class CharacterController {
   /** Crosshair-on-the-ground for the shovel and planting (wired by the engine). */
   public groundAim: GroundAim | null = null;
   private readonly aimPlayerPos = new THREE.Vector3();
+  /** Reused render-only player position; never used by physics or gameplay queries. */
+  private readonly renderPositionScratch = new THREE.Vector3();
   private readonly restraintVel = new THREE.Vector3();
 
   constructor(
@@ -287,6 +289,7 @@ export class CharacterController {
       );
 
     this.collider = this.physics.world.createCollider(colliderDesc, this.body);
+    this.physics.registerInterpolatedBody(this.body);
   }
 
   private initAbilities(): void {
@@ -741,9 +744,11 @@ export class CharacterController {
         );
       }
 
-      // 6. Synchronize 3D visual mannequin model & Lean Effect
+      // 6. Synchronize the visible mannequin with the interpolated physics pose.
+      // The body itself remains authoritative for all gameplay and collision calculations.
       const trans = this.body.translation();
-      this.model.group.position.set(trans.x, trans.y, trans.z);
+      this.physics.getInterpolatedBodyPosition(this.body, this.renderPositionScratch);
+      this.model.group.position.copy(this.renderPositionScratch);
 
       // Compute target facing rotation angle based on movement or input
       let targetFacingAngle: number | null = null;
@@ -869,6 +874,7 @@ export class CharacterController {
       const p = customPos || this.spawnPosition;
       if (Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
         this.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
+        this.physics.resetBodyInterpolation(this.body);
         this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
         this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
         this.body.setGravityScale(1.0, true);
@@ -880,6 +886,14 @@ export class CharacterController {
     } catch (err) {
       console.warn('[CharacterController] respawn error:', err);
     }
+  }
+
+  /** Position of the visible character root for camera/rendering; gameplay should use getPosition(). */
+  public getRenderPosition(): THREE.Vector3 {
+    if (!this.body || !this.physics.isInitialized()) {
+      return this.renderPositionScratch.copy(this.spawnPosition);
+    }
+    return this.physics.getInterpolatedBodyPosition(this.body, this.renderPositionScratch);
   }
 
   public getPosition(): THREE.Vector3 {
