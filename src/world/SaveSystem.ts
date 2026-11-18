@@ -132,7 +132,7 @@ function isValidRleBase64(value: unknown, expectedValues: number): boolean {
 
 function isTerrainSave(value: unknown): value is TerrainSaveData {
   if (!isRecord(value) || !isIntegerInRange(value.size, 1, WORLD_SIZE)) return false;
-  const size = value.size;
+  const size = value.size as number;
 
   if (value.enc === 'd1') {
     return size === WORLD_SIZE &&
@@ -204,7 +204,7 @@ function isWorkerSave(value: unknown): boolean {
       typeof value.role !== 'string' || !isFiniteNumber(value.energy) ||
       !isFiniteNumber(value.jobsDone) || !isNumberTuple(value.pos, 3) ||
       !isNumberTuple(value.home, 3) || typeof value.asleep !== 'boolean' ||
-      !(value.bed === null || typeof value.bed === 'string')) return false;
+      !(value.bed === undefined || value.bed === null || typeof value.bed === 'string')) return false;
   if (value.food !== undefined && !isFiniteNumber(value.food)) return false;
   if (value.carry !== undefined &&
       (!Array.isArray(value.carry) || !value.carry.every((item) =>
