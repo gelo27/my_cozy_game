@@ -4,6 +4,29 @@ import fs from 'fs';
 import path from 'path';
 import {defineConfig, type Plugin} from 'vite';
 
+function isLoopbackHostHeader(hostHeader: string): boolean {
+  try {
+    const hostname = new URL(`http://${hostHeader}`).hostname.toLowerCase().replace(/^\\[|\\]$/g, '');
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
+
+/** Require a loopback Host and, when supplied by the browser, an exact same-origin match. */
+function isTrustedLocalRequest(originHeader: string | undefined, hostHeader: string): boolean {
+  if (!isLoopbackHostHeader(hostHeader)) return false;
+  if (!originHeader) return true; // Non-browser local tools may omit Origin; the loopback peer is still required.
+  try {
+    const origin = new URL(originHeader);
+    const requestHost = new URL(`http://${hostHeader}`);
+    return origin.protocol === 'http:' && origin.origin === requestHost.origin &&
+      isLoopbackHostHeader(origin.host);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Dev-only endpoints for the in-game editor: POST /__dev/rivers writes src/world/rivers/rivers.json,
  * POST /__dev/caves writes src/explore/cave/caves.json. Only loopback clients may write (the dev
@@ -30,26 +53,67 @@ function devWorldDataPlugin(): Plugin {
     configureServer(server) {
       for (const [route, target] of files) {
         server.middlewares.use(route, (req, res) => {
+          if (req.method !== 'POST') {
+            res.statusCode = 405;
+            res.setHeader('Allow', 'POST');
+            res.end();
+            return;
+          }
+
           const ip = req.socket.remoteAddress ?? '';
-          if (req.method !== 'POST' || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) {
+          const hostHeader = req.headers.host ?? '';
+          const fetchSiteHeader = req.headers['sec-fetch-site'];
+          const fetchSite = Array.isArray(fetchSiteHeader) ? fetchSiteHeader[0] : fetchSiteHeader;
+          const isLoopbackPeer = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip);
+          if (!isLoopbackPeer || !isTrustedLocalRequest(req.headers.origin, hostHeader) ||
+              (fetchSite !== undefined && fetchSite !== 'same-origin' && fetchSite !== 'none')) {
             res.statusCode = 403;
             res.end();
             return;
           }
+
+          const contentType = req.headers['content-type'] ?? '';
+          if (!/^application\\/json(?:\\s*;|$)/i.test(contentType)) {
+            res.statusCode = 415;
+            res.end('Expected application/json');
+            return;
+          }
+
           let body = '';
+          let bodyBytes = 0;
+          let tooLarge = false;
           req.on('data', (chunk) => {
-            body += chunk;
-            if (body.length > target.limit) req.destroy();
+            if (tooLarge) return;
+            const part = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+            bodyBytes += Buffer.byteLength(part, 'utf8');
+            if (bodyBytes > target.limit) {
+              tooLarge = true;
+              body = '';
+              return;
+            }
+            body += part;
           });
           req.on('end', () => {
+            if (tooLarge) {
+              res.statusCode = 413;
+              res.end('Request body too large');
+              return;
+            }
             try {
-              if (!target.check(JSON.parse(body))) throw new Error(`Expected ${target.what}`);
+              const parsed: unknown = JSON.parse(body);
+              if (!target.check(parsed)) throw new Error(`Expected ${target.what}`);
               lastWrite.set(target.file, Date.now());
               fs.writeFileSync(target.file, body);
               res.end('ok');
-            } catch (err) {
+            } catch {
               res.statusCode = 400;
-              res.end(String(err));
+              res.end('Invalid JSON payload');
+            }
+          });
+          req.on('error', () => {
+            if (!res.writableEnded) {
+              res.statusCode = 400;
+              res.end();
             }
           });
         });
