@@ -1297,6 +1297,30 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
     ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2);
     ctx.fill();
   };
+  /** Small reusable beveled paver. Shapes are repeated over texture borders for seamless tiling. */
+  const drawPaver = (x: number, y: number, w: number, h: number, tone: string, angle = 0) => {
+    wrapShape(x, y, () => {
+      ctx.rotate(angle);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = def.borderColor;
+      ctx.fillRect(-w / 2, -h / 2, w, h);
+      const pad = Math.max(1.5, Math.min(w, h) * 0.08);
+      const grad = ctx.createLinearGradient(0, -h / 2, 0, h / 2);
+      grad.addColorStop(0, def.accentColor);
+      grad.addColorStop(0.16, tone);
+      grad.addColorStop(0.86, tone);
+      grad.addColorStop(1, def.secondaryColor);
+      ctx.fillStyle = grad;
+      ctx.fillRect(-w / 2 + pad, -h / 2 + pad, w - pad * 2, h - pad * 2);
+      ctx.globalAlpha = 0.22;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-w / 2 + pad + 1, -h / 2 + pad + 1);
+      ctx.lineTo(w / 2 - pad - 1, -h / 2 + pad + 1);
+      ctx.stroke();
+    });
+  };
 
   switch (type) {
     case TerrainTileType.GRASS:
@@ -1347,6 +1371,182 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
         }
       }
       break;
+
+    case TerrainTileType.SIDEWALK_PAVERS: {
+      // Mid-sized rectangular concrete slabs in a staggered running bond.
+      const tones = ['#92989e', '#7d848b', '#a1a7ad', '#858c93', '#737b82'];
+      for (let row = -1; row < 9; row++) {
+        const y = row * 32 + 16;
+        const offset = (row & 1) ? 32 : 0;
+        for (let col = -1; col < 6; col++) {
+          const x = col * 64 + offset + 32;
+          drawPaver(x, y, 61, 29, tones[(Math.abs(row * 7 + col * 3) % tones.length)]);
+        }
+      }
+      break;
+    }
+
+    case TerrainTileType.CLINKER_HERRINGBONE: {
+      // Warm clay bricks alternate orientation in interlocking quarter-turn groups.
+      // The 64 px motif repeats cleanly in both axes.
+      const tones = ['#bd674b', '#a95139', '#c87859', '#91422f', '#b45a40', '#d0805e'];
+      for (let row = -1; row < 9; row++) {
+        for (let col = -1; col < 9; col++) {
+          const x = col * 32 + 16;
+          const y = row * 32 + 16;
+          const orient = ((Math.floor(row / 2) + Math.floor(col / 2)) & 1) ? Math.PI / 2 : 0;
+          const tone = tones[Math.abs(row * 5 + col * 7) % tones.length];
+          drawPaver(x, y, 29, 14, tone, orient);
+        }
+      }
+      // Fine clay flecks keep large painted areas from reading as a flat checkerboard.
+      for (let i = 0; i < 240; i++) {
+        ctx.globalAlpha = 0.12 + rnd() * 0.18;
+        ctx.fillStyle = rnd() < 0.5 ? '#f0ad86' : '#4d281f';
+        wrapRect(rnd() * size, rnd() * size, 1 + rnd() * 2, 1);
+      }
+      break;
+    }
+
+    case TerrainTileType.GRANITE_SETTS: {
+      // Dense, slightly irregular split-granite setts with dark joints and chipped corners.
+      const tones = ['#70767c', '#555b62', '#858b91', '#646a71', '#4f555c', '#777d83'];
+      ctx.fillStyle = def.borderColor;
+      ctx.fillRect(0, 0, size, size);
+      for (let row = 0; row < 8; row++) {
+        for (let col = 0; col < 8; col++) {
+          const cx = col * 32 + 16;
+          const cy = row * 32 + 16;
+          const w = 27 + rnd() * 3;
+          const h = 27 + rnd() * 3;
+          const cut = 3 + rnd() * 3;
+          const tone = tones[(rnd() * tones.length) | 0];
+          wrapShape(cx, cy, () => {
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = '#24282d';
+            ctx.beginPath();
+            ctx.moveTo(-w / 2 + cut, -h / 2);
+            ctx.lineTo(w / 2 - cut * 0.7, -h / 2 + 1);
+            ctx.lineTo(w / 2, -h / 2 + cut);
+            ctx.lineTo(w / 2 - 1, h / 2 - cut);
+            ctx.lineTo(w / 2 - cut, h / 2);
+            ctx.lineTo(-w / 2 + cut * 0.5, h / 2 - 1);
+            ctx.lineTo(-w / 2, h / 2 - cut);
+            ctx.lineTo(-w / 2 + 1, -h / 2 + cut);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = tone;
+            ctx.globalAlpha = 0.96;
+            ctx.beginPath();
+            ctx.moveTo(-w / 2 + cut + 1, -h / 2 + 2);
+            ctx.lineTo(w / 2 - cut, -h / 2 + 2);
+            ctx.lineTo(w / 2 - 2, -h / 2 + cut + 1);
+            ctx.lineTo(w / 2 - 2, h / 2 - cut);
+            ctx.lineTo(w / 2 - cut, h / 2 - 2);
+            ctx.lineTo(-w / 2 + cut + 1, h / 2 - 2);
+            ctx.lineTo(-w / 2 + 2, h / 2 - cut);
+            ctx.lineTo(-w / 2 + 2, -h / 2 + cut + 1);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 0.25;
+            ctx.strokeStyle = '#e0e4e7';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-w / 2 + cut + 4, -h / 2 + 3);
+            ctx.lineTo(w / 2 - cut - 3, -h / 2 + 3);
+            ctx.stroke();
+          });
+        }
+      }
+      break;
+    }
+
+    case TerrainTileType.SANDSTONE_FLAGSTONE: {
+      // Large organic sandstone slabs with softly fractured edges and sandy joints.
+      const tones = ['#c0a77e', '#aa906a', '#d0b68d', '#9e8663', '#b79c73', '#d7c198'];
+      ctx.fillStyle = '#746047';
+      ctx.fillRect(0, 0, size, size);
+      for (let row = 0; row < 4; row++) {
+        for (let col = 0; col < 4; col++) {
+          const cx = col * 64;
+          const cy = row * 64;
+          const tone = tones[(rnd() * tones.length) | 0];
+          const points: [number, number][] = [];
+          const radius = 27 + rnd() * 3;
+          for (let i = 0; i < 8; i++) {
+            const angle = (i / 8) * Math.PI * 2 + (rnd() - 0.5) * 0.22;
+            const r = radius * (0.86 + rnd() * 0.14);
+            points.push([Math.cos(angle) * r, Math.sin(angle) * r]);
+          }
+          wrapShape(cx, cy, () => {
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = '#5c4a36';
+            ctx.beginPath();
+            points.forEach(([x, y], i) => i ? ctx.lineTo(x + 1, y + 1) : ctx.moveTo(x + 1, y + 1));
+            ctx.closePath();
+            ctx.fill();
+            const grad = ctx.createLinearGradient(-30, -28, 28, 28);
+            grad.addColorStop(0, def.accentColor);
+            grad.addColorStop(0.38, tone);
+            grad.addColorStop(1, def.secondaryColor);
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            points.forEach(([x, y]) => ctx.lineTo(x, y));
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 0.2;
+            ctx.strokeStyle = '#fff0d6';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-14, -15);
+            ctx.lineTo(-4, -20);
+            ctx.stroke();
+          });
+        }
+      }
+      break;
+    }
+
+    case TerrainTileType.LIMESTONE_PAVERS: {
+      // Clean large square slabs for patios, with restrained stone grain and light bevels.
+      const tones = ['#ded5c4', '#cfc5b2', '#e7decd', '#d4c9b5', '#c7bda9'];
+      for (let row = 0; row < 4; row++) {
+        for (let col = 0; col < 4; col++) {
+          const cx = col * 64 + 32;
+          const cy = row * 64 + 32;
+          const tone = tones[(rnd() * tones.length) | 0];
+          wrapShape(cx, cy, () => {
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = def.borderColor;
+            ctx.fillRect(-31, -31, 62, 62);
+            const grad = ctx.createLinearGradient(-28, -28, 28, 28);
+            grad.addColorStop(0, def.accentColor);
+            grad.addColorStop(0.42, tone);
+            grad.addColorStop(1, def.secondaryColor);
+            ctx.fillStyle = grad;
+            ctx.fillRect(-28, -28, 56, 56);
+            ctx.globalAlpha = 0.22;
+            ctx.strokeStyle = '#fffdf5';
+            ctx.lineWidth = 1.2;
+            ctx.strokeRect(-27, -27, 54, 54);
+            ctx.globalAlpha = 0.12;
+            ctx.strokeStyle = '#8a806e';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(-18, -5 + rnd() * 7);
+            ctx.bezierCurveTo(-4, -10, 5, 8, 18, 4);
+            ctx.stroke();
+          });
+        }
+      }
+      // Low-contrast mineral specks, sparse enough to keep the slabs calm.
+      for (let i = 0; i < 150; i++) {
+        ctx.globalAlpha = 0.1 + rnd() * 0.1;
+        ctx.fillStyle = rnd() < 0.5 ? '#ffffff' : '#827866';
+        wrapRect(rnd() * size, rnd() * size, 1 + rnd() * 2, 1 + rnd() * 2);
+      }
+      break;
+    }
     case TerrainTileType.SNOW:
       // Soft wind-blown ripples and fine crystals; the shader adds drifts, blue shade and glints
       for (let i = 0; i < 90; i++) {
