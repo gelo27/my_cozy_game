@@ -29,7 +29,7 @@ export type FootSurface =
  *   felt, not heard, and Foley is high-passed), so every recipe ends in a 24 dB/oct high-pass at
  *   its surface's corner. That is what removes the fake "bass thump".
  *
- * Runtime: every sound is rendered once at 24 kHz into a few variants (~2.5 MB for all of them),
+ * Runtime: every sound is rendered once at 24 kHz into a few MB of pre-rendered AudioBuffers,
  * pre-rendered one per browser idle slot. Playing a sound allocates only the one-shot
  * AudioBufferSourceNode Web Audio requires; gains come from a fixed pool of pre-connected voices
  * and the end handler is one shared function, so walking makes no JS garbage.
