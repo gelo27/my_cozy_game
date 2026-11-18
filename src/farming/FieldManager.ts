@@ -171,6 +171,8 @@ function rng(seed: number): () => number {
  */
 export class FieldManager {
   private readonly fields = new Map<string, FarmField>();
+  private readonly fieldsByOrigin = new Map<string, FarmField>();
+  private readonly fractionalFields = new Set<FarmField>();
   private readonly group = new THREE.Group();
   private readonly batches = new Map<string, Batch>();
   private readonly visuals = new Map<string, CropVisual>();
@@ -309,7 +311,7 @@ export class FieldManager {
     return best ? { field: best, dist: bestDist } : null;
   }
 
-  private fieldContaining(x: number, z: number): FarmField | null {
+  public fieldContaining(x: number, z: number): FarmField | null {
     for (const f of this.fields.values()) {
       if (x >= f.gx && x < f.gx + FIELD_CELLS && z >= f.gz && z < f.gz + FIELD_CELLS) return f;
     }
@@ -346,10 +348,10 @@ export class FieldManager {
     return { kind: 'dig', gx, gz, reason: this.validate(gx, gz) };
   }
 
-  private validate(gx: number, gz: number): DigBlockReason | null {
+  private validate(gx: number, gz: number, overlaps = !!this.overlapping(gx, gz)): DigBlockReason | null {
     const terrain = this.terrain;
     if (!terrain) return 'blocked';
-    if (this.overlapping(gx, gz)) return 'overlap';
+    if (overlaps) return 'overlap';
 
     for (let z = gz; z < gz + FIELD_CELLS; z++) {
       for (let x = gx; x < gx + FIELD_CELLS; x++) {
@@ -401,12 +403,55 @@ export class FieldManager {
 
   // ---------------------------------------------------------------- editing
 
+  public editorRevision = 0;
+
+  public getEditorFieldAtOrigin(gx: number, gz: number): FarmField | null {
+    return this.fieldsByOrigin.get(`${gx}:${gz}`) ?? null;
+  }
+
+  public canCreateEditorField(gx: number, gz: number): boolean {
+    if (!Number.isInteger(gx) || !Number.isInteger(gz)) return false;
+    for (let z = gz - FIELD_CELLS + 1; z < gz + FIELD_CELLS; z++) {
+      for (let x = gx - FIELD_CELLS + 1; x < gx + FIELD_CELLS; x++) {
+        if (this.getEditorFieldAtOrigin(x, z)) return false;
+      }
+    }
+    for (const field of this.fractionalFields) {
+      if (Math.abs(gx - field.gx) < FIELD_CELLS && Math.abs(gz - field.gz) < FIELD_CELLS) return false;
+    }
+    return this.validate(gx, gz, false) === null;
+  }
+
+  public captureEditorField(gx: number, gz: number): FieldSaveData | null {
+    const field = this.getEditorFieldAtOrigin(gx, gz);
+    if (!field) return null;
+    return { gx, gz, prev: [...field.prevTiles], crop: field.crop ? { ...field.crop } : null };
+  }
+
+  public restoreEditorField(gx: number, gz: number, data: FieldSaveData | null): void {
+    const current = this.getEditorFieldAtOrigin(gx, gz);
+    if (!data) {
+      if (current) this.removeField(current.id);
+      return;
+    }
+    const crop = data.crop ? { ...data.crop } : null;
+    if (!current) {
+      this.createField(gx, gz, crop, [...data.prev]);
+      return;
+    }
+    current.crop = crop;
+    current.wetness = crop?.isWatered ? 1 : 0;
+    this.markCropsDirty();
+  }
+
   /** Called when the shovel digs a new field (not when a save restores one). */
   public onDug: ((field: FarmField) => void) | null = null;
 
   public createField(gx: number, gz: number, crop: CropState | null = null, prevTiles?: number[]): FarmField | null {
     const terrain = this.terrain;
     if (!terrain) return null;
+    const origin = `${gx}:${gz}`;
+    if (this.fieldsByOrigin.has(origin)) return null;
     const prev: number[] = [];
     for (let z = gz; z < gz + FIELD_CELLS; z++) {
       for (let x = gx; x < gx + FIELD_CELLS; x++) {
@@ -433,6 +478,9 @@ export class FieldManager {
       wetShown: -1,
     };
     this.fields.set(field.id, field);
+    this.fieldsByOrigin.set(origin, field);
+    if (!Number.isInteger(gx) || !Number.isInteger(gz)) this.fractionalFields.add(field);
+    this.editorRevision++;
     this.dirty = true;
     return field;
   }
@@ -452,16 +500,22 @@ export class FieldManager {
     this.dryOut(field);
     this.placementCache.delete(id);
     this.fields.delete(id);
+    this.fieldsByOrigin.delete(`${field.gx}:${field.gz}`);
+    this.fractionalFields.delete(field);
+    this.editorRevision++;
     this.dirty = true;
     return true;
   }
 
   public clear(): void {
+    if (this.fields.size) this.editorRevision++;
     for (const f of this.fields.values()) {
       this.group.remove(f.indicator);
       this.dryOut(f);
     }
     this.fields.clear();
+    this.fieldsByOrigin.clear();
+    this.fractionalFields.clear();
     this.placementCache.clear();
     this.dirty = true;
   }

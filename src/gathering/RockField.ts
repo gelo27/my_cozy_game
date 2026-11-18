@@ -33,6 +33,13 @@ export interface RockNode {
   growProgress: number;
 }
 
+export interface AuthoredRock {
+  id: number;
+  kind: RockKind;
+  position: [number, number, number];
+  scale: number;
+}
+
 /** A rock shape and its three LODs' geometry ids in the batch. */
 interface VariantEntry {
   shape: RockVariant;
@@ -86,6 +93,56 @@ export class RockField {
   public onMined: ((drops: { itemId: string; amount: number }[], at: THREE.Vector3) => void) | null = null;
 
   private rocks: RockNode[] = [];
+  public editorRevision = 0;
+  private readonly authored = new Map<number, RockNode>();
+  private nextAuthoredId = -1;
+
+  public get editorNodes(): readonly RockNode[] {
+    return this.rocks;
+  }
+
+  public addAuthoredRock(position: THREE.Vector3, kind: RockKind, scale = 1): RockNode | null {
+    if (this.authored.size >= 512) return null;
+    const rock = this.createRock(this.nextAuthoredId--, position, kind, scale);
+    this.authored.set(rock.id, rock);
+    return rock;
+  }
+
+  public isAuthoredRock(id: number): boolean {
+    return this.authored.has(id);
+  }
+
+  public moveAuthoredRock(id: number, position: THREE.Vector3): boolean {
+    const rock = this.authored.get(id);
+    if (!rock) return false;
+    if (rock.body) this.physics.removeRigidBody(rock.body);
+    rock.body = null;
+    rock.position.copy(position);
+    rock.group.position.copy(position);
+    this.syncRock(rock);
+    if (!rock.isDepleted) this.addCollider(rock);
+    return true;
+  }
+
+  public removeAuthoredRock(id: number): void {
+    const rock = this.authored.get(id);
+    if (rock) this.removeMatching((entry) => entry === rock);
+  }
+
+  public serializeAuthored(): AuthoredRock[] {
+    return Array.from(this.authored.values(), (rock) => ({
+      id: rock.id, kind: rock.kind, position: rock.position.toArray(), scale: rock.baseScale,
+    }));
+  }
+
+  public restoreAuthored(data: readonly AuthoredRock[]): void {
+    if (this.authored.size) this.removeMatching((rock) => this.authored.has(rock.id));
+    this.nextAuthoredId = -1;
+    for (const row of data) {
+      this.authored.set(row.id, this.createRock(row.id, new THREE.Vector3(...row.position), row.kind, row.scale));
+      this.nextAuthoredId = Math.min(this.nextAuthoredId, row.id - 1);
+    }
+  }
   private nextId = 0;
   private batch: THREE.BatchedMesh;
   private vertexCapacity = 0;
@@ -411,13 +468,20 @@ export class RockField {
 
   /** Removes every rock the test matches (the cave editor rebuilds the cave ore). */
   public removeRocksWhere(test: (pos: THREE.Vector3) => boolean): void {
+    this.removeMatching((rock) => !this.authored.has(rock.id) && test(rock.position));
+  }
+
+  private removeMatching(test: (rock: RockNode) => boolean): void {
+    const before = this.rocks.length;
     this.rocks = this.rocks.filter((rock) => {
-      if (!test(rock.position)) return true;
+      if (!test(rock)) return true;
+      this.authored.delete(rock.id);
       if (rock.body) this.physics.removeRigidBody(rock.body);
       rock.body = null;
       this.batch.deleteInstance(rock.instanceId);
       return false;
     });
+    if (this.rocks.length !== before) this.editorRevision++;
   }
 
   /** Every LOD_PASS_SECONDS (once the camera moved): each rock takes the LOD its distance asks for. */
@@ -465,7 +529,7 @@ export class RockField {
     return list;
   }
 
-  private createRock(id: number, position: THREE.Vector3, kind: RockKind, scale: number): void {
+  private createRock(id: number, position: THREE.Vector3, kind: RockKind, scale: number): RockNode {
     const group = new THREE.Object3D();
     group.name = `Rock_${kind}_${id}`;
     group.position.copy(position);
@@ -504,6 +568,8 @@ export class RockField {
     this.syncRock(rock);
     this.addCollider(rock);
     this.rocks.push(rock);
+    this.editorRevision++;
+    return rock;
   }
 
   /** Copies the rock's transform and visibility into the batch. */

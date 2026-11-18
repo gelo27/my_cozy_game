@@ -154,7 +154,15 @@ export type EngineMode = 'play' | 'editor';
 export interface DevStats {
   fps: number;
   frameMs: number;
+  frameMsP95: number;
   physicsMs: number;
+  physicsBodies: number | null;
+  physicsColliders: number | null;
+  caveChunks: number;
+  caveBuilding: boolean;
+  caveCollidersReady: boolean;
+  shaderPrewarmMs: number;
+  shaderPrewarmPrograms: number;
   drawCalls: number;
   triangles: number;
   geometries: number;
@@ -255,6 +263,10 @@ export class GameEngine {
   public mode: EngineMode = 'play';
 
   private readonly scene = new THREE.Scene();
+
+  public getEditorScene(): THREE.Scene {
+    return this.scene;
+  }
   private readonly renderer: THREE.WebGLRenderer;
   private readonly physics = new PhysicsWorld();
   private readonly resizeObserver: ResizeObserver;
@@ -456,6 +468,16 @@ export class GameEngine {
     w.exploration.teleport(w.character, this.camera, pos, () => this.callbacks.onNotify(t(atBed ? 'respawn.bed' : 'respawn.spawn'), 'info'));
   }
 
+  /** Fast-travel helper for the developer scenario panel; uses the normal doorway fade and cave exit path. */
+  public devTeleportToSite(siteId: string): boolean {
+    const w = this.world;
+    const site = w?.exploration.sites.find((entry) => entry.id === siteId);
+    if (!w || !site || this.mode !== 'editor') return false;
+    const pos = new THREE.Vector3(site.x, site.y + 1.5, site.z);
+    w.exploration.teleport(w.character, this.camera, pos);
+    return true;
+  }
+
   /** Freezes the whole game (simulation, clock, rendering) and ducks the ambience. */
   public setPaused(paused: boolean): void {
     if (paused === this.paused) return;
@@ -470,6 +492,7 @@ export class GameEngine {
     if (!this.world || this.mode === mode || (mode === 'editor' && !DEV_TOOLS_ENABLED)) return;
     if (mode === 'editor' && !uiScreens.request('editor')) return;
     const { character, editor } = this.world;
+    if (mode === 'play' && editor.hasUnsavedEdits && !window.confirm('Є незбережені зміни світу. Повернутися до гри без збереження?')) return;
     if (mode === 'editor') {
       if (character.buildAbility?.isBuildModeActive) character.buildAbility.toggleBuildMode();
       if (character.buildAbility?.isPaintingModeActive) character.buildAbility.togglePaintingMode();
@@ -740,6 +763,7 @@ export class GameEngine {
       };
       // One full-screen UI at a time (UiScreens): the engine-side screens
       const build = character.buildAbility;
+      build?.setBuildLocationGuard(() => !explorer.inCave);
       uiScreens.register('build', {
         isOpen: () => !!build?.isBuildModeActive,
         close: () => build?.isBuildModeActive && build.toggleBuildMode(),
@@ -837,7 +861,10 @@ export class GameEngine {
       this.world.saves = new SaveSystem(this.world);
       // A save loaded during play uploads its world before the next frame (the start-up load is
       // covered by prewarmShaders)
-      this.world.saves.onApplied = () => (this.gpuWarmupPending = true);
+      this.world.saves.onApplied = () => {
+        this.gpuWarmupPending = true;
+        editor.clearHistory();
+      };
 
       // Resume the last session, else start in the shipped default world, else dress a fresh one
       if (this.world.saves.load(AUTOSAVE_SLOT)) {
@@ -957,6 +984,10 @@ export class GameEngine {
   private lastBuildingTelemetry: BuildingTelemetry | null = null;
   private lastEditorRevision = -1;
   private frameMsAccum = 0;
+  /** Bounded frame-time ring; sampled each frame and sorted only for the 3 Hz dev HUD. */
+  private readonly frameSamples = new Float32Array(120);
+  private frameSampleCount = 0;
+  private frameSampleCursor = 0;
   private lastStepMs = 0;
   /** Building revision the terrain's roof-shelter mask was last built from. */
   private shelterRevision = -1;
@@ -1373,7 +1404,11 @@ export class GameEngine {
       this.scheduleAutosave();
     }
 
-    this.frameMsAccum += performance.now() - frameStart;
+    const frameMs = performance.now() - frameStart;
+    this.frameMsAccum += frameMs;
+    this.frameSamples[this.frameSampleCursor] = frameMs;
+    this.frameSampleCursor = (this.frameSampleCursor + 1) % this.frameSamples.length;
+    this.frameSampleCount = Math.min(this.frameSampleCount + 1, this.frameSamples.length);
     this.updateDiagnostics(stepTime);
     hitchLog.mark(9);
   };
@@ -1400,7 +1435,7 @@ export class GameEngine {
 
   /** Diagnostics & Telemetry updates (~3 times per second). */
   private updateDiagnostics(stepTime: number): void {
-    const { character, props } = this.world!;
+    const { character, props, exploration } = this.world!;
     const { callbacks } = this;
 
     this.frameCount++;
@@ -1413,10 +1448,24 @@ export class GameEngine {
       if (DEV_TOOLS_ENABLED && this.mode === 'editor') {
         const info = this.renderer.info;
         const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+        const frameWindow = Array.from(this.frameSamples.subarray(0, this.frameSampleCount)).sort((a, b) => a - b);
+        const p95 = frameWindow.length ? frameWindow[Math.min(frameWindow.length - 1, Math.ceil(frameWindow.length * 0.95) - 1)] : 0;
+        const physicsCounts = this.physics.world as unknown as {
+          bodies?: { len?: () => number };
+          colliders?: { len?: () => number };
+        };
         callbacks.onDevStats({
           fps,
           frameMs: this.frameMsAccum / this.frameCount,
+          frameMsP95: p95,
           physicsMs: this.lastStepMs,
+          physicsBodies: physicsCounts.bodies?.len?.() ?? null,
+          physicsColliders: physicsCounts.colliders?.len?.() ?? null,
+          caveChunks: exploration.caveNetwork.chunkCount,
+          caveBuilding: exploration.caveNetwork.busy,
+          caveCollidersReady: exploration.caveNetwork.collidersReady,
+          shaderPrewarmMs: this.shaderPrewarmMs,
+          shaderPrewarmPrograms: this.shaderPrewarmPrograms,
           drawCalls: info.render.calls,
           triangles: info.render.triangles,
           geometries: info.memory.geometries,

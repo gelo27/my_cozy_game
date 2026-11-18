@@ -788,11 +788,78 @@ export class BabyDragon extends Pest {
 const NATURAL_COUNT: Record<PestKind, number> = { hedgehog: 5, dragon: 2, shark: 3, spider: 6 };
 export const PEST_KINDS: PestKind[] = ['hedgehog', 'dragon', 'shark', 'spider'];
 
+export interface AuthoredPest {
+  id: number;
+  kind: PestKind;
+  position: [number, number, number];
+  normal?: [number, number, number];
+}
+
 export const PEST_HABITAT: Record<PestKind, PestHabitat> = { hedgehog: 'land', dragon: 'land', shark: 'sea', spider: 'cave' };
 
 /** Keeps hedgehogs and baby dragons in the wilds, sharks in the sea and spiders in the caves. */
 export class PestSystem {
   public readonly pests: Pest[] = [];
+  private readonly authored = new Map<number, { data: AuthoredPest; pest: Pest }>();
+  private nextAuthoredId = 1;
+
+  public serializeAuthored(): AuthoredPest[] {
+    return Array.from(this.authored.values(), ({ data }) => data);
+  }
+
+  public authoredId(pest: Pest): number | undefined {
+    return this.pestAuthorIds.get(pest);
+  }
+
+  public getAuthored(id: number): AuthoredPest | undefined {
+    return this.authored.get(id)?.data;
+  }
+
+  private readonly pestAuthorIds = new WeakMap<Pest, number>();
+
+  private author(pest: Pest, position: THREE.Vector3, normal?: THREE.Vector3): void {
+    const id = this.nextAuthoredId++;
+    this.pestAuthorIds.set(pest, id);
+    this.authored.set(id, { data: { id, kind: pest.kind, position: position.toArray(), normal: normal?.toArray() }, pest });
+  }
+
+  public restoreAuthored(data: readonly AuthoredPest[]): void {
+    if (!this.authored.size && !data.length) return;
+    for (const { pest } of this.authored.values()) this.remove(pest);
+    this.authored.clear();
+    this.nextAuthoredId = 1;
+    for (const row of data) {
+      const pest = this.create(row.kind, ...row.position, row.normal ? new THREE.Vector3(...row.normal) : undefined);
+      pest.placed = true;
+      this.pestAuthorIds.set(pest, row.id);
+      this.authored.set(row.id, { data: row, pest });
+      this.nextAuthoredId = Math.max(this.nextAuthoredId, row.id + 1);
+    }
+    this.revision++;
+  }
+
+  public removeAuthored(id: number): void {
+    const entry = this.authored.get(id);
+    if (!entry) return;
+    this.authored.delete(id);
+    this.remove(entry.pest);
+    this.revision++;
+  }
+
+  public moveAuthored(id: number, at: THREE.Vector3): boolean {
+    const entry = this.authored.get(id);
+    if (!entry) return false;
+    const normal = entry.data.normal ? new THREE.Vector3(...entry.data.normal) : undefined;
+    const position = at.clone();
+    if (entry.data.kind === 'hedgehog' || entry.data.kind === 'dragon') position.y = this.terrain.getHeight(at.x, at.z);
+    if (this.placementError(entry.data.kind, position, !this.isCave(position), normal)) return false;
+    const pest = this.create(entry.data.kind, position.x, position.y, position.z, normal);
+    pest.placed = true;
+    this.pestAuthorIds.set(pest, id);
+    this.remove(entry.pest);
+    this.authored.set(id, { data: { ...entry.data, position: position.toArray() }, pest });
+    return true;
+  }
   public port: PestPort | null = null;
   /** Physics queries for walls and sight lines (set once physics is up). */
   public env: PestEnv = OPEN_ENV;
@@ -948,16 +1015,19 @@ export class PestSystem {
    * (x, z); spiders stand on the surface hit (cave floor or island). Null when it cannot go there.
    */
   public spawnAt(kind: PestKind, at: THREE.Vector3, onIsland: boolean, normal?: THREE.Vector3): Pest | null {
+    if (this.authored.size >= 256) return null;
     if (this.placementError(kind, at, onIsland, normal)) return null;
     let y = at.y;
     if (kind === 'shark') y = worldSettings.waterLevel - Math.min(seaDepthAt(this.terrain, at.x, at.z) * 0.5, 4);
     const pest = this.create(kind, at.x, y, at.z, normal);
     pest.placed = true;
+    this.author(pest, pest.position, normal);
     return pest;
   }
 
   /** A pest of `kind` a few metres from the player where it can live; null if there is no such spot near. */
   public spawnNear(kind: PestKind, player: THREE.Vector3, playerInCave: boolean): Pest | null {
+    if (this.authored.size >= 256) return null;
     if (kind === 'spider') {
       for (let i = 0; i < 16; i++) {
         const a = Math.random() * Math.PI * 2;
@@ -971,6 +1041,7 @@ export class PestSystem {
         if (this.placementError('spider', tA, !playerInCave, n)) continue;
         const p = this.create('spider', tA.x, tA.y, tA.z, n);
         p.placed = true;
+        this.author(p, p.position, n);
         return p;
       }
       return null;

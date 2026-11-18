@@ -1,18 +1,41 @@
-import React, { useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 export const btn = 'flex items-center justify-center rounded-lg transition-colors';
 export const chip = (on: boolean) =>
   `${btn} gap-1.5 px-2.5 py-1.5 text-[11px] font-semibold ${on ? 'bg-sky-500 text-white' : 'bg-white/5 text-zinc-300 hover:bg-white/10'}`;
 
-export const Section: React.FC<{ title: string; children: React.ReactNode; right?: React.ReactNode }> = ({ title, children, right }) => (
-  <div className="flex flex-col gap-1.5">
-    <div className="flex items-center text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-      <span className="flex-1">{title}</span>
-      {right}
-    </div>
-    {children}
-  </div>
-);
+export const Section: React.FC<{ title: string; children: React.ReactNode; right?: React.ReactNode }> = ({ title, children, right }) => {
+  const [open, setOpen] = useState(() => {
+    try { return localStorage.getItem(`editor.section.${title}`) !== '0'; } catch { return true; }
+  });
+  useEffect(() => {
+    const reveal = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === title) setOpen(true);
+    };
+    window.addEventListener('editor:openSection', reveal);
+    return () => window.removeEventListener('editor:openSection', reveal);
+  }, [title]);
+  return (
+    <section className="flex flex-col gap-1.5">
+      <div className="flex items-center text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+        <button
+          type="button"
+          className="flex flex-1 items-center gap-1 text-left hover:text-zinc-300"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => {
+            const next = !value;
+            try { localStorage.setItem(`editor.section.${title}`, next ? '1' : '0'); } catch { /* storage unavailable */ }
+            return next;
+          })}
+        >
+          <span aria-hidden="true">{open ? '▾' : '▸'}</span>{title}
+        </button>
+        {right}
+      </div>
+      <div className={open ? 'flex flex-col gap-1.5' : 'hidden'}>{children}</div>
+    </section>
+  );
+};
 
 export const Slider: React.FC<{
   label: string; value: number; min: number; max: number; step: number; onChange(v: number): void; fmt?(v: number): string;

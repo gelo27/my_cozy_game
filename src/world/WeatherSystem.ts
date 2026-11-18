@@ -84,7 +84,16 @@ export const WeatherProfiles = {
     WeatherProfiles.save();
   },
   resetAll(): void {
-    (Object.keys(PROFILES) as WeatherType[]).forEach((k) => WeatherProfiles.reset(k));
+    const defaults = makeDefaults();
+    for (const k of Object.keys(PROFILES) as WeatherType[]) {
+      const target = PROFILES[k], source = defaults[k];
+      Object.assign(target, source, {
+        tint: target.tint.copy(source.tint),
+        haze: target.haze.copy(source.haze),
+        sound: Object.assign(target.sound, source.sound),
+      });
+    }
+    WeatherProfiles.save();
   },
   save(): void {
     try {

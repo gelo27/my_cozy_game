@@ -563,6 +563,25 @@ export class PropSystem {
   private readonly batches = new Map<string, PropBatch>();
   private readonly props = new Map<number, PropInstance>();
   private readonly batchOf = new Map<number, PropBatch>();
+  private readonly editorHidden = new Set<number>();
+  public editorTopologyRevision = 0;
+
+  public canHideInEditor(id: number): boolean {
+    return this.batchOf.has(id);
+  }
+
+  public isEditorProp(id: number): boolean {
+    return this.props.has(id) && !this.transient.has(id);
+  }
+
+  public setEditorHidden(id: number, hidden: boolean): void {
+    const prop = this.props.get(id);
+    const batch = this.batchOf.get(id);
+    if (!prop || !batch) return;
+    if (hidden) this.editorHidden.add(id);
+    else this.editorHidden.delete(id);
+    this.writeMatrix(batch, this.slotOf.get(id)!, prop);
+  }
   private readonly slotOf = new Map<number, number>();
   private readonly bodies = new Map<number, RAPIER.RigidBody>();
   /** Temporary visual pose (chop wobble, fall, regrow) per prop; not saved. */
@@ -995,24 +1014,25 @@ export class PropSystem {
 
   public add(
     type: string, x: number, z: number, rotationY = 0, scale = 1, y?: number, grounded = true, length?: number, colors?: [number, number] | null,
-    web?: Partial<WebParams> | null, webAnchors?: number[] | null, tilt?: [number, number] | null, head?: number | null
+    web?: Partial<WebParams> | null, webAnchors?: number[] | null, tilt?: [number, number] | null, head?: number | null, editorId?: number
   ): number | null {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
+    if (editorId !== undefined && this.props.has(editorId)) return null;
+    const id = editorId ?? this.nextId++;
     const def = PROP_DEF_MAP.get(type);
     if (def?.web) {
-      const id = this.nextId++;
       const prop: PropInstance = {
         id, type, position: new THREE.Vector3(x, y ?? this.terrain.getHeight(x, z), z), rotationY, scale, grounded, web: clampWeb(web),
         webAnchors: Array.isArray(webAnchors) && webAnchors.every(Number.isFinite) ? [...webAnchors] : undefined,
         tilt: Array.isArray(tilt) && tilt.length === 2 && tilt.every(Number.isFinite) && (tilt[0] || tilt[1]) ? [tilt[0], tilt[1]] : undefined,
       };
       this.props.set(id, prop);
+      this.editorTopologyRevision++;
       this.webs.add(prop);
       this.revision++;
       return id;
     }
     if (def?.chain) {
-      const id = this.nextId++;
       const species = CHAIN_SPECIES[def.chain];
       const prop: PropInstance = {
         id, type, position: new THREE.Vector3(x, y ?? this.terrain.getHeight(x, z), z), rotationY, scale, grounded, length: species.clampLinks(length),
@@ -1020,13 +1040,13 @@ export class PropSystem {
         head: def.chain === 'lily' && head ? species.clampHead(head) : undefined,
       };
       this.props.set(id, prop);
+      this.editorTopologyRevision++;
       this.chainField(def.chain).add(prop);
       this.revision++;
       return id;
     }
     const batch = this.getBatch(type, x, z);
     if (!batch) return null;
-    const id = this.nextId++;
     const prop: PropInstance = {
       id,
       type,
@@ -1036,6 +1056,7 @@ export class PropSystem {
       grounded,
     };
     this.props.set(id, prop);
+    this.editorTopologyRevision++;
     this.attach(prop, batch);
     this.createBody(prop, batch.def);
     this.noteSolid(prop);
@@ -1057,6 +1078,8 @@ export class PropSystem {
     this.poses.delete(id);
     this.transient.delete(id);
     this.props.delete(id);
+    this.editorHidden.delete(id);
+    this.editorTopologyRevision++;
     this.revision++;
   }
 
@@ -1329,7 +1352,7 @@ export class PropSystem {
     PropSystem._q.setFromAxisAngle(PropSystem._up, prop.rotationY);
     const pose = this.poses.get(prop.id);
     if (pose) PropSystem._q.premultiply(PropSystem._tilt.setFromAxisAngle(pose.axis, pose.angle));
-    PropSystem._s.setScalar(prop.scale * (pose ? Math.max(pose.scale, 1e-4) : 1));
+    PropSystem._s.setScalar(this.editorHidden.has(prop.id) ? 0 : prop.scale * (pose ? Math.max(pose.scale, 1e-4) : 1));
     PropSystem._m.compose(prop.position, PropSystem._q, PropSystem._s);
     batch.mesh.setMatrixAt(slot, PropSystem._m);
     batch.mesh.instanceMatrix.needsUpdate = true;
@@ -1353,26 +1376,62 @@ export class PropSystem {
   }
 
   private saveCache: { key: string; data: PropSaveData[] } | null = null;
+  private editorCapture: { key: string; data: Map<number, PropSaveData> } | null = null;
 
   public serialize(): PropSaveData[] {
     // Reused while nothing moved (props change only through this class; grounded ones follow the terrain)
     const key = `${this.revision}|${this.terrain.revision}|${this.transientRevision}`;
     if (this.saveCache?.key === key) return this.saveCache.data;
-    const data = this.list().filter((p) => !this.transient.has(p.id)).map((p): PropSaveData => ({
+    const data = this.list().filter((p) => !this.transient.has(p.id)).map((prop) => this.saveProp(prop));
+    this.saveCache = { key, data };
+    return data;
+  }
+
+  private saveProp(p: PropInstance): PropSaveData {
+    return {
       type: p.type,
       p: [+p.position.x.toFixed(3), +p.position.y.toFixed(3), +p.position.z.toFixed(3)],
       r: +p.rotationY.toFixed(4),
       s: +p.scale.toFixed(3),
       g: p.grounded ? undefined : false,
       n: p.length,
-      c: p.colors,
+      c: p.colors ? [...p.colors] : undefined,
       hd: p.head,
-      w: p.web,
-      wa: p.webAnchors,
+      w: p.web ? { ...p.web } : undefined,
+      wa: p.webAnchors ? [...p.webAnchors] : undefined,
       t: p.tilt ? [+p.tilt[0].toFixed(4), +p.tilt[1].toFixed(4)] : undefined,
-    }));
-    this.saveCache = { key, data };
-    return data;
+    };
+  }
+
+  public captureEditorProp(id: number): PropSaveData | null {
+    const prop = this.props.get(id);
+    return prop && !this.transient.has(id) ? this.saveProp(prop) : null;
+  }
+
+  public restoreEditorProp(id: number, data: PropSaveData | null): void {
+    this.remove(id);
+    if (data) this.add(data.type, data.p[0], data.p[2], data.r, data.s, data.p[1], data.g !== false,
+      data.n, data.c, data.w, data.wa, data.t, data.hd, id);
+  }
+
+  public captureEditorProps(): Map<number, PropSaveData> {
+    const key = `${this.revision}|${this.terrain.revision}|${this.transientRevision}`;
+    if (this.editorCapture?.key === key) return this.editorCapture.data;
+    const result = new Map<number, PropSaveData>();
+    for (const [id, prop] of this.props) {
+      if (!this.transient.has(id)) result.set(id, this.saveProp(prop));
+    }
+    this.editorCapture = { key, data: result };
+    return result;
+  }
+
+  public restoreEditorProps(data: ReadonlyMap<number, PropSaveData>): void {
+    for (const id of this.props.keys()) {
+      if (!data.has(id) && !this.transient.has(id)) this.remove(id);
+    }
+    for (const [id, saved] of data) {
+      if (JSON.stringify(this.captureEditorProp(id)) !== JSON.stringify(saved)) this.restoreEditorProp(id, saved);
+    }
   }
 
   public deserialize(data: PropSaveData[]): void {

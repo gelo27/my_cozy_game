@@ -175,8 +175,22 @@ export function setVegetation<K extends keyof VegetationSettings>(key: K, value:
   } catch { /* storage unavailable */ }
 }
 
-export function resetVegetationSettings(): void {
-  for (const k of Object.keys(VEGETATION_DEFAULTS) as (keyof VegetationSettings)[]) {
-    setVegetation(k, VEGETATION_DEFAULTS[k] as never);
+/** Applies a complete editor preset with one persistence write and at most one geometry rebuild per system. */
+export function applyVegetationPreset(values: Partial<VegetationSettings>): void {
+  let leavesChanged = false;
+  let grassChanged = false;
+  for (const key of Object.keys(VEGETATION_DEFAULTS) as (keyof VegetationSettings)[]) {
+    const value = values[key];
+    if (value === undefined || typeof value !== typeof VEGETATION_DEFAULTS[key] || vegetationSettings[key] === value) continue;
+    vegetationSettings[key] = value as never;
+    if (LEAF_KEYS.includes(key)) leavesChanged = true;
+    if (GRASS_GEOMETRY_KEYS.includes(key)) grassChanged = true;
   }
+  if (leavesChanged) vegetationRevision.leaves++;
+  if (grassChanged) vegetationRevision.grass++;
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(vegetationSettings)); } catch { /* storage unavailable */ }
+}
+
+export function resetVegetationSettings(): void {
+  applyVegetationPreset(VEGETATION_DEFAULTS);
 }

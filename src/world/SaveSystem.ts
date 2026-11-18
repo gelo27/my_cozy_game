@@ -15,6 +15,9 @@ import type { OrchardSaveData } from '../gathering/AppleOrchard';
 import type { NurserySaveData } from '../gathering/TreeNursery';
 import type { WorkerSaveData } from '../npc/WorkerManager';
 import { STORAGE_CHEST, STORAGE_CHEST_SPOT } from '../npc/FarmStorage';
+import { ROCK_TYPES } from '../gathering/GatheringConfig';
+import type { AuthoredRock } from '../gathering/RockField';
+import { PEST_KINDS, type AuthoredPest, type PestKind } from '../gameplay/Pests';
 
 export const SAVE_VERSION = 2;
 const KEY_PREFIX = 'cozyfarm.save.';
@@ -52,6 +55,8 @@ export interface WorldSaveData {
   pets: PetSaveData[];
   /** Farmhands (missing in older saves: the starting crew stays). */
   workers?: WorkerSaveData[];
+  authoredRocks?: AuthoredRock[];
+  authoredPests?: AuthoredPest[];
   /** The farm storage chests' shared stock. */
   storage?: Record<string, number>;
   /** Days passed (missing in older saves: 0). */
@@ -268,6 +273,29 @@ function isWorldSaveData(value: unknown): value is WorldSaveData {
   if (value.exploration !== undefined && !isExplorationSave(value.exploration)) return false;
   if (value.workers !== undefined &&
       (!Array.isArray(value.workers) || value.workers.length > 10 || !value.workers.every(isWorkerSave))) return false;
+  if (value.authoredRocks !== undefined) {
+    if (!Array.isArray(value.authoredRocks) || value.authoredRocks.length > 512) return false;
+    const ids = new Set<number>();
+    for (const rock of value.authoredRocks) {
+      if (!isRecord(rock) || !isIntegerInRange(rock.id, -1_000_000, -1) ||
+          typeof rock.kind !== 'string' || !Object.hasOwn(ROCK_TYPES, rock.kind) ||
+          !isNumberTuple(rock.position, 3) || rock.position.some((coordinate) => Math.abs(coordinate) > 3000) ||
+          !isFiniteNumber(rock.scale) || rock.scale < 0.1 || rock.scale > 10) return false;
+      if (ids.has(rock.id as number)) return false;
+      ids.add(rock.id as number);
+    }
+  }
+  if (value.authoredPests !== undefined) {
+    if (!Array.isArray(value.authoredPests) || value.authoredPests.length > 256) return false;
+    const ids = new Set<number>();
+    for (const pest of value.authoredPests) {
+      if (!isRecord(pest) || !isIntegerInRange(pest.id, 1, 1_000_000) || !PEST_KINDS.includes(pest.kind as PestKind) ||
+          !isNumberTuple(pest.position, 3) || pest.position.some((coordinate) => Math.abs(coordinate) > 3000) ||
+          (pest.normal !== undefined && (!isNumberTuple(pest.normal, 3) || pest.normal.some((component) => Math.abs(component) > 1.01)))) return false;
+      if (ids.has(pest.id as number)) return false;
+      ids.add(pest.id as number);
+    }
+  }
   if (value.storage !== undefined && !isNumberRecord(value.storage)) return false;
   if (value.weatherDirector !== undefined && !isWeatherDirectorSave(value.weatherDirector)) return false;
   if (value.snowCover !== undefined &&
@@ -337,6 +365,8 @@ export class SaveSystem {
       boat: { p: w.boat.getPosition().toArray() as [number, number, number], yaw: w.boat.getYaw() },
       pets: w.gameplay.pets.serialize(),
       workers: w.gameplay.workers?.serialize(),
+      authoredRocks: w.rocks.serializeAuthored(),
+      authoredPests: w.gameplay.pests.serializeAuthored(),
       storage: w.gameplay.storage?.serialize(),
       day: worldSettings.day,
       season: worldSettings.season,
@@ -414,6 +444,8 @@ export class SaveSystem {
     if (data.pets?.length) w.gameplay.pets.deserialize(data.pets);
     w.gameplay.storage?.deserialize(data.storage);
     if (data.workers && w.gameplay.workers) w.gameplay.workers.deserialize(data.workers);
+    w.rocks.restoreAuthored(data.authoredRocks ?? []);
+    w.gameplay.pests.restoreAuthored(data.authoredPests ?? []);
     this.onApplied?.();
   }
 

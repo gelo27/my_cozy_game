@@ -75,6 +75,8 @@ export class BuildAbility implements IAbility {
   public snapSystem: SnapSystem = new SnapSystem();
   public ghostRenderer: PreviewGhostRenderer | null = null;
   public pieceSelectionSystem: PieceSelectionSystem | null = null;
+  /** Location rule supplied by the engine; building and painting are disabled in caves. */
+  private canBuildHere: () => boolean = () => true;
 
   public currentSnapResult: SnapResult | null = null;
   public aimedPieceId: string | null = null;
@@ -99,6 +101,10 @@ export class BuildAbility implements IAbility {
 
   constructor() {}
 
+  public setBuildLocationGuard(guard: () => boolean): void {
+    this.canBuildHere = guard;
+  }
+
   public setBuildingSystems(
     manager: BuildingManager,
     ghostRenderer: PreviewGhostRenderer,
@@ -114,6 +120,7 @@ export class BuildAbility implements IAbility {
   }
 
   public toggleBuildMode(): boolean {
+    if (!this.isBuildModeActive && !this.canBuildHere()) return false;
     // One screen at a time: opening build mode closes the backpack, map, panels (UiScreens)
     if (!this.isBuildModeActive && !uiScreens.request('build')) return false;
     this.isBuildModeActive = !this.isBuildModeActive;
@@ -137,6 +144,7 @@ export class BuildAbility implements IAbility {
   }
 
   public togglePaintingMode(): boolean {
+    if (!this.isPaintingModeActive && !this.canBuildHere()) return false;
     if (!this.isPaintingModeActive && !uiScreens.request('paint')) return false;
     this.isPaintingModeActive = !this.isPaintingModeActive;
     if (this.isPaintingModeActive) {
@@ -177,6 +185,7 @@ export class BuildAbility implements IAbility {
   }
 
   public undoPaint(): boolean {
+    if (!this.canBuildHere()) return false;
     this.endPaintStroke();
     const ok = this.buildingManager?.undoPaint() ?? false;
     if (ok) audioEngine.playPaintPick();
@@ -184,6 +193,7 @@ export class BuildAbility implements IAbility {
   }
 
   public redoPaint(): boolean {
+    if (!this.canBuildHere()) return false;
     this.endPaintStroke();
     const ok = this.buildingManager?.redoPaint() ?? false;
     if (ok) audioEngine.playPaintBrush();
@@ -227,6 +237,7 @@ export class BuildAbility implements IAbility {
   }
 
   public setPieceType(type: BuildingPieceType | null): void {
+    if (type !== null && !this.canBuildHere()) return;
     this.houseRoofTool = null;
     this.dormerTool = false;
     if (type === null) {
@@ -274,6 +285,7 @@ export class BuildAbility implements IAbility {
   }
 
   public rotatePiece(clockwise: boolean = true): void {
+    if (!this.canBuildHere()) return;
     const angleDelta = clockwise ? this.rotationStep : -this.rotationStep;
 
     // 1. If a ghost piece is actively selected for placement in the dock, rotate its preview yaw
@@ -317,6 +329,7 @@ export class BuildAbility implements IAbility {
   }
 
   public toggleSnapping(): boolean {
+    if (!this.canBuildHere()) return this.snappingEnabled;
     this.snappingEnabled = !this.snappingEnabled;
     audioEngine.playBuildSelect();
     return this.snappingEnabled;
@@ -328,6 +341,18 @@ export class BuildAbility implements IAbility {
     if (!this.enabled || !this.buildingManager || !this.ghostRenderer) return;
 
     const input = context.input as any;
+    if (!this.canBuildHere()) {
+      // Close both modes on cave entry and discard queued touch actions so they cannot
+      // place or demolish a piece after the player has crossed the entrance.
+      if (this.isBuildModeActive) this.toggleBuildMode();
+      if (this.isPaintingModeActive) this.setPaintingMode(false);
+      input.buildToggleJustPressed = false;
+      input.paintToggleJustPressed = false;
+      input.buildPlaceJustPressed = false;
+      input.buildDemolishJustPressed = false;
+      this.ghostRenderer.setVisible(false);
+      return;
+    }
     // Esc acts once per press (held, it would deselect and then leave the mode on the next frame)
     const escDown = !!input.keys?.['Escape'];
     const escPressed = escDown && !this.escWasDown;
@@ -902,6 +927,7 @@ export class BuildAbility implements IAbility {
 
   /** Dormer panel buttons. Returns a message to show, or null. */
   public dormerAction(action: DormerAction): { ok: boolean; message: string } | null {
+    if (!this.canBuildHere()) return null;
     const bm = this.buildingManager;
     const roof = this.getSelectedShingleRoof();
     if (!bm || !roof) return null;
@@ -956,6 +982,7 @@ export class BuildAbility implements IAbility {
    * over its whole house. Returns the hint to show.
    */
   public setHouseRoofTool(kind: HouseRoofKind | null): { ok: boolean; message: string } | null {
+    if (kind !== null && !this.canBuildHere()) return null;
     if (kind === null || this.houseRoofTool === kind) {
       this.houseRoofTool = null;
       audioEngine.playBuildSelect();
@@ -976,6 +1003,7 @@ export class BuildAbility implements IAbility {
 
   /** One roof over the whole house of a wall (the selected / aimed one by default). Returns the message to show. */
   public roofWholeHouse(kind: HouseRoofKind = 'hip', fromWall?: BuiltPiece | null): { ok: boolean; message: string } {
+    if (!this.canBuildHere()) return { ok: false, message: t('build.houseRoof.noWall') };
     const wall = fromWall === undefined ? this.houseRoofWall() : fromWall;
     if (!this.buildingManager || !wall) return { ok: false, message: t('build.houseRoof.noWall') };
     const res = this.buildingManager.placeHouseRoof(wall.id, kind);
@@ -1003,6 +1031,7 @@ export class BuildAbility implements IAbility {
 
   /** Walls along the floor outline, or the ceiling inside the walls. Returns the message to show. */
   public fillOutline(from?: BuiltPiece | null): { ok: boolean; message: string } {
+    if (!this.canBuildHere()) return { ok: false, message: t('build.fill.noPiece') };
     const target = from ?? this.fillTarget();
     if (!this.buildingManager || !target) return { ok: false, message: t('build.fill.noPiece') };
     const res = this.buildingManager.fillOutline(target.id);
@@ -1017,6 +1046,7 @@ export class BuildAbility implements IAbility {
 
   /** Restyles the selected roof, and makes the style the one new roofs get */
   public setRoofStyle(style: RoofStyle): void {
+    if (!this.canBuildHere()) return;
     if (!this.buildingManager) return;
     this.buildingManager.defaultRoofStyle = style;
     const roof = this.getSelectedShingleRoof();
@@ -1024,21 +1054,25 @@ export class BuildAbility implements IAbility {
   }
 
   public confirmWalls(): boolean {
+    if (!this.canBuildHere()) return false;
     if (!this.buildingManager) return false;
     return this.buildingManager.confirmWalls();
   }
 
   public confirmFloors(): boolean {
+    if (!this.canBuildHere()) return false;
     if (!this.buildingManager) return false;
     return this.buildingManager.confirmFloors();
   }
 
   public confirmFoundations(): boolean {
+    if (!this.canBuildHere()) return false;
     if (!this.buildingManager) return false;
     return this.buildingManager.confirmFoundations();
   }
 
   public confirmAll(): boolean {
+    if (!this.canBuildHere()) return false;
     if (!this.buildingManager) return false;
     return this.buildingManager.confirmAll();
   }
@@ -1054,6 +1088,7 @@ export class BuildAbility implements IAbility {
   }
 
   public importScene(data: any) {
+    if (!this.canBuildHere()) return { success: false, piecesCount: 0, customizedCells: 0, error: 'Building is disabled in caves' };
     if (!this.buildingManager) return { success: false, piecesCount: 0, customizedCells: 0, error: 'BuildingManager not available' };
     return this.buildingManager.importScene(data);
   }

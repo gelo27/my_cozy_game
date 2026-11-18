@@ -908,14 +908,28 @@ export class BuildingManager {
       return false;
     }
 
-    // 1. Calculate new rotation
+    return this.setPieceTransform(pieceId, piece.position, piece.rotation.y + angleDelta);
+  }
+
+  /** Edits the authored transform and invalidates both the old and new areas. */
+  public setPieceTransform(pieceId: string, position: THREE.Vector3, yaw: number): boolean {
+    const piece = this.pieces.get(pieceId);
+    if (!piece) return false;
     const currentEuler = new THREE.Euler().setFromQuaternion(piece.quaternion, 'YXZ');
-    currentEuler.y = ((currentEuler.y + angleDelta) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    currentEuler.y = THREE.MathUtils.euclideanModulo(yaw, Math.PI * 2);
+    const quaternion = new THREE.Quaternion().setFromEuler(currentEuler);
+    if (isPieceBelowSurface(piece.type, position, quaternion)) return false;
+    const moved = !piece.position.equals(position);
+    const old = moved ? { ...piece, position: piece.position.clone(), quaternion: piece.quaternion.clone() } : null;
+    this.spatialGrid.remove(piece);
+    if (old) this.continuousWallSystem.invalidatePieceArea(old);
+    piece.position.copy(position);
     piece.rotation.copy(currentEuler);
-    piece.quaternion.setFromEuler(piece.rotation);
+    piece.quaternion.copy(quaternion);
 
     // 2. Update visual mesh group
     piece.meshGroup.matrixAutoUpdate = true;
+    piece.meshGroup.position.copy(position);
     piece.meshGroup.quaternion.copy(piece.quaternion);
     piece.meshGroup.updateMatrix();
     piece.meshGroup.updateMatrixWorld(true);
@@ -938,6 +952,7 @@ export class BuildingManager {
 
     // 4. Update Rapier static rigid body rotation
     if (piece.staticBody) {
+      if (moved) piece.staticBody.setTranslation(position, true);
       piece.staticBody.setRotation(
         { x: piece.quaternion.x, y: piece.quaternion.y, z: piece.quaternion.z, w: piece.quaternion.w },
         true
@@ -950,7 +965,6 @@ export class BuildingManager {
     }
 
     // 6. Update Spatial Grid
-    this.spatialGrid.remove(piece);
     this.spatialGrid.insert(piece);
     this.markGreenhouseDirty(piece.type);
     this.staticBatch.markPiece(piece);
@@ -959,6 +973,7 @@ export class BuildingManager {
 
     // 7. Baked meshes around it (a turned window moves its hole; a turned pending wall re-cuts the floor)
     this.continuousWallSystem.pieceChanged(piece);
+    if (old && !isSolidWallPiece(old.type)) this.rebuildWallCollidersAroundPiece(old);
 
     // 8. Recompute wall colliders if wall/opening rotated
     if (
@@ -2018,7 +2033,15 @@ export class BuildingManager {
   /**
    * Spawns a starter Norse longhouse foundation and frame at given coordinates.
    */
-  public spawnStarterVikingCabin(origin: THREE.Vector3 = new THREE.Vector3(14, 0, 10)): void {
+  public spawnStarterVikingCabin(origin: THREE.Vector3): BuiltPiece[] {
+    const placed: BuiltPiece[] = [];
+    let failed = false;
+    const place = (type: BuildingPieceType, position: THREE.Vector3, rotation: THREE.Quaternion) => {
+      if (failed) return;
+      const piece = this.placePiece(type, position, rotation, undefined, true);
+      if (piece) placed.push(piece);
+      else failed = true;
+    };
     const rot0 = new THREE.Quaternion();
     const rot90 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
     const rot180 = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
@@ -2027,7 +2050,7 @@ export class BuildingManager {
     // 2x2 Floor Grid (4 tiles = 4m x 4m)
     for (let x = -1; x <= 1; x += 2) {
       for (let z = -1; z <= 1; z += 2) {
-        this.placePiece(
+        place(
           BuildingPieceType.WOOD_FLOOR_2X2,
           new THREE.Vector3(origin.x + x * 1.0, origin.y + 0.06, origin.z + z * 1.0),
           rot0
@@ -2036,104 +2059,102 @@ export class BuildingManager {
     }
 
     // Front wall with window and doorway with double door
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_WINDOW_2X2,
       new THREE.Vector3(origin.x - 1.0, origin.y + 1.0, origin.z + 2.0),
       rot0
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_DOORWAY_2X2,
       new THREE.Vector3(origin.x + 1.0, origin.y + 1.0, origin.z + 2.0),
       rot0
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_DOOR_DOUBLE,
       new THREE.Vector3(origin.x + 1.0, origin.y + 1.0, origin.z + 2.0),
       rot0
     );
 
     // Back walls
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x - 1.5, origin.y + 1.0, origin.z - 2.0),
       rot180
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x - 0.5, origin.y + 1.0, origin.z - 2.0),
       rot180
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x + 0.5, origin.y + 1.0, origin.z - 2.0),
       rot180
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x + 1.5, origin.y + 1.0, origin.z - 2.0),
       rot180
     );
 
     // Left walls
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x - 2.0, origin.y + 1.0, origin.z - 1.5),
       rot90
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x - 2.0, origin.y + 1.0, origin.z - 0.5),
       rot90
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x - 2.0, origin.y + 1.0, origin.z + 0.5),
       rot90
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x - 2.0, origin.y + 1.0, origin.z + 1.5),
       rot90
     );
 
     // Right walls
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x + 2.0, origin.y + 1.0, origin.z - 1.5),
       rot270
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x + 2.0, origin.y + 1.0, origin.z - 0.5),
       rot270
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x + 2.0, origin.y + 1.0, origin.z + 0.5),
       rot270
     );
-    this.placePiece(
+    place(
       BuildingPieceType.WOOD_WALL_1X2,
       new THREE.Vector3(origin.x + 2.0, origin.y + 1.0, origin.z + 1.5),
       rot270
     );
 
-    // Stairs approaching doorway
-    this.placePiece(
-      BuildingPieceType.WOOD_STAIRS_2X2,
-      new THREE.Vector3(origin.x - 1.0, origin.y, origin.z + 4.0),
-      rot180
-    );
-
     // Procedural 2-Pitched Gable Roof crowning the starter cabin (Heartopia style)
-    this.placePiece(
+    place(
       BuildingPieceType.ROOF_GABLE_4X4,
-      new THREE.Vector3(origin.x, origin.y + 2.8, origin.z),
+      new THREE.Vector3(origin.x, origin.y + 2.0, origin.z),
       rot0
     );
 
-    // Bake demo house walls and floors into continuous seamless meshes with checker texture
-    this.confirmAll();
+    if (failed) {
+      for (const piece of placed) this.demolishPiece(piece.id);
+      return [];
+    }
+    // Bake only this cabin, leaving any other pending construction untouched.
+    this.continuousWallSystem.confirmPieces(placed);
+    return placed;
   }
 
   /**

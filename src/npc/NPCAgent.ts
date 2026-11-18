@@ -340,6 +340,10 @@ export class NPCAgent {
     this.vy = 0;
   }
 
+  public setEditorPosition(feet: THREE.Vector3): void {
+    this.placeAt({ x: feet.x, y: feet.y - 0.05, z: feet.z });
+  }
+
   private updateDebugLine(from: THREE.Vector3): void {
     if (!this.debugLine) return;
     const pts = [from, ...this.path].map((p) => new THREE.Vector3(p.x, p.y + 0.15, p.z));

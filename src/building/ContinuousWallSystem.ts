@@ -153,6 +153,10 @@ export class ContinuousWallSystem {
     this.markDirty(piece);
   }
 
+  public invalidatePieceArea(piece: BuiltPiece): void {
+    this.markDirty(piece);
+  }
+
   /** Bakes every pending piece of `layer` (or all layers). True when that layer has any pieces. */
   public confirm(layer: Layer | 'all'): boolean {
     const layers = layer === 'all' ? LAYERS : [layer];
@@ -170,6 +174,12 @@ export class ContinuousWallSystem {
       if (l && layers.includes(l)) return true;
     }
     return false;
+  }
+
+  /** Bake a newly placed template without confirming other construction in progress. */
+  public confirmPieces(pieces: readonly BuiltPiece[]): void {
+    for (const piece of pieces) if (!piece.isConfirmed) this.confirmPiece(piece);
+    this.flush();
   }
 
   /** Paint changed on these pieces' faces. Pending pieces get baked (their paint shows on the baked mesh). */

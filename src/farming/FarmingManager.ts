@@ -146,7 +146,7 @@ export class FarmingManager {
     return this.fields.get(id)?.center ?? null;
   }
 
-  private newCrop(cropType: CropType): CropState {
+  public newCrop(cropType: CropType): CropState {
     return {
       cropType,
       stage: 1,

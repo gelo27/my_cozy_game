@@ -90,12 +90,16 @@ export interface EditorState {
 interface Snapshot {
   heights: Float32Array;
   tiles: Uint8Array;
-  props: ReturnType<PropSystem['serialize']>;
+  props: ReturnType<PropSystem['captureEditorProps']>;
   rivers: string;
   /** Cave layout JSON ('' before the network has built). */
   caves: string;
   /** Duckweed cells (Duckweed.ts). */
   duckweed: Uint8Array;
+}
+
+interface HistorySwap {
+  (): HistorySwap;
 }
 
 /**
@@ -143,6 +147,11 @@ export class EditorController {
   };
   /** Bumped whenever `state` changes so React can re-read it. */
   public revision = 0;
+  /** Revision of world edits since the last editor save/load action. */
+  public editRevision = 0;
+  public savedEditRevision = 0;
+  private nextEditRevision = 1;
+  public readonly recentActions: { label: string; at: number }[] = [];
   /** The enemies (set by the engine once gameplay is up): the enemy tool puts them in the world. */
   public pests: PestSystem | null = null;
   /** Messages for the developer (a refused enemy placement). */
@@ -164,6 +173,8 @@ export class EditorController {
   private ghostWebKey = '';
   private readonly gizmo: TransformControls;
   private readonly gizmoTarget = new THREE.Object3D();
+  private sceneTransform: ((position: THREE.Vector3, yaw: number, mode: 'translate' | 'rotate') => void) | null = null;
+  private sceneCanRotate = false;
   private readonly hit = new THREE.Vector3();
   private hasHit = false;
   /** The cursor is on the island's terrain (props placed there stay glued to it); false in the caves. */
@@ -174,8 +185,12 @@ export class EditorController {
   private stroking = false;
   private flattenHeight = 0;
   private lastPlaceAt = new THREE.Vector3(Infinity, 0, 0);
-  private undoStack: Snapshot[] = [];
-  private redoStack: Snapshot[] = [];
+  private undoStack: HistorySwap[] = [];
+  private redoStack: HistorySwap[] = [];
+  public scenePicking: ((ray: THREE.Raycaster, additive: boolean) => void) | null = null;
+  public sceneHover: ((point: THREE.Vector3 | null) => void) | null = null;
+  public sceneShortcut: ((action: 'delete' | 'duplicate') => void) | null = null;
+  public sceneSelectionRefresh: (() => void) | null = null;
 
   // Fly camera
   private yaw = 0;
@@ -228,7 +243,10 @@ export class EditorController {
     this.gizmo.setSize(0.8);
     this.gizmo.showY = true;
     this.gizmo.addEventListener('dragging-changed', (e) => {
-      if ((e as unknown as { value: boolean }).value) this.pushUndo();
+      const dragging = (e as unknown as { value: boolean }).value;
+      if (this.sceneTransform) {
+        if (!dragging) this.sceneTransform(this.gizmoTarget.position.clone(), this.gizmoTarget.rotation.y, this.state.gizmoMode);
+      } else if (dragging && this.state.selectedPropId !== null) this.trackSelectedProp();
     });
     this.gizmo.addEventListener('objectChange', () => this.applyGizmo());
     scene.add(this.gizmo.getHelper());
@@ -301,7 +319,16 @@ export class EditorController {
     this.revision++;
   }
 
+  public clearHistory(): void {
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+    this.recentActions.length = 0;
+    this.select(null);
+    this.markSaved();
+  }
+
   public select(id: number | null): void {
+    this.sceneTransform = null;
     this.state.selectedPropId = id;
     const prop = id !== null ? this.props.get(id) : undefined;
     if (prop) {
@@ -319,12 +346,29 @@ export class EditorController {
     this.touch();
   }
 
+  public selectSceneTransform(
+    position: THREE.Vector3, yaw: number | undefined,
+    commit: (position: THREE.Vector3, yaw: number, mode: 'translate' | 'rotate') => void,
+  ): void {
+    this.state.selectedPropId = null;
+    this.sceneTransform = commit;
+    this.sceneCanRotate = yaw !== undefined;
+    if (!this.sceneCanRotate && this.state.gizmoMode === 'rotate') this.set('gizmoMode', 'translate');
+    this.gizmoTarget.position.copy(position);
+    this.gizmoTarget.rotation.set(0, yaw ?? 0, 0, 'YXZ');
+    this.gizmo.attach(this.gizmoTarget);
+    this.gizmo.getHelper().visible = true;
+    this.updateGizmoAxes();
+    this.touch();
+  }
+
   /** Webs turn on all three axes; other props only about Y (moving still works on all three). */
   private updateGizmoAxes(): void {
     const id = this.state.selectedPropId;
     const prop = id !== null ? this.props.get(id) : undefined;
     const web = !!prop && !!PROP_DEF_MAP.get(prop.type)?.web;
     const rotate = this.state.gizmoMode === 'rotate';
+    if (this.sceneTransform) this.gizmo.enabled = !rotate || this.sceneCanRotate;
     this.gizmo.showX = this.gizmo.showZ = !rotate || web;
     this.gizmo.showY = true;
     // Webs rotate about their own axes (the tilt is in the web's frame)
@@ -424,7 +468,7 @@ export class EditorController {
     return {
       heights: this.terrain.heights.slice(),
       tiles: this.terrain.tiles.slice(),
-      props: this.props.serialize(),
+      props: this.props.captureEditorProps(),
       rivers: stringifyRivers(riverWorld.defs),
       caves: this.caves.work ? JSON.stringify(this.caves.work) : '',
       duckweed: duckweed.snapshot(),
@@ -445,31 +489,80 @@ export class EditorController {
     this.terrain.invalidateSaveCache();
     const save = this.terrain.serialize();
     this.terrain.deserialize(save); // marks all chunks/splat/physics dirty
-    this.props.deserialize(s.props);
+    this.props.restoreEditorProps(s.props);
     duckweed.restore(s.duckweed);
     this.select(null);
   }
 
   public pushUndo(): void {
-    this.undoStack.push(this.snapshot());
+    this.trackChange(this.actionLabel(), () => this.snapshot(), (state) => this.restore(state));
+  }
+
+  public trackSelectedProp(): void {
+    const id = this.state.selectedPropId;
+    if (id === null) return;
+    this.trackChange('Властивості об’єкта', () => this.props.captureEditorProp(id), (data) => {
+      this.props.restoreEditorProp(id, data);
+      this.select(data ? id : null);
+    });
+  }
+
+  public trackChange<T>(label: string, capture: () => T, restore: (state: T) => void): void {
+    this.recordChange(label, capture, restore, capture());
+  }
+
+  public recordChange<T>(label: string, capture: () => T, restore: (state: T) => void, before: T): void {
+    const swap = (state: T, version: number): HistorySwap => () => {
+      const inverse = swap(capture(), this.editRevision);
+      restore(state);
+      this.editRevision = version;
+      return inverse;
+    };
+    this.undoStack.push(swap(before, this.editRevision));
     if (this.undoStack.length > 30) this.undoStack.shift();
     this.redoStack.length = 0;
+    this.editRevision = this.nextEditRevision++;
+    this.recordEdit(label);
     this.touch();
+  }
+
+  private actionLabel(): string {
+    return ({
+      place: 'Розміщення об’єкта', sculpt: 'Зміна рельєфу', paint: 'Зміна покриття',
+      river: 'Зміна річки', cave: 'Зміна печери', duckweed: 'Зміна ряски', scatter: 'Пензель об’єктів',
+      enemy: 'Зміна ворогів', select: 'Зміна сцени',
+    } as const)[this.state.tool] ?? 'Зміна світу';
+  }
+
+  private recordEdit(label: string): void {
+    this.recentActions.unshift({ label, at: Date.now() });
+    if (this.recentActions.length > 20) this.recentActions.length = 20;
+  }
+
+  public markSaved(): void {
+    this.savedEditRevision = this.editRevision;
+    this.touch();
+  }
+
+  public get hasUnsavedEdits(): boolean {
+    return this.editRevision !== this.savedEditRevision;
   }
 
   public undo(): void {
     const s = this.undoStack.pop();
     if (!s) return;
-    this.redoStack.push(this.snapshot());
-    this.restore(s);
+    this.redoStack.push(s());
+    this.sceneSelectionRefresh?.();
+    this.recordEdit('Скасовано дію');
     this.touch();
   }
 
   public redo(): void {
     const s = this.redoStack.pop();
     if (!s) return;
-    this.undoStack.push(this.snapshot());
-    this.restore(s);
+    this.undoStack.push(s());
+    this.sceneSelectionRefresh?.();
+    this.recordEdit('Повторено дію');
     this.touch();
   }
 
@@ -494,7 +587,14 @@ export class EditorController {
     } else if (tool === 'enemy') {
       this.placeEnemy();
     } else if (tool === 'select') {
-      this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
+      const rect = this.dom.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const cursor = new THREE.Vector2((e.clientX - rect.left) / rect.width * 2 - 1, 1 - (e.clientY - rect.top) / rect.height * 2);
+      this.raycaster.setFromCamera(cursor, this.camera);
+      if (this.scenePicking) {
+        this.scenePicking(this.raycaster, e.shiftKey);
+        return;
+      }
       const hit = this.props.pick(this.raycaster);
       this.select(hit ? hit.id : null);
     } else if (this.hasHit) {
@@ -538,6 +638,7 @@ export class EditorController {
     } else if ((e.ctrlKey || e.metaKey) && e.code === 'KeyD') {
       e.preventDefault();
       if (this.state.tool === 'cave') this.caves.duplicateSelected();
+      else if (this.state.tool === 'select' && this.sceneShortcut) this.sceneShortcut('duplicate');
       else this.duplicateSelected();
     } else if (this.state.tool === 'river' && !e.ctrlKey && this.rivers.keyDown(e)) {
       // handled by the river tool
@@ -547,7 +648,8 @@ export class EditorController {
       this.caves.addMode = 'none';
       this.caves.select(null);
     } else if (e.code === 'Delete' || e.code === 'Backspace') {
-      this.deleteSelected();
+      if (this.state.tool === 'select' && this.sceneShortcut) this.sceneShortcut('delete');
+      else this.deleteSelected();
     } else if (!e.ctrlKey && !this.looking) {
       const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave', Digit7: 'enemy', Digit8: 'duckweed', Digit9: 'scatter' };
       if (tools[e.code]) this.set('tool', tools[e.code]);
@@ -587,6 +689,7 @@ export class EditorController {
     if (tool === 'place' && this.lilyOnSurface()) this.castOntoSea();
     // Duckweed is painted on the water surface (sea, lakes, rivers), not on the bottom under it
     if (tool === 'duckweed') this.castOntoWater();
+    this.sceneHover?.(tool === 'select' && this.hasHit && !this.looking ? this.hit : null);
     const brushTool = tool === 'sculpt' || tool === 'paint' || tool === 'duckweed' || tool === 'scatter';
 
     this.updateCursor((brushTool || tool === 'enemy') && this.hasHit);
@@ -845,8 +948,10 @@ export class EditorController {
       this.onNotify(err, 'warning');
       return;
     }
-    pests.spawnAt(kind, this.hit, this.hitOnTerrain, kind === 'spider' ? this.hitNormal : undefined);
-    this.touch();
+    const before = pests.serializeAuthored();
+    if (pests.spawnAt(kind, this.hit, this.hitOnTerrain, kind === 'spider' ? this.hitNormal : undefined)) {
+      this.recordChange('Розміщення істоти', () => pests.serializeAuthored(), (data) => pests.restoreAuthored(data), before);
+    }
   }
 
   /** A cave surface under the cursor nearer than the terrain hit (if any) becomes the hit. */

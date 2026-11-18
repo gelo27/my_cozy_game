@@ -1,14 +1,15 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, Package, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
-  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music, Skull, Fish, X, SprayCan, Eraser,
+  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music, Skull, Fish, X, SprayCan, Eraser, Search, Star, Clock3,
 } from 'lucide-react';
 import { RiverPanel } from './RiverPanel';
 import { MusicPanel } from './MusicPanel';
 import { CavePanel } from './CavePanel';
+import { ScenePanel } from './ScenePanel';
 import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool, isScatterable } from '../../editor/EditorController';
@@ -24,9 +25,9 @@ import { worldSettings } from '../../world/WorldSettings';
 import { duckweed } from '../../world/Duckweed';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
-import { waterSettings, WaterSettings, saveWaterSettings, resetWaterSettings } from '../../world/WaterSettings';
+import { waterSettings, WaterSettings, WATER_DEFAULTS, saveWaterSettings, resetWaterSettings } from '../../world/WaterSettings';
 import { RIPPLE_SIM_RES } from '../../scene/WaterRippleSim';
-import { vegetationSettings, VegetationSettings, setVegetation, resetVegetationSettings } from '../../world/VegetationSettings';
+import { vegetationSettings, VegetationSettings, setVegetation, resetVegetationSettings, applyVegetationPreset } from '../../world/VegetationSettings';
 import { causticsSettings, applyCausticsSettings, resetCausticsSettings, CausticsSettings } from '../../scene/WaterEffects';
 import { lightShaftSettings, resetLightShaftSettings, saveLightShaftSettings, LightShaftSettings } from '../../world/LightShafts';
 import { cloudShadowSettings, resetCloudShadowSettings, saveCloudShadowSettings, CloudShadowSettings } from '../../world/CloudShadows';
@@ -38,6 +39,13 @@ const ICONS: Record<string, React.ElementType> = {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, Package, Waves, Bug,
 };
+
+function readEditorList(key: string): string[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 12) : [];
+  } catch { return []; }
+}
 
 const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції', objects: 'Об’єкти' };
 
@@ -67,6 +75,18 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
   const [tab, setTab] = useState<Tab>('world');
   const [, force] = useState(0);
   const rerender = () => force((n) => n + 1);
+  const [navQuery, setNavQuery] = useState('');
+  const [favorites, setFavorites] = useState<string[]>(() => readEditorList('farm.editor.favorites'));
+  const [recent, setRecent] = useState<string[]>(() => readEditorList('farm.editor.recent'));
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!editor.hasUnsavedEdits) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [editor, editor.editRevision]);
 
   const setTool = (t: EditorTool) => {
     editor.set('tool', t);
@@ -93,12 +113,67 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'save', icon: Save, label: 'Збереження' },
     { id: 'debug', icon: Activity, label: 'Дебаг' },
   ];
+  const navItems = [
+    ...tools.map((item) => ({ key: `tool:${item.id}`, label: item.label.replace(/ \(\d\)$/, ''), icon: item.icon })),
+    ...tabs.map((item) => ({ key: `tab:${item.id}`, label: item.label, icon: item.icon })),
+    ...[
+      ['atmo', 'Час доби'], ['atmo', 'Пора року'], ['atmo', 'Погода'], ['atmo', 'Нічні джерела світла'],
+      ['atmo', 'Голоси птахів'], ['atmo', 'Вода'], ['water', 'Параметри хвиль'], ['veg', 'Трава'],
+      ['veg', 'Дерева'], ['scene', 'Швидкі перевірки'], ['scene', 'Ієрархія сцени'], ['save', 'Пресети середовища'],
+      ['debug', 'Продуктивність'], ['debug', 'Сценарії перевірки'],
+    ].map(([tabId, label]) => ({ key: `section:${tabId}:${label}`, label, icon: Search })),
+  ];
+  const selectNav = (key: string) => {
+    const [kind, id, ...rest] = key.split(':');
+    if (kind === 'tool') setTool(id as EditorTool);
+    else if (kind === 'tab') setTab(id as Tab);
+    else if (kind === 'section') {
+      setTab(id as Tab);
+      const title = rest.join(':');
+      try { localStorage.setItem(`editor.section.${title}`, '1'); } catch { /* storage unavailable */ }
+      window.dispatchEvent(new CustomEvent('editor:openSection', { detail: title }));
+    }
+    setRecent((old) => {
+      const next = [key, ...old.filter((value) => value !== key)].slice(0, 5);
+      try { localStorage.setItem('farm.editor.recent', JSON.stringify(next)); } catch { /* storage unavailable */ }
+      return next;
+    });
+    setNavQuery('');
+  };
+  const toggleFavorite = (key: string) => setFavorites((old) => {
+    const next = old.includes(key) ? old.filter((value) => value !== key) : [key, ...old].slice(0, 12);
+    try { localStorage.setItem('farm.editor.favorites', JSON.stringify(next)); } catch { /* storage unavailable */ }
+    return next;
+  });
+  const navLabel = (key: string) => navItems.find((item) => item.key === key)?.label ?? key;
 
   return (
     <div className="absolute inset-0 pointer-events-none z-40 font-sans text-zinc-200 select-none">
       {/* Top bar */}
       <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-zinc-900/90 border border-white/10 rounded-xl px-1.5 py-1 shadow-xl pointer-events-auto">
         <span className="px-2 text-[11px] font-bold text-sky-400 tracking-wide">РЕДАКТОР</span>
+        <span className={`hidden text-[10px] sm:inline ${editor.hasUnsavedEdits ? 'text-amber-300' : 'text-emerald-300'}`} title={editor.hasUnsavedEdits ? 'Є зміни після останнього збереження' : 'Зміни збережено'}>{editor.hasUnsavedEdits ? '● Не збережено' : '✓ Збережено'}</span>
+        <label className="relative flex h-8 w-40 items-center gap-1.5 rounded-lg border border-white/10 bg-black/25 px-2 text-zinc-400 focus-within:border-sky-500 sm:w-52">
+          <Search className="h-3.5 w-3.5 shrink-0" />
+          <input value={navQuery} onChange={(e) => setNavQuery(e.target.value)} onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              const match = navItems.find((item) => item.label.toLocaleLowerCase().includes(navQuery.trim().toLocaleLowerCase()));
+              if (match) selectNav(match.key);
+            }
+            if (e.key === 'Escape') setNavQuery('');
+          }} placeholder="Знайти інструмент…" aria-label="Пошук інструментів редактора" className="min-w-0 flex-1 bg-transparent text-[10px] text-zinc-100 outline-none placeholder:text-zinc-500" />
+          {navQuery && <div className="absolute left-0 top-9 z-50 max-h-64 w-64 overflow-y-auto rounded-lg border border-white/10 bg-zinc-950 p-1 shadow-2xl">
+            {navItems.filter((item) => item.label.toLocaleLowerCase().includes(navQuery.trim().toLocaleLowerCase())).slice(0, 8).map((item) => (
+              <div key={item.key} className="flex items-center gap-1">
+                <button className="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-white/10" onClick={() => selectNav(item.key)}>
+                  <item.icon className="h-3.5 w-3.5 shrink-0 text-sky-300" /><span className="truncate">{item.label}</span>
+                </button>
+                <button className={`rounded p-1 ${favorites.includes(item.key) ? 'text-amber-300' : 'text-zinc-600 hover:text-amber-300'}`} aria-label="Перемкнути обране" onClick={() => toggleFavorite(item.key)}><Star className="h-3 w-3" fill={favorites.includes(item.key) ? 'currentColor' : 'none'} /></button>
+              </div>
+            ))}
+            {!navItems.some((item) => item.label.toLocaleLowerCase().includes(navQuery.trim().toLocaleLowerCase())) && <p className="px-2 py-2 text-xs text-zinc-500">Нічого не знайдено</p>}
+          </div>}
+        </label>
         <button className={`${btn} w-8 h-8 hover:bg-white/10 disabled:opacity-30`} disabled={!s.canUndo} onClick={() => editor.undo()} title="Скасувати (Ctrl+Z)">
           <Undo2 className="w-4 h-4" />
         </button>
@@ -108,7 +183,9 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
         <button
           className={`${btn} w-8 h-8 hover:bg-white/10`}
           onClick={() => {
-            world.saves.save('editor');
+            if (SaveSystem.listSlots().some((slot) => slot.slot === 'editor') && !window.confirm('Перезаписати збереження «editor» поточним світом?')) return;
+            if (!world.saves.save('editor')) { props.notify('Не вдалося зберегти світ', 'warn'); return; }
+            editor.markSaved();
             props.notify('Світ збережено в слот «editor»', 'success');
           }}
           title="Швидке збереження"
@@ -127,7 +204,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
           <button
             key={t.id}
             title={t.label}
-            onClick={() => setTool(t.id)}
+            onClick={() => selectNav(`tool:${t.id}`)}
             className={`${btn} w-9 h-9 ${tab === 'world' && s.tool === t.id ? 'bg-sky-500 text-white' : 'hover:bg-white/10'}`}
           >
             <t.icon className="w-4 h-4" />
@@ -138,7 +215,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
           <button
             key={t.id}
             title={t.label}
-            onClick={() => setTab(t.id)}
+            onClick={() => selectNav(`tab:${t.id}`)}
             className={`${btn} w-9 h-9 ${tab === t.id ? 'bg-sky-500 text-white' : 'hover:bg-white/10'}`}
           >
             <t.icon className="w-4 h-4" />
@@ -147,9 +224,15 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
       </div>
 
       {/* Context panel */}
-      <div className="absolute top-2 left-[3.4rem] w-64 max-h-[calc(100%-1rem)] overflow-y-auto bg-zinc-900/90 border border-white/10 rounded-xl p-3 shadow-xl pointer-events-auto flex flex-col gap-3 text-xs">
+      <div className="absolute top-2 left-[3.4rem] w-64 sm:w-72 max-h-[calc(100%-1rem)] overflow-y-auto bg-zinc-900/90 border border-white/10 rounded-xl p-3 shadow-xl pointer-events-auto flex flex-col gap-3 text-xs">
+        {favorites.length > 0 && <Section title="Обране">
+          <div className="flex flex-wrap gap-1">{favorites.map((key) => <button key={key} className={chip(false)} onClick={() => selectNav(key)}><Star className="h-3 w-3 text-amber-300" fill="currentColor" />{navLabel(key)}</button>)}</div>
+        </Section>}
+        {recent.length > 0 && <Section title="Нещодавні інструменти">
+          <div className="flex flex-wrap gap-1">{recent.map((key) => <button key={key} className={chip(false)} onClick={() => selectNav(key)}><Clock3 className="h-3 w-3 text-sky-300" />{navLabel(key)}</button>)}</div>
+        </Section>}
         {tab === 'world' && <ToolPanel engine={engine} />}
-        {tab === 'scene' && <ScenePanel engine={engine} rerender={rerender} />}
+        {tab === 'scene' && <ScenePanel engine={engine} notice={props.notify} openTool={setTool} inspectProp={<SelectedInspector engine={engine} detailsOnly />} />}
         {tab === 'atmo' && <AtmospherePanel engine={engine} rerender={rerender} />}
         {tab === 'water' && <WaterPanel rerender={rerender} />}
         {tab === 'veg' && <VegetationPanel rerender={rerender} />}
@@ -515,13 +598,14 @@ const ScatterPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
   );
 };
 
-const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
+const SelectedInspector: React.FC<{ engine: GameEngine; detailsOnly?: boolean }> = ({ engine, detailsOnly }) => {
   const { editor, props } = engine.world!;
   const id = editor.state.selectedPropId;
   const prop = id !== null ? props.get(id) : undefined;
   if (!prop) return <p className="text-zinc-500">Нічого не вибрано.</p>;
   const def = PROP_DEFS.find((d) => d.id === prop.type);
   const update = (patch: { x?: number; y?: number; z?: number; rot?: number; scale?: number; tx?: number; tz?: number }) => {
+    editor.trackSelectedProp();
     const p = prop.position.clone();
     if (patch.x !== undefined) p.x = patch.x;
     if (patch.y !== undefined) p.y = patch.y;
@@ -537,15 +621,15 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
   };
   return (
     <Section title={`Інспектор · ${def?.name ?? prop.type} #${prop.id}`}>
-      <div className="grid grid-cols-3 gap-1">
+      {!detailsOnly && <div className="grid grid-cols-3 gap-1">
         {(['x', 'y', 'z'] as const).map((axis) => (
           <NumberField key={axis} label={axis.toUpperCase()} value={prop.position[axis]} onCommit={(v) => update({ [axis]: v })} />
         ))}
-      </div>
-      <div className="grid grid-cols-2 gap-1">
+      </div>}
+      {!detailsOnly && <div className="grid grid-cols-2 gap-1">
         <NumberField label="Поворот°" value={THREE.MathUtils.radToDeg(prop.rotationY)} onCommit={(v) => update({ rot: v })} />
         <NumberField label="Масштаб" value={prop.scale} onCommit={(v) => update({ scale: Math.max(0.05, v) })} />
-      </div>
+      </div>}
       {def?.web && (
         <div className="grid grid-cols-2 gap-1">
           <NumberField label="Нахил X°" value={THREE.MathUtils.radToDeg(prop.tilt?.[0] ?? 0)} onCommit={(v) => update({ tx: v })} />
@@ -557,9 +641,11 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           type="checkbox"
           checked={prop.grounded}
           onChange={(e) => {
+            editor.trackSelectedProp();
             prop.grounded = e.target.checked;
-            if (prop.grounded) update({ y: engine.world!.terrain.getHeight(prop.position.x, prop.position.z) });
-            prop.grounded = e.target.checked;
+            const position = prop.position.clone();
+            if (prop.grounded) position.y = engine.world!.terrain.getHeight(position.x, position.z);
+            editor.setSelectedTransform(position, prop.rotationY, prop.scale, prop.tilt);
           }}
           className="accent-sky-500"
         />
@@ -571,7 +657,7 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           value={prop.length ?? CHAIN_SPECIES[def.chain].cfg.minLinks}
           scale={prop.scale}
           head={prop.head ?? 0}
-          onStart={() => editor.pushUndo()}
+          onStart={() => editor.trackSelectedProp()}
           onChange={(v) => editor.setSelectedChainLength(v)}
         />
       )}
@@ -579,14 +665,14 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         <LilyHeadChips
           head={prop.head ?? 0}
           onChange={(h) => {
-            editor.pushUndo();
+            editor.trackSelectedProp();
             editor.setSelectedChainHead(h);
           }}
         />
       )}
       {def?.web && prop.web && (
         <>
-          <WebFields params={prop.web} onStart={() => editor.pushUndo()} onChange={(patch) => editor.setSelectedWeb(patch)} />
+          <WebFields params={prop.web} onStart={() => editor.trackSelectedProp()} onChange={(patch) => editor.setSelectedWeb(patch)} />
           <p className="text-[10px] text-zinc-500">Зміна параметрів перебудовує павутину (розрізи заростають).</p>
         </>
       )}
@@ -594,18 +680,18 @@ const SelectedInspector: React.FC<{ engine: GameEngine }> = ({ engine }) => {
       {def?.chain === 'algae' && (
         <AlgaeColorFields
           colors={prop.colors ?? null}
-          onStart={() => editor.pushUndo()}
+          onStart={() => editor.trackSelectedProp()}
           onChange={(c) => editor.setSelectedChainColors(c)}
         />
       )}
-      <div className="flex gap-1">
+      {!detailsOnly && <div className="flex gap-1">
         <button className={`${chip(false)} flex-1`} onClick={() => editor.duplicateSelected()}>
           <Copy className="w-3.5 h-3.5" /> Копія
         </button>
         <button className={`${btn} flex-1 gap-1.5 py-1.5 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25`} onClick={() => editor.deleteSelected()}>
           <Trash2 className="w-3.5 h-3.5" /> Видалити
         </button>
-      </div>
+      </div>}
     </Section>
   );
 };
@@ -655,8 +741,12 @@ const EnemyPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         <button
           className={`${btn} gap-1.5 py-1.5 bg-white/5 hover:bg-white/10`}
           onClick={() => {
+            const before = pests.serializeAuthored();
             const p = pests.spawnNear(s.enemyKind, w.character.getPosition(), !!w.exploration.inCave);
-            if (p) editor.focusOn(p.position);
+            if (p) {
+              editor.recordChange('Розміщення істоти', () => pests.serializeAuthored(), (data) => pests.restoreAuthored(data), before);
+              editor.focusOn(p.position);
+            }
             else w.editor.onNotify(`Поруч із гравцем немає місця для: ${ENEMY_INFO[s.enemyKind].name}`, 'warning');
             refresh();
           }}
@@ -712,7 +802,13 @@ const EnemyPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
                   className="text-zinc-500 hover:text-rose-400"
                   title="Прибрати"
                   onClick={() => {
-                    pests.remove(p);
+                    const id = pests.authoredId(p);
+                    if (id === undefined) {
+                      pests.remove(p);
+                    } else {
+                      editor.trackChange('Видалення істоти', () => pests.serializeAuthored(), (data) => pests.restoreAuthored(data));
+                      pests.removeAuthored(id);
+                    }
                     refresh();
                   }}
                 >
@@ -733,58 +829,6 @@ const EnemyPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           <Trash2 className="w-3.5 h-3.5" /> Прибрати всіх
         </button>
       </Section>
-    </>
-  );
-};
-
-const ScenePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ engine }) => {
-  const w = engine.world!;
-  const [filter, setFilter] = useState('');
-  const list = useMemo(() => w.props.list(), [w.props.revision]); // eslint-disable-line react-hooks/exhaustive-deps
-  const names = useMemo(() => new Map(PROP_DEFS.map((d) => [d.id, d.name])), []);
-  const filtered = list.filter((p) => !filter || (names.get(p.type) ?? p.type).toLowerCase().includes(filter.toLowerCase()));
-  const focus = (pos: THREE.Vector3) => w.editor.focusOn(pos);
-  const entity = (icon: React.ElementType, label: string, pos: THREE.Vector3) => {
-    const Icon = icon;
-    return (
-      <button key={label} className={`${btn} justify-start gap-2 px-2 py-1 hover:bg-white/10`} onClick={() => focus(pos)}>
-        <Icon className="w-3.5 h-3.5 text-sky-400" /> {label}
-        <Crosshair className="w-3 h-3 ml-auto text-zinc-500" />
-      </button>
-    );
-  };
-  return (
-    <>
-      <Section title="Сутності">
-        {entity(User, 'Гравець', w.character.getPosition())}
-        {entity(Car, 'Пікап', w.vehicle.getPosition())}
-        {w.gameplay.pets.pets.map((p) => entity(PawPrint, p.name, p.group.position))}
-      </Section>
-      <Section title={`Об’єкти (${list.length})`}>
-        <input
-          placeholder="Пошук…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          className="bg-black/30 border border-white/10 rounded px-2 py-1 outline-none focus:border-sky-500"
-        />
-        <div className="flex flex-col max-h-64 overflow-y-auto">
-          {filtered.slice(0, 200).map((p) => (
-            <button
-              key={p.id}
-              onClick={() => {
-                w.editor.set('tool', 'select');
-                w.editor.select(p.id);
-                focus(p.position);
-              }}
-              className={`${btn} justify-start gap-2 px-2 py-1 ${w.editor.state.selectedPropId === p.id ? 'bg-sky-500/30' : 'hover:bg-white/10'}`}
-            >
-              <span className="text-zinc-500 tabular-nums w-8 text-left">#{p.id}</span>
-              {names.get(p.type) ?? p.type}
-            </button>
-          ))}
-        </div>
-      </Section>
-      <SelectedInspector engine={engine} />
     </>
   );
 };
@@ -1631,12 +1675,14 @@ const AlgaePanel: React.FC<{ rerender(): void }> = ({ rerender }) => {
 
 const SavePanel: React.FC<{ engine: GameEngine; notify: EditorUIProps['notify'] }> = ({ engine, notify }) => {
   const w = engine.world!;
+  const editor = w.editor;
   const [slots, setSlots] = useState(() => SaveSystem.listSlots());
   const [name, setName] = useState('level1');
   const fileRef = useRef<HTMLInputElement>(null);
   const refresh = () => setSlots(SaveSystem.listSlots());
   return (
     <>
+      <EnvironmentPresets engine={engine} notify={notify} />
       <Section title="Новий слот">
         <div className="flex gap-1">
           <input value={name} onChange={(e) => setName(e.target.value.replace(/[^\w-]/g, ''))} className="flex-1 min-w-0 bg-black/30 border border-white/10 rounded px-2 py-1 outline-none focus:border-sky-500" />
@@ -1644,7 +1690,10 @@ const SavePanel: React.FC<{ engine: GameEngine; notify: EditorUIProps['notify'] 
             className={chip(true)}
             onClick={() => {
               if (!name) return;
-              notify(w.saves.save(name) ? `Збережено «${name}»` : 'Не вдалося зберегти', 'success');
+              if (slots.some((slot) => slot.slot === name) && !window.confirm(`Перезаписати збереження «${name}»?`)) return;
+              const ok = w.saves.save(name);
+              if (ok) editor.markSaved();
+              notify(ok ? `Збережено «${name}»` : 'Не вдалося зберегти', ok ? 'success' : 'warn');
               refresh();
             }}
           >
@@ -1662,13 +1711,26 @@ const SavePanel: React.FC<{ engine: GameEngine; notify: EditorUIProps['notify'] 
                 {s.savedAt ? new Date(s.savedAt).toLocaleString() : '—'} · {s.sizeKb} КБ
               </div>
             </div>
-            <button className={`${btn} w-7 h-7 hover:bg-white/10`} title="Завантажити" onClick={() => notify(w.saves.load(s.slot) ? `Завантажено «${s.slot}»` : 'Несумісне збереження', 'info')}>
+            <button className={`${btn} w-7 h-7 hover:bg-white/10`} title="Замінити поточний світ цим збереженням" onClick={() => {
+              if (!window.confirm(`Завантажити «${s.slot}» і замінити поточний світ?`)) return;
+              const ok = w.saves.load(s.slot);
+              if (ok) editor.markSaved();
+              notify(ok ? `Завантажено «${s.slot}»` : 'Несумісне збереження', ok ? 'success' : 'warn');
+            }}>
               <FolderOpen className="w-3.5 h-3.5" />
             </button>
-            <button className={`${btn} w-7 h-7 hover:bg-white/10`} title="Перезаписати" onClick={() => (w.saves.save(s.slot), refresh())}>
+            <button className={`${btn} w-7 h-7 hover:bg-white/10`} title="Перезаписати" onClick={() => {
+              if (!window.confirm(`Перезаписати збереження «${s.slot}» поточним світом?`)) return;
+              const ok = w.saves.save(s.slot);
+              if (ok) editor.markSaved();
+              notify(ok ? `Збережено «${s.slot}»` : 'Не вдалося зберегти', ok ? 'success' : 'warn');
+              refresh();
+            }}>
               <Save className="w-3.5 h-3.5" />
             </button>
-            <button className={`${btn} w-7 h-7 hover:bg-rose-500/20 text-rose-300`} title="Видалити" onClick={() => (SaveSystem.delete(s.slot), refresh())}>
+            <button className={`${btn} w-7 h-7 hover:bg-rose-500/20 text-rose-300`} title="Видалити" onClick={() => {
+              if (window.confirm(`Видалити збереження «${s.slot}»?`)) { SaveSystem.delete(s.slot); refresh(); }
+            }}>
               <Trash2 className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -1689,7 +1751,12 @@ const SavePanel: React.FC<{ engine: GameEngine; notify: EditorUIProps['notify'] 
             className="hidden"
             onChange={async (e) => {
               const f = e.target.files?.[0];
-              if (f) notify((await w.saves.importFile(f)) ? 'Світ імпортовано' : 'Файл не підходить', 'info');
+              if (f) {
+                if (!window.confirm('Імпортувати файл і замінити поточний світ?')) { e.target.value = ''; return; }
+                const ok = await w.saves.importFile(f);
+                if (ok) editor.markSaved();
+                notify(ok ? 'Світ імпортовано' : 'Файл не підходить', ok ? 'success' : 'warn');
+              }
               e.target.value = '';
             }}
           />
@@ -1698,6 +1765,7 @@ const SavePanel: React.FC<{ engine: GameEngine; notify: EditorUIProps['notify'] 
       <button
         className={`${btn} gap-1.5 py-1.5 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25`}
         onClick={() => {
+          if (!window.confirm('Видалити автозбереження? Після перезавантаження буде створено новий світ.')) return;
           SaveSystem.delete('auto');
           notify('Автозбереження видалено — після перезавантаження буде новий світ', 'warn');
           refresh();
@@ -1709,8 +1777,121 @@ const SavePanel: React.FC<{ engine: GameEngine; notify: EditorUIProps['notify'] 
   );
 };
 
-const DebugTab: React.FC<EditorUIProps> = ({ engine, stats, isWireframe, onToggleWireframe, showConsole, onToggleConsole, showCharacterInspector, onToggleCharacterInspector }) => {
+type EnvironmentPreset = {
+  name: string;
+  savedAt: number;
+  timeOfDay: number;
+  season: string;
+  secondsPerHour: number;
+  waterLevel: number;
+  weather: WeatherType;
+  weatherAuto: boolean;
+  nightLightMode: NightLightMode;
+  weatherProfiles: Record<string, Record<string, unknown>>;
+  water: WaterSettings;
+  vegetation: VegetationSettings;
+};
+
+const ENVIRONMENT_PRESETS_KEY = 'farm.editor.environment-presets.v1';
+
+const EnvironmentPresets: React.FC<{ engine: GameEngine; notify: EditorUIProps['notify'] }> = ({ engine, notify }) => {
+  const [name, setName] = useState('Мій пресет');
+  const [presets, setPresets] = useState<EnvironmentPreset[]>(() => {
+    try {
+      const data: unknown = JSON.parse(localStorage.getItem(ENVIRONMENT_PRESETS_KEY) ?? '[]');
+      return Array.isArray(data) ? data.filter((p) => p && typeof p.name === 'string' && p.water && p.vegetation && p.weatherProfiles).slice(0, 20) : [];
+    } catch { return []; }
+  });
+  const persist = (next: EnvironmentPreset[]) => {
+    setPresets(next);
+    try { localStorage.setItem(ENVIRONMENT_PRESETS_KEY, JSON.stringify(next)); } catch { notify('Не вдалося зберегти пресет у браузері', 'warn'); }
+  };
+  const capture = () => {
+    const profiles: EnvironmentPreset['weatherProfiles'] = {};
+    for (const [key, profile] of Object.entries(WEATHER_PROFILES)) {
+      profiles[key] = { ...profile, tint: profile.tint.getHex(), haze: profile.haze.getHex(), sound: { ...profile.sound } };
+    }
+    return {
+      name: name.trim().slice(0, 40) || 'Пресет', savedAt: Date.now(), timeOfDay: worldSettings.timeOfDay,
+      season: worldSettings.season, secondsPerHour: worldSettings.secondsPerHour, waterLevel: worldSettings.waterLevel,
+      weather: engine.world!.weather.weather, weatherAuto: engine.world!.weather.director.auto, nightLightMode: nightLightSettings.mode,
+      weatherProfiles: profiles, water: { ...waterSettings }, vegetation: { ...vegetationSettings },
+    } satisfies EnvironmentPreset;
+  };
+  const apply = (preset: EnvironmentPreset) => {
+    if (!window.confirm(`Застосувати пресет «${preset.name}»? Поточні параметри середовища буде замінено.`)) return;
+    const w = engine.world!;
+    worldSettings.timeOfDay = Number.isFinite(preset.timeOfDay) ? THREE.MathUtils.clamp(preset.timeOfDay, 0, 23.99) : worldSettings.timeOfDay;
+    worldSettings.season = (['spring', 'summer', 'autumn', 'winter'].includes(preset.season) ? preset.season : worldSettings.season) as typeof worldSettings.season;
+    worldSettings.secondsPerHour = Number.isFinite(preset.secondsPerHour) ? THREE.MathUtils.clamp(preset.secondsPerHour, 0, 180) : worldSettings.secondsPerHour;
+    worldSettings.waterLevel = Number.isFinite(preset.waterLevel) ? THREE.MathUtils.clamp(preset.waterLevel, -6, 4) : worldSettings.waterLevel;
+    if (preset.weather in WEATHER_LABELS) w.weather.setWeather(preset.weather);
+    w.weather.director.auto = preset.weatherAuto !== false;
+    for (const [key, saved] of Object.entries(preset.weatherProfiles)) {
+      const profile = WEATHER_PROFILES[key as WeatherType];
+      if (!profile || !saved || typeof saved !== 'object') continue;
+      for (const field of ['light', 'fog', 'amount', 'cover', 'dark', 'hazeMix'] as const) {
+        const value = saved[field];
+        if (typeof value === 'number' && Number.isFinite(value)) profile[field] = value;
+      }
+      if (typeof saved.tint === 'number') profile.tint.setHex(saved.tint);
+      if (typeof saved.haze === 'number') profile.haze.setHex(saved.haze);
+      if (saved.precipitation === 'none' || saved.precipitation === 'rain' || saved.precipitation === 'snow') profile.precipitation = saved.precipitation;
+      if (saved.sound && typeof saved.sound === 'object') {
+        for (const soundKey of Object.keys(profile.sound) as (keyof WeatherSound)[]) {
+          const value = (saved.sound as Partial<WeatherSound>)[soundKey];
+          if (typeof value === 'number' && Number.isFinite(value)) profile.sound[soundKey] = value;
+        }
+      }
+    }
+    WeatherProfiles.save();
+    for (const key of Object.keys(WATER_DEFAULTS) as (keyof WaterSettings)[]) {
+      const value = preset.water[key];
+      if (typeof value === typeof WATER_DEFAULTS[key]) waterSettings[key] = value as never;
+    }
+    saveWaterSettings();
+    applyVegetationPreset(preset.vegetation);
+    if (NIGHT_LIGHT_MODES.includes(preset.nightLightMode)) setNightLightMode(preset.nightLightMode);
+    notify(`Застосовано пресет «${preset.name}»`, 'success');
+  };
+  return <Section title="Пресети середовища">
+    <div className="flex gap-1">
+      <input value={name} maxLength={40} onChange={(e) => setName(e.target.value)} className="min-w-0 flex-1 rounded border border-white/10 bg-black/30 px-2 py-1 outline-none focus:border-sky-500" aria-label="Назва пресета" />
+      <button className={chip(true)} title="Зберегти час, сезон, погоду, світло, воду й рослинність" onClick={() => persist([capture(), ...presets].slice(0, 20))}><Save className="h-3.5 w-3.5" /></button>
+    </div>
+    <p className="text-[10px] text-zinc-500">До 20 наборів: час, сезон, профілі погоди, світло, вода й рослинність.</p>
+    <button className={chip(false)} onClick={() => {
+      if (!window.confirm('Відновити стандартні параметри часу, погоди, світла, води й рослинності?')) return;
+      const w = engine.world!;
+      worldSettings.timeOfDay = 9;
+      worldSettings.season = 'spring';
+      worldSettings.secondsPerHour = 60;
+      worldSettings.waterLevel = -0.6;
+      w.weather.setWeather('clear');
+      w.weather.director.auto = true;
+      WeatherProfiles.resetAll();
+      resetWaterSettings();
+      resetVegetationSettings();
+      setNightLightMode('room');
+      notify('Стандартні параметри середовища відновлено', 'success');
+    }}>Відновити стандартні параметри</button>
+    {presets.map((preset, i) => <div key={`${preset.name}-${preset.savedAt}`} className="flex items-center gap-1 rounded-lg bg-white/5 px-2 py-1">
+      <button className="min-w-0 flex-1 truncate text-left font-semibold hover:text-sky-300" onClick={() => apply(preset)} title="Застосувати пресет">{preset.name}</button>
+      <button className={`${btn} h-7 w-7 text-rose-300 hover:bg-rose-500/20`} aria-label={`Видалити пресет ${preset.name}`} onClick={() => persist(presets.filter((_, n) => n !== i))}><Trash2 className="h-3.5 w-3.5" /></button>
+    </div>)}
+    {presets.length === 0 && <p className="text-zinc-500">Збережених наборів поки немає.</p>}
+  </Section>;
+};
+
+const DebugTab: React.FC<EditorUIProps> = ({ engine, stats, isWireframe, onToggleWireframe, showConsole, onToggleConsole, showCharacterInspector, onToggleCharacterInspector, notify }) => {
   const [, force] = useState(0);
+  const [frameHistory, setFrameHistory] = useState<number[]>([]);
+  const currentFrameMs = stats?.frameMs;
+  useEffect(() => {
+    if (currentFrameMs === undefined) return;
+    setFrameHistory((values) => [...values, currentFrameMs].slice(-48));
+  }, [currentFrameMs]);
+  const w = engine.world!;
   const row = (label: string, value: string, warn = false) => (
     <div className="flex justify-between">
       <span className="text-zinc-400">{label}</span>
@@ -1723,19 +1904,31 @@ const DebugTab: React.FC<EditorUIProps> = ({ engine, stats, isWireframe, onToggl
         {stats ? (
           <div className="flex flex-col gap-0.5">
             {row('FPS', stats.fps.toFixed(0), stats.fps < 50)}
-            {row('Кадр (CPU)', `${stats.frameMs.toFixed(2)} мс`, stats.frameMs > 10)}
+            {row('Кадр (середнє)', `${stats.frameMs.toFixed(2)} мс`, stats.frameMs > 16.7)}
+            {row('Кадр (p95)', `${stats.frameMsP95.toFixed(2)} мс`, stats.frameMsP95 > 20)}
             {row('Фізика', `${stats.physicsMs.toFixed(2)} мс`, stats.physicsMs > 4)}
+            {row('Тіла / колайдери', `${stats.physicsBodies ?? '—'} / ${stats.physicsColliders ?? '—'}`)}
             {row('Draw calls', String(stats.drawCalls), stats.drawCalls > 250)}
             {row('Трикутники', stats.triangles.toLocaleString())}
             {row('Геометрії', String(stats.geometries), stats.geometries > 600)}
             {row('Текстури', String(stats.textures))}
             {row('Шейдери', String(stats.programs))}
-            {stats.heapMb !== null && row('JS heap', `${stats.heapMb.toFixed(0)} МБ`)}
+            {row('JS heap', stats.heapMb !== null ? `${stats.heapMb.toFixed(0)} МБ` : 'браузер не надає')}
             {row('Об’єкти / деталі будов', `${stats.props} / ${stats.pieces}`)}
+            {row('Чанки печер', String(stats.caveChunks))}
+            {row('Печера', stats.caveBuilding ? 'генерується' : stats.caveCollidersReady ? 'готова' : 'колайдери готуються', stats.caveBuilding || !stats.caveCollidersReady)}
+            {row('Шейдери при запуску', stats.shaderPrewarmMs > 0 ? `${stats.shaderPrewarmMs.toFixed(0)} мс · ${stats.shaderPrewarmPrograms}` : 'ще не готові', stats.shaderPrewarmMs === 0)}
           </div>
         ) : (
           <p className="text-zinc-500">Збір…</p>
         )}
+        {frameHistory.length > 1 && <div className="rounded bg-black/20 p-1" aria-label="Графік часу кадру">
+          <svg viewBox="0 0 192 48" className="h-12 w-full" role="img" aria-label="Час кадру, мілісекунди">
+            <path d="M0 16H192 M0 32H192" stroke="rgba(255,255,255,.12)" strokeWidth="1" />
+            <polyline fill="none" stroke="#38bdf8" strokeWidth="2" vectorEffect="non-scaling-stroke" points={frameHistory.map((v, i) => `${i * (192 / (frameHistory.length - 1))},${46 - Math.min(v, 50) / 50 * 44}`).join(' ')} />
+          </svg>
+          <div className="flex justify-between text-[9px] text-zinc-500"><span>0 мс</span><span>50 мс · останні 14 с</span></div>
+        </div>}
       </Section>
       <Section title="Візуалізація">
         <button className={chip(isWireframe)} onClick={onToggleWireframe}>
@@ -1762,6 +1955,35 @@ const DebugTab: React.FC<EditorUIProps> = ({ engine, stats, isWireframe, onToggl
           fmt={(v) => (v === 0 ? 'пауза' : `${v.toFixed(1)}×`)}
         />
         <p className="text-zinc-500">Консоль: window.dev — tp(x,z), give(id,n), time(h), weather(t), spawn(type,x,z), save(), load().</p>
+      </Section>
+      <Section title="Сценарії перевірки">
+        <p className="text-zinc-500">Переміщення використовує ігровий fade; натисни E біля входу, щоб перевірити звичайну взаємодію.</p>
+        <div className="grid grid-cols-2 gap-1">
+          {w.exploration.sites.map((site) => <button key={site.id} className={chip(false)} onClick={() => {
+            if (engine.devTeleportToSite(site.id)) notify(`Переміщено до ${site.id}${site.underwater ? ' · підводна зона' : ''}`, 'info');
+            else notify('Не вдалося перемістити гравця', 'warn');
+          }}>{site.kind === 'cave' ? `Вхід ${site.id}` : site.kind === 'lighthouse' ? 'Маяк' : site.kind === 'ruins' ? 'Руїни' : 'Хатина'}</button>)}
+        </div>
+        <div className="grid grid-cols-2 gap-1">
+          <button className={chip(false)} onClick={() => {
+            if (w.exploration.debugCaveTransition('enter', 'cave1', w.character, engine.camera)) notify('Перевірка входу в печеру запущена', 'info');
+            else notify('Вхід недоступний: перевір, чи гравець уже в печері', 'warn');
+          }}>Перевірити вхід</button>
+          <button className={chip(false)} disabled={!w.exploration.inCave} onClick={() => {
+            const id = w.exploration.inCave;
+            if (id && w.exploration.debugCaveTransition('exit', id, w.character, engine.camera)) notify('Перевірка виходу з печери запущена', 'info');
+          }}>Перевірити вихід</button>
+        </div>
+      </Section>
+      <Section title="Останні зміни">
+        <div className="flex items-center justify-between text-[10px]">
+          <span className={w.editor.hasUnsavedEdits ? 'text-amber-300' : 'text-emerald-300'}>{w.editor.hasUnsavedEdits ? 'Є незбережені зміни' : 'Світ збережено'}</span>
+          <span className="text-zinc-500">{w.editor.recentActions.length}/20</span>
+        </div>
+        {w.editor.recentActions.slice(0, 8).map((action, i) => <div key={`${action.at}-${i}`} className="flex justify-between gap-2 text-[10px]">
+          <span className="truncate text-zinc-300">{action.label}</span><span className="shrink-0 text-zinc-600">{new Date(action.at).toLocaleTimeString()}</span>
+        </div>)}
+        {w.editor.recentActions.length === 0 && <p className="text-zinc-500">Історія дій з’явиться після першої зміни світу.</p>}
       </Section>
       <Section title="Гравець">
         <button

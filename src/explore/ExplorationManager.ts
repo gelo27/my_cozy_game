@@ -311,6 +311,16 @@ export class ExplorationManager {
     return this.network;
   }
 
+  /** Developer scenario hook: run the same faded cave transition used by the entrance and exit prompts. */
+  public debugCaveTransition(direction: 'enter' | 'exit', id: string, character: CharacterController, camera: ThirdPersonCamera): boolean {
+    const cave = this.caves.find((entry) => entry.site.id === id);
+    if (!cave) return false;
+    if (direction === 'enter') this.enterCave(cave, character, camera);
+    else if (this.inCave) this.exitCave(cave, character, camera);
+    else return false;
+    return true;
+  }
+
   private enterCave(cave: CaveEntry, character: CharacterController, camera: ThirdPersonCamera): void {
     // The network is generated in a worker from startup; if it is not done yet the fade waits for it
     this.startTransition(
