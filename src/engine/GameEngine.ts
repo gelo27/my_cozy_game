@@ -255,6 +255,8 @@ export class GameEngine {
   private readonly resizeObserver: ResizeObserver;
   private animationFrameId = 0;
   private isDisposed = false;
+  /** Cancels asynchronous startup work when the React host unmounts the engine. */
+  private readonly initAbortController = new AbortController();
   private keyG = false;
   public readonly ambient = new AmbientAudio();
   /** Surf and gulls along the shores. */
@@ -394,7 +396,9 @@ export class GameEngine {
   }
 
   public dispose(): void {
+    if (this.isDisposed) return;
     this.isDisposed = true;
+    this.initAbortController.abort();
     if (this.world && this.mode === 'play') this.world.saves.save(AUTOSAVE_SLOT);
     cancelAnimationFrame(this.animationFrameId);
     window.removeEventListener('keydown', this.handleKeyDown);
@@ -833,13 +837,19 @@ export class GameEngine {
       // Resume the last session, else start in the shipped default world, else dress a fresh one
       if (this.world.saves.load(AUTOSAVE_SLOT)) {
         callbacks.onLog('info', 'Відновлено останнє автозбереження.');
-      } else if (await this.world.saves.loadDefaultWorld()) {
-        callbacks.onLog('info', 'Завантажено стандартний світ.');
       } else {
-        props.populateDefault();
-        exploration.clearSiteProps();
-        gameplay.pets.spawnDefaults(SPAWN_POSITION);
+        const loadedDefaultWorld = await this.world.saves.loadDefaultWorld(this.initAbortController.signal);
+        // Do not continue startup (or create fallback entities) after the host disposed this engine.
+        if (this.isDisposed || this.initAbortController.signal.aborted) return;
+        if (loadedDefaultWorld) {
+          callbacks.onLog('info', 'Завантажено стандартний світ.');
+        } else {
+          props.populateDefault();
+          exploration.clearSiteProps();
+          gameplay.pets.spawnDefaults(SPAWN_POSITION);
+        }
       }
+      if (this.isDisposed) return;
       if (!gameplay.pets.pets.length) gameplay.pets.spawnDefaults(SPAWN_POSITION);
       // Hedgehogs and baby dragons in the wilds, sharks in the sea, spiders in the caves (not saved:
       // each session gets fresh ones; the cave spiders come once the network has built)
@@ -859,6 +869,8 @@ export class GameEngine {
       this.animate();
       callbacks.onReady();
     } catch (err: any) {
+      // Startup may reject because dispose() aborted a pending resource load.
+      if (this.isDisposed || this.initAbortController.signal.aborted) return;
       console.error('Failed to initialize 3D scene / Rapier physics:', err);
       this.callbacks.onError(err?.message || 'Error loading physics engine');
     }
@@ -880,11 +892,14 @@ export class GameEngine {
       // shaders are compiled here too instead of hitching the first frames of play
       const assets = Promise.allSettled([CharacterModel.preload(), loadWheatModel(), loadCropModels(), loadTreeModels(), loadAppleModels()]);
       await Promise.race([assets, new Promise((r) => setTimeout(r, 6000))]);
+      if (this.isDisposed) return;
       // Let the models' own load callbacks attach their meshes to the scene first
       await new Promise((r) => setTimeout(r, 0));
+      if (this.isDisposed) return;
       this.world?.terrain.updateLod(this.camera.camera.position);
       const timeout = new Promise<void>((r) => setTimeout(r, 4000));
       await Promise.race([this.renderer.compileAsync(this.scene, this.camera.camera).then(() => undefined), timeout]);
+      if (this.isDisposed) return;
       this.flushBuildings();
       this.warmUpGpuUploads(this.camera.camera);
     } catch (err) {
