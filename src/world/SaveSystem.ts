@@ -5,7 +5,7 @@ import { PropSaveData, MILLSTONE_SPOT, FOREST_VERSION } from './PropSystem';
 import { PetSaveData } from '../gameplay/PetSystem';
 import { WeatherType } from './WeatherSystem';
 import type { WeatherDirectorSave } from './WeatherDirector';
-import { worldSettings } from './WorldSettings';
+import { WORLD_SIZE, worldSettings } from './WorldSettings';
 import { duckweed } from './Duckweed';
 import { SEASONS, Season, legacySeasonOf } from './Seasons';
 import type { GameWorld } from '../engine/GameEngine';
@@ -68,6 +68,219 @@ export interface SaveSlotInfo {
   slot: string;
   savedAt: string;
   sizeKb: number;
+}
+
+
+const MAX_SAVE_FILE_BYTES = 32 * 1024 * 1024;
+const WEATHER_TYPES: readonly string[] = ['clear', 'cloudy', 'rain', 'storm', 'fog', 'snow', 'blizzard'];
+
+type SaveRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is SaveRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isIntegerInRange(value: unknown, min: number, max: number): value is number {
+  return Number.isInteger(value) && (value as number) >= min && (value as number) <= max;
+}
+
+function isNumberTuple(value: unknown, length: number): value is number[] {
+  return Array.isArray(value) && value.length === length && value.every(isFiniteNumber);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 100_000 && value.every((item) => typeof item === 'string');
+}
+
+function isNumberArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length <= 1_000_000 && value.every(isFiniteNumber);
+}
+
+function isNumberRecord(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.values(value).every((item) => isFiniteNumber(item) && item >= 0);
+}
+
+function decodeSaveBase64(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 4_000_000) return null;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return null;
+  try {
+    return atob(value);
+  } catch {
+    return null;
+  }
+}
+
+/** Validate the RLE pair stream before TerrainSystem allocates and decodes its full heightmap. */
+function isValidRleBase64(value: unknown, expectedValues: number): boolean {
+  const decoded = decodeSaveBase64(value);
+  if (decoded === null || decoded.length === 0 || decoded.length % 4 !== 0) return false;
+
+  let total = 0;
+  for (let i = 0; i < decoded.length; i += 4) {
+    const rawCount = decoded.charCodeAt(i) | (decoded.charCodeAt(i + 1) << 8);
+    const count = rawCount >= 0x8000 ? rawCount - 0x10000 : rawCount;
+    if (count <= 0) return false;
+    total += count;
+    if (total > expectedValues) return false;
+  }
+  return total === expectedValues;
+}
+
+function isTerrainSave(value: unknown): value is TerrainSaveData {
+  if (!isRecord(value) || !isIntegerInRange(value.size, 1, WORLD_SIZE)) return false;
+  const size = value.size;
+
+  if (value.enc === 'd1') {
+    return size === WORLD_SIZE &&
+      isValidRleBase64(value.heights, (WORLD_SIZE + 1) * (WORLD_SIZE + 1)) &&
+      isValidRleBase64(value.tiles, WORLD_SIZE * WORLD_SIZE);
+  }
+
+  if (value.enc !== undefined) return false;
+  const heights = decodeSaveBase64(value.heights);
+  const tiles = decodeSaveBase64(value.tiles);
+  return heights !== null && tiles !== null &&
+    heights.length === (size + 1) * (size + 1) * 2 &&
+    tiles.length === size * size;
+}
+
+function isSavedPiece(value: unknown): boolean {
+  if (!isRecord(value) ||
+      typeof value.id !== 'string' || typeof value.type !== 'string' ||
+      !isNumberTuple(value.position, 3) || !isNumberTuple(value.quaternion, 4)) return false;
+  if (value.rotation !== undefined && !isNumberTuple(value.rotation, 3)) return false;
+  if (value.health !== undefined && !isFiniteNumber(value.health)) return false;
+  if (value.isOpen !== undefined && typeof value.isOpen !== 'boolean') return false;
+  if (value.roofConfig !== undefined && !isRecord(value.roofConfig)) return false;
+  if (value.roofStyle !== undefined && typeof value.roofStyle !== 'string') return false;
+  const q = value.quaternion as number[];
+  return q.some((part) => Math.abs(part) > 1e-8);
+}
+
+function isBuildingSave(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isRecord(value) || value.version !== 1 ||
+      !isRecord(value.metadata) || !Array.isArray(value.pieces) || value.pieces.length > 100_000) return false;
+  const metadata = value.metadata;
+  if (!isIntegerInRange(metadata.totalPieces, 0, 100_000) ||
+      !isIntegerInRange(metadata.customizedCells, 0, 10_000_000) ||
+      typeof metadata.confirmed !== 'boolean') return false;
+  if (metadata.roofStyle !== undefined && typeof metadata.roofStyle !== 'string') return false;
+  if (!value.pieces.every(isSavedPiece)) return false;
+  if (value.wallPainting !== undefined &&
+      (!isRecord(value.wallPainting) || !Object.values(value.wallPainting).every((v) => typeof v === 'string'))) return false;
+  return true;
+}
+
+function isPropSave(value: unknown): boolean {
+  return isRecord(value) && typeof value.type === 'string' &&
+    isNumberTuple(value.p, 3) && isFiniteNumber(value.r) &&
+    isFiniteNumber(value.s) && value.s > 0 && value.s <= 100 &&
+    (value.g === undefined || typeof value.g === 'boolean') &&
+    (value.n === undefined || isFiniteNumber(value.n)) &&
+    (value.c === undefined || isNumberTuple(value.c, 2)) &&
+    (value.hd === undefined || isFiniteNumber(value.hd)) &&
+    (value.w === undefined || isRecord(value.w)) &&
+    (value.wa === undefined || isNumberArray(value.wa)) &&
+    (value.t === undefined || isNumberTuple(value.t, 2));
+}
+
+function isVehicleSave(value: unknown): boolean {
+  return isRecord(value) && isNumberTuple(value.p, 3) && isFiniteNumber(value.yaw);
+}
+
+function isPetSave(value: unknown): boolean {
+  return isRecord(value) && (value.kind === 'cat' || value.kind === 'dog') &&
+    typeof value.name === 'string' && isFiniteNumber(value.affection) &&
+    isNumberTuple(value.p, 2);
+}
+
+function isWorkerSave(value: unknown): boolean {
+  if (!isRecord(value) || !isIntegerInRange(value.slot, 0, 1000) ||
+      typeof value.role !== 'string' || !isFiniteNumber(value.energy) ||
+      !isFiniteNumber(value.jobsDone) || !isNumberTuple(value.pos, 3) ||
+      !isNumberTuple(value.home, 3) || typeof value.asleep !== 'boolean' ||
+      !(value.bed === null || typeof value.bed === 'string')) return false;
+  if (value.food !== undefined && !isFiniteNumber(value.food)) return false;
+  if (value.carry !== undefined &&
+      (!Array.isArray(value.carry) || !value.carry.every((item) =>
+        isRecord(item) && typeof item.itemId === 'string' && isFiniteNumber(item.amount) && item.amount >= 0))) return false;
+  return true;
+}
+
+function isExplorationSave(value: unknown): boolean {
+  return isRecord(value) && typeof value.explored === 'string' &&
+    isStringArray(value.discovered) && isStringArray(value.chests) &&
+    isStringArray(value.recipes) && Array.isArray(value.markers) &&
+    value.markers.length <= 100_000 && value.markers.every(isRecord);
+}
+
+function isWeatherDirectorSave(value: unknown): boolean {
+  return isRecord(value) && isFiniteNumber(value.rng) && isFiniteNumber(value.hoursLeft) &&
+    Array.isArray(value.queue) && value.queue.length <= 100 &&
+    value.queue.every((entry) => isRecord(entry) &&
+      WEATHER_TYPES.includes(String(entry.type)) && isFiniteNumber(entry.hours) && entry.hours > 0) &&
+    typeof value.auto === 'boolean';
+}
+
+/** Runtime guard for both local saves and user-supplied world files. */
+function isWorldSaveData(value: unknown): value is WorldSaveData {
+  if (!isRecord(value) || value.version !== SAVE_VERSION ||
+      typeof value.savedAt !== 'string' || !isTerrainSave(value.terrain) ||
+      !isFiniteNumber(value.waterLevel) || !isFiniteNumber(value.timeOfDay) ||
+      value.timeOfDay < 0 || value.timeOfDay > 24 ||
+      !WEATHER_TYPES.includes(String(value.weather)) ||
+      !Array.isArray(value.props) || value.props.length > 200_000 ||
+      !value.props.every(isPropSave) || !isBuildingSave(value.buildings)) return false;
+
+  if (!isRecord(value.inventory) || !isNumberRecord(value.inventory.items) ||
+      !(value.inventory.equipped === null || typeof value.inventory.equipped === 'string') ||
+      (value.inventory.hotbar !== undefined &&
+        (!Array.isArray(value.inventory.hotbar) ||
+          !value.inventory.hotbar.every((item) => item === null || typeof item === 'string'))) ||
+      (value.inventory.capacity !== undefined &&
+        !isIntegerInRange(value.inventory.capacity, 1, 100_000)) ||
+      !isNumberTuple(value.player, 3) ||
+      !(value.vehicle === null || isVehicleSave(value.vehicle))) return false;
+
+  if (value.pets !== undefined &&
+      (!Array.isArray(value.pets) || value.pets.length > 1000 || !value.pets.every(isPetSave))) return false;
+  if (value.moped !== undefined && !isVehicleSave(value.moped)) return false;
+  if (value.boat !== undefined && !isVehicleSave(value.boat)) return false;
+  if (value.fields !== undefined &&
+      (!Array.isArray(value.fields) || value.fields.length > 100_000 ||
+        !value.fields.every((field) => isRecord(field) && isFiniteNumber(field.gx) &&
+          isFiniteNumber(field.gz) && isNumberArray(field.prev) &&
+          (field.crop === null || field.crop === undefined || isRecord(field.crop))))) return false;
+  if (value.orchard !== undefined &&
+      (!isRecord(value.orchard) || !Array.isArray(value.orchard.t) ||
+        !value.orchard.t.every((row) => isNumberArray(row)) ||
+        (value.orchard.a !== undefined &&
+          (!Array.isArray(value.orchard.a) || !value.orchard.a.every((row) => isNumberArray(row)))))) return false;
+  if (value.nursery !== undefined &&
+      (!Array.isArray(value.nursery) || !value.nursery.every((row) =>
+        Array.isArray(row) && row.length === 6 && typeof row[0] === 'string' &&
+        row.slice(1).every(isFiniteNumber)))) return false;
+  if (value.exploration !== undefined && !isExplorationSave(value.exploration)) return false;
+  if (value.workers !== undefined &&
+      (!Array.isArray(value.workers) || value.workers.length > 10 || !value.workers.every(isWorkerSave))) return false;
+  if (value.storage !== undefined && !isNumberRecord(value.storage)) return false;
+  if (value.weatherDirector !== undefined && !isWeatherDirectorSave(value.weatherDirector)) return false;
+  if (value.snowCover !== undefined &&
+      (!isFiniteNumber(value.snowCover) || value.snowCover < 0 || value.snowCover > 1)) return false;
+  if (value.forest !== undefined && !isIntegerInRange(value.forest, 0, 1_000_000)) return false;
+  if (value.day !== undefined && (!isFiniteNumber(value.day) || value.day < 0)) return false;
+  if (value.season !== undefined && !['spring', 'summer', 'autumn', 'winter'].includes(String(value.season))) return false;
+  if (value.duckweed !== undefined && decodeSaveBase64(value.duckweed) === null) return false;
+  if (value.sleep !== undefined &&
+      (!isRecord(value.sleep) ||
+        !(value.sleep.bed === null || isNumberTuple(value.sleep.bed, 3)) ||
+        !isFiniteNumber(value.sleep.night))) return false;
+  return true;
 }
 
 /**
@@ -136,6 +349,7 @@ export class SaveSystem {
   }
 
   public apply(data: WorldSaveData): void {
+    if (!isWorldSaveData(data)) throw new Error('Invalid or unsupported world save data');
     const w = this.world;
     worldSettings.waterLevel = data.waterLevel;
     worldSettings.timeOfDay = data.timeOfDay;
@@ -245,16 +459,21 @@ export class SaveSystem {
   public load(slot: string): boolean {
     const data = SaveSystem.read(slot);
     if (!data) return false;
-    this.apply(data);
-    return true;
+    try {
+      this.apply(data);
+      return true;
+    } catch (err) {
+      console.warn('[SaveSystem] load failed; current world was kept where possible', err);
+      return false;
+    }
   }
 
   public static read(slot: string): WorldSaveData | null {
     try {
       const raw = localStorage.getItem(KEY_PREFIX + slot);
       if (!raw) return null;
-      const data = JSON.parse(raw) as WorldSaveData;
-      return data.version === SAVE_VERSION ? data : null;
+      const data: unknown = JSON.parse(raw);
+      return isWorldSaveData(data) ? data : null;
     } catch {
       return null;
     }
@@ -302,12 +521,12 @@ export class SaveSystem {
    * The world a first session starts in (no autosave yet): public/worlds/default.world.json.
    * False when it is missing or doesn't match this save version (the generated world is used then).
    */
-  public async loadDefaultWorld(): Promise<boolean> {
+  public async loadDefaultWorld(signal?: AbortSignal): Promise<boolean> {
     try {
-      const res = await fetch(`${import.meta.env.BASE_URL}worlds/default.world.json`);
-      if (!res.ok) return false;
-      const data = (await res.json()) as WorldSaveData;
-      if (data.version !== SAVE_VERSION || !data.terrain) return false;
+      const res = await fetch(`${import.meta.env.BASE_URL}worlds/default.world.json`, signal ? { signal } : undefined);
+      if (!res.ok || signal?.aborted) return false;
+      const data: unknown = await res.json();
+      if (signal?.aborted || !isWorldSaveData(data)) return false;
       this.apply(data);
       return true;
     } catch {
@@ -316,15 +535,42 @@ export class SaveSystem {
   }
 
   public importFile(file: File): Promise<boolean> {
+    if (file.size > MAX_SAVE_FILE_BYTES) return Promise.resolve(false);
+
     return file.text().then((text) => {
+      if (text.length > MAX_SAVE_FILE_BYTES) return false;
+      let parsed: unknown;
       try {
-        const data = JSON.parse(text) as WorldSaveData;
-        if (data.version !== SAVE_VERSION || !data.terrain) return false;
-        this.apply(data);
-        return true;
+        parsed = JSON.parse(text);
       } catch {
         return false;
       }
+      if (!isWorldSaveData(parsed)) return false;
+
+      // Keep a rollback snapshot so a runtime failure during rebuild cannot leave a half-imported world.
+      let previous: WorldSaveData;
+      try {
+        previous = this.capture();
+      } catch (err) {
+        console.warn('[SaveSystem] could not snapshot the current world before import', err);
+        return false;
+      }
+
+      try {
+        this.apply(parsed);
+        return true;
+      } catch (err) {
+        console.warn('[SaveSystem] import failed; restoring the previous world', err);
+        try {
+          this.apply(previous);
+        } catch (restoreError) {
+          console.error('[SaveSystem] failed to restore the previous world after import failure', restoreError);
+        }
+        return false;
+      }
+    }).catch((err) => {
+      console.warn('[SaveSystem] could not read import file', err);
+      return false;
     });
   }
 }
