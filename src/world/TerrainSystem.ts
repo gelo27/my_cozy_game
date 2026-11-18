@@ -1380,23 +1380,34 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
         const offset = (row & 1) ? 32 : 0;
         for (let col = -1; col < 6; col++) {
           const x = col * 64 + offset + 32;
-          drawPaver(x, y, 61, 29, tones[(Math.abs(row * 7 + col * 3) % tones.length)]);
+          drawPaver(x, y, 61, 29, tones[(((row & 7) * 3 + (col & 3) * 2) % tones.length)]);
         }
       }
       break;
     }
 
     case TerrainTileType.CLINKER_HERRINGBONE: {
-      // Warm clay bricks alternate orientation in interlocking quarter-turn groups.
-      // The 64 px motif repeats cleanly in both axes.
+      // True 90-degree herringbone: 2:1 bricks occupy pairs of 16 px cells.
+      // This 4x4 domino motif repeats every 64 px in both axes.
       const tones = ['#bd674b', '#a95139', '#c87859', '#91422f', '#b45a40', '#d0805e'];
-      for (let row = -1; row < 9; row++) {
-        for (let col = -1; col < 9; col++) {
-          const x = col * 32 + 16;
-          const y = row * 32 + 16;
-          const orient = ((Math.floor(row / 2) + Math.floor(col / 2)) & 1) ? Math.PI / 2 : 0;
-          const tone = tones[Math.abs(row * 5 + col * 7) % tones.length];
-          drawPaver(x, y, 29, 14, tone, orient);
+      const motif: { x: number; y: number; vertical: boolean }[] = [
+        { x: 16, y: 8, vertical: false },
+        { x: 40, y: 16, vertical: true },
+        { x: 56, y: 16, vertical: true },
+        { x: 8, y: 32, vertical: true },
+        { x: 24, y: 32, vertical: true },
+        { x: 48, y: 40, vertical: false },
+        { x: 16, y: 56, vertical: false },
+        { x: 48, y: 56, vertical: false },
+      ];
+      for (let row = -1; row < 5; row++) {
+        for (let col = -1; col < 5; col++) {
+          motif.forEach((brick, i) => {
+            const x = col * 64 + brick.x;
+            const y = row * 64 + brick.y;
+            const tone = tones[(((row & 3) * 5 + (col & 3) * 3 + i) % tones.length)];
+            drawPaver(x, y, brick.vertical ? 13 : 29, brick.vertical ? 29 : 13, tone);
+          });
         }
       }
       // Fine clay flecks keep large painted areas from reading as a flat checkerboard.
@@ -1415,8 +1426,9 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
       ctx.fillRect(0, 0, size, size);
       for (let row = 0; row < 8; row++) {
         for (let col = 0; col < 8; col++) {
-          const cx = col * 32 + 16;
-          const cy = row * 32 + 16;
+          // Stones on the repeat seam are duplicated by wrapShape for perfect tiling.
+          const cx = col * 32;
+          const cy = row * 32;
           const w = 27 + rnd() * 3;
           const h = 27 + rnd() * 3;
           const cut = 3 + rnd() * 3;
