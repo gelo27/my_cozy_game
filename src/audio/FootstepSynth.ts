@@ -6,7 +6,8 @@
 export type FootSurface =
   | 'grass' | 'dirt' | 'asphalt' | 'cobble' | 'sand' | 'snow'
   | 'leaves' | 'gravel' | 'ice' | 'mud'
-  | 'wood' | 'stone' | 'tile' | 'carpet' | 'water';
+  | 'wood' | 'stone' | 'tile' | 'carpet' | 'water'
+  | 'concretePavers' | 'clinker' | 'graniteSetts' | 'sandstone' | 'limestone';
 
 /**
  * Footsteps and swimming, synthesised once into short AudioBuffers (no files).
@@ -45,13 +46,19 @@ export const OTHER_RANGE = 28;
 
 export type Kind = FootSurface | 'wet' | 'stroke' | 'lap' | 'splash' | 'under' | 'exhale';
 /** Pre-render order: what the player hears first comes first. */
-export const WARM_ORDER: Kind[] = ['grass', 'dirt', 'wood', 'sand', 'stone', 'water', 'wet', 'cobble', 'asphalt', 'tile', 'carpet', 'snow', 'leaves', 'gravel', 'ice', 'mud', 'stroke', 'lap', 'splash', 'under', 'exhale'];
+export const WARM_ORDER: Kind[] = [
+  'grass', 'dirt', 'wood', 'sand', 'stone', 'water', 'wet',
+  'cobble', 'concretePavers', 'clinker', 'graniteSetts', 'sandstone', 'limestone',
+  'asphalt', 'tile', 'carpet', 'snow', 'leaves', 'gravel', 'ice', 'mud',
+  'stroke', 'lap', 'splash', 'under', 'exhale',
+];
 
 /** Relative loudness per surface (soft floors are quieter). */
 export const SURFACE_GAIN: Record<FootSurface, number> = {
   grass: 0.7, dirt: 0.8, asphalt: 0.75, cobble: 0.8, sand: 0.65, snow: 0.8,
   leaves: 0.85, gravel: 0.85, ice: 0.6, mud: 0.8,
   wood: 0.72, stone: 0.75, tile: 0.7, carpet: 0.45, water: 1.25,
+  concretePavers: 0.74, clinker: 0.82, graniteSetts: 0.86, sandstone: 0.72, limestone: 0.7,
 };
 
 export const R = Math.random;
@@ -383,6 +390,48 @@ function renderStep(sr: number, surface: FootSurface): Float32Array {
     case 'cobble':
       soleOnHardGround(o, sr, p * rr(0.95, 1.05), 1.4);
       return finish(o, sr, 200, 4500);
+    case 'concretePavers': {
+      // Concrete slabs: compact, dry heel contact with a restrained cementy grit in the joints.
+      const g = grf(0.002, 0.021, 0.082, 0.58, 0.003, 0.028);
+      swish(o, sr, 0, 0.002, 0.014, 920 * p, 0.58, 0.72);
+      impact(o, sr, g, 1.25, [[1450 * p, 0.012, 0.2], [2750 * p, 0.009, 0.13]], 0.025);
+      phisem(o, sr, g, 520, 0.88, [res(1900 * p, 0.42), res(3500 * p, 0.36, 0.35)], 0.22);
+      return finish(o, sr, 190, 5000);
+    }
+    case 'clinker': {
+      // Fired clay is harder and slightly more resonant than concrete: a crisp brick tap
+      // followed by a muted toe knock, without the metallic ring of glazed tile.
+      const g = grf(0.0018, 0.02, 0.078, 0.62, 0.003, 0.026);
+      swish(o, sr, 0, 0.002, 0.015, 1050 * p, 0.62, 0.55);
+      impact(o, sr, g, 1.45, [[1050 * p, 0.018, 0.22], [2150 * p, 0.014, 0.2], [3400 * p, 0.008, 0.07]], 0.04);
+      phisem(o, sr, g, 420, 0.9, [res(2600 * p, 0.4)], 0.14);
+      return finish(o, sr, 220, 5600);
+    }
+    case 'graniteSetts': {
+      // Dense split granite gives a hard stone knock plus a coarse crunch as the sole shifts
+      // over the narrow joints between the small setts.
+      const g = soleOnHardGround(o, sr, p * rr(0.97, 1.04), 1.65);
+      impact(o, sr, g, 1.05, [[1750 * p, 0.009, 0.18], [3150 * p, 0.006, 0.1]], 0.035);
+      return finish(o, sr, 210, 5200);
+    }
+    case 'sandstone': {
+      // Sandstone is porous and slightly dusty: a soft stone press with fine grains brushing
+      // under the shoe instead of the sharper clack of granite or clinker.
+      const g = grf(0.005, 0.035, 0.095, 0.62, 0.009, 0.045);
+      swish(o, sr, 0, 0.006, 0.032, 620 * p, 0.52, 0.8);
+      swish(o, sr, g.toeAt, 0.008, 0.034, 780 * p, 0.52, 0.42 * g.toeAmp);
+      phisem(o, sr, g, 1350, 0.89, [res(1450 * p, 0.48), res(2700 * p, 0.42, 0.45)], 0.52);
+      phisem(o, sr, g, 500, 0.92, [res(3400 * p, 0.35, 0.3)], 0.12);
+      return finish(o, sr, 170, 4400);
+    }
+    case 'limestone': {
+      // Cut limestone slabs have a light, dry tap with a short low-mid stone body and little grit.
+      const g = grf(0.0025, 0.024, 0.086, 0.56, 0.004, 0.03);
+      swish(o, sr, 0, 0.0025, 0.017, 820 * p, 0.55, 0.58);
+      impact(o, sr, g, 1.3, [[1180 * p, 0.012, 0.16], [2380 * p, 0.01, 0.14], [3650 * p, 0.006, 0.04]], 0.018);
+      phisem(o, sr, g, 300, 0.9, [res(2100 * p, 0.38, 0.25)], 0.1);
+      return finish(o, sr, 190, 5000);
+    }
     case 'stone': {
       // Flagstones / terracotta indoors: the sole's thup plus a short, dull stone knock
       const g = soleOnHardGround(o, sr, p, 0.6);
