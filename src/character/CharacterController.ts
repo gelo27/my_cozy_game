@@ -562,9 +562,9 @@ export class CharacterController {
     this.ragdoll ??= new Ragdoll(this.physics);
     if (this.carryAbility?.isHolding) this.carryAbility.dropObject();
     const v = this.body.linvel();
-    // The model updates its pose first so the bodies start exactly where the parts are drawn
-    const trans = this.body.translation();
-    this.model.group.position.set(trans.x, trans.y, trans.z);
+    // Start the ragdoll from the exact pose currently shown on screen, not the latest physics tick.
+    this.physics.getInterpolatedBodyPosition(this.body, this.renderPositionScratch);
+    this.model.group.position.copy(this.renderPositionScratch);
     if (!this.ragdoll.start(this.model, new THREE.Vector3(v.x, v.y, v.z))) return false;
     this.collider.setEnabled(false);
     this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
