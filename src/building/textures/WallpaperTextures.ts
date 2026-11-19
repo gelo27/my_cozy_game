@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-/** Default physical size of a square 512px wallpaper repeat on walls. */
+/** Default physical size of a square 128px wallpaper repeat on walls. */
 export const DEFAULT_WALL_TILE_SIZE = 2.0;
 /** Wainscot textures are composites: 1m panel at the bottom, painted wall above, 4m tall in total. */
 export const WAINSCOT_TILE_HEIGHT = 4.0;
@@ -35,9 +35,10 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
   dataUrl: string;
 } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
 
   // 1. Base Fill
@@ -179,16 +180,17 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
 
 
   // 6. Compose the real wall: panel squeezed into the bottom metre, painted wall above it.
-  // 256px per metre in both directions keeps the texture's proportions true on any wall.
+  // Keep the logical 512px drawing grid; the canvas context downsamples it to 128px on output.
   const pxPerMeter = 512 / DEFAULT_WALL_TILE_SIZE;
   const fullH = WAINSCOT_TILE_HEIGHT * pxPerMeter;
   const panelH = WAINSCOT_PANEL_HEIGHT * pxPerMeter;
   const upperColor = options.upperWallColor ?? '#f2ece1';
 
   const wall = document.createElement('canvas');
-  wall.width = 512;
-  wall.height = fullH;
+  wall.width = 128;
+  wall.height = fullH / 4;
   const wctx = wall.getContext('2d')!;
+  wctx.scale(0.25, 0.25);
   wctx.fillStyle = upperColor;
   wctx.fillRect(0, 0, 512, fullH - panelH);
   // Soft plaster mottling so the painted part does not look flat
@@ -202,7 +204,7 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
     wctx.fill();
   }
   wctx.restore();
-  wctx.drawImage(canvas, 0, fullH - panelH, 512, panelH);
+  wctx.drawImage(canvas, 0, 0, 128, 128, 0, fullH - panelH, 512, panelH);
 
 
   const texture = new THREE.CanvasTexture(wall);
@@ -215,16 +217,17 @@ export function createWainscotTexture(options: WainscotTextureOptions): {
   const thumb = document.createElement('canvas');
   thumb.width = 256;
   thumb.height = 256;
-  thumb.getContext('2d')!.drawImage(wall, 0, fullH - 512, 512, 512, 0, 0, 256, 256);
+  thumb.getContext('2d')!.drawImage(wall, 0, fullH / 4 - 128, 128, 128, 0, 0, 256, 256);
 
   return { texture, dataUrl: thumb.toDataURL('image/png') };
 }
 
 export function createFloralWallpaperTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Warm ivory background
   ctx.fillStyle = '#faf6ee';
@@ -305,9 +308,10 @@ export function createFloralWallpaperTexture(): { texture: THREE.CanvasTexture; 
 
 export function createMintBeadboardTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#d8e2dc';
   ctx.fillRect(0, 0, 512, 512);
@@ -342,9 +346,10 @@ export function createMintBeadboardTexture(): { texture: THREE.CanvasTexture; da
 
 export function createPinkGinghamTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   const tileSize = 64;
   ctx.fillStyle = '#fff0f3';
@@ -381,9 +386,10 @@ export function createPinkGinghamTexture(): { texture: THREE.CanvasTexture; data
 
 export function createGoldDamaskTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Champagne parchment background
   ctx.fillStyle = '#f8f5ee';
@@ -433,9 +439,10 @@ export function createGoldDamaskTexture(): { texture: THREE.CanvasTexture; dataU
 
 export function createTerracottaBrickTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Mortar background
   ctx.fillStyle = '#dfd7cc';
@@ -474,9 +481,10 @@ export function createTerracottaBrickTexture(): { texture: THREE.CanvasTexture; 
 
 export function createSubwayTileTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Dark grey grout
   ctx.fillStyle = '#3a3d40';
@@ -522,9 +530,10 @@ export function createSubwayTileTexture(): { texture: THREE.CanvasTexture; dataU
 
 export function createSageBotanicalTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#7a9e7e';
   ctx.fillRect(0, 0, 512, 512);
@@ -562,9 +571,10 @@ export function createSageBotanicalTexture(): { texture: THREE.CanvasTexture; da
 
 export function createLavenderStarsTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#dcd3f0';
   ctx.fillRect(0, 0, 512, 512);
@@ -609,9 +619,10 @@ export function createLavenderStarsTexture(): { texture: THREE.CanvasTexture; da
 
 export function createOakPlanksTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#ab8460';
   ctx.fillRect(0, 0, 512, 512);
@@ -645,9 +656,10 @@ export function createOakPlanksTexture(): { texture: THREE.CanvasTexture; dataUr
 
 export function createCobblestoneTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#6b705c';
   ctx.fillRect(0, 0, 512, 512);
@@ -678,9 +690,10 @@ export function createCobblestoneTexture(): { texture: THREE.CanvasTexture; data
 
 export function createSkyCloudsTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#90e0ef';
   ctx.fillRect(0, 0, 512, 512);
@@ -713,9 +726,10 @@ export function createSkyCloudsTexture(): { texture: THREE.CanvasTexture; dataUr
 
 export function createCreamStuccoTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#f8f6f0';
   ctx.fillRect(0, 0, 512, 512);
@@ -741,9 +755,10 @@ export function createCreamStuccoTexture(): { texture: THREE.CanvasTexture; data
 
 export function createScandiGeoTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#f4f1de';
   ctx.fillRect(0, 0, 512, 512);

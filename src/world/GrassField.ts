@@ -99,6 +99,8 @@ export class GrassField {
     uGrTrailC: { value: new THREE.Vector2() },
     uGrTrailK: { value: veg.grassTrail },
     uGrSnow: { value: 0 },
+    uGrPuddleMask: { value: null as THREE.Texture | null },
+    uGrPuddleFill: { value: 0 },
   };
   /** 0..1 fallen snow (WeatherSystem.snowCover): blades sink into it, frost over and barely sway. */
   public snowCover = 0;
@@ -132,6 +134,7 @@ export class GrassField {
     this.uniforms.uGrData.value = this.dataTex;
     this.uniforms.uGrFlower.value = this.flowerTex;
     this.uniforms.uGrColor.value = terrain.grassLayer;
+    this.uniforms.uGrPuddleMask.value = terrain.puddleMaskTexture;
     this.uniforms.uGrTrail.value = this.trail.texture;
     terrain.setSnowTrail(this.trail.texture, this.trail.center);
 
@@ -203,6 +206,7 @@ export class GrassField {
     u.uGrTime.value += dt;
     u.uGrSea.value = worldSettings.waterLevel;
     u.uGrSnow.value = this.snowCover;
+    u.uGrPuddleFill.value = this.terrain.puddleFill;
     const windTarget = (0.25 + wind * 0.75) * (1 - this.snowCover * 0.7);
     u.uGrWind.value += (windTarget - u.uGrWind.value) * (1 - Math.exp(-dt * 0.5));
     // The patch sits a little ahead of the camera, where the view actually looks
@@ -383,6 +387,8 @@ uniform float uGrSea;
 uniform sampler2D uGrHeight;
 uniform sampler2D uGrData;
 uniform sampler2D uGrFlower;
+uniform sampler2D uGrPuddleMask;
+uniform float uGrPuddleFill;
 uniform sampler2D uGrRiver;
 uniform sampler2D uGrColor;
 uniform float uGrSize;
@@ -421,10 +427,11 @@ float grBeach = (grRiver.g > 0.5 && grWaterY > uGrSea + 0.3)
   : smoothstep(grWaterY + 0.55, grWaterY + 0.15, grY);
 float grEdge = 1.0 - smoothstep(GR_SIZE * 0.22, GR_SIZE * 0.49, length(grLocal));
 float grDens = grD.r * (1.0 - grBeach);
+float grPool = texture2D(uGrPuddleMask, grUv).r * smoothstep(0.02, 0.2, uGrPuddleFill);
 // Height: per blade, clumps of taller and shorter grass, thinning out at density borders
 float grClump = grNoise(grRoot * 0.21) * 0.7 + grNoise(grRoot * 0.73 + 5.3) * 0.3;
 float grH = uGrHeightK * mix(0.5, 1.0, aGrRnd.x) * (0.45 + grClump * 1.0)
-  * smoothstep(0.02, 0.95, grDens) * grEdge;
+  * smoothstep(0.02, 0.95, grDens) * grEdge * (1.0 - grPool);
 // Snow: blades sink into it (the short ones vanish), the clumps first poke out where it is thin
 float grSnowK = uGrSnow * smoothstep(-0.2, 0.25, uGrSnow * 1.6 - 0.55 + (grClump - 0.5) * 1.2);
 grH *= clamp(1.0 - grSnowK * 1.25, 0.0, 1.0);

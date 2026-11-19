@@ -3,9 +3,10 @@ import * as THREE from 'three';
 // Procedural texture generator for stylized Norse wood and stone
 export function createNorseWoodTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Warm rich Scandinavian wood base
   ctx.fillStyle = '#6e4726';
@@ -56,9 +57,10 @@ export function createNorseWoodTexture(): THREE.CanvasTexture {
 
 export function createChiseledStoneTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Granite base
   ctx.fillStyle = '#5c636a';
@@ -95,9 +97,10 @@ export function createChiseledStoneTexture(): THREE.CanvasTexture {
 
 export function createThatchRoofTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#7a633a'; // Viking thatch reed/straw
   ctx.fillRect(0, 0, 512, 512);
@@ -126,9 +129,10 @@ export function createThatchRoofTexture(): THREE.CanvasTexture {
 
 export function createCheckerWallTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   const gridSize = 8; // 8x8 squares -> 64px per square
   const tileSize = 512 / gridSize;
@@ -160,9 +164,10 @@ export function createCheckerWallTexture(): THREE.CanvasTexture {
 
 export function createCheckerFloorTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   const gridSize = 8; // 8x8 squares -> 64px per square
   const tileSize = 512 / gridSize;
@@ -198,9 +203,10 @@ export function createCheckerFloorTexture(): THREE.CanvasTexture {
 
 export function createCheckerWindowTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   const gridSize = 8;
   const tileSize = 512 / gridSize;
@@ -231,9 +237,10 @@ export function createCheckerWindowTexture(): THREE.CanvasTexture {
 
 export function createCheckerPillarTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   const gridSize = 8;
   const tileSize = 512 / gridSize;
@@ -264,9 +271,10 @@ export function createCheckerPillarTexture(): THREE.CanvasTexture {
 
 export function createRusticatedQuoinTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Warm classical limestone / cream sandstone base
   ctx.fillStyle = '#e2d9cc';
@@ -308,9 +316,10 @@ export function createRusticatedQuoinTexture(): THREE.CanvasTexture {
 
 export function createWhitePaintedWoodTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Soft warm clean white base (cottage enamel)
   ctx.fillStyle = '#fbfcfe';
@@ -343,9 +352,10 @@ export function createWhitePaintedWoodTexture(): THREE.CanvasTexture {
 
 export function createMahoganyWoodTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Deep rich mahogany wood base
   ctx.fillStyle = '#451a11';
@@ -386,9 +396,10 @@ export function createMahoganyWoodTexture(): THREE.CanvasTexture {
 
 export function createCharcoalWoodTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Deep graphite slate charcoal base
   ctx.fillStyle = '#2c333a';
@@ -422,9 +433,10 @@ export function createCharcoalWoodTexture(): THREE.CanvasTexture {
 
 export function createCreamWoodTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Warm colonial ivory cream base
   ctx.fillStyle = '#f5eee1';

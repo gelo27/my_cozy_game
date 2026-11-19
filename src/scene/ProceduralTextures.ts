@@ -18,12 +18,11 @@ export class TextureGenerator {
    * Creates or retrieves a cached high-quality procedural checkerboard texture
    */
   public static createCheckerTexture(options: CheckerTextureOptions = {}): THREE.CanvasTexture {
-    const isMobile = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
     const primaryColor = options.primaryColor ?? '#334155'; // Slate 700
     const secondaryColor = options.secondaryColor ?? '#1e293b'; // Slate 800
     const gridLineColor = options.gridLineColor ?? '#475569'; // Slate 600
     const gridLineWidth = options.gridLineWidth ?? 2;
-    const size = options.size ?? (isMobile ? 256 : 512);
+    const size = options.size ?? 128;
     const tiles = options.tiles ?? 8;
     const repeatU = options.repeatU ?? 1;
     const repeatV = options.repeatV ?? 1;

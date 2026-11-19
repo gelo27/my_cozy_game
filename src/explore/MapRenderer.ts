@@ -9,7 +9,7 @@ export const EXPLORE_GRID = 128;
 /**
  * Paints the island as a hand-drawn style map straight from the heightmap: one pixel per metre,
  * water by depth, sand, grass by height, rock on steep or high ground, hill shading and contour lines.
- * It is a single 512x512 canvas, redrawn only when the terrain changed.
+ * It is a single 750x750 canvas, redrawn only when the terrain changed.
  */
 export function renderTerrainMap(terrain: TerrainSystem): HTMLCanvasElement {
   const N = WORLD_SIZE;

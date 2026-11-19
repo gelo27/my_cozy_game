@@ -39,7 +39,7 @@ export interface CausticsSettings {
   speed: number;
   /** Line sharpness (power applied to the pattern). */
   contrast: number;
-  /** Rainbow fringe: how far R and B are shifted, in texels of the 512 px texture. */
+  /** Rainbow fringe: how far R and B are shifted, in texels of the 128 px texture. */
   aberration: number;
   /** Fading with water depth (per metre). */
   depthFalloff: number;
@@ -169,7 +169,7 @@ export function injectCaustics(shader: THREE.WebGLProgramParametersWithUniforms)
 
 // ---------------------------------------------------------------- texture
 
-const TEX = 512;
+const TEX = 128;
 /** Direction the colours are split along (35°). */
 const DISP = { x: 0.819, y: 0.573 };
 

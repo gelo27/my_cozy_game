@@ -6,7 +6,7 @@ import { WeatherSystem } from '../world/WeatherSystem';
 import { NightLighting, ExtraLight } from '../world/NightLighting';
 import { getIslandSites, IslandSite, SiteKind } from '../world/IslandSites';
 import { coastRadius } from '../world/IslandGenerator';
-import { WORLD_HALF, worldSettings } from '../world/WorldSettings';
+import { WORLD_HALF } from '../world/WorldSettings';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { RockField } from '../gathering/RockField';
 import { RockKind } from '../gathering/GatheringConfig';
@@ -81,6 +81,7 @@ export interface ExplorationSaveData {
   chests: string[];
   recipes: string[];
   markers: MapMarker[];
+  caveExcavations?: { x: number; y: number; z: number; r: number }[];
 }
 
 const DISCOVER_RADIUS = 30;
@@ -98,7 +99,8 @@ const CAVE_ORIGIN = new THREE.Vector3(1500, 200, 0);
  * the beaches, glowing mushrooms in caves), and the map: fog of war, discovered places, player pins.
  */
 export class ExplorationManager {
-  public readonly sites: IslandSite[] = getIslandSites();
+  /** Only caves remain as built world landmarks; the lighthouse, ruins and hut are retired. */
+  public readonly sites: IslandSite[] = getIslandSites().filter((site) => site.kind === 'cave');
   public readonly explored = new Uint8Array(EXPLORE_GRID * EXPLORE_GRID);
   public readonly discovered = new Set<string>();
   public markers: MapMarker[] = [];
@@ -161,7 +163,6 @@ export class ExplorationManager {
       }
     }
     this.placeMountainOre();
-    this.placeBeachForage();
 
     const coast = new Float32Array(360);
     for (let d = 0; d < 360; d++) coast[d] = coastRadius(Math.cos((d * Math.PI) / 180) * 100, Math.sin((d * Math.PI) / 180) * 100);
@@ -221,28 +222,6 @@ export class ExplorationManager {
       const kind: RockKind = y > 15 && roll < 0.3 ? 'gold' : roll < 0.12 ? 'gold' : roll < 0.55 ? 'copper' : 'iron';
       this.rocks.addRock(new THREE.Vector3(x, y - 0.15, z), kind, 0.85 + rnd() * 0.35);
       placed++;
-    }
-  }
-
-  /** Shells and sand mounds strewn along the beach band of the whole coastline. */
-  private placeBeachForage(): void {
-    let s = 777;
-    const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
-    const water = worldSettings.waterLevel;
-    for (let deg = 0; deg < 360; deg += 3.2) {
-      const a = (deg * Math.PI) / 180 + rnd() * 0.03;
-      const cx = Math.cos(a), cz = Math.sin(a);
-      // Walk in from the sea to the first dry sand
-      for (let r = 245; r > 120; r -= 0.7) {
-        const y = this.terrain.getHeight(cx * r, cz * r);
-        if (y < water + 0.08) continue;
-        if (y > water + 1.1 || this.nearSite(cx * r, cz * r, 2)) break;
-        const rr = r - rnd() * 2;
-        const x = cx * rr + (rnd() - 0.5) * 2, z = cz * rr + (rnd() - 0.5) * 2;
-        const gy = this.terrain.getHeight(x, z);
-        if (gy > water + 0.05 && gy > riverWorld.waterLevelAt(x, z) + 0.05) this.forage.add(rnd() < 0.62 ? 'shell' : 'sand', new THREE.Vector3(x, gy, z));
-        break;
-      }
     }
   }
 
@@ -434,6 +413,8 @@ export class ExplorationManager {
     }
     this.weather.caveFactor = this.inCave ? 1 : 0;
     this.nightLighting.forcedDark = this.inCave ? 1 : 0;
+    // NightLighting already has a cheap shader-based lantern on the player; enable it only here.
+    this.nightLighting.playerLantern = !!this.inCave;
     this.network.update(dt, playerPos, !!this.inCave);
     // Cave lights come from the buckets around the player: refresh on crossing into another one
     if (this.inCave) {
@@ -680,6 +661,7 @@ export class ExplorationManager {
       chests: [...this.openedChestIds],
       recipes: [...this.gameplay.knownRecipes],
       markers: this.markers,
+      caveExcavations: this.network.getExcavations(),
     };
   }
 
@@ -699,6 +681,7 @@ export class ExplorationManager {
     this.gameplay.knownRecipes.clear();
     data?.recipes?.forEach((id) => this.gameplay.knownRecipes.add(id));
     this.markers = data?.markers ?? [];
+    this.network.restoreExcavations(data?.caveExcavations ?? []);
     this.inCave = null;
     this.lightRevision++;
     this.gameplay.anchorOverride = null;

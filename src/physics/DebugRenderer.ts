@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { PhysicsWorld } from './PhysicsWorld';
 import { CharacterController } from '../character/CharacterController';
 import { isDoorPiece, BuildingPieceType } from '../building/types/BuildingTypes';
+import { SEA_FLOOR_Y, WORLD_LIMIT } from '../world/WorldSettings';
 
 export class DebugRenderer {
   public lines: THREE.LineSegments;
@@ -54,15 +55,20 @@ export class DebugRenderer {
         ) {
           const vArr = buffers.vertices;
           const cArr = buffers.colors;
-          const vLen = vArr.length;
-          const cLen = cArr.length;
-          positions = new Array(vLen);
-          for (let i = 0; i < vLen; i++) {
-            positions[i] = vArr[i];
-          }
-          colors = new Array(cLen);
-          for (let i = 0; i < cLen; i++) {
-            colors[i] = cArr[i];
+          // Rapier draws the giant open-sea floor and the four safety walls at the world limit.
+          // They are physics safety nets, not scene geometry; showing their outlines makes the
+          // ocean look like it has a dotted seam and the island look boxed in by giant walls.
+          for (let i = 0, color = 0; i + 5 < vArr.length && color + 7 < cArr.length; i += 6, color += 8) {
+            const x1 = vArr[i], y1 = vArr[i + 1], z1 = vArr[i + 2];
+            const x2 = vArr[i + 3], y2 = vArr[i + 4], z2 = vArr[i + 5];
+            const atWorldEdge = (x: number, z: number) =>
+              (Math.abs(Math.abs(x) - WORLD_LIMIT) < 2 && Math.abs(z) <= WORLD_LIMIT + 2) ||
+              (Math.abs(Math.abs(z) - WORLD_LIMIT) < 2 && Math.abs(x) <= WORLD_LIMIT + 2);
+            const safetyNetEdge = atWorldEdge(x1, z1) && atWorldEdge(x2, z2) &&
+              Math.max(y1, y2) <= 50 && Math.min(y1, y2) >= SEA_FLOOR_Y - 2;
+            if (safetyNetEdge) continue;
+            for (let j = 0; j < 6; j++) positions.push(vArr[i + j]);
+            for (let j = 0; j < 8; j++) colors.push(cArr[color + j]);
           }
         }
       } catch {

@@ -45,7 +45,7 @@ export const FURNITURE_GRID_STEP = 0.25;
 // ---------------------------------------------------------------------------
 
 function makeCanvasTexture(draw: (ctx: CanvasRenderingContext2D, size: number) => void): THREE.CanvasTexture {
-  const size = 256;
+  const size = 128;
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;

@@ -10,7 +10,7 @@ const danger = `${btn} gap-1.5 py-1.5 bg-rose-500/15 text-rose-300 hover:bg-rose
 
 const ITEM_LABELS: Record<ItemType, string> = {
   chest: 'Скриня', ore: 'Руда', crystal: 'Кристал', mushroom: 'Гриби', ember: 'Жар', light: 'Світло',
-  stalactite: 'Сталактит', stalagmite: 'Сталагміт', pillar: 'Колона', drip: 'Крапля',
+  stalactite: 'Сталактит', stalagmite: 'Сталагміт', pillar: 'Колона', drip: 'Крапля', dig: 'Прокопана порода',
 };
 const HUB_LABELS: Record<HubKind, string> = { chamber: 'Камера', grand: 'Великий зал', lake: 'Озеро' };
 const TUNNEL_LABELS: Record<TunnelKind, string> = { ramp: 'Схил', stairs: 'Сходи', drop: 'Уступ', sump: 'Сифон', flood: 'Затоплений' };

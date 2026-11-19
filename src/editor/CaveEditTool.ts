@@ -21,7 +21,7 @@ export const CAVE_ITEM_TYPES: ItemType[] = ['chest', 'ore', 'crystal', 'mushroom
 
 const ITEM_COLORS: Record<ItemType, number> = {
   chest: 0xfacc15, ore: 0xf97316, crystal: 0x60a5fa, mushroom: 0x2dd4bf, ember: 0xef4444, light: 0xfef08a,
-  stalactite: 0xa8a29e, stalagmite: 0x78716c, pillar: 0x57534e, drip: 0x38bdf8,
+  stalactite: 0xa8a29e, stalagmite: 0x78716c, pillar: 0x57534e, drip: 0x38bdf8, dig: 0x94a3b8,
 };
 const HUB_COLORS: Record<HubKind, number> = { chamber: 0x38bdf8, grand: 0xa855f7, lake: 0x22d3ee };
 const TUNNEL_COLORS: Record<TunnelKind, number> = { ramp: 0x94a3b8, stairs: 0xe2e8f0, drop: 0xf97316, sump: 0x3b82f6, flood: 0x06b6d4 };

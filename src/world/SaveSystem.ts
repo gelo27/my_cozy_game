@@ -139,10 +139,9 @@ function isTerrainSave(value: unknown): value is TerrainSaveData {
   if (!isRecord(value) || !isIntegerInRange(value.size, 1, WORLD_SIZE)) return false;
   const size = value.size as number;
 
-  if (value.enc === 'd1') {
-    return size === WORLD_SIZE &&
-      isValidRleBase64(value.heights, (WORLD_SIZE + 1) * (WORLD_SIZE + 1)) &&
-      isValidRleBase64(value.tiles, WORLD_SIZE * WORLD_SIZE);
+  if (value.enc === 'd1' || value.enc === 'd2') {
+    return isValidRleBase64(value.heights, (size + 1) * (size + 1)) &&
+      isValidRleBase64(value.tiles, size * size);
   }
 
   if (value.enc !== undefined) return false;

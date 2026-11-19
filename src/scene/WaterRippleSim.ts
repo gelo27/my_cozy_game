@@ -397,6 +397,16 @@ class WaterRippleSim {
         if (z > maxZ) maxZ = z;
       }
     }
+    // The coarse wet grid can miss a narrow channel between samples. Always test the player/body
+    // focus itself, so a swimmer in a river reliably wakes the wave field and pushes a wake.
+    if (riverWorld.waterLevelAt(this.cx, this.cz) - ground(this.cx, this.cz) >= WET_MIN_DEPTH) {
+      any = true;
+      const pad = cell;
+      minX = Math.min(minX, this.cx - pad);
+      minZ = Math.min(minZ, this.cz - pad);
+      maxX = Math.max(maxX, this.cx + pad);
+      maxZ = Math.max(maxZ, this.cz + pad);
+    }
     // One probe cell of margin: water may reach a little past the last wet sample
     if (any) {
       minX -= cell;

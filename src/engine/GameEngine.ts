@@ -74,9 +74,9 @@ const GROUND_SPEED: Partial<Record<TerrainTileType, number>> = {
   [TerrainTileType.MUD]: 0.6,
   [TerrainTileType.PUDDLE]: 0.8,
 };
-/** Seconds of heavy rain to fill the puddles, and of dry weather for them to dry out again. */
+/** Seconds of heavy rain to fill puddles; clear weather dries them in one minute. */
 const PUDDLE_FILL_TIME = 45;
-const PUDDLE_DRY_TIME = 900;
+const PUDDLE_DRY_TIME = 60;
 
 /** Floor paint (building) -> footstep recipe; unpainted floors are wooden planks. */
 function floorSurface(wallpaperId: string): FootSurface {
@@ -109,6 +109,7 @@ import { VehicleController } from '../vehicle/VehicleController';
 import { MopedController } from '../vehicle/MopedController';
 import { BoatController } from '../vehicle/BoatController';
 import { buildLighthousePier } from '../world/Pier';
+import { getIslandSites } from '../world/IslandSites';
 import { WildlifeSystem } from '../wildlife/WildlifeSystem';
 import { StaticShadows } from '../world/StaticShadows';
 import { InteriorLighting, interiorSettings } from '../world/InteriorLighting';
@@ -518,7 +519,7 @@ export class GameEngine {
       setRippleCamera(this.camera.camera);
       this.lightShafts = new LightShafts(scene);
       waterRippleSim.setGround((x, z) => terrain.getHeight(x, z));
-      // Painted puddles hold water too: the wave simulation runs over them (steps, rain drops)
+      // Painted and natural basin puddles hold water too (steps and rain drops).
       waterRippleSim.setExtraWet((ox, oz, area, out) => {
         const x0 = Math.max(0, Math.floor(ox) + WORLD_HALF), x1 = Math.min(WORLD_SIZE - 1, Math.ceil(ox + area) + WORLD_HALF);
         const z0 = Math.max(0, Math.floor(oz) + WORLD_HALF), z1 = Math.min(WORLD_SIZE - 1, Math.ceil(oz + area) + WORLD_HALF);
@@ -528,9 +529,9 @@ export class GameEngine {
         const tiles = terrain.tiles;
         for (let z = z0; z <= z1; z++) {
           for (let x = x0, i = z * WORLD_SIZE + x0; x <= x1; x++, i++) {
-            if (tiles[i] !== TerrainTileType.PUDDLE) continue;
-            any = true;
             const wx = x - WORLD_HALF, wz = z - WORLD_HALF;
+            if (tiles[i] !== TerrainTileType.PUDDLE && (this.puddleFill < 0.12 || terrain.puddlePotentialAt(wx + 0.5, wz + 0.5) < 0.4)) continue;
+            any = true;
             if (wx < out.minX) out.minX = wx;
             if (wz < out.minZ) out.minZ = wz;
             if (wx + 1 > out.maxX) out.maxX = wx + 1;
@@ -746,6 +747,7 @@ export class GameEngine {
       for (let i = 0; i < 3; i++) workers.spawn(new THREE.Vector3(npcSpawn.x + 2 + i * 1.6, 0, npcSpawn.z + 2.5));
       gameplay.workers = workers;
       exploration = new ExplorationManager(scene, physics, terrain, props, rocks, inventoryManager, gameplay, weather, nightLighting, particleManager);
+      character.gatheringAbility.caveNetwork = exploration.caveNetwork;
       exploration.onNotify = (text, type) => callbacks.onNotify(text, type);
       exploration.onItems = (items) => callbacks.onResourcesGathered(items);
       const explorer = exploration;
@@ -780,7 +782,8 @@ export class GameEngine {
       // Nothing opens while asleep or during a doorway fade
       uiScreens.setBlocked(() => gameplay.sleeping || explorer.fading);
       // Wooden jetty at the lighthouse with the motorboat moored alongside
-      const lighthouse = exploration.sites.find((s) => s.kind === 'lighthouse')!;
+      // Keep the boat dock available even though the lighthouse landmark itself is retired.
+      const lighthouse = getIslandSites().find((s) => s.kind === 'lighthouse')!;
       const pier = buildLighthousePier(lighthouse, terrain, scene, physics);
       const boat = new BoatController(physics, scene, terrain, pier.boatSpawn, pier.boatYaw);
       boat.dock.copy(pier.end).lerp(pier.start, 0.25);
@@ -1098,7 +1101,9 @@ export class GameEngine {
       const tile = feet ? this.terrainTileUnder(feet, character.groundCollider) : null;
       character.groundSpeed = tile !== null ? GROUND_SPEED[tile] ?? 1 : 1;
       // Wading through a puddle: the feet push a wake into the wave simulation
-      if (tile === TerrainTileType.PUDDLE && feet) setWaterBody(feet.x, feet.z, character.telemetry.speed, 0.28);
+      if (feet && this.puddleFill > 0.25 && (tile === TerrainTileType.PUDDLE || terrain.puddlePotentialAt(feet.x, feet.z) > 0.4)) {
+        setWaterBody(feet.x, feet.z, character.telemetry.speed, 0.28);
+      }
       character.update(dt, inputManager, tpCamera);
     }
     // Splash drops, the swimmer's rising air bubbles and the caustics' clock
@@ -1171,6 +1176,7 @@ export class GameEngine {
       updateCutaway(dt, cutOn, tpCamera.camera.position, this.cutawayTarget, p.y - 0.75);
     }
     w.weather.update(dt, tpCamera.camera.position);
+    w.terrain.setPuddleSky(w.weather.puddleSky);
     w.water.sparkles.update(
       this.camera.camera.position,
       w.weather.sun,
@@ -1761,7 +1767,7 @@ export class GameEngine {
     if (w.exploration.inCave) return 'stone';
     const t = this.terrainTileUnder(p, collider);
     if (t !== null) {
-      if (t === TerrainTileType.PUDDLE && this.puddleFill > 0.25) return 'water';
+      if (this.puddleFill > 0.25 && (t === TerrainTileType.PUDDLE || w.terrain.puddlePotentialAt(p.x, p.z) > 0.4)) return 'water';
       const tile = TILE_SURFACE[t] ?? 'grass';
       // Fallen snow covers the ground once it is more than a dusting (it melts on fields and dirt tracks)
       return w.weather.snowCover > 0.35 && tile !== 'dirt' && p.y > worldSettings.waterLevel + 0.3 ? 'snow' : tile;
@@ -1774,7 +1780,7 @@ export class GameEngine {
     if (!w || this.paused || this.mode !== 'play' || !audioEngine.context) return;
     const surface = this.surfaceUnder(point, collider);
     // A step into a puddle's water: a splash ring (the wave simulation spreads it)
-    if (surface === 'water' && this.terrainTileUnder(point, collider) === TerrainTileType.PUDDLE) {
+    if (surface === 'water' && (this.terrainTileUnder(point, collider) === TerrainTileType.PUDDLE || w.terrain.puddlePotentialAt(point.x, point.z) > 0.4)) {
       emitWaterRipple(point.x + (Math.random() - 0.5) * 0.25, point.z + (Math.random() - 0.5) * 0.25, Math.min(1, 0.45 + intensity * 0.35), 1.4);
     }
     // Rain soaks open ground: steps get a squelch layer (not under roofs, in caves or on floors)

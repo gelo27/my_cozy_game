@@ -1436,7 +1436,9 @@ export class PropSystem {
 
   public deserialize(data: PropSaveData[]): void {
     this.clear();
-    for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.p[1], d.g !== false, d.n, Array.isArray(d.c) && d.c.length === 2 ? d.c : null, d.w, d.wa, d.t, d.hd);
+    // Grounded props follow the current heightmap on load; this also repairs older saves after
+    // terrain generation changes such as the expanded, deeper coastline.
+    for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.g === false ? d.p[1] : undefined, d.g !== false, d.n, Array.isArray(d.c) && d.c.length === 2 ? d.c : null, d.w, d.wa, d.t, d.hd);
   }
 
   /** Default decoration so a fresh world does not look empty. */

@@ -126,10 +126,12 @@ export class CaveNetwork {
   private decorMaterials: THREE.Material[] = [];
   private readonly lightBuckets = new Map<number, ExtraLight[]>();
   private pools: CaveGenOutput['pools'] = [];
+  private wetPools: CavePlan['wetPools'] = [];
   private drips: CaveDrips | null = null;
   private cullTimer = 0;
   private time = 0;
   private wasVisible = false;
+  private pendingExcavations: { x: number; y: number; z: number; r: number }[] | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -154,8 +156,12 @@ export class CaveNetwork {
    * boxes touch are re-meshed; null re-meshes everything. A rebuild asked for while one runs waits
    * and merges with the next.
    */
-  public rebuild(layout: CaveLayout | null, dirty: Box[] | null, seed = this.seed): void {
-    const req: CaveGenRequest = { seed, entrances: this.entrancesIn, coast: this.coast, layout: layout ? structuredClone(layout) : null, dirty };
+  public rebuild(layout: CaveLayout | null, dirty: Box[] | null, seed = this.seed, preserveContents = false): void {
+    const req: CaveGenRequest = {
+      seed, entrances: this.entrancesIn, coast: this.coast,
+      layout: layout ? structuredClone(layout) : null, dirty, preserveContents,
+      reuseWetPools: preserveContents ? this.wetPools : undefined,
+    };
     if (this.inFlight) {
       // Only the newest layout matters; the dirty areas of every skipped one still need re-meshing
       const prev = this.queued;
@@ -164,6 +170,55 @@ export class CaveNetwork {
       return;
     }
     this.start(req, false);
+  }
+
+  /** Persisted player cuts, applied once the generated layout is available. */
+  public restoreExcavations(cuts: { x: number; y: number; z: number; r: number }[]): void {
+    this.pendingExcavations = cuts;
+    if (this.layout) this.applyPendingExcavations();
+  }
+
+  public getExcavations(): { x: number; y: number; z: number; r: number }[] {
+    return (this.layout?.items ?? []).filter((it) => it.t === 'dig').map(({ x, y, z, r }) => ({ x, y, z, r: r ?? 0.9 }));
+  }
+
+  /** Carves a compact sphere just behind a wall impact, then rebuilds only its nearby chunks. */
+  public excavate(worldPoint: THREE.Vector3, worldNormal: THREE.Vector3): boolean {
+    if (!this.layout) return false;
+    // Center the cut just inside the surface and make it large enough to survive the cave's
+    // 0.8 m SDF sampling interval as a clearly visible bite.
+    const p = worldPoint.clone().addScaledVector(worldNormal, -0.5).sub(this.origin);
+    const r = 1.35;
+    // Distant chunks may still be meshing after the entrance is playable. Extend the newest
+    // queued layout so a new strike cannot overwrite an earlier queued excavation.
+    const base = this.queued?.layout ?? this.build?.plan.layout ?? this.layout;
+    const next = structuredClone(base);
+    const item = { id: next.nextItem++, t: 'dig' as const, x: p.x, y: p.y, z: p.z, r };
+    next.items.push(item);
+    const pad = r + 2;
+    this.rebuild(next, [{ minX: p.x - pad, maxX: p.x + pad, minY: p.y - pad, maxY: p.y + pad, minZ: p.z - pad, maxZ: p.z + pad }], this.seed, true);
+    return true;
+  }
+
+  /** Updates the cave shader's soft impact preview without changing mesh buffers. */
+  public setDigHighlight(worldPoint: THREE.Vector3 | null): void {
+    caveUniforms.uDigGlow.value = worldPoint ? 0.9 : 0;
+    if (worldPoint) caveUniforms.uDigPoint.value.copy(worldPoint);
+  }
+
+  private applyPendingExcavations(): void {
+    if (!this.layout || !this.pendingExcavations?.length) { this.pendingExcavations = null; return; }
+    const cuts = this.pendingExcavations;
+    this.pendingExcavations = null;
+    const next = structuredClone(this.layout);
+    const existing = new Set(next.items.filter((it) => it.t === 'dig').map((it) => `${it.x.toFixed(2)},${it.y.toFixed(2)},${it.z.toFixed(2)}`));
+    for (const c of cuts) {
+      const key = `${c.x.toFixed(2)},${c.y.toFixed(2)},${c.z.toFixed(2)}`;
+      if (existing.has(key)) continue;
+      existing.add(key);
+      next.items.push({ id: next.nextItem++, t: 'dig', x: c.x, y: c.y, z: c.z, r: c.r });
+    }
+    if (next.items.length !== this.layout.items.length) this.rebuild(next, null, this.seed, true);
   }
 
   /** Keeps the workers alive between builds (for the editor); off terminates them once idle. */
@@ -295,7 +350,7 @@ export class CaveNetwork {
       chunks: 0,
       cache,
     };
-    this.applyPlan(plan);
+    this.applyPlan(plan, !!req.preserveContents);
     if (this.build.priorityLeft === 0) this.markReady();
   }
 
@@ -353,6 +408,7 @@ export class CaveNetwork {
       console.info(`[CaveNetwork] ${s.hubs} chambers, ${s.tunnels} tunnels, ${s.pools} pools, ${s.chunks} chunks, ${s.triangles} triangles in ${ms} ms (${this.poolSize()} workers)`);
     }
     this.onBuilt?.(b.plan.layout, this.stats);
+    this.applyPendingExcavations();
     const next = this.queued;
     this.queued = null;
     if (next) this.start(next, false);
@@ -397,7 +453,7 @@ export class CaveNetwork {
   }
 
   /** Everything of a build but the rock: water, decorations, lights, drips, entrances, contents. */
-  private applyPlan(plan: CavePlan): void {
+  private applyPlan(plan: CavePlan, preserveContents = false): void {
     const o = this.origin;
     const W = (p: [number, number, number]) => new THREE.Vector3(p[0] + o.x, p[1] + o.y, p[2] + o.z);
 
@@ -410,6 +466,12 @@ export class CaveNetwork {
     if (drop.length) {
       const gone = new Set(drop);
       this.colliderQueue = this.colliderQueue.filter((v) => !gone.has(v.key));
+    }
+
+    if (preserveContents) {
+      this.layout = plan.layout;
+      this.revision++;
+      return;
     }
 
     this.clearDecor();
@@ -427,6 +489,7 @@ export class CaveNetwork {
       this.decorGeometries.push(geo);
     }
     this.pools = plan.pools;
+    this.wetPools = plan.wetPools;
     this.buildCrystals(plan);
     this.buildEmbers(plan);
     this.buildEntrances(plan);
@@ -460,7 +523,7 @@ export class CaveNetwork {
     this.entrances = plan.entrances.map((e) => ({ id: e.id, mouth: W(e.mouth), spawn: W(e.spawn), yaw: e.yaw, underwater: e.underwater }));
     this.layout = plan.layout;
     this.revision++;
-    this.onContents?.({
+    if (!preserveContents) this.onContents?.({
       chests: plan.chests.map((c) => ({ id: c.id, pos: W(c.pos), yaw: c.yaw })),
       ores: plan.ores.map((r) => ({ pos: W(r.pos), kind: r.kind })),
       mushrooms: plan.mushrooms.map(W),

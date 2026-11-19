@@ -11,9 +11,10 @@ export interface GeneratedTextureResult {
  */
 export function createHerringboneParquetTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
 
   ctx.fillStyle = '#b6834d';
@@ -89,9 +90,10 @@ export function createHerringboneParquetTexture(): GeneratedTextureResult {
  */
 export function createDarkWalnutFloorTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
 
   ctx.fillStyle = '#301f14';
@@ -147,9 +149,10 @@ export function createDarkWalnutFloorTexture(): GeneratedTextureResult {
  */
 export function createLightPineFloorTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#ecdac3';
   ctx.fillRect(0, 0, 512, 512);
@@ -195,9 +198,10 @@ export function createLightPineFloorTexture(): GeneratedTextureResult {
  */
 export function createCheckerMarbleFloorTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#1e1e24';
   ctx.fillRect(0, 0, 512, 512);
@@ -268,9 +272,10 @@ export function createCheckerMarbleFloorTexture(): GeneratedTextureResult {
  */
 export function createTerracottaCottoFloorTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#b25332';
   ctx.fillRect(0, 0, 512, 512);
@@ -315,9 +320,10 @@ export function createTerracottaCottoFloorTexture(): GeneratedTextureResult {
  */
 export function createRoyalCarpetFloorTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Deep burgundy base
   ctx.fillStyle = '#6b1124';
@@ -386,9 +392,10 @@ export function createRoyalCarpetFloorTexture(): GeneratedTextureResult {
  */
 export function createFlagstonePaversFloorTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#52525b';
   ctx.fillRect(0, 0, 512, 512);
@@ -432,9 +439,10 @@ export function createFlagstonePaversFloorTexture(): GeneratedTextureResult {
  */
 export function createMoroccanMosaicFloorTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#f8fafc';
   ctx.fillRect(0, 0, 512, 512);
@@ -495,9 +503,10 @@ export function createMoroccanMosaicFloorTexture(): GeneratedTextureResult {
  */
 export function createDarkWoodCofferedCeilingTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
 
   ctx.fillStyle = '#3f2514';
@@ -563,9 +572,10 @@ export function createDarkWoodCofferedCeilingTexture(): GeneratedTextureResult {
  */
 export function createWhiteCofferedCeilingTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#f8fafc';
   ctx.fillRect(0, 0, 512, 512);
@@ -623,9 +633,10 @@ export function createWhiteCofferedCeilingTexture(): GeneratedTextureResult {
  */
 export function createRusticOakBeamsCeilingTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
 
   // Warm cream stucco base
@@ -694,9 +705,10 @@ export function createRusticOakBeamsCeilingTexture(): GeneratedTextureResult {
  */
 export function createWhiteBeadedPlanksCeilingTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#f8fafc';
   ctx.fillRect(0, 0, 512, 512);
@@ -736,9 +748,10 @@ export function createWhiteBeadedPlanksCeilingTexture(): GeneratedTextureResult 
  */
 export function createCelestialStarryCeilingTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Deep indigo galaxy gradient
   const bgGrad = ctx.createRadialGradient(256, 256, 40, 256, 256, 320);
@@ -817,9 +830,10 @@ export function createCelestialStarryCeilingTexture(): GeneratedTextureResult {
  */
 export function createVictorianPlasterRosetteCeilingTexture(): GeneratedTextureResult {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#faf8f5';
   ctx.fillRect(0, 0, 512, 512);

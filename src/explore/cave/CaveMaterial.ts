@@ -4,7 +4,11 @@ import { WET_ABOVE, WET_RANGE } from './CaveGen';
 import { CAUSTICS_GLSL, CAUSTICS_TINT, causticsUniforms } from '../../scene/WaterEffects';
 
 /** Shared clock for the cave shaders (ember cracks pulse, water shimmers). */
-export const caveUniforms = { uCaveTime: { value: 0 } };
+export const caveUniforms = {
+  uCaveTime: { value: 0 },
+  uDigPoint: { value: new THREE.Vector3() },
+  uDigGlow: { value: 0 },
+};
 
 const NOISE_GLSL = `
   float cHash(vec3 p) {
@@ -65,6 +69,8 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
         '#include <common>',
         `#include <common>
         uniform float uCaveTime;
+        uniform vec3 uDigPoint;
+        uniform float uDigGlow;
         varying vec4 vCave;
         varying float vWet;
         varying vec3 vCavePos;
@@ -145,7 +151,12 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
       .replace(
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
-        totalEmissiveRadiance += glow;`
+        float digDistance = distance(vCaveWorld, uDigPoint);
+        float digRadius = 0.72;
+        float digRing = 1.0 - smoothstep(0.035, 0.13, abs(digDistance - digRadius));
+        float digHalo = 1.0 - smoothstep(0.13, 0.38, abs(digDistance - digRadius));
+        float digMark = max(digRing, digHalo * 0.28);
+        totalEmissiveRadiance += glow + vec3(0.08, 1.0, 0.22) * digMark * uDigGlow;`
       );
   };
   mat.customProgramCacheKey = () => 'cave-rock-v6';

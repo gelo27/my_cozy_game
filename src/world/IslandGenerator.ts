@@ -1,4 +1,4 @@
-import { WORLD_HALF, SEA_FLOOR_Y } from './WorldSettings';
+import { ISLAND_HALF, WORLD_HALF, SEA_FLOOR_Y } from './WorldSettings';
 import { applySitePads } from './IslandSites';
 
 /**
@@ -51,7 +51,7 @@ function smoothstep(x: number, a: number, b: number): number {
 /** Radius of the shoreline in a direction (m): ~180-225, never reaching the world edge. */
 export function coastRadius(x: number, z: number): number {
   const a = Math.atan2(z, x);
-  return WORLD_HALF * 0.79 + fbm(Math.cos(a) * 1.6 + 3.1, Math.sin(a) * 1.6 - 1.7) * 26;
+  return ISLAND_HALF * 0.79 + fbm(Math.cos(a) * 1.6 + 3.1, Math.sin(a) * 1.6 - 1.7) * 26;
 }
 
 /** Natural terrain before landmarks level their pads. */
@@ -80,14 +80,17 @@ export function baseIslandHeight(x: number, z: number): number {
     y += outer * (n * 2.5 + rolling + mountains + lakes);
   }
 
-  // Coast: beach slope down to the sea floor
+  // Coast: keep the shoreline in place, then ease the seabed down across all remaining underwater
+  // space. A fixed 48 m transition became a sheer cliff when the sea floor was deepened to -128 m.
   const coast = coastRadius(x, z);
-  const sea = smoothstep(r, coast - 26, coast + 22);
+  const rayScale = Math.max(Math.abs(x), Math.abs(z)) / Math.max(r, 1e-6);
+  const mapEdge = WORLD_HALF / rayScale;
+  const sea = smoothstep(r, coast - 8, mapEdge);
   y = y * (1 - sea) + SEA_FLOOR_Y * sea;
-  return Math.max(-12, Math.min(24, y));
+  return Math.max(SEA_FLOOR_Y, Math.min(24, y));
 }
 
 /** Final generated terrain: the natural island with landmark pads levelled in. */
 export function islandHeight(x: number, z: number): number {
-  return Math.max(-12, Math.min(24, applySitePads(x, z, baseIslandHeight(x, z))));
+  return Math.max(SEA_FLOOR_Y, Math.min(24, applySitePads(x, z, baseIslandHeight(x, z))));
 }

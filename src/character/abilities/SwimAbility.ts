@@ -18,6 +18,10 @@ import { setWaterBody, setWaterLimb } from '../../scene/WaterDetails';
  */
 const WADE_DEPTH_ENTER = 0.88;
 const WADE_DEPTH_EXIT = 0.78;
+// Narrow river channels are intentionally shallower than the sea; let the player swim in them
+// instead of being permanently forced into the wading state.
+const RIVER_SWIM_DEPTH_ENTER = 0.75;
+const RIVER_SWIM_DEPTH_EXIT = 0.65;
 /** Within this distance (m) below the resting height the swimmer is caught by the surface. */
 const SURFACE_CAPTURE = 0.55;
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -113,6 +117,7 @@ export class SwimAbility implements IAbility {
     const caveLevel = riverWorld.caveLevelAt(pos.x, pos.y, pos.z);
     const inCavePool = !Number.isNaN(caveLevel);
     const level = inCavePool ? caveLevel : riverWorld.waterLevelAt(pos.x, pos.z);
+    const inRiverChannel = !inCavePool && !Number.isNaN(riverWorld.riverSurfaceAt(pos.x, pos.z));
     this.waterMax.y = level;
     riverWorld.flowAt(pos.x, pos.z, this.flow);
     // Shallows are waded, not swum: the player stands up wherever the water is at most about
@@ -123,7 +128,10 @@ export class SwimAbility implements IAbility {
     if (!this.isSwimming && context.ground.isGrounded) {
       bed = Math.max(bed, level - (pos.y - CAPSULE_HALF_TOTAL));
     }
-    const shallow = bed < (this.isSwimming ? WADE_DEPTH_EXIT : WADE_DEPTH_ENTER);
+    const swimDepthLimit = inRiverChannel
+      ? (this.isSwimming ? RIVER_SWIM_DEPTH_EXIT : RIVER_SWIM_DEPTH_ENTER)
+      : (this.isSwimming ? WADE_DEPTH_EXIT : WADE_DEPTH_ENTER);
+    const shallow = bed < swimDepthLimit;
 
     // 1. Water Bounds Check
     // Capsule height is 1.5m (center at pos.y). Enter water when center drops below water level + 0.45m.

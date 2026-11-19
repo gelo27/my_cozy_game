@@ -6,7 +6,7 @@ import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/types/TerrainTypes';
 import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
-import { islandHeight } from './IslandGenerator';
+import { coastRadius, islandHeight } from './IslandGenerator';
 import { riverWorld, GridRect } from './rivers/RiverWorld';
 import { causticsUniforms, CAUSTICS_GLSL } from '../scene/WaterEffects';
 import { rippleSimUniforms } from '../scene/WaterRippleSim';
@@ -14,7 +14,7 @@ import { TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
 
 const N = WORLD_SIZE; // cells per side (1 m cells)
 const V = N + 1; // vertices per side
-const CHUNK = 64; // metres per render + physics chunk -> 8x8; the camera frustum culls most of them
+const CHUNK = 64; // metres per render + physics chunk -> 8x8; fits the 512 m map
 const CHUNKS = N / CHUNK;
 export const TERRAIN_CHUNK = CHUNK;
 export const TERRAIN_CHUNKS = CHUNKS;
@@ -84,16 +84,16 @@ function buildLodIndex(s: number): number[] {
 export type TerrainBrushKind = 'raise' | 'lower' | 'smooth' | 'flatten';
 
 /**
- * Serialized terrain, base64. Format 'd1': run-length encoded Int16 pairs (count, value) of the
- * height difference from the generated island in centimetres, and of the tile ids, so an untouched
- * world is a few bytes and edits cost only where they are. Without `enc`: raw Int16 cm heights and
- * raw tile bytes (old saves, possibly a smaller world that gets placed in the island's centre).
+ * Serialized terrain, base64. Formats 'd1' and 'd2' store run-length encoded Int16 pairs (count,
+ * value) of the height difference from the generated island in centimetres, and of the tile ids.
+ * 'd2' marks terrain rebased to the expanded seabed. Without `enc`: raw Int16 cm heights and raw
+ * tile bytes (old saves, possibly a smaller world that gets placed in the island's centre).
  */
 export interface TerrainSaveData {
   size: number;
   heights: string;
   tiles: string;
-  enc?: 'd1';
+  enc?: 'd1' | 'd2';
 }
 
 /**
@@ -127,6 +127,11 @@ export class TerrainSystem {
   /** Surface type per cell: `tiles` itself as an R8 texture (nearest; the shader blends). */
   private readonly tileTex: THREE.DataTexture;
   private readonly splatB: THREE.DataTexture;
+  /** CPU-built basin mask (R8, one texel per terrain cell); refreshed only when heights change. */
+  private readonly puddleMaskData = new Uint8Array(N * N);
+  private readonly puddleMaskTex: THREE.DataTexture;
+  private puddleMaskDirty = { x0: 0, z0: 0, x1: N - 1, z1: N - 1 };
+  private puddleMaskFullPending = true;
   private splatDirty = true;
   /**
    * A whole-texture splat upload is queued for this frame's render: partial ranges must not be
@@ -144,6 +149,13 @@ export class TerrainSystem {
     // Rain falling right now (ripples in puddles), puddle water level (0 dried out .. 1 brimming)
     uRainFall: { value: 0 },
     uPuddleFill: { value: 0 },
+    uPuddleSkyH: { value: new THREE.Color(0.28, 0.38, 0.48) },
+    uPuddleSkyZ: { value: new THREE.Color(0.18, 0.3, 0.48) },
+    uPuddleCloud: { value: new THREE.Color(0.7, 0.75, 0.8) },
+    uPuddleCloudShade: { value: new THREE.Color(0.35, 0.4, 0.48) },
+    uPuddleSunDir: { value: new THREE.Vector3(0, 1, 0) },
+    uPuddleSunColor: { value: new THREE.Color(1, 0.9, 0.7) },
+    uPuddleCloudCover: { value: 0.25 },
     uTerrTime: { value: 0 },
     uSnowCover: { value: 0 },
     // Footprints (GrassTrail's blue channel) around the player, and the window's centre
@@ -177,9 +189,17 @@ export class TerrainSystem {
     this.splatB.minFilter = THREE.LinearFilter;
     this.splatB.generateMipmaps = false;
     this.splatB.needsUpdate = true;
+    this.puddleMaskTex = new THREE.DataTexture(this.puddleMaskData, N, N, THREE.RedFormat, THREE.UnsignedByteType);
+    this.puddleMaskTex.magFilter = THREE.LinearFilter;
+    this.puddleMaskTex.minFilter = THREE.LinearFilter;
+    this.puddleMaskTex.generateMipmaps = false;
+    this.puddleMaskTex.unpackAlignment = 1;
+    this.puddleMaskTex.colorSpace = THREE.NoColorSpace;
 
     this.material = this.createMaterial();
     this.generateDefaultWorld();
+    this.rebuildPuddleMask(0, 0, N - 1, N - 1);
+    this.puddleMaskFullPending = true;
     this.buildChunks();
     this.createWorldBounds();
   }
@@ -240,6 +260,18 @@ export class TerrainSystem {
     if (ix < 0 || iz < 0 || ix >= N || iz >= N) return TerrainTileType.GRASS;
     return this.tiles[iz * N + ix];
   }
+
+  /** 0..1 natural basin likelihood at world position (used by visuals and footsteps). */
+  public puddlePotentialAt(x: number, z: number): number {
+    const ix = Math.floor(x + WORLD_HALF);
+    const iz = Math.floor(z + WORLD_HALF);
+    if (ix < 0 || iz < 0 || ix >= N || iz >= N) return 0;
+    return this.puddleMaskData[iz * N + ix] / 255;
+  }
+
+  /** Texture shared with terrain / grass shaders; no per-frame copies. */
+  public get puddleMaskTexture(): THREE.Texture { return this.puddleMaskTex; }
+  public get puddleFill(): number { return this.uniforms.uPuddleFill.value; }
 
   // ---------------------------------------------------------------- editing
 
@@ -353,6 +385,7 @@ export class TerrainSystem {
   }
 
   private markHeightsDirty(minX: number, minZ: number, maxX: number, maxZ: number): void {
+    this.rebuildPuddleMask(minX - 6, minZ - 6, maxX + 6, maxZ + 6);
     // A vertex on a chunk edge belongs to both neighbours; normals also read one cell further out
     const c0x = Math.max(0, Math.floor((minX - 1) / CHUNK));
     const c1x = Math.min(CHUNKS - 1, Math.floor((maxX + 1) / CHUNK));
@@ -383,11 +416,51 @@ export class TerrainSystem {
       this.uploadSplat();
       this.splatDirty = false;
     }
+    if (this.puddleMaskFullPending || this.puddleMaskDirty.x0 <= this.puddleMaskDirty.x1) this.uploadPuddleMask();
     this.physicsTimer -= dt;
     if (this.physicsDirtyChunks.size && this.physicsTimer <= 0) {
       this.rebuildDirtyColliders();
       this.physicsTimer = 0.25;
     }
+  }
+
+  /** Height-vs-neighbour average identifies concave basins while rejecting slopes and hilltops. */
+  private rebuildPuddleMask(x0: number, z0: number, x1: number, z1: number): void {
+    const ax = Math.max(0, Math.floor(x0)), az = Math.max(0, Math.floor(z0));
+    const bx = Math.min(N - 1, Math.ceil(x1)), bz = Math.min(N - 1, Math.ceil(z1));
+    const h = this.heights;
+    const sample = (x: number, z: number) => h[THREE.MathUtils.clamp(z, 0, N) * V + THREE.MathUtils.clamp(x, 0, N)];
+    for (let z = az; z <= bz; z++) for (let x = ax; x <= bx; x++) {
+      const center = sample(x, z);
+      let near = 0, far = 0;
+      for (let k = 0; k < 8; k++) {
+        const a = k * Math.PI / 4, dx = Math.round(Math.cos(a)), dz = Math.round(Math.sin(a));
+        near += sample(x + dx * 3, z + dz * 3);
+        far += sample(x + dx * 6, z + dz * 6);
+      }
+      const basin = ((near + far) / 16) - center;
+      const slope = Math.hypot((sample(x + 1, z) - sample(x - 1, z)) * 0.5, (sample(x, z + 1) - sample(x, z - 1)) * 0.5);
+      const basinMask = THREE.MathUtils.smoothstep(basin, 0.08, 0.42) * (1 - THREE.MathUtils.smoothstep(slope, 0.16, 0.5));
+      this.puddleMaskData[z * N + x] = Math.round(basinMask * 255);
+    }
+    const r = this.puddleMaskDirty;
+    r.x0 = Math.min(r.x0, ax); r.z0 = Math.min(r.z0, az);
+    r.x1 = Math.max(r.x1, bx); r.z1 = Math.max(r.z1, bz);
+  }
+
+  private uploadPuddleMask(): void {
+    const r = this.puddleMaskDirty;
+    const rows = r.z1 - r.z0 + 1;
+    if (this.puddleMaskFullPending || rows * (r.x1 - r.x0 + 1) > (N * N) / 4) {
+      this.puddleMaskTex.clearUpdateRanges();
+      this.puddleMaskFullPending = true;
+    } else {
+      const count = (r.x1 - r.x0 + 1) * 4;
+      for (let z = r.z0; z <= r.z1; z++) this.puddleMaskTex.addUpdateRange((z * N + r.x0) * 4, count);
+    }
+    this.puddleMaskTex.needsUpdate = true;
+    this.puddleMaskFullPending = false;
+    r.x0 = N; r.z0 = N; r.x1 = -1; r.z1 = -1;
   }
 
   /** Forces the physics heightfield to match immediately (e.g. on brush release). */
@@ -610,6 +683,17 @@ export class TerrainSystem {
     this.uniforms.uPuddleFill.value = value;
   }
 
+  /** Keep puddle highlights in sync with the current procedural sky without a reflection pass. */
+  public setPuddleSky(sky: { horizon: THREE.Color; zenith: THREE.Color; cloudLit: THREE.Color; cloudShade: THREE.Color; cover: number; sunDir: THREE.Vector3; sunColor: THREE.Color }): void {
+    this.uniforms.uPuddleSkyH.value.copy(sky.horizon);
+    this.uniforms.uPuddleSkyZ.value.copy(sky.zenith);
+    this.uniforms.uPuddleCloud.value.copy(sky.cloudLit);
+    this.uniforms.uPuddleCloudShade.value.copy(sky.cloudShade);
+    this.uniforms.uPuddleSunDir.value.copy(sky.sunDir);
+    this.uniforms.uPuddleSunColor.value.copy(sky.sunColor);
+    this.uniforms.uPuddleCloudCover.value = sky.cover;
+  }
+
   /** Fallen snow from the weather (0 bare .. 1 white everywhere); settles in patches first. */
   public setSnowCover(value: number): void {
     this.uniforms.uSnowCover.value = value;
@@ -714,6 +798,7 @@ export class TerrainSystem {
         tRiver: { value: riverWorld.texture },
         tTiles: { value: this.tileTex },
         tSplatB: { value: this.splatB },
+        tPuddleMask: { value: this.puddleMaskTex },
         uWorldSize: { value: WORLD_SIZE },
       });
       for (const [k, v] of Object.entries(layers)) shader.uniforms[k] = { value: v };
@@ -740,6 +825,9 @@ uniform float uWaterLevel;
 uniform float uRainWet;
 uniform float uRainFall;
 uniform float uPuddleFill;
+uniform sampler2D tPuddleMask;
+uniform vec3 uPuddleSkyH, uPuddleSkyZ, uPuddleCloud, uPuddleCloudShade, uPuddleSunDir, uPuddleSunColor;
+uniform float uPuddleCloudCover;
 uniform float uTerrTime;
 // The wave simulation around the player (WaterRippleSim): puddles ripple with it too
 uniform sampler2D uWdSim;
@@ -868,6 +956,10 @@ vec3 terrainColor() {
   float roofed = wetDry.y;
   float wet = max(wetDry.x, uRainWet * earthW * (1.0 - roofed));
   if (wet > 0.004) c = mix(c, vec3(0.0123, 0.0052, 0.003), wet * (0.82 + 0.36 * n));
+  // The CPU-built mask marks concave basins from terrain heights; read it only while wet.
+  float autoPool = 0.0;
+  if (uPuddleFill > 0.01) autoPool = texture2D(tPuddleMask, suv).r * (1.0 - roofed) * smoothstep(0.02, 0.18, uPuddleFill);
+  puddleW = max(puddleW, autoPool);
   // Mud and puddle beds: footprints pressed in (dark, wet hollows), and a wet sheen of the sky,
   // brighter at grazing angles and in the rain
   float soft = (mudW + puddleW) * (1.0 - rock);
@@ -889,8 +981,7 @@ vec3 terrainColor() {
     }
     c = mix(c, vec3(0.16, 0.19, 0.23), soft * (0.02 + uRainWet * 0.06 + fresT * (0.12 + uRainWet * 0.22)));
   }
-  // Puddles: water lies where the painted patch is deepest (its middle, broken up by the noise);
-  // the fuller they are, the further it spreads. A dark mirror of the sky with rain rings.
+  // Puddles: water lies where the painted patch is deepest; the pool shrinks as it dries.
   if (puddleW > 0.001) {
     // Shape: the painted weight (deepest in the middle) broken up by finer noise, so a drying
     // puddle shrinks into a few separate pools
@@ -910,8 +1001,20 @@ vec3 terrainColor() {
         if (simOn > 0.0) simG = textureLod(uWdSim, suvW, 0.0).ba * simOn * uWdSimLook.y;
       }
       vec3 nW = normalize(vec3(-simG.x, 1.0, -simG.y));
-      float fresW = 1.0 - max(dot(toEyeT, nW), 0.0);
-      fresW *= fresW * fresW;
+      vec3 viewW = normalize(cameraPosition - vTerrWorld);
+      float fresW = 1.0 - max(dot(viewW, nW), 0.0);
+      fresW *= fresW;
+      // Reflect the view ray into the procedural sky. Two broad hashed cloud bands mimic the
+      // sky dome at almost no cost; no screen-space reflection or extra render target is needed.
+      vec3 reflectW = reflect(-viewW, nW);
+      float skyH = clamp(reflectW.y, 0.0, 1.0);
+      vec3 skyW = mix(uPuddleSkyH, uPuddleSkyZ, pow(skyH, 0.5));
+      vec2 cloudUv = reflectW.xz / max(0.18, abs(reflectW.y) + 0.18);
+      float cloudN = sin(cloudUv.x * 3.1 + cloudUv.y * 1.7) * sin(cloudUv.y * 2.6 - cloudUv.x * 1.2);
+      float cloudMask = smoothstep(-0.18, 0.22, cloudN + (uPuddleCloudCover - 0.5) * 0.45);
+      skyW = mix(skyW, mix(uPuddleCloudShade, uPuddleCloud, smoothstep(0.3, 0.9, skyH)), cloudMask * uPuddleCloudCover);
+      float sunReflection = pow(max(dot(reflectW, normalize(uPuddleSunDir)), 0.0), 96.0);
+      skyW += uPuddleSunColor * sunReflection * 0.75;
       float ripple = 0.0;
       // Drawn rain rings only where the simulation isn't running (it drops its own)
       if (uRainFall > 0.02 && simOn < 0.999) {
@@ -930,10 +1033,11 @@ vec3 terrainColor() {
       }
       float simShade = clamp(dot(simG, vec2(0.55, 0.45)) * 0.6, -0.35, 0.35);
       // (linear colours: the sky's reflection is dimmer than it looks in sRGB)
-      vec3 sky = vec3(0.2, 0.27, 0.36);
-      vec3 waterC = mix(c * 0.3, sky, 0.22 + fresW * 0.55) + sky * (ripple + simShade * 0.8);
+      vec3 sky = skyW;
+      vec3 waterC = mix(c * 0.72, sky, 0.16 + fresW * 0.34) + sky * (ripple * 0.28 + simShade * 0.3);
       waterC = max(waterC, vec3(0.0));
-      c = mix(c, waterC, water);
+      // Keep the ground clearly visible through shallow water; reflection stays a soft highlight.
+      c = mix(c, waterC, water * mix(0.3, 0.48, uPuddleFill) * smoothstep(0.015, 0.12, uPuddleFill));
     }
   }
   // Snow: settles last, but never on rocky slopes (weight fades with the rock mask) and melts
@@ -1067,7 +1171,7 @@ vec3 terrainColor() {
     for (let i = 0; i < dh.length; i++) dh[i] = Math.round(this.heights[i] * 100) - base.heights[i];
     const dt = new Int16Array(N * N);
     for (let i = 0; i < dt.length; i++) dt[i] = this.tiles[i];
-    return { size: N, enc: 'd1', heights: rleEncode(dh), tiles: rleEncode(dt) };
+    return { size: N, enc: 'd2', heights: rleEncode(dh), tiles: rleEncode(dt) };
   }
 
   /** True when the last load placed an older, smaller world in the island's centre. */
@@ -1076,11 +1180,35 @@ vec3 terrainColor() {
   public deserialize(data: TerrainSaveData): void {
     this.expandedFromLegacy = false;
     const base = TerrainSystem.base();
-    if (data.enc === 'd1' && data.size === N) {
-      const dh = rleDecode(data.heights, V * V);
-      for (let i = 0; i < dh.length; i++) this.heights[i] = (base.heights[i] + dh[i]) / 100;
-      const dt = rleDecode(data.tiles, N * N);
-      for (let i = 0; i < dt.length; i++) this.tiles[i] = sanitizeTile(dt[i]);
+    if ((data.enc === 'd1' || data.enc === 'd2') && data.size > 0 && data.size <= 2048) {
+      const s = data.size;
+      const sv = s + 1;
+      const dh = rleDecode(data.heights, sv * sv);
+      const dt = rleDecode(data.tiles, s * s);
+      const copySize = Math.min(s, N);
+      const sourceOffset = Math.floor((s - copySize) / 2);
+      const targetOffset = Math.floor((N - copySize) / 2);
+      const rebaseUnderwater = data.enc === 'd1' || s > N;
+      // Keep the center of expanded saves when shrinking the map, and center older smaller saves
+      // when growing it. This preserves the island's world coordinates in either direction.
+      this.heights.set(base.heights);
+      this.tiles.set(base.tiles);
+      for (let z = 0; z <= copySize; z++) {
+        for (let x = 0; x <= copySize; x++) {
+          const oldIndex = (z + sourceOffset) * sv + x + sourceOffset;
+          const newIndex = (z + targetOffset) * V + x + targetOffset;
+          const generated = base.heights[newIndex];
+          this.heights[newIndex] = rebaseUnderwater
+            ? this.rebaseLegacySeabed(generated, dh[oldIndex], x + targetOffset - N / 2, z + targetOffset - N / 2)
+            : (generated + dh[oldIndex]) / 100;
+        }
+      }
+      for (let z = 0; z < copySize; z++) {
+        for (let x = 0; x < copySize; x++) {
+          this.tiles[(z + targetOffset) * N + x + targetOffset] = sanitizeTile(dt[(z + sourceOffset) * s + x + sourceOffset]);
+        }
+      }
+      this.expandedFromLegacy = s < N;
     } else if (!data.enc && data.size <= N) {
       this.loadLegacy(data, base);
     } else {
@@ -1091,14 +1219,19 @@ vec3 terrainColor() {
     this.commit();
   }
 
-  /** Old raw saves: their (smaller) world goes in the middle, blended into the island around it. */
+  /** Old raw saves store the whole old square, including its flat -11 m seabed. */
   private loadLegacy(data: TerrainSaveData, base: { heights: Int16Array; tiles: Uint8Array }): void {
     const s = data.size;
     const sv = s + 1;
     const o = (N - s) / 2;
     const cm = new Int16Array(fromBase64(data.heights).buffer);
     const oldTiles = fromBase64(data.tiles);
-    const BLEND = 24;
+    // The old square ended on a flat -11 m seabed. Extending its edge values outward (or keeping
+    // them at all) stamps a visible square shelf into the expanded ocean. Retain the saved land
+    // and shoreline, then smoothly hand submerged cells back to the new generated seabed.
+    const LEGACY_SEA_FLOOR = -11;
+    const SHORE_HANDOFF_DEPTH = -0.6;
+    const EDGE_FADE = 24;
     for (let iz = 0; iz <= N; iz++) {
       for (let ix = 0; ix <= N; ix++) {
         const lx = ix - o;
@@ -1106,9 +1239,16 @@ vec3 terrainColor() {
         const cx = Math.min(s, Math.max(0, lx));
         const cz = Math.min(s, Math.max(0, lz));
         const old = (cm[cz * sv + cx] ?? 0) / 100;
-        const d = Math.hypot(lx - cx, lz - cz);
-        const t = THREE.MathUtils.smoothstep(d, 0, BLEND);
-        this.heights[iz * V + ix] = old * (1 - t) + (base.heights[iz * V + ix] / 100) * t;
+        const inside = lx >= 0 && lx <= s && lz >= 0 && lz <= s;
+        let keepOld = inside ? 1 : 0;
+        if (inside && s < N) {
+          const edgeDistance = Math.min(lx, s - lx, lz, s - lz);
+          const fadesFromEdge = THREE.MathUtils.smoothstep(edgeDistance, 0, EDGE_FADE);
+          const fadesBelowShore = THREE.MathUtils.smoothstep(old, LEGACY_SEA_FLOOR, SHORE_HANDOFF_DEPTH);
+          keepOld *= fadesFromEdge * fadesBelowShore;
+        }
+        const generated = base.heights[iz * V + ix] / 100;
+        this.heights[iz * V + ix] = generated + (old - generated) * keepOld;
       }
     }
     this.tiles.set(base.tiles);
@@ -1116,6 +1256,20 @@ vec3 terrainColor() {
       for (let x = 0; x < s; x++) this.tiles[(z + o) * N + x + o] = sanitizeTile(oldTiles[z * s + x] ?? TerrainTileType.GRASS);
     }
     this.expandedFromLegacy = s < N;
+  }
+
+  /**
+   * Early expanded-world saves baked the old square -11 m shelf into their d1 deltas. Keep saved
+   * land and the shallow shoreline, but fade those legacy underwater deltas back to the generated
+   * seabed by distance from the natural coast. New d2 saves load exactly and are not rebased again.
+   */
+  private rebaseLegacySeabed(generatedCm: number, deltaCm: number, x: number, z: number): number {
+    const generated = generatedCm / 100;
+    const saved = (generatedCm + deltaCm) / 100;
+    if (saved >= worldSettings.waterLevel) return saved;
+    const offshore = Math.hypot(x, z) - coastRadius(x, z);
+    const fade = THREE.MathUtils.smoothstep(offshore, 8, 90);
+    return generated + (saved - generated) * (1 - fade);
   }
 }
 
@@ -1251,7 +1405,7 @@ void terrAddTile(int id, float w, inout ivec4 ids, inout vec4 ws, inout int cnt)
  * number of surface types, instead of one sampler each (WebGL2 guarantees only 16 per shader).
  */
 function createSurfaceArray(): THREE.DataArrayTexture {
-  const size = 256;
+  const size = 128;
   const layerBytes = size * size * 4;
   const data = new Uint8Array(layerBytes * SURFACE_TILES.length);
   SURFACE_TILES.forEach((t, i) => {
@@ -1274,7 +1428,7 @@ function createSurfaceArray(): THREE.DataArrayTexture {
 }
 
 function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
-  const size = 256;
+  const size = 128;
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = size;
   const ctx = canvas.getContext('2d')!;

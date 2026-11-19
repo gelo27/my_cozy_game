@@ -16,8 +16,8 @@ import {
   waterSurfaceUniforms,
 } from './WaterSurface';
 
-/** The sea planes follow the camera and reach past the far plane, so the ocean meets the horizon. */
-const OCEAN_SIZE = 1200;
+/** The sea planes follow the camera and stay well beyond the visible horizon. */
+const OCEAN_SIZE = 4000;
 const HALF = WORLD_SIZE / 2;
 /** Re-upload the bed heights and the shore field at most this often while the terrain is being sculpted (s). */
 const HEIGHT_REFRESH = 0.25;
@@ -143,8 +143,9 @@ diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
     };
     this.seabed = new THREE.Mesh(bedGeo, bedMat);
     this.seabed.name = 'SeaBed';
-    // A hair under the terrain's lowest height, so the overlap strip never z-fights
-    this.seabed.position.y = SEA_FLOOR_Y - 0.01;
+    // Slightly above the terrain floor: the 5 cm cutout overlap hides the square map-edge seam
+    // without two nearly coplanar surfaces fighting in the depth buffer.
+    this.seabed.position.y = SEA_FLOOR_Y + 0.03;
     this.seabed.frustumCulled = false;
     scene.add(this.seabed);
     this.sparkles = new WaterSparkles(scene);

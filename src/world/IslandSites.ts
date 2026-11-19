@@ -168,7 +168,10 @@ export function getIslandSites(): IslandSite[] {
 
 /** Blends the terrain toward each site's pad height. */
 export function applySitePads(x: number, z: number, y: number): number {
+  // Retired ruins and hut no longer leave unnatural flat clearings. The lighthouse pad remains
+  // as the foundation for the boat dock, which is still a usable point of interest.
   for (const s of getIslandSites()) {
+    if (s.kind !== 'cave' && s.kind !== 'lighthouse') continue;
     const dx = x - s.x, dz = z - s.z;
     const outer = s.pad + s.padBlend;
     const d2 = dx * dx + dz * dz;

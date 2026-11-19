@@ -14,6 +14,7 @@ import { APPLE_SAPLING_ID, AppleOrchard, AppleTreeNode } from '../../gathering/A
 import { WebField, WEB_REACH } from '../../world/SpiderWebs';
 import { FlowerBeds, tulipItemIndex } from '../../gathering/FlowerBeds';
 import { TreeNursery, seedTreeType } from '../../gathering/TreeNursery';
+import type { CaveNetwork } from '../../explore/cave/CaveNetwork';
 
 /** The axe reaches a pest this far past its body (m); a bit more than a tree, they move. */
 const PEST_REACH = 1.9;
@@ -34,10 +35,11 @@ type Target =
   | { type: 'rock'; node: RockNode }
   | { type: 'pest'; node: Pest }
   | { type: 'apple'; node: AppleTreeNode }
-  | { type: 'web'; node: { position: THREE.Vector3; radius: number } };
+  | { type: 'web'; node: { position: THREE.Vector3; radius: number } }
+  | { type: 'cave'; node: { position: THREE.Vector3; radius: number }; normal: THREE.Vector3 };
 
 /** What the E / LMB prompt can be about (webs have their own). */
-type FieldTarget = Exclude<Target, { type: 'web' }>;
+type FieldTarget = Exclude<Target, { type: 'web' | 'cave' }>;
 
 /**
  * Chopping trees with the axe and mining rocks with the pickaxe (E / LMB).
@@ -45,10 +47,14 @@ type FieldTarget = Exclude<Target, { type: 'web' }>;
  */
 export class GatheringAbility implements IAbility {
   private readonly playerPosScratch = new THREE.Vector3();
+  private readonly caveRayOrigin = new THREE.Vector3();
+  private readonly caveRayDirection = new THREE.Vector3();
   public name = 'GatheringAbility';
   public enabled = true;
 
   public currentPrompt: GatherPrompt | null = null;
+  /** Lets the viewport show the aiming reticle while the pickaxe is used underground. */
+  public isCaveMining = false;
 
   private forest: ForestZone | null = null;
   private rocks: RockField | null = null;
@@ -69,6 +75,7 @@ export class GatheringAbility implements IAbility {
   public flowers: FlowerBeds | null = null;
   /** Pines, oaks and bushes planted from the seeds felled trees drop (wired by the engine). */
   public nursery: TreeNursery | null = null;
+  public caveNetwork: CaveNetwork | null = null;
   private readonly facingScratch = new THREE.Vector3();
 
   public setSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager, propTrees: PropTreeField | null = null): void {
@@ -79,8 +86,10 @@ export class GatheringAbility implements IAbility {
   }
 
   public update(dt: number, context: CharacterContext): void {
+    this.caveNetwork?.setDigHighlight(null);
     // Swimming / diving: tools are put away (a swing under way is dropped)
     if (!this.enabled || !this.forest || !this.rocks || !this.inventory || context.isSwimming) {
+      this.isCaveMining = false;
       if (context.isSwimming) {
         this.pendingHit = null;
         this.swingFacing = null;
@@ -99,6 +108,8 @@ export class GatheringAbility implements IAbility {
     const t = context.body.translation();
     const playerPos = this.playerPosScratch.set(t.x, t.y, t.z);
     const tool = this.equippedTool();
+    this.isCaveMining = !!this.caveNetwork?.contains(playerPos) && tool === 'pickaxe'
+      && !context.isBuildModeActive && !this.inventory.isInventoryOpen();
 
     // Axe in hand and a pest close: the swing goes to the pest, not the tree behind it
     if (tool === 'axe' && this.pests && !context.isBuildModeActive && !this.inventory.isInventoryOpen()) {
@@ -164,8 +175,16 @@ export class GatheringAbility implements IAbility {
       this.nursery.hideGhost();
     }
 
-    const target = this.findTarget(playerPos);
-    this.currentPrompt = target ? this.buildPrompt(target, tool) : null;
+    // In a cave, the crosshair decides what the pickaxe hits. Nearby ore nodes must not steal
+    // the wall target just because their centres happen to be closer to the player.
+    const aimedCaveWall = this.isCaveMining ? this.findCaveWall(context, playerPos) : null;
+    const target: FieldTarget | Extract<Target, { type: 'cave' }> | null = aimedCaveWall ?? this.findTarget(playerPos);
+    if (target?.type === 'cave') this.caveNetwork?.setDigHighlight(target.node.position);
+    this.currentPrompt = target?.type === 'cave'
+      ? { kind: 'stone', title: 'Печерна порода', actionText: tool === 'pickaxe' ? 'Прокопати' : 'Потрібна кирка', hintText: 'Копання зберігається у світі', progress: 0, canAct: tool === 'pickaxe' }
+      : target ? this.buildPrompt(target, tool)
+      : this.isCaveMining ? { kind: 'stone', title: 'Печерна порода', actionText: 'Підійди до стіни', hintText: '', progress: 0, canAct: false }
+      : null;
 
     if (!target || context.isBuildModeActive || this.inventory.isInventoryOpen()) return;
     // Competes with the other E targets only when this hand can do something to it
@@ -360,6 +379,15 @@ export class GatheringAbility implements IAbility {
       this.hitStar(rock, direction, rock.radius * 0.6, broke);
       return;
     }
+    if (target.type === 'cave') {
+      const point = target.node.position;
+      if (this.caveNetwork?.excavate(point, target.normal)) {
+        this.inventory?.addItem('stone', 1);
+        audioEngine.at(point).playMineHit();
+        hitFx.star(point, true);
+      }
+      return;
+    }
     if (target.type === 'propTree') {
       const tree = target.node;
       const broke = this.propTrees!.hit(tree, direction);
@@ -416,13 +444,26 @@ export class GatheringAbility implements IAbility {
     return best;
   }
 
+  private findCaveWall(context: CharacterContext, playerPos: THREE.Vector3): Extract<Target, { type: 'cave' }> | null {
+    const cave = this.caveNetwork;
+    if (!cave || !cave.ready || !cave.contains(playerPos)) return null;
+    // Keep the ray origin on the player, while following the camera's full 3D look direction.
+    const origin = this.caveRayOrigin.set(playerPos.x, playerPos.y + 0.35, playerPos.z);
+    const direction = this.caveRayDirection.copy(context.cameraWorldDirection).normalize();
+    const reach = GATHERING_CONFIG.REACH + 1.2;
+    const hit = context.physics.castRayAndGetNormal(origin, direction, reach, context.collider);
+    if (!hit || !cave.contains(hit.point)) return null;
+    if (playerPos.distanceTo(hit.point) > reach) return null;
+    return { type: 'cave', node: { position: hit.point.clone(), radius: 0.15 }, normal: hit.normal.clone() };
+  }
+
   private equippedTool(): GatherTool | null {
     const id = this.inventory!.getEquippedItemId();
     return id === 'axe' || id === 'pickaxe' ? id : null;
   }
 
   private requiredTool(target: Target): GatherTool {
-    return target.type === 'rock' ? 'pickaxe' : 'axe';
+    return target.type === 'rock' || target.type === 'cave' ? 'pickaxe' : 'axe';
   }
 
   /** Axe in hand: chop; otherwise knock a ripe tree, or say how far along it is. */

@@ -47,7 +47,7 @@ export interface CaveGenInput {
 
 export type HubKind = 'chamber' | 'grand' | 'lake';
 export type TunnelKind = 'ramp' | 'stairs' | 'drop' | 'sump' | 'flood';
-export type ItemType = 'chest' | 'ore' | 'crystal' | 'mushroom' | 'ember' | 'light' | 'stalactite' | 'stalagmite' | 'pillar' | 'drip';
+export type ItemType = 'chest' | 'ore' | 'crystal' | 'mushroom' | 'ember' | 'light' | 'stalactite' | 'stalagmite' | 'pillar' | 'drip' | 'dig';
 
 export interface LayoutHub {
   id: string;
@@ -139,6 +139,10 @@ export interface CaveGenRequest extends CaveGenInput {
   layout?: CaveLayout | null;
   /** Only re-mesh chunks touching these boxes (null: everything). */
   dirty?: Box[] | null;
+  /** Gameplay digs preserve placed/depleted resources while rock and water are remeshed. */
+  preserveContents?: boolean;
+  /** Existing shoreline masks reused by a rock-only gameplay edit. */
+  reuseWetPools?: CavePool[];
 }
 
 // ------------------------------------------------------------------ output
@@ -367,6 +371,11 @@ interface AirPrim extends Box {
 interface RockPrim extends Box {
   stamp: number;
   uid: number;
+  d(x: number, y: number, z: number): number;
+}
+
+/** Player cuts are subtracted after authored rock is added, so shelves and pillars can be mined too. */
+interface DigPrim extends Box {
   d(x: number, y: number, z: number): number;
 }
 
@@ -627,6 +636,7 @@ const byUid = (a: { uid: number }, b: { uid: number }) => a.uid - b.uid;
 class PrimIndex {
   private readonly air: AirPrim[][] = Array.from({ length: IDX_N * IDX_N }, () => []);
   private readonly rock: RockPrim[][] = Array.from({ length: IDX_N * IDX_N }, () => []);
+  private readonly digs: DigPrim[][] = Array.from({ length: IDX_N * IDX_N }, () => []);
   private stamp = 1;
   private nextUid = 1;
 
@@ -637,6 +647,11 @@ class PrimIndex {
       if (isRock) this.rock[j * IDX_N + i].push(p as RockPrim);
       else this.air[j * IDX_N + i].push(p as AirPrim);
     }
+  }
+
+  public addDig(p: DigPrim): void {
+    const i0 = this.ci(p.minX), i1 = this.ci(p.maxX), j0 = this.ci(p.minZ), j1 = this.ci(p.maxZ);
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) this.digs[j * IDX_N + i].push(p);
   }
 
   private ci(v: number): number {
@@ -675,6 +690,10 @@ class PrimIndex {
   public rockAt(x: number, z: number): RockPrim[] {
     return this.rock[this.ci(z) * IDX_N + this.ci(x)];
   }
+
+  public digsAt(x: number, z: number): DigPrim[] {
+    return this.digs[this.ci(z) * IDX_N + this.ci(x)];
+  }
 }
 
 function overlaps(a: Box, b: Box): boolean {
@@ -694,7 +713,7 @@ function rawAir(x: number, y: number, z: number, air: AirPrim[]): number {
 }
 
 /** The signed distance field from a candidate list. */
-function field(x: number, y: number, z: number, air: AirPrim[], rock: RockPrim[]): number {
+function field(x: number, y: number, z: number, air: AirPrim[], rock: RockPrim[], digs: DigPrim[] = []): number {
   let d = 1e9;
   let amp = 1;
   for (let i = 0; i < air.length; i++) {
@@ -720,6 +739,14 @@ function field(x: number, y: number, z: number, air: AirPrim[], rock: RockPrim[]
     if (x < p.minX || x > p.maxX || y < p.minY || y > p.maxY || z < p.minZ || z > p.maxZ) continue;
     const r = -p.d(x, y, z);
     if (r > d) d = r;
+  }
+  // Carve after authored solid primitives are added back. Otherwise gallery shelves and pillars
+  // would silently refill a player's cut on some impacts.
+  for (let i = 0; i < digs.length; i++) {
+    const p = digs[i];
+    if (x < p.minX || x > p.maxX || y < p.minY || y > p.maxY || z < p.minZ || z > p.maxZ) continue;
+    const cut = p.d(x, y, z);
+    if (cut < d) d = cut;
   }
   return d;
 }
@@ -1293,10 +1320,32 @@ function buildField(layout: CaveLayout, input: CaveGenInput): Built {
       addRock(new Slab(h.x, h.z, ux, uz, -0.52 * R, -0.02 * R, 0.66 * R, 1.35 * R, h.floor, SHELF_H, true));
     }
   }
-  for (const it of layout.items) if (it.t === 'pillar') addRock(new Pillar(it.x, it.z, it.r ?? 1.5, it.y));
+  for (const it of layout.items) {
+    if (it.t === 'pillar') addRock(new Pillar(it.x, it.z, it.r ?? 1.5, it.y));
+    // Player excavations join the air field, so both the surface mesh and coarse chunk culling
+    // see them. They are spatially indexed like the authored cave primitives.
+    if (it.t === 'dig') {
+      const cut = new DigSphere(it.x, it.y, it.z, it.r ?? 0.8);
+      addAir(cut);
+      index.addDig(cut);
+    }
+  }
 
-  const at = (x: number, y: number, z: number) => field(x, y, z, index.airAt(x, z), index.rockAt(x, z));
+  const at = (x: number, y: number, z: number) => field(x, y, z, index.airAt(x, z), index.rockAt(x, z), index.digsAt(x, z));
   return { hubs, index, poolDefs, entrances, tunnelSpots, at };
+}
+
+class DigSphere implements AirPrim, DigPrim {
+  stamp = 0;
+  uid = 0;
+  minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number;
+  amp = 0.22;
+  constructor(private x: number, private y: number, private z: number, private r: number) {
+    this.minX = x - r - 1; this.maxX = x + r + 1;
+    this.minY = y - r - 1; this.maxY = y + r + 1;
+    this.minZ = z - r - 1; this.maxZ = z + r + 1;
+  }
+  d(x: number, y: number, z: number): number { return Math.hypot(x - this.x, y - this.y, z - this.z) - this.r; }
 }
 
 // ------------------------------------------------------------------ water
@@ -1888,7 +1937,8 @@ class Mesher {
       for (let j = 0; j < S; j++) {
         const y = G0Y + (y0 + j) * CELL;
         for (let i = 0; i < S; i++, n++) {
-          const v = field(G0X + (x0 + i) * CELL, y, z, qa, qr);
+          const wx = G0X + (x0 + i) * CELL;
+          const v = field(wx, y, z, qa, qr, this.b.index.digsAt(wx, z));
           f[n] = v;
           if (v < 0) neg = true;
           else pos = true;
@@ -1902,7 +1952,8 @@ class Mesher {
     const lat = (gi: number, gj: number, gk: number): number => {
       const i = gi - x0, j = gj - y0, k = gk - z0;
       if (i >= 0 && j >= 0 && k >= 0 && i < S && j < S && k < S) return f[fi(i, j, k)];
-      return field(G0X + gi * CELL, G0Y + gj * CELL, G0Z + gk * CELL, qa, qr);
+      const x = G0X + gi * CELL, z = G0Z + gk * CELL;
+      return field(x, G0Y + gj * CELL, z, qa, qr, this.b.index.digsAt(x, z));
     };
     /** Trilinear field from the lattice (ambient occlusion: no fresh noise per sample). */
     const fieldAt = (x: number, y: number, z: number): number => {
@@ -2106,6 +2157,10 @@ function tunnelBox(hubs: Map<string, LayoutHub>, t: LayoutTunnel): Box | null {
 
 /** The part of the rock an item shapes (null for items that are not rock). */
 export function itemBox(it: LayoutItem): Box | null {
+  if (it.t === 'dig') {
+    const r = (it.r ?? 0.8) + 2;
+    return { minX: it.x - r, maxX: it.x + r, minY: it.y - r, maxY: it.y + r, minZ: it.z - r, maxZ: it.z + r };
+  }
   if (it.t === 'pillar') {
     const r = (it.r ?? 1.5) + 4;
     return { minX: it.x - r, maxX: it.x + r, minY: it.y - 3, maxY: it.y + 26, minZ: it.z - r, maxZ: it.z + r };
@@ -2238,9 +2293,15 @@ export function planCaveNetwork(req: CaveGenRequest): CavePlan {
   const layout: CaveLayout = fresh ? planCaveLayout(req) : (req.layout as CaveLayout);
   ensureEntrances(layout, req, mulberry(req.seed * 31 + 7));
   const built = buildField(layout, req);
-  const wr = buildWater(built);
+  // Mining changes a few rock chunks. Re-running every cave's water flood fill and recreating all
+  // decorations on each swing is wasteful; reuse the current shore masks for these local edits.
+  const wr = req.preserveContents
+    ? { pools: [] as CavePool[], wetPools: req.reuseWetPools ?? [], water: [] as number[], waterBiome: [] as number[] }
+    : buildWater(built);
   if (fresh) populate(layout, built, wr.pools, mulberry(req.seed * 7919 + 101));
-  const contents = deriveContents(layout, built, wr.pools);
+  const contents = req.preserveContents
+    ? { chests: [], ores: [], mushrooms: [], crystals: [], embers: [], drips: new Float32Array(0), lights: [] }
+    : deriveContents(layout, built, wr.pools);
   const dirty = fresh ? null : (req.dirty ?? null);
   const list = listChunks(built, dirty);
   return {

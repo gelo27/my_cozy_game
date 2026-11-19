@@ -291,6 +291,11 @@ export class WeatherSystem {
     return this.current.cover;
   }
 
+  /** Sky colours used by the cheap terrain puddle reflection. */
+  public get puddleSky(): Pick<SkyParams, 'horizon' | 'zenith' | 'cloudLit' | 'cloudShade' | 'cover' | 'sunDir' | 'sunColor'> {
+    return this.skyParams;
+  }
+
   private updateSnowCover(dt: number): void {
     const hourSec = worldSettings.secondsPerHour > 0 ? worldSettings.secondsPerHour : 60;
     const falling = this.snowMix * this.current.amount;

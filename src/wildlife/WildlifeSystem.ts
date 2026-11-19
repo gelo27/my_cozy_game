@@ -8,7 +8,7 @@ import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { WORLD_HALF, isMobileDevice, worldSettings } from '../world/WorldSettings';
 import { animalTime } from './AnimalMaterial';
 import { Species, SpeciesTuning, WildContext } from './Species';
-import { Butterflies, FishSchools, Gulls, Hares, Turtles } from './Animals';
+import { Butterflies, FishSchools, Gulls, Hares } from './Animals';
 import { TREE_SPOTS } from '../gathering/GatheringConfig';
 
 const CELL = 8;
@@ -75,8 +75,7 @@ export class WildlifeSystem {
       new Gulls(this.group, tune({ capacity: 14, spawnMin: 25, spawnMax: 110, despawn: 150, viewDist: 140, nearDist: 70, radius: 0.8, triesPerFrame: 3 })),
       new Butterflies(this.group, tune({ capacity: 36, spawnMin: 6, spawnMax: 32, despawn: 42, viewDist: 32, nearDist: 22, radius: 0.15, triesPerFrame: 4 })),
       (this.hares = new Hares(this.group, tune({ capacity: 10, spawnMin: 22, spawnMax: 70, despawn: 90, viewDist: 75, nearDist: 35, radius: 0.5, triesPerFrame: 3 }))),
-      (this.fish = new FishSchools(this.group, tune({ capacity: 12, spawnMin: 12, spawnMax: 55, despawn: 70, viewDist: 50, nearDist: 25, radius: 2.5, triesPerFrame: 3 }))),
-      new Turtles(this.group, tune({ capacity: 8, spawnMin: 18, spawnMax: 70, despawn: 90, viewDist: 70, nearDist: 30, radius: 0.7, triesPerFrame: 2 }))
+      (this.fish = new FishSchools(this.group, tune({ capacity: 12, spawnMin: 12, spawnMax: 55, despawn: 70, viewDist: 50, nearDist: 25, radius: 2.5, triesPerFrame: 3 })))
     );
 
     this.ctx = {

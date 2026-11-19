@@ -76,9 +76,10 @@ export function createSims4ShingleTexture(
   shadowColor: string
 ): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   // Base background fill
   ctx.fillStyle = secondaryColor;
@@ -168,9 +169,10 @@ export function createBlueSlateTexture(): THREE.CanvasTexture {
 export function createSims4WhiteTrimTexture(): THREE.CanvasTexture {
   // One seamless repeat = 1m x 1m of painted white trim board (fascia, rake, soffit)
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   ctx.fillStyle = '#f6f6f9';
   ctx.fillRect(0, 0, 512, 512);
@@ -203,9 +205,10 @@ export function createSims4WhiteTrimTexture(): THREE.CanvasTexture {
 /** Seamless white lap siding for gable / attic fronton walls: 1m repeat, 12.5cm boards. */
 export function createRoofLapSidingTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 512;
+  canvas.width = 128;
+  canvas.height = 128;
   const ctx = canvas.getContext('2d')!;
+  ctx.scale(0.25, 0.25);
 
   const boardH = 64;
   for (let y = 0; y < 512; y += boardH) {

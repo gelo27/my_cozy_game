@@ -66,7 +66,8 @@ const ATTACK_HOLD = 3;
  * strikes. Layers have hold times, so they never flicker; losing the enemy strips the layers back to
  * the drone before the music fades.
  *
- * A track is never cut mid-phrase when the weather turns: it finishes its section and fades.
+ * Ambient tracks always finish their full arrangement. Weather and place changes affect the next
+ * selection and the current mix, but never stop a song that is already playing.
  */
 class MusicDirector {
   private ctx: AudioContext | null = null;
@@ -93,7 +94,6 @@ class MusicDirector {
   private forcedTrack = false;
   /** Seconds of silence left before the next track (game time, frozen while paused). */
   private silence = rand(8, 20);
-  private moodEnded = false;
   private dangerHold = 0;
   private dangerLoading = false;
   /** Seconds the attack layer stays up after the last strike. */
@@ -337,18 +337,8 @@ class MusicDirector {
     const from = this.place;
     this.place = next;
     if (this.mode !== 'ambient') return;
-    if (next === 'underwater' || from === 'underwater') {
-      if (this.track && !this.forcedTrack) {
-        this.track.fadeOut(3);
-        this.track = null;
-      }
-      if (this.loading && !this.forcedTrack) {
-        this.trackReq++;
-        this.loading = false;
-      }
-      this.moodEnded = false;
-      this.silence = next ? rand(1, 3) : rand(12, 30);
-    } else if (next) this.silence = Math.min(this.silence, rand(3, 8));
+    // Place changes (including diving and surfacing) only affect what is selected after the
+    // current song ends. Keep an in-flight load too; playTrack validates the mode, not the place.
   }
 
   /** Tracks written for a place that suit this time and weather. */
@@ -364,12 +354,13 @@ class MusicDirector {
     return !weathers.length || weathers.includes(weather) || (!!fb && weathers.includes(fb));
   }
 
-  /** Whether a track belongs here: underground the cave tracks, at a place its own, else the time and weather ones. */
-  private fitsNow(mood: readonly string[], slot: TimeSlot, weather: string): boolean {
+  /** Whether a not-yet-started selection still matches the latest world state. */
+  private fitsNowFor(mood: readonly string[], s: MusicWorldState): boolean {
+    const slot = this.timeSlot(s);
     if (this.mode === 'cave') return mood.includes('cave');
-    if (this.place) return mood.includes(this.place) && this.placeFits(mood, slot, weather);
-    const fb = WEATHER_FALLBACK[weather];
-    return this.fits(mood, slot, weather) || (!!fb && this.fits(mood, slot, fb));
+    if (this.place) return mood.includes(this.place) && this.placeFits(mood, slot, s.weather);
+    const fb = WEATHER_FALLBACK[s.weather];
+    return this.fits(mood, slot, s.weather) || (!!fb && this.fits(mood, slot, fb));
   }
 
   /** An outdoor track for this time and weather (place tracks only play at their place). */
@@ -382,10 +373,8 @@ class MusicDirector {
     const slot = this.timeSlot(s);
     const tr = this.track;
     if (tr && !tr.done) {
-      if (!this.forcedTrack && !this.fitsNow(tr.song.mood, slot, s.weather)) {
-        tr.endAtSectionBoundary(6);
-        this.moodEnded = true;
-      }
+      // Do not truncate a song when weather, time of day, or place changes. The new world state
+      // is used by pickTrack after this arrangement finishes naturally.
       tr.setLayer('night', s.night, 2);
       tr.setLayer('day', 1 - s.night, 2);
       tr.setLayer('rain', s.rain, 2);
@@ -394,10 +383,8 @@ class MusicDirector {
     if (tr?.done) {
       this.track = null;
       this.forcedTrack = false;
-      // A track that ended because the weather or time changed gives way sooner
-      // At a place (a fishing trip, the beach) its music comes back sooner
-      this.silence = this.moodEnded ? (this.place ? rand(2, 6) : rand(10, 25)) : this.place ? rand(20, 60) : rand(60, 240);
-      this.moodEnded = false;
+      // Songs have finished naturally; keep a shorter pause for dedicated place music.
+      this.silence = this.place ? rand(20, 60) : rand(60, 240);
     }
     if (this.loading) return;
     this.silence -= dt;
@@ -442,8 +429,15 @@ class MusicDirector {
         if (this.mode === 'danger' || this.mode === 'sleep' || !this.musicAudible) return;
         this.track?.fadeOut(1.5);
         this.track = null;
-        this.moodEnded = false;
-      } else if (this.mode !== mode || this.track || !this.musicAudible) return;
+      } else if (this.mode !== mode || this.track || !this.musicAudible) {
+        return;
+      } else {
+        const current = this.state;
+        if (current && !this.fitsNowFor(song.mood, current)) {
+          this.silence = 0;
+          return;
+        }
+      }
       this.forcedTrack = forced;
       this.setSpace(song.space, song.wet);
       const p = new SongPlayer(this.ctx!, this.pool!, song, this.duck!, false, levels, isMobileDevice());

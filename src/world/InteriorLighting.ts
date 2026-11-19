@@ -448,10 +448,28 @@ export class InteriorLighting {
       return i;
     };
     const bx = segs.map((s) => [Math.min(s.p1.x, s.p2.x) - 1, Math.min(s.p1.y, s.p2.y) - 1, Math.max(s.p1.x, s.p2.x) + 1, Math.max(s.p1.y, s.p2.y) + 1]);
+    // Segment boxes are already expanded by the join distance. Compare only boxes that share
+    // a 2 m spatial bin instead of testing every pair in a large house (O(n²)).
+    const WALL_BIN = 2;
+    const wallBins = new Map<string, number[]>();
     for (let a = 0; a < n; a++) {
-      for (let b = a + 1; b < n; b++) {
-        const A = bx[a], B = bx[b];
+      const A = bx[a];
+      const x0 = Math.floor(A[0] / WALL_BIN), x1 = Math.floor(A[2] / WALL_BIN);
+      const z0 = Math.floor(A[1] / WALL_BIN), z1 = Math.floor(A[3] / WALL_BIN);
+      const candidates = new Set<number>();
+      for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+        const bin = wallBins.get(`${x},${z}`);
+        if (bin) for (const b of bin) candidates.add(b);
+      }
+      for (const b of candidates) {
+        const B = bx[b];
         if (A[0] <= B[2] && B[0] <= A[2] && A[1] <= B[3] && B[1] <= A[3]) parent[find(a)] = find(b);
+      }
+      for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+        const key = `${x},${z}`;
+        let bin = wallBins.get(key);
+        if (!bin) wallBins.set(key, (bin = []));
+        bin.push(a);
       }
     }
     const groups = new Map<number, WallSeg[]>();
@@ -701,6 +719,14 @@ export class InteriorLighting {
         this.write(job.cl);
       } else {
         this.clusters.delete(job.cl.key);
+        // A collider can be replaced while this bake is yielding. The failed job removes its
+        // cluster, so force a fresh discovery after a short cooldown; otherwise `seenRevision`
+        // can already match the building revision and the house remains unshaded until the
+        // player moves or another building edit happens.
+        if (this.current.has(job.cl.key)) {
+          this.seenRevision = -1;
+          this.checkTimer = 0.25;
+        }
       }
     }
   }
@@ -791,6 +817,24 @@ export class InteriorLighting {
       }
     }
     if (!Number.isFinite(topY)) return false;
+    // Index cover colliders in 4 m bins. A house can contain hundreds of floor tiles; scanning its
+    // entire cover list for every 0.25 m room sample wastes most of the bake on distant AABBs.
+    const CASTER_BIN = 4;
+    const binColumns = Math.max(1, Math.ceil(W * CELL / CASTER_BIN));
+    const binRows = Math.max(1, Math.ceil(H * CELL / CASTER_BIN));
+    const casterBins = new Map<number, typeof casters>();
+    for (const cc of casters) {
+      const x0 = Math.max(0, Math.floor((cc.x0 - ox) / CASTER_BIN));
+      const x1 = Math.min(binColumns - 1, Math.floor((cc.x1 - ox) / CASTER_BIN));
+      const z0 = Math.max(0, Math.floor((cc.z0 - oz) / CASTER_BIN));
+      const z1 = Math.min(binRows - 1, Math.floor((cc.z1 - oz) / CASTER_BIN));
+      for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+        const key = z * binColumns + x;
+        let bin = casterBins.get(key);
+        if (!bin) casterBins.set(key, (bin = []));
+        bin.push(cc);
+      }
+    }
     const castTop = topY + 1;
     const castLen = castTop - this.focusY + 200;
     const ray = (this.ray ??= new this.physics.rapier.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }));
@@ -824,12 +868,17 @@ export class InteriorLighting {
         ray.origin.y = castTop;
         ray.origin.z = pz;
         let toi = Infinity, far = -Infinity, topRoof = false;
-        for (const cc of casters) {
-          if (px < cc.x0 || px > cc.x1 || pz < cc.z0 || pz > cc.z1) continue;
-          const t = cc.c.castRay(ray, castLen, true);
-          if (t < 0) continue;
-          if (t < toi) { toi = t; topRoof = cc.roof; }
-          if (t > far) far = t;
+        const binX = Math.floor((px - ox) / CASTER_BIN);
+        const binZ = Math.floor((pz - oz) / CASTER_BIN);
+        const nearby = casterBins.get(binZ * binColumns + binX);
+        if (nearby) {
+          for (const cc of nearby) {
+            if (px < cc.x0 || px > cc.x1 || pz < cc.z0 || pz > cc.z1) continue;
+            const t = cc.c.castRay(ray, castLen, true);
+            if (t < 0) continue;
+            if (t < toi) { toi = t; topRoof = cc.roof; }
+            if (t > far) far = t;
+          }
         }
         if (++casts % 48 === 0) {
           yield;
@@ -1099,22 +1148,38 @@ export class InteriorLighting {
     // the share of wall cells around)
     const ao = new Float32Array(NN);
     const inside = new Uint8Array(NN);
+    // Summed-area tables make the AO wall ratio an O(1) rectangle query instead of counting the
+    // same 7x7 neighbourhood for every interior cell.
+    const prefixStride = W + 1;
+    const prefixLength = prefixStride * (H + 1);
+    const outsidePrefix = new Uint32Array(prefixLength);
+    const wallPrefix = new Uint32Array(prefixLength);
+    for (let j = 0; j < H; j++) {
+      let outsideRow = 0, wallRow = 0;
+      const prefixRow = (j + 1) * prefixStride;
+      const previousRow = j * prefixStride;
+      for (let i = 0; i < W; i++) {
+        const c = j * W + i;
+        if (outside[c]) outsideRow++;
+        else if (blocked[c] === 1) wallRow++;
+        outsidePrefix[prefixRow + i + 1] = outsidePrefix[previousRow + i + 1] + outsideRow;
+        wallPrefix[prefixRow + i + 1] = wallPrefix[previousRow + i + 1] + wallRow;
+      }
+    }
     for (let j = 0; j < H; j++) {
       for (let i = 0; i < W; i++) {
         const c = j * W + i;
         if (k[c] === 0) continue;
         inside[c] = 1;
-        let walls = 0, all = 0;
-        for (let dj = -AO_R; dj <= AO_R; dj++) {
-          for (let di = -AO_R; di <= AO_R; di++) {
-            const ii = i + di, jj = j + dj;
-            if (ii < 0 || jj < 0 || ii >= W || jj >= H) continue;
-            const cc = jj * W + ii;
-            if (outside[cc]) continue;
-            all++;
-            if (blocked[cc] === 1) walls++;
-          }
-        }
+        const x0 = Math.max(0, i - AO_R), x1 = Math.min(W - 1, i + AO_R);
+        const z0 = Math.max(0, j - AO_R), z1 = Math.min(H - 1, j + AO_R);
+        const a = (z1 + 1) * prefixStride + x1 + 1;
+        const b = z0 * prefixStride + x1 + 1;
+        const d = (z1 + 1) * prefixStride + x0;
+        const e = z0 * prefixStride + x0;
+        const outsideCount = outsidePrefix[a] - outsidePrefix[b] - outsidePrefix[d] + outsidePrefix[e];
+        const walls = wallPrefix[a] - wallPrefix[b] - wallPrefix[d] + wallPrefix[e];
+        const all = (x1 - x0 + 1) * (z1 - z0 + 1) - outsideCount;
         ao[c] = THREE.MathUtils.smoothstep(walls / Math.max(all, 1), 0.08, 0.5);
       }
     }

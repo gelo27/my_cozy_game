@@ -6,10 +6,12 @@ import type { Season } from './Seasons';
  */
 export const WORLD_SIZE = 512; // metres of terrain, spans [-256, 256] on X and Z
 export const WORLD_HALF = WORLD_SIZE / 2;
-/** Open sea around the island; invisible walls stand this far out, hidden by distance fog. */
+/** Keep the generated island's shoreline fixed while the underwater map grows around it. */
+export const ISLAND_HALF = 256;
+/** Keep the open-water buffer beyond the terrain, as in the original world. */
 export const WORLD_LIMIT = WORLD_HALF + 260;
 /** Sea bed depth beyond the island (the terrain slopes down to it at the coast). */
-export const SEA_FLOOR_Y = -11;
+export const SEA_FLOOR_Y = -128;
 /** Open-sea bed (visual plane and collider), just under the island's lowest possible terrain. */
 export const SEA_BED_TOP = SEA_FLOOR_Y - 0.25;
 
