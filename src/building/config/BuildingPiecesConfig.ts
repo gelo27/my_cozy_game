@@ -13,7 +13,7 @@ import { MODULE_SIZE, HALF_SIZE, WALL_THICKNESS, FLOOR_THICKNESS } from './Build
 import { applyDefaultWallFaces } from './DefaultWallMaterials';
 import type { PieceMeshTemplate } from './meshes/PieceMeshTemplate';
 import { buildGreenhouseWallGeometry, GH_LEAF_W, GH_LEAF_H, GH_LEAF_Y, GH_HINGE_X, pushBox, greenhouseDoorLeafParts, greenhouseDoorFrameParts, mergeGreenhouseParts, buildGreenhouseDoorGeometry, buildGreenhouseDoorFrame, buildGreenhouseDoorLeaf } from './meshes/GreenhouseGeometry';
-import { buildWindowPieceGeometry, buildOuterDoorFrameGeometry, buildDoorwayWallGeometry, buildSingleDoorGeometry, buildDoubleDoorGeometry, buildGrandSideliteDoorFrameGeometry, buildGrandMahoganyDoorLeaf, buildWhite2PanelDoorFrameGeometry, buildWhite2PanelDoorLeaf, buildCottageWindowDoorFrameGeometry, buildCottageWindowDoorLeaf, buildColonial6PanelDoorFrameGeometry, buildColonial6PanelDoorLeaf } from './meshes/OpeningGeometry';
+import { buildWindowPieceGeometry, buildSingleHungWindowPieceGeometry, buildArchedWindowPieceGeometry, buildOuterDoorFrameGeometry, buildDoorwayWallGeometry, buildSingleDoorGeometry, buildDoubleDoorGeometry, buildGrandSideliteDoorFrameGeometry, buildGrandMahoganyDoorLeaf, buildWhite2PanelDoorFrameGeometry, buildWhite2PanelDoorLeaf, buildCottageWindowDoorFrameGeometry, buildCottageWindowDoorLeaf, buildColonial6PanelDoorFrameGeometry, buildColonial6PanelDoorLeaf } from './meshes/OpeningGeometry';
 import { buildStraightRailingGeometry, buildStairRailingGeometry, buildWhiteDecorativeFenceGeometry } from './meshes/RailingGeometry';
 
 // Textures, materials, unit sizes and the mesh template type live in their own modules;
@@ -23,6 +23,30 @@ export { BUILDING_MATERIALS, GREENHOUSE_GLASS_FAR, WINDOW_GLASS_FAR, addFarGlass
 export { MODULE_SIZE, HALF_SIZE, WALL_THICKNESS, FLOOR_THICKNESS } from './BuildingConstants';
 export type { PieceMeshTemplate } from './meshes/PieceMeshTemplate';
 
+function windowPieceDef(type: BuildingPieceType, name: string, ukrainianName: string, width: number, height: number, woodCost: number): BuildingPieceDef {
+  const socket = (id: string, x: number, y: number, normal: THREE.Vector3, type: SocketType) => ({
+    id, type, localPosition: new THREE.Vector3(x, y, 0), localNormal: normal,
+    // Wall top/bottom sockets use the wall normal as their up axis. This matches the existing
+    // opening pieces and keeps the window face parallel to the wall when the snap solver aligns it.
+    localUp: id === 'bottom' || id === 'top' ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0),
+    compatibleWith: id === 'bottom'
+      ? [SocketType.FLOOR_EDGE, SocketType.WALL_TOP]
+      : id === 'top'
+        ? [SocketType.WALL_BOTTOM, SocketType.ROOF_EAVE, SocketType.FLOOR_EDGE]
+        : [SocketType.WALL_SIDE],
+  });
+  return {
+    type, name, ukrainianName, category: PieceCategory.WINDOWS,
+    dimensions: new THREE.Vector3(width, height, WALL_THICKNESS), woodCost, stoneCost: 0, maxHealth: 100,
+    iconName: 'AppWindow', description: name,
+    sockets: [
+      socket('bottom', 0, -height / 2, new THREE.Vector3(0, -1, 0), SocketType.WALL_BOTTOM),
+      socket('top', 0, height / 2, new THREE.Vector3(0, 1, 0), SocketType.WALL_TOP),
+      socket('left', -width / 2, 0, new THREE.Vector3(-1, 0, 0), SocketType.WALL_SIDE),
+      socket('right', width / 2, 0, new THREE.Vector3(1, 0, 0), SocketType.WALL_SIDE),
+    ],
+  };
+}
 
 export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
   ...FURNITURE_PIECE_DEFS,
@@ -903,6 +927,11 @@ export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
       },
     ],
   },
+
+  [BuildingPieceType.WOOD_WALL_WINDOW_SINGLE_HUNG]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_SINGLE_HUNG, 'Single-Hung Window 1x2m', 'Одностулкове підвісне вікно 1х2м', 1, 2, 1),
+  [BuildingPieceType.WOOD_WALL_WINDOW_ARCH]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_ARCH, 'Arched Window 1x2m', 'Аркове вікно 1х2м', 1, 2, 2),
+  [BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN, 'Palladian Window 1x2m', 'Паладіанське вікно 1х2м', 1, 2, 3),
+  [BuildingPieceType.WOOD_WALL_WINDOW_ROUND]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_ROUND, 'Round Window 1x1m', 'Кругле вікно 1х1м', 1, 1, 2),
 
   [BuildingPieceType.WOOD_STAIRS_2X2]: {
     type: BuildingPieceType.WOOD_STAIRS_2X2,
@@ -2342,6 +2371,15 @@ function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
     case BuildingPieceType.WOOD_WALL_WINDOW_1X1_5: {
       return buildWindowPieceGeometry(1.0, 1.5);
     }
+
+    case BuildingPieceType.WOOD_WALL_WINDOW_SINGLE_HUNG:
+      return buildSingleHungWindowPieceGeometry(1.0, 2.0);
+    case BuildingPieceType.WOOD_WALL_WINDOW_ARCH:
+      return buildArchedWindowPieceGeometry(1.0, 2.0, 'arch');
+    case BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN:
+      return buildArchedWindowPieceGeometry(1.0, 2.0, 'palladian');
+    case BuildingPieceType.WOOD_WALL_WINDOW_ROUND:
+      return buildArchedWindowPieceGeometry(1.0, 1.0, 'round');
 
     case BuildingPieceType.WOOD_STAIRS_2X2: {
       const stepCount = 5;

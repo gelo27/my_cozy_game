@@ -1783,6 +1783,20 @@ export class BuildingManager {
         break;
       }
 
+      case BuildingPieceType.WOOD_WALL_WINDOW_SINGLE_HUNG:
+      case BuildingPieceType.WOOD_WALL_WINDOW_ARCH:
+      case BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN: {
+        colliderDesc = this.physics.rapier.ColliderDesc.cuboid(0.5, HALF_SIZE, WALL_THICKNESS / 2.0)
+          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+        break;
+      }
+
+      case BuildingPieceType.WOOD_WALL_WINDOW_ROUND: {
+        colliderDesc = this.physics.rapier.ColliderDesc.cuboid(0.5, 0.5, WALL_THICKNESS / 2.0)
+          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+        break;
+      }
+
       case BuildingPieceType.WOOD_WALL_1X2:
       case BuildingPieceType.WOOD_WALL_WINDOW_1X2: {
         colliderDesc = this.physics.rapier.ColliderDesc.cuboid(0.5, HALF_SIZE, WALL_THICKNESS / 2.0)

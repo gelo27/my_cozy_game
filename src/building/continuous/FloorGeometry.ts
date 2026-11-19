@@ -33,13 +33,15 @@ export function createWallObstacle(
   yBase: number,
   yTop: number
 ): WallObstacle {
-  let verts = [
+  return convexObstacle([
     startRight.clone(),
     endRight.clone(),
     endLeft.clone(),
     startLeft.clone(),
-  ];
+  ], yBase, yTop);
+}
 
+export function convexObstacle(verts: THREE.Vector2[], yBase: number, yTop: number): WallObstacle {
   let area = 0;
   for (let i = 0; i < verts.length; i++) {
     const next = (i + 1) % verts.length;
@@ -81,7 +83,7 @@ export function createWallObstacle(
   };
 }
 
-function clipPolygonByPlane(
+export function clipPolygonByPlane(
   polygon: THREE.Vector2[],
   pointOnPlane: THREE.Vector2,
   keepNormal: THREE.Vector2
@@ -127,7 +129,7 @@ function clipPolygonByPlane(
 
 export function subtractConvexPolygon(
   poly: THREE.Vector2[],
-  obstacle: WallObstacle
+  obstacle: WallObstacle, minArea = 1e-5
 ): THREE.Vector2[][] {
   if (poly.length < 3) return [];
 
@@ -178,7 +180,7 @@ export function subtractConvexPolygon(
         const nextK = (k + 1) % outsidePiece.length;
         pieceArea += outsidePiece[k].x * outsidePiece[nextK].y - outsidePiece[nextK].x * outsidePiece[k].y;
       }
-      if (Math.abs(pieceArea) * 0.5 > 1e-5) {
+      if (Math.abs(pieceArea) * 0.5 > minArea) {
         resultingPieces.push(outsidePiece);
       }
     }

@@ -748,6 +748,8 @@ export class CharacterModel {
       this.activeWeapon = 13;
     } else if (itemId === 'slingshot') {
       this.activeWeapon = 15;
+    } else if (itemId === 'dynamite') {
+      this.activeWeapon = 16;
 
     } else if (itemId.endsWith('_seed')) {
       this.activeWeapon = 11;
@@ -895,6 +897,27 @@ export class CharacterModel {
       this.rodTip.position.set(0, 0.55 + 0.75 * Math.cos(0.75), 0.25 + 0.75 * Math.sin(0.75));
       rod.add(this.rodTip);
       this.weaponPivot.add(rod);
+    } else if (this.activeWeapon === 16) {
+      // A small wrapped charge, reused through the held-item cache like the other tools
+      const charge = new THREE.Group();
+      const stickMat = new THREE.MeshLambertMaterial({ color: 0xc62828 });
+      const stickGeo = new THREE.CylinderGeometry(0.055, 0.055, 0.28, 8);
+      for (let i = -1; i <= 1; i++) {
+        const stick = new THREE.Mesh(stickGeo, stickMat);
+        stick.position.set(i * 0.075, 0.03, 0.05);
+        stick.rotation.z = Math.PI / 2;
+        charge.add(stick);
+      }
+      const band = new THREE.Mesh(new THREE.BoxGeometry(0.27, 0.045, 0.16), new THREE.MeshLambertMaterial({ color: 0xd6b36b }));
+      band.position.set(0, 0.03, 0.05);
+      charge.add(band);
+      const fuse = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.016, 0.13, 5), new THREE.MeshLambertMaterial({ color: 0xe7d7a4 }));
+      fuse.position.set(0, 0.17, 0.05);
+      charge.add(fuse);
+      const spark = new THREE.Mesh(new THREE.SphereGeometry(0.025, 6, 5), new THREE.MeshBasicMaterial({ color: 0xffb52e }));
+      spark.position.set(0, 0.24, 0.05);
+      charge.add(spark);
+      this.weaponPivot.add(charge);
     } else if (this.activeWeapon === 15) {
       // Slingshot: a forked hazel stick with a leather band (shared geometry is tiny, built once and cached)
       const sling = new THREE.Group();

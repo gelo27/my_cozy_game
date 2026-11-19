@@ -46,7 +46,7 @@ export interface WorldSaveData {
   orchard?: OrchardSaveData;
   /** Saplings the player planted from cones, acorns and bush cuttings (missing in older saves). */
   nursery?: NurserySaveData;
-  inventory: { items: Record<string, number>; equipped: string | null; hotbar?: (string | null)[]; capacity?: number };
+  inventory: { items: Record<string, number>; equipped: string | null; hotbar?: (string | null)[]; capacity?: number; dynamiteStackGifted?: boolean };
   player: [number, number, number];
   vehicle: { p: [number, number, number]; yaw: number } | null;
   moped?: { p: [number, number, number]; yaw: number };
@@ -357,6 +357,7 @@ export class SaveSystem {
         equipped: w.inventoryManager.getEquippedItemId(),
         hotbar: w.inventoryManager.getHotbar(),
         capacity: w.inventoryManager.getCapacity(),
+        dynamiteStackGifted: true,
       },
       player: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
       vehicle: { p: [vt.x, vt.y + 0.3, vt.z], yaw: Math.atan2(fwd.x, fwd.z) },
@@ -424,11 +425,18 @@ export class SaveSystem {
       if (count > item.count) inv.addItem(item.id, count - item.count);
       else if (count < item.count) inv.removeItem(item.id, item.count - count);
     }
+    // One-time grant for existing saves: raise the starter dynamite stack to 99 without refilling it on later loads.
+    if (!data.inventory.dynamiteStackGifted) {
+      inv.addItem('dynamite', Math.max(0, 99 - inv.getItemCount('dynamite')));
+      data.inventory.dynamiteStackGifted = true;
+    }
     if (data.inventory.equipped !== inv.getEquippedItemId()) inv.equipItem(data.inventory.equipped);
     // Saves from before the hotbar keep the default tool row
     if (data.inventory.hotbar) inv.setHotbar(data.inventory.hotbar);
     // Saves from before the slingshot: it joins the hotbar once (if a slot is free)
     if (data.inventory.items.slingshot === undefined && !inv.isOnHotbar('slingshot')) inv.addToHotbar('slingshot');
+    // Saves from before dynamite: the new starter stack joins the hotbar once (if a slot is free)
+    if (data.inventory.items.dynamite === undefined && !inv.isOnHotbar('dynamite')) inv.addToHotbar('dynamite');
     if (data.inventory.capacity) inv.setCapacity(data.inventory.capacity);
 
     w.character.respawn(new THREE.Vector3(...data.player).add(new THREE.Vector3(0, 0.3, 0)));

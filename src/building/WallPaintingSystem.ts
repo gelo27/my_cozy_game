@@ -19,7 +19,7 @@ import {
   createCelestialStarryCeilingTexture,
   createVictorianPlasterRosetteCeilingTexture,
 } from './textures/FloorCeilingTextures';
-import { WainscotTextureOptions, createWainscotTexture, createFloralWallpaperTexture, createMintBeadboardTexture, createPinkGinghamTexture, createGoldDamaskTexture, createTerracottaBrickTexture, createSubwayTileTexture, createSageBotanicalTexture, createLavenderStarsTexture, createOakPlanksTexture, createCobblestoneTexture, createSkyCloudsTexture, createCreamStuccoTexture, createScandiGeoTexture } from './textures/WallpaperTextures';
+import { WainscotTextureOptions, createWainscotTexture, createFloralWallpaperTexture, createMintBeadboardTexture, createPinkGinghamTexture, createGoldDamaskTexture, createTerracottaBrickTexture, createSubwayTileTexture, createSageBotanicalTexture, createLavenderStarsTexture, createOakPlanksTexture, createCobblestoneTexture, createSkyCloudsTexture, createCreamStuccoTexture, createScandiGeoTexture, createCozyWallpaperTexture } from './textures/WallpaperTextures';
 import { DEFAULT_WALL_TILE_SIZE, WAINSCOT_TILE_HEIGHT } from './textures/WallpaperTextures';
 import { WALLPAPER_UI_CATALOG } from './WallpaperCatalog';
 import {
@@ -35,6 +35,11 @@ import {
 } from './config/DefaultWallMaterials';
 
 const WALL_EDGE_WALLPAPER_ID = 'wall_edge';
+const LEGACY_SIDING_IDS = new Map([
+  ['lap_siding_blue', 'lap_siding_sky'],
+  ['lap_siding_green', 'lap_siding_forest'],
+  ['lap_siding_brown', 'lap_siding_walnut'],
+]);
 
 // Re-exported for existing imports
 export { createWainscotTexture } from './textures/WallpaperTextures';
@@ -247,6 +252,24 @@ export class WallPaintingSystem {
       tileWidth: LAP_SIDING_TILE.width,
       tileHeight: LAP_SIDING_TILE.height,
     });
+
+    // Coloured siding uses the same texture. TextureArrayMaterials bakes each material's tint
+    // into the merged mesh's vertex colours, so palette choices keep the existing fast wall path.
+    for (const item of WALLPAPER_UI_CATALOG.filter((entry) => entry.id.startsWith('lap_siding_') && entry.id !== DEFAULT_OUTER_WALLPAPER_ID)) {
+      const material = new THREE.MeshLambertMaterial({ map: LAP_SIDING_MATERIAL.map, color: item.previewColor });
+      this.registerWallpaper({
+        id: item.id,
+        name: item.name,
+        ukrainianName: item.ukrainianName,
+        category: 'exterior',
+        previewColor: item.previewColor,
+        description: item.description,
+        material,
+        thumbnailUrl: LAP_SIDING_THUMBNAIL,
+        tileWidth: LAP_SIDING_TILE.width,
+        tileHeight: LAP_SIDING_TILE.height,
+      });
+    }
 
     // Wainscoting Variant 2: Natural Oak (Натуральний дуб)
     const wainscotOak = createWainscotTexture({
@@ -462,6 +485,21 @@ export class WallPaintingSystem {
       material: new THREE.MeshLambertMaterial({ map: clouds.texture, }),
       thumbnailUrl: clouds.dataUrl,
     });
+
+    for (const [style, id] of [
+      ['tiny_fruit', 'cozy_tiny_fruit'], ['tulip_sprig', 'cozy_tulip_sprig'],
+      ['gingham_blue', 'cozy_gingham_blue'], ['mushroom', 'cozy_mushroom'],
+    ] as const) {
+      const pattern = createCozyWallpaperTexture(style);
+      const item = WALLPAPER_UI_CATALOG.find((entry) => entry.id === id)!;
+      this.registerWallpaper({
+        id, name: item.name, ukrainianName: item.ukrainianName, category: 'interior',
+        previewColor: item.previewColor, description: item.description,
+        material: new THREE.MeshLambertMaterial({ map: pattern.texture }),
+        thumbnailUrl: pattern.dataUrl,
+        tileWidth: 2, tileHeight: 2,
+      });
+    }
 
     // 8: Scandi Geo
     const scandi = createScandiGeoTexture();
@@ -951,7 +989,7 @@ export class WallPaintingSystem {
       // Older saves stored per-cell keys `${pieceId}:${face}:${col}:${row}`; collapse them to whole faces
       const parts = rawKey.split(':');
       const key = parts.length >= 4 ? `${parts[0]}:${parts[1]}` : rawKey;
-      if (!this.paintedCells.has(key)) this.paintedCells.set(key, wallpaperId);
+      if (!this.paintedCells.has(key)) this.paintedCells.set(key, LEGACY_SIDING_IDS.get(wallpaperId) ?? wallpaperId);
     }
   }
 

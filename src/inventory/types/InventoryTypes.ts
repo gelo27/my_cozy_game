@@ -487,6 +487,18 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     description: 'Міцна дерев’яна рогатка. ЛКМ / E — постріл камінцем у найближчого шкідника в полі зору: три влучання проганяють їжака, чотири — дракончика.',
     isEquippable: true,
   },
+  {
+    id: 'dynamite',
+    name: 'Динаміт',
+    category: 'tools',
+    count: 99,
+    maxStack: 99,
+    iconName: 'Bomb',
+    color: '#dc2626',
+    description: 'Киньте в печері ЛКМ або E. Через короткий час вибух прокопає породу навколо місця падіння.',
+    isEquippable: true,
+    buyPrice: 25,
+  },
   ...fish('fish_carp', 'Короп', '#a3a35c', 'Звичайна ставкова риба. Клює будь-коли.', 12),
   ...fish('fish_perch', 'Окунь', '#5c8a3a', 'Смугастий окунь, активний вдень.', 18),
   ...fish('fish_catfish', 'Сом', '#5b4a3a', 'Великий нічний сом. Ловиться ввечері та вночі.', 40),
@@ -594,6 +606,7 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id === 'stone') return '⛰️';
   if (item.id === 'fishing_rod') return '🎣';
   if (item.id === 'slingshot') return '🪃';
+  if (item.id === 'dynamite') return '🧨';
   if (item.id === 'fish_golden') return '🐠';
   if (item.id.startsWith('fish_')) return '🐟';
   if (item.id === 'dish_bread') return '🍞';

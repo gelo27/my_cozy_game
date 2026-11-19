@@ -41,6 +41,15 @@ import { DEFAULT_ROOF_STYLE, RoofStyle } from '../building/ProceduralRoofSystem'
 import { InputManager } from '../input/InputManager';
 import { AimStatus, Chip, Crosshair, ModeBar, PrimaryAction, Shelf, ShelfCard, ShelfSection, ToolButton, ToolColumn } from './buildui/BuildUI';
 
+const WindowGlyph: React.FC<{ shape: 'single' | 'arch' | 'palladian' | 'round' }> = ({ shape }) => (
+  <svg viewBox="0 0 32 32" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {shape === 'round' ? <><circle cx="16" cy="16" r="10" /><path d="M6 16h20M16 6v20M9 9l14 14M23 9 9 23" /></> :
+      shape === 'arch' || shape === 'palladian' ? <><path d="M5 27V14a11 11 0 0 1 22 0v13M5 27h22" />
+        {shape === 'palladian' && <><path d="M16 5v22M7 16h18M16 16 9 8M16 16l7-8" /></>}</> :
+        <><rect x="6" y="4" width="20" height="24" rx="1" /><path d="M6 16h20" /></>}
+  </svg>
+);
+
 interface BuildingHUDProps {
   telemetry: BuildingTelemetry;
   inputManager?: InputManager;
@@ -140,6 +149,34 @@ const PIECE_ITEMS: PieceItemConfig[] = [
     slot: 3,
     icon: <AppWindow className="w-5 h-5" />,
     dimBadge: '2x2м',
+  },
+  {
+    type: BuildingPieceType.WOOD_WALL_WINDOW_SINGLE_HUNG,
+    category: PieceCategory.WINDOWS,
+    slot: 4,
+    icon: <WindowGlyph shape="single" />,
+    dimBadge: '1x2м · підвісне',
+  },
+  {
+    type: BuildingPieceType.WOOD_WALL_WINDOW_ARCH,
+    category: PieceCategory.WINDOWS,
+    slot: 5,
+    icon: <WindowGlyph shape="arch" />,
+    dimBadge: '1x2м · арка',
+  },
+  {
+    type: BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN,
+    category: PieceCategory.WINDOWS,
+    slot: 6,
+    icon: <WindowGlyph shape="palladian" />,
+    dimBadge: '1x2м · палладіанське',
+  },
+  {
+    type: BuildingPieceType.WOOD_WALL_WINDOW_ROUND,
+    category: PieceCategory.WINDOWS,
+    slot: 7,
+    icon: <WindowGlyph shape="round" />,
+    dimBadge: '1x1м · кругле',
   },
 
   // Doors & Doorways

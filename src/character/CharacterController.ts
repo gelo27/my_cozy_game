@@ -660,7 +660,7 @@ export class CharacterController {
       // The shovel or tulips in hand: aimed at the ground at once (crosshair, closer camera), like the
       // slingshot with RMB (the state checks use last frame's, the abilities that set them run below)
       const held = this.equippedInventoryItem;
-      const groundTool = held === 'shovel' || !!held?.startsWith('tulip_') || !!seedTreeType(held);
+      const groundTool = held === 'shovel' || held === 'dynamite' || !!held?.startsWith('tulip_') || !!seedTreeType(held);
       const isGroundAiming = groundTool && !this.telemetry.isSwimming && !this.telemetry.isClimbing
         && !this.carryAbility?.isHolding && !this.buildAbility?.isBuildModeActive && !this.stunTimer;
       let groundAim: GroundAimHit | null = null;
@@ -886,6 +886,32 @@ export class CharacterController {
     } catch (err) {
       console.warn('[CharacterController] respawn error:', err);
     }
+  }
+
+  /** Keep the visible player attached to Rapier while gameplay input/animation is paused in the editor. */
+  public syncEditorVisual(dt: number): void {
+    if (!this.body || !this.body.isValid() || !this.physics.isInitialized() || this.ragdoll?.active) return;
+    this.updateGroundDetection();
+    this.physics.getInterpolatedBodyPosition(this.body, this.renderPositionScratch);
+    this.model.group.position.copy(this.renderPositionScratch);
+    const v = this.body.linvel();
+    this.tempVelocity.set(v.x, v.y, v.z);
+    this.model.updateAnimation(Math.min(dt, 0.05), {
+      isGrounded: this.groundInfo.isGrounded,
+      isMoving: false,
+      isSprinting: false,
+      isCrouching: false,
+      isDashing: false,
+      isClimbing: false,
+      isHoldingObject: false,
+      isSwimming: this.telemetry.isSwimming,
+      swimDepth: this.telemetry.swimDepth,
+      activeWeapon: this.model.activeWeapon,
+      isAiming: false,
+      speed: 0,
+      verticalVelocity: v.y,
+      velocity3D: this.tempVelocity,
+    }, null);
   }
 
   /** Position of the visible character root for camera/rendering; gameplay should use getPosition(). */

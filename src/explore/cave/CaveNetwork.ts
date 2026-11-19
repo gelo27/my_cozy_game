@@ -200,6 +200,19 @@ export class CaveNetwork {
     return true;
   }
 
+  /** Adds one localized SDF cut for a cave explosion; only chunks around it are remeshed. */
+  public blast(worldPoint: THREE.Vector3, radius = 2.7): boolean {
+    if (!this.layout || !this.ready || !this.contains(worldPoint)) return false;
+    const r = THREE.MathUtils.clamp(radius, 1.5, 4.5);
+    const p = worldPoint.clone().sub(this.origin);
+    const base = this.queued?.layout ?? this.build?.plan.layout ?? this.layout;
+    const next = structuredClone(base);
+    next.items.push({ id: next.nextItem++, t: 'dig', x: p.x, y: p.y, z: p.z, r });
+    const pad = r + 2;
+    this.rebuild(next, [{ minX: p.x - pad, maxX: p.x + pad, minY: p.y - pad, maxY: p.y + pad, minZ: p.z - pad, maxZ: p.z + pad }], this.seed, true);
+    return true;
+  }
+
   /** Updates the cave shader's soft impact preview without changing mesh buffers. */
   public setDigHighlight(worldPoint: THREE.Vector3 | null): void {
     caveUniforms.uDigGlow.value = worldPoint ? 0.9 : 0;

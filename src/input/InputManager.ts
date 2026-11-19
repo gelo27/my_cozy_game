@@ -25,6 +25,8 @@ export interface MovementInput {
   aim: boolean;
   shoot: boolean;
   shootJustPressed: boolean;
+  /** A short, non-drag left click released over the game canvas. */
+  shootJustReleased?: boolean;
   buildToggleJustPressed: boolean;
   buildRotateJustPressed: boolean;
   buildSnapToggleJustPressed: boolean;
@@ -99,6 +101,7 @@ export class InputManager {
   public isMouseDown: boolean = false;
   public isRightMouseDown: boolean = false;
   private isMouseDownPrevious: boolean = false;
+  private mouseShootJustReleased = false;
   private mouseDownTime: number = 0;
   private dragDistance: number = 0;
   private lastMouseX: number = 0;
@@ -193,6 +196,7 @@ export class InputManager {
     const isDragGesture = this.isDragging || this.dragDistance > 6 || clickDuration > 450;
 
     if (e.button === 0) {
+      this.mouseShootJustReleased = !isDragGesture && !isUI;
       if ((this.isBuildMode || this.isPaintMode) && !isDragGesture && !isUI) {
         this.mouseBuildPlaceJustPressed = true;
         this.mouseBuildPlaceShift = e.shiftKey;
@@ -526,6 +530,7 @@ export class InputManager {
       aim: this.isRightMouseDown,
       shoot: shootDown,
       shootJustPressed,
+      shootJustReleased: this.mouseShootJustReleased,
       buildToggleJustPressed,
       buildRotateJustPressed,
       buildSnapToggleJustPressed,
@@ -558,6 +563,7 @@ export class InputManager {
     (this.touchState as any).paintToggleJustPressed = false;
     this.touchState.buildSelectSlot = undefined;
     this.mouseBuildPlaceJustPressed = false;
+    this.mouseShootJustReleased = false;
     this.mouseBuildDemolishJustPressed = false;
     this.middleClicked = false;
 

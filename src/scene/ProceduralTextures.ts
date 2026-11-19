@@ -1,3 +1,4 @@
+import { isMobileDevice } from '../world/WorldSettings';
 import * as THREE from 'three';
 
 export interface CheckerTextureOptions {
@@ -59,7 +60,7 @@ export class TextureGenerator {
     texture.wrapT = THREE.RepeatWrapping;
     texture.repeat.set(repeatU, repeatV);
     texture.colorSpace = THREE.SRGBColorSpace;
-    texture.anisotropy = isMobile ? 1 : 2;
+    texture.anisotropy = isMobileDevice() ? 1 : 2;
     texture.needsUpdate = true;
 
     this.textureCache.set(cacheKey, texture);

@@ -617,6 +617,55 @@ export function createLavenderStarsTexture(): { texture: THREE.CanvasTexture; da
   return { texture, dataUrl: canvas.toDataURL('image/png') };
 }
 
+/** Small, hand-drawn cottage patterns with a compact square repeat for true-to-life wall scale. */
+export function createCozyWallpaperTexture(
+  style: 'tiny_fruit' | 'tulip_sprig' | 'gingham_blue' | 'mushroom',
+): { texture: THREE.CanvasTexture; dataUrl: string } {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 256;
+  const ctx = canvas.getContext('2d')!;
+  const bg: Record<typeof style, string> = {
+    tiny_fruit: '#fff7e8', tulip_sprig: '#f8f3e7', gingham_blue: '#edf5f7', mushroom: '#f4eee2',
+  };
+  ctx.fillStyle = bg[style];
+  ctx.fillRect(0, 0, 256, 256);
+
+  if (style === 'gingham_blue') {
+    const size = 32;
+    for (let y = 0; y < 256; y += size) for (let x = 0; x < 256; x += size) {
+      ctx.fillStyle = ((x / size + y / size) % 2) ? 'rgba(111,164,184,.24)' : 'rgba(111,164,184,.08)';
+      ctx.fillRect(x, y, size, size);
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,.48)';
+    ctx.lineWidth = 2;
+    for (let p = 0; p <= 256; p += size) { ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, 256); ctx.stroke(); ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(256, p); ctx.stroke(); }
+  } else {
+    for (let y = 32; y < 256; y += 64) for (let x = 32; x < 256; x += 64) {
+      ctx.save(); ctx.translate(x + ((y / 64) % 2) * 16, y);
+      if (style === 'tiny_fruit') {
+        ctx.strokeStyle = '#7f9a69'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(0, 2); ctx.stroke();
+        ctx.fillStyle = '#e77a63'; ctx.beginPath(); ctx.arc(-6, 7, 7, 0, Math.PI * 2); ctx.arc(6, 7, 7, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#f3cf78'; ctx.beginPath(); ctx.arc(0, 7, 3, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#8daa72'; ctx.beginPath(); ctx.ellipse(5, -5, 7, 3, -.5, 0, Math.PI * 2); ctx.fill();
+      } else if (style === 'tulip_sprig') {
+        ctx.strokeStyle = '#79956c'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, 18); ctx.quadraticCurveTo(-2, 0, 0, -10); ctx.stroke();
+        ctx.fillStyle = '#8eaa78'; ctx.beginPath(); ctx.ellipse(-7, 8, 8, 3, -.6, 0, Math.PI * 2); ctx.ellipse(7, 2, 8, 3, .6, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#df8990'; ctx.beginPath(); ctx.moveTo(-8, -8); ctx.quadraticCurveTo(-10, -19, -4, -14); ctx.quadraticCurveTo(0, -22, 4, -14); ctx.quadraticCurveTo(10, -19, 8, -8); ctx.quadraticCurveTo(0, -1, -8, -8); ctx.fill();
+      } else {
+        ctx.fillStyle = '#9a7055'; ctx.beginPath(); ctx.ellipse(0, 1, 15, 9, 0, Math.PI, Math.PI * 2); ctx.lineTo(7, 17); ctx.quadraticCurveTo(0, 20, -7, 17); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#f4dfb7'; ctx.fillRect(-5, 4, 10, 12);
+        ctx.fillStyle = '#f1d8a6'; ctx.beginPath(); ctx.arc(-6, -3, 2, 0, Math.PI * 2); ctx.arc(5, -6, 2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#8ca879'; ctx.beginPath(); ctx.ellipse(14, 13, 7, 3, -.5, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return { texture, dataUrl: canvas.toDataURL('image/png') };
+}
+
 export function createOakPlanksTexture(): { texture: THREE.CanvasTexture; dataUrl: string } {
   const canvas = document.createElement('canvas');
   canvas.width = 128;

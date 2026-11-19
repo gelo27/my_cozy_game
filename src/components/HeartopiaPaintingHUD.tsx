@@ -84,7 +84,15 @@ export const HeartopiaPaintingHUD: React.FC<HeartopiaPaintingHUDProps> = ({
 
   const swatch = (item: WallpaperUIItem, cls: string) => (
     <span className={`block overflow-hidden ${cls}`} style={{ backgroundColor: item.previewColor }}>
-      {item.thumbnailUrl && <img src={item.thumbnailUrl} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" draggable={false} />}
+      {item.thumbnailUrl && (
+        <img
+          src={item.thumbnailUrl}
+          alt=""
+          className={`w-full h-full object-cover ${item.id.startsWith('lap_siding_') ? 'mix-blend-multiply' : ''}`}
+          referrerPolicy="no-referrer"
+          draggable={false}
+        />
+      )}
     </span>
   );
 

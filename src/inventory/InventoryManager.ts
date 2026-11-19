@@ -7,7 +7,7 @@ export const HOTBAR_SIZE = 8;
 export const BACKPACK_COLUMNS = 8;
 export const BACKPACK_MAX_SLOTS = 32;
 export const BACKPACK_START_CAPACITY = 16;
-const DEFAULT_HOTBAR = ['watering_can', 'axe', 'pickaxe', 'shovel', 'fishing_rod', 'slingshot'];
+const DEFAULT_HOTBAR = ['watering_can', 'axe', 'pickaxe', 'shovel', 'fishing_rod', 'slingshot', 'dynamite'];
 
 export class InventoryManager {
   private items: Map<string, InventoryItem> = new Map();

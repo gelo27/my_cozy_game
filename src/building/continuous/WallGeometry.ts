@@ -1,9 +1,10 @@
 import * as THREE from 'three';
-import { BuiltPiece, getWallSize, isDoorPiece, isDoorwayPiece } from '../types/BuildingTypes';
+import { BuiltPiece, BuildingPieceType, getWallSize, isDoorPiece, isDoorwayPiece } from '../types/BuildingTypes';
 import { WALL_THICKNESS } from '../config/BuildingConstants';
 import { MeshBuffers } from './MeshBuffers';
 import { SolvedWall, WallRow } from './WallJoints';
-import { slabCoversWallTop, subtractObstacles, WallObstacle } from './FloorGeometry';
+import { openingContour } from '../OpeningContour';
+import { clipPolygonByPlane, convexObstacle, subtractConvexPolygon, slabCoversWallTop, subtractObstacles, WallObstacle } from './FloorGeometry';
 
 /**
  * Emits the merged mesh of solved walls: both faces (cut around windows and doors), the reveals
@@ -17,14 +18,10 @@ import { slabCoversWallTop, subtractObstacles, WallObstacle } from './FloorGeome
 /** Trim (edges, caps, reveals) checker tile size, m */
 const TRIM_TILE = 0.5;
 const EPS = 1e-4;
-
 export interface WallOpening {
+  /** Convex opening in local horizontal metres and world height. */
+  outline: WallObstacle;
   piece: BuiltPiece;
-  /** Hole extent in the wall's local frame (x along the wall from its centre, y from its centre) */
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
 }
 
 /** Openings (windows, doors, doorways) in `opening pieces` that cut through `wall`. */
@@ -42,11 +39,12 @@ export function findWallOpenings(wall: BuiltPiece, openingPieces: BuiltPiece[]):
     if (Math.abs(opTangent.dot(tangent)) < 0.707) continue;
     const [ow, oh] = getWallSize(op.type);
     const lx = delta.dot(tangent);
-    const ly = delta.y;
-    const o = { piece: op, minX: lx - ow / 2, maxX: lx + ow / 2, minY: ly - oh / 2, maxY: ly + oh / 2 };
-    const overlapX = Math.min(w / 2, o.maxX) - Math.max(-w / 2, o.minX);
-    const overlapY = Math.min(h / 2, o.maxY) - Math.max(-h / 2, o.minY);
-    if (overlapX > 0.02 && overlapY > 0.02) out.push(o);
+    if (Math.abs(lx) >= (w + ow) / 2 - EPS || Math.abs(delta.y) >= (h + oh) / 2 - EPS) continue;
+    const profile = op.type === BuildingPieceType.WOOD_WALL_WINDOW_ROUND ? 'round'
+      : op.type === BuildingPieceType.WOOD_WALL_WINDOW_ARCH || op.type === BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN ? 'arch' : 'rect';
+    const points = openingContour(profile, ow, oh);
+    for (const p of points) { p.x += lx; p.y += op.position.y; }
+    out.push({ outline: convexObstacle(points, 0, 0), piece: op });
   }
   return out;
 }
@@ -97,18 +95,17 @@ export function emitWall(b: MeshBuffers, solved: SolvedWall, openings: WallOpeni
   /** World-space U: patterns line up across walls in the same line */
   const uOffset = center.x * tan.x + center.y * tan.y;
   const halfW = seg.halfW;
-  const py = piece.position.y;
 
   rows.forEach((row, r) => {
-    const rowOps = openings.filter((o) => Math.min(row.y1, py + o.maxY) - Math.max(row.y0, py + o.minY) > 0.02);
-    emitFace(b, row, 'left', rowOps, along, uOffset, seg.yBase, py, style.faceKey(piece.id, 'left'));
-    emitFace(b, row, 'right', rowOps, along, uOffset, seg.yBase, py, style.faceKey(piece.id, 'right'));
+    const rowOps = openings.filter((o) => Math.min(row.y1, o.outline.maxZ) - Math.max(row.y0, o.outline.minZ) > EPS);
+    emitFace(b, row, 'left', rowOps, along, uOffset, seg.yBase, style.faceKey(piece.id, 'left'));
+    emitFace(b, row, 'right', rowOps, along, uOffset, seg.yBase, style.faceKey(piece.id, 'right'));
 
     b.beginGroup();
-    emitReveals(b, row, rowOps, along, halfW, py, seg.yBase, seg.yTop);
-    emitCaps(b, row, openings, halfW, py);
-    if (r === 0) emitEdge(b, row, row.y0, false, openings, along, py);
-    if (r === rows.length - 1) emitEdge(b, row, row.y1, true, openings, along, py, covers);
+    emitReveals(b, row, rowOps, along, halfW, seg.yBase, seg.yTop);
+    emitCaps(b, row, openings, halfW);
+    if (r === 0) emitEdge(b, row, row.y0, false, openings, along);
+    if (r === rows.length - 1) emitEdge(b, row, row.y1, true, openings, along, covers);
     for (const hub of solved.hubs) {
       if (hub.y0 !== row.y0) continue;
       if (hub.top) {
@@ -129,6 +126,38 @@ function onEdge(a: THREE.Vector2, b: THREE.Vector2, xa: number, xb: number, x: n
   return a.clone().lerp(b, t);
 }
 
+/** Triangulate around complete contours so adjacent triangles share their edge endpoints.
+ * For a cut that spans walls or height bands, clip those triangles to this face afterwards. */
+function wallFacePolygons(x0: number, x1: number, y0: number, y1: number, ops: WallOpening[]) {
+  const rectangle = (l: number, r: number, b: number, t: number) => [
+    new THREE.Vector2(l, b), new THREE.Vector2(r, b), new THREE.Vector2(r, t), new THREE.Vector2(l, t),
+  ];
+  const face = rectangle(x0, x1, y0, y1);
+  if (!ops.length) return [face];
+  const holes = ops.map(op => op.outline);
+  // Imported layouts can have overlapping cutouts. Earcut expects separate holes.
+  if (holes.some((a, i) => holes.slice(i + 1).some(b =>
+    a.maxX >= b.minX && b.maxX >= a.minX && a.maxZ >= b.minZ && b.maxZ >= a.minZ))) {
+    return holes.reduce((faces, hole) => faces.flatMap(p => subtractConvexPolygon(p, hole, 1e-10)), [face]);
+  }
+  const outer = rectangle(
+    Math.min(x0, ...holes.map(h => h.minX - EPS)), Math.max(x1, ...holes.map(h => h.maxX + EPS)),
+    Math.min(y0, ...holes.map(h => h.minZ - EPS)), Math.max(y1, ...holes.map(h => h.maxZ + EPS)),
+  );
+  const contours = holes.map(h => h.vertices);
+  const triangles = THREE.ShapeUtils.triangulateShape(outer, contours);
+  const points = outer.concat(...contours);
+  let polygons = triangles.map(tri => tri.map(i => points[i]));
+  for (let i = 0; i < 4; i++) {
+    const a = face[i], b = face[(i + 1) % 4];
+    const normal = new THREE.Vector2(a.y - b.y, b.x - a.x).normalize();
+    if (outer.some(p => p.clone().sub(a).dot(normal) < 0)) {
+      polygons = polygons.map(p => clipPolygonByPlane(p, a, normal)).filter(p => p.length >= 3);
+    }
+  }
+  return polygons;
+}
+
 function emitFace(
   b: MeshBuffers,
   row: WallRow,
@@ -137,124 +166,93 @@ function emitFace(
   along: (p: THREE.Vector2) => number,
   uOffset: number,
   yBase: number,
-  py: number,
   key: string
 ): void {
-  const isLeft = side === 'left';
-  const a = isLeft ? row.startLeft : row.startRight;
-  const e = isLeft ? row.endLeft : row.endRight;
-  const xa = along(a);
-  const xe = along(e);
-  const lo = Math.min(xa, xe);
-  const hi = Math.max(xa, xe);
-  const uSign = isLeft ? 1 : -1;
+  const left = side === 'left';
+  const start = left ? row.startLeft : row.startRight;
+  const end = left ? row.endLeft : row.endRight;
+  const x0 = along(start), x1 = along(end);
+  const faces = wallFacePolygons(x0, x1, row.y0, row.y1, ops);
 
-  const rect = (x0: number, x1: number, ya: number, yb: number) => {
-    if (x1 - x0 <= EPS || yb - ya <= 0.005) return;
-    const p0 = onEdge(a, e, xa, xe, x0);
-    const p1 = onEdge(a, e, xa, xe, x1);
-    const u0 = uSign * (x0 + uOffset);
-    const u1 = uSign * (x1 + uOffset);
-    const v0 = ya - yBase;
-    const v1 = yb - yBase;
-    if (isLeft) {
-      b.quad(v3(p0, ya), v3(p1, ya), v3(p1, yb), v3(p0, yb), [u0, v0, u1, v0, u1, v1, u0, v1]);
-    } else {
-      b.quad(v3(p1, ya), v3(p0, ya), v3(p0, yb), v3(p1, yb), [u1, v0, u0, v0, u0, v1, u1, v1]);
-    }
-  };
-
+  const tangent = end.clone().sub(start).normalize().multiplyScalar(left ? 1 : -1);
   b.beginGroup();
-  for (const [x0, x1] of solidIntervals(lo, hi, ops)) rect(x0, x1, row.y0, row.y1);
-  for (const op of ops) {
-    const x0 = Math.max(lo, op.minX);
-    const x1 = Math.min(hi, op.maxX);
-    if (x1 - x0 <= EPS) continue;
-    const opY0 = py + op.minY;
-    const opY1 = py + op.maxY;
-    if (opY0 > row.y0 + 0.005) rect(x0, x1, row.y0, Math.min(row.y1, opY0)); // below (sill)
-    if (opY1 < row.y1 - 0.005) rect(x0, x1, Math.max(row.y0, opY1), row.y1); // above (header)
+  for (const face of faces) {
+    const first = b.vertexCount;
+    for (const p of face) {
+      const world = onEdge(start, end, x0, x1, p.x);
+      b.positions.push(world.x, p.y, world.y);
+      b.normals.push(-tangent.y, 0, tangent.x);
+      b.uvs.push((left ? 1 : -1) * (p.x + uOffset), p.y - yBase);
+    }
+    for (let i = 1; i + 1 < face.length; i++) {
+      if (left) b.indices.push(first, first + i, first + i + 1);
+      else b.indices.push(first, first + i + 1, first + i);
+    }
   }
   b.endGroup(key, 0, true);
 }
 
-/** Inside faces of each hole: the two jambs, the head and the sill. */
-function emitReveals(
-  b: MeshBuffers,
-  row: WallRow,
-  ops: WallOpening[],
-  along: (p: THREE.Vector2) => number,
-  halfW: number,
-  py: number,
-  wallBase: number,
-  wallTop: number
-): void {
-  const xsl = along(row.startLeft), xel = along(row.endLeft);
-  const xsr = along(row.startRight), xer = along(row.endRight);
-  const T = WALL_THICKNESS / TRIM_TILE;
+/** Clip a contour edge to the portion of the opening inside this wall and height band. */
+function emitReveals(b: MeshBuffers, row: WallRow, ops: WallOpening[], along: (p: THREE.Vector2) => number,
+  halfW: number, wallBase: number, wallTop: number): void {
+  const point = (a: THREE.Vector2, e: THREE.Vector2, p: THREE.Vector2) =>
+    v3(onEdge(a, e, along(a), along(e), p.x), p.y);
   for (const op of ops) {
-    const opY0 = py + op.minY;
-    const opY1 = py + op.maxY;
-    const y0 = Math.max(row.y0, opY0);
-    const y1 = Math.min(row.y1, opY1);
-    if (y1 <= y0 + 0.005) continue;
-    const x0 = Math.max(-halfW, op.minX);
-    const x1 = Math.min(halfW, op.maxX);
-    if (x1 - x0 <= 0.005) continue;
-    const l0 = onEdge(row.startLeft, row.endLeft, xsl, xel, x0);
-    const l1 = onEdge(row.startLeft, row.endLeft, xsl, xel, x1);
-    const r0 = onEdge(row.startRight, row.endRight, xsr, xer, x0);
-    const r1 = onEdge(row.startRight, row.endRight, xsr, xer, x1);
-    const H = (y1 - y0) / TRIM_TILE;
-    const W = (x1 - x0) / TRIM_TILE;
-    // Jambs only where the hole's side is inside this wall (a hole across two walls has one per wall)
-    if (op.minX > -halfW + 0.01) b.quad(v3(l0, y0), v3(r0, y0), v3(r0, y1), v3(l0, y1), [0, 0, T, 0, T, H, 0, H]);
-    if (op.maxX < halfW - 0.01) b.quad(v3(r1, y0), v3(l1, y0), v3(l1, y1), v3(r1, y1), [0, 0, T, 0, T, H, 0, H]);
-    // Head and sill where the hole ends inside the wall (not at its top or bottom)
-    if (Math.abs(y1 - opY1) < 0.005 && y1 < wallTop - 0.01) {
-      b.quad(v3(l0, y1), v3(r0, y1), v3(r1, y1), v3(l1, y1), [0, 0, W, 0, W, T, 0, T], DOWN);
-    }
-    const isDoor = isDoorPiece(op.piece.type) || isDoorwayPiece(op.piece.type);
-    if (!isDoor && Math.abs(y0 - opY0) < 0.005 && y0 > wallBase + 0.01) {
-      b.quad(v3(l0, y0), v3(l1, y0), v3(r1, y0), v3(r0, y0), [0, 0, T, 0, T, W, 0, W], UP);
+    const verts = op.outline.vertices;
+    for (let i = 0; i < verts.length; i++) {
+      const a = verts[i], e = verts[(i + 1) % verts.length];
+      let lo = 0, hi = 1;
+      for (const [start, delta, min, max] of [[a.x, e.x - a.x, -halfW, halfW], [a.y, e.y - a.y, row.y0, row.y1]]) {
+        if (Math.abs(delta) < 1e-10) {
+          if (start < min - EPS || start > max + EPS) hi = -1;
+        } else {
+          const t0 = (min - start) / delta, t1 = (max - start) / delta;
+          lo = Math.max(lo, Math.min(t0, t1));
+          hi = Math.min(hi, Math.max(t0, t1));
+        }
+      }
+      if (hi <= lo) continue;
+      if (Math.abs(a.y - e.y) < EPS && (a.y <= wallBase + EPS || a.y >= wallTop - EPS ||
+        (a.y === op.outline.minZ && (isDoorPiece(op.piece.type) || isDoorwayPiece(op.piece.type))))) continue;
+      const p = a.clone().lerp(e, lo), q = a.clone().lerp(e, hi);
+      const u = p.distanceTo(q) / TRIM_TILE, v = WALL_THICKNESS / TRIM_TILE;
+      b.quad(point(row.startLeft,row.endLeft,p), point(row.startLeft,row.endLeft,q),
+        point(row.startRight,row.endRight,q), point(row.startRight,row.endRight,p), [0,0,u,0,u,v,0,v]);
     }
   }
 }
 
-function emitCaps(b: MeshBuffers, row: WallRow, ops: WallOpening[], halfW: number, py: number): void {
-  const T = WALL_THICKNESS / TRIM_TILE;
-  const H = (row.y1 - row.y0) / TRIM_TILE;
-  // An opening running through the whole row at the end leaves nothing to cap
-  const through = (atStart: boolean) =>
-    ops.some((op) =>
-      (atStart ? op.minX <= -halfW + 0.01 : op.maxX >= halfW - 0.01) &&
-      py + op.minY <= row.y0 + 0.005 &&
-      py + op.maxY >= row.y1 - 0.005
-    );
-  if (row.hasStartCap && !through(true)) {
-    b.quad(v3(row.startRight, row.y0), v3(row.startLeft, row.y0), v3(row.startLeft, row.y1), v3(row.startRight, row.y1), [0, 0, T, 0, T, H, 0, H]);
-  }
-  if (row.hasEndCap && !through(false)) {
-    b.quad(v3(row.endLeft, row.y0), v3(row.endRight, row.y0), v3(row.endRight, row.y1), v3(row.endLeft, row.y1), [0, 0, T, 0, T, H, 0, H]);
-  }
+/** Interval occupied by a convex opening at a wall end or horizontal edge. */
+function sections(ops: WallOpening[], axis: 'x' | 'y', value: number) {
+  const other = axis === 'x' ? 'y' : 'x';
+  return ops.flatMap(({ outline }) => {
+    const hits: number[] = [];
+    const pts = outline.vertices;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      if (Math.abs(a[axis] - value) < EPS) hits.push(a[other]);
+      if ((a[axis] < value) !== (b[axis] < value))
+        hits.push(THREE.MathUtils.lerp(a[other], b[other], (value - a[axis]) / (b[axis] - a[axis])));
+    }
+    return hits.length ? [{ minX: Math.min(...hits), maxX: Math.max(...hits) }] : [];
+  });
 }
 
-/**
- * Top or bottom edge of the wall at height y, left out over openings that reach it (a door at the
- * floor, a tall window at the top) but kept on the solid parts beside them.
- */
-function emitEdge(
-  b: MeshBuffers,
-  row: WallRow,
-  y: number,
-  top: boolean,
-  ops: WallOpening[],
-  along: (p: THREE.Vector2) => number,
-  py: number,
-  covers: WallObstacle[] = []
-): void {
+function emitCaps(b: MeshBuffers, row: WallRow, ops: WallOpening[], halfW: number): void {
+  const cap = (a: THREE.Vector2, e: THREE.Vector2, x: number) => {
+    for (const [lo, hi] of solidIntervals(row.y0, row.y1, sections(ops, 'x', x))) {
+      const u = WALL_THICKNESS / TRIM_TILE, v = (hi-lo) / TRIM_TILE;
+      b.quad(v3(a,lo), v3(e,lo), v3(e,hi), v3(a,hi), [0,0,u,0,u,v,0,v]);
+    }
+  };
+  if (row.hasStartCap) cap(row.startRight,row.startLeft,-halfW);
+  if (row.hasEndCap) cap(row.endLeft,row.endRight,halfW);
+}
+
+function emitEdge(b: MeshBuffers, row: WallRow, y: number, top: boolean, ops: WallOpening[],
+  along: (p: THREE.Vector2) => number, covers: WallObstacle[] = []): void {
   const over = top ? coversAt(covers, y) : [];
-  const holes = ops.filter((op) => (top ? py + op.maxY >= y - 0.005 : py + op.minY <= y + 0.005));
+  const holes = sections(ops, 'y', y);
   const xsl = along(row.startLeft), xel = along(row.endLeft);
   const xsr = along(row.startRight), xer = along(row.endRight);
   const lo = Math.min(xsl, xel, xsr, xer) - 1;

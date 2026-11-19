@@ -1105,6 +1105,10 @@ export class GameEngine {
         setWaterBody(feet.x, feet.z, character.telemetry.speed, 0.28);
       }
       character.update(dt, inputManager, tpCamera);
+    } else if (editing) {
+      // Physics keeps stepping in the editor; keep the visible mannequin in sync with its capsule
+      // and advance its idle/fall animation instead of leaving it at the last gameplay pose.
+      character.syncEditorVisual(rawDt);
     }
     // Splash drops, the swimmer's rising air bubbles and the caustics' clock
     character.swimAbility?.waterParticles?.update(dt);

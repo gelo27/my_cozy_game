@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import type RAPIER from '@dimforge/rapier3d-compat';
+import { COLLISION_GROUPS } from '../../config/constants';
 import { interactionFocus, FOCUS_TOOL } from '../../gameplay/InteractionFocus';
 import { t, t as tr, plural, dataName } from '../../i18n/i18n';
 import { IAbility, CharacterContext } from './IAbility';
@@ -18,6 +20,30 @@ import type { CaveNetwork } from '../../explore/cave/CaveNetwork';
 
 /** The axe reaches a pest this far past its body (m); a bit more than a tree, they move. */
 const PEST_REACH = 1.9;
+const DYNAMITE_ID = 'dynamite';
+const DYNAMITE_FUSE = 1.35;
+const DYNAMITE_RADIUS = 2.7;
+const DYNAMITE_BODY_GEO = new THREE.CylinderGeometry(0.065, 0.065, 0.28, 8);
+const DYNAMITE_BODY_MAT = new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.75 });
+const DYNAMITE_BAND_GEO = new THREE.BoxGeometry(0.25, 0.045, 0.15);
+const DYNAMITE_BAND_MAT = new THREE.MeshStandardMaterial({ color: 0xd6b36b, roughness: 0.85 });
+const DYNAMITE_FUSE_GEO = new THREE.CylinderGeometry(0.012, 0.016, 0.12, 5);
+const DYNAMITE_FUSE_MAT = new THREE.MeshStandardMaterial({ color: 0xe7d7a4, roughness: 0.8 });
+const DYNAMITE_SPARK_GEO = new THREE.SphereGeometry(0.025, 6, 5);
+const DYNAMITE_SPARK_MAT = new THREE.MeshBasicMaterial({ color: 0xffb52e });
+
+interface ThrownDynamite {
+  mesh: THREE.Group;
+  body: RAPIER.RigidBody;
+  position: THREE.Vector3;
+  fuse: number;
+  canBlastCave: boolean;
+}
+
+interface BlastPulse {
+  mesh: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
+  life: number;
+}
 
 export interface GatherPrompt {
   kind: 'tree' | 'fallen' | RockKind;
@@ -77,6 +103,10 @@ export class GatheringAbility implements IAbility {
   public nursery: TreeNursery | null = null;
   public caveNetwork: CaveNetwork | null = null;
   private readonly facingScratch = new THREE.Vector3();
+  private readonly throwOriginScratch = new THREE.Vector3();
+  private readonly throwDirectionScratch = new THREE.Vector3();
+  private readonly thrownDynamite: ThrownDynamite[] = [];
+  private readonly blastPulses: BlastPulse[] = [];
 
   public setSystems(forest: ForestZone, rocks: RockField, inventory: InventoryManager, propTrees: PropTreeField | null = null): void {
     this.forest = forest;
@@ -87,6 +117,7 @@ export class GatheringAbility implements IAbility {
 
   public update(dt: number, context: CharacterContext): void {
     this.caveNetwork?.setDigHighlight(null);
+    this.updateDynamite(dt, context);
     // Swimming / diving: tools are put away (a swing under way is dropped)
     if (!this.enabled || !this.forest || !this.rocks || !this.inventory || context.isSwimming) {
       this.isCaveMining = false;
@@ -105,11 +136,30 @@ export class GatheringAbility implements IAbility {
     this.updatePendingHit(dt);
     if (this.cooldown === 0 && !this.pendingHit) this.swingFacing = null;
 
-    const t = context.body.translation();
-    const playerPos = this.playerPosScratch.set(t.x, t.y, t.z);
+    // Keep this name distinct from the imported translation helper `t()` used below for prompts.
+    const bodyPosition = context.body.translation();
+    const playerPos = this.playerPosScratch.set(bodyPosition.x, bodyPosition.y, bodyPosition.z);
     const tool = this.equippedTool();
     this.isCaveMining = !!this.caveNetwork?.contains(playerPos) && tool === 'pickaxe'
       && !context.isBuildModeActive && !this.inventory.isInventoryOpen();
+
+    // Dynamite is a consumable thrown from the selected hotbar slot.
+    if (this.inventory.getEquippedItemId() === DYNAMITE_ID) {
+      const inCave = !!this.caveNetwork?.contains(playerPos);
+      const canThrow = inCave && this.cooldown <= 0 && !context.isBuildModeActive && !this.inventory.isInventoryOpen() && !context.isSwimming
+        && !context.isClimbing && !context.isHoldingObject && !context.model?.isActionLocked();
+      this.currentPrompt = {
+        kind: 'stone', title: t('dynamite.title'), actionText: !inCave ? t('dynamite.caveOnly') : canThrow ? t('dynamite.throw') : t('dynamite.blocked'),
+        hintText: canThrow ? t('dynamite.hint') : '', progress: 0, canAct: canThrow,
+      };
+      if (canThrow) interactionFocus.offer('gather', null, FOCUS_TOOL);
+      const throwPressed = context.input.interactJustPressed || !!context.input.shootJustReleased
+        || (context.input.shootJustPressed && !context.input.isMouseDown);
+      if (canThrow && interactionFocus.allows('gather') && throwPressed) {
+        this.throwDynamite(playerPos, context);
+      }
+      return;
+    }
 
     // Axe in hand and a pest close: the swing goes to the pest, not the tree behind it
     if (tool === 'axe' && this.pests && !context.isBuildModeActive && !this.inventory.isInventoryOpen()) {
@@ -199,6 +249,99 @@ export class GatheringAbility implements IAbility {
     }
     if (!tool || tool !== this.requiredTool(target)) return;
     this.swing(target, playerPos, tool, context);
+  }
+
+  private throwDynamite(playerPos: THREE.Vector3, context: CharacterContext): void {
+    const inventory = this.inventory;
+    const parent = context.model?.group?.parent as THREE.Object3D | null;
+    if (!inventory || !parent || !inventory.removeItem(DYNAMITE_ID, 1)) return;
+
+    const mesh = new THREE.Group();
+    for (let i = -1; i <= 1; i++) {
+      const stick = new THREE.Mesh(DYNAMITE_BODY_GEO, DYNAMITE_BODY_MAT);
+      stick.position.set(i * 0.075, 0, 0);
+      stick.rotation.z = Math.PI / 2;
+      mesh.add(stick);
+    }
+    const band = new THREE.Mesh(DYNAMITE_BAND_GEO, DYNAMITE_BAND_MAT);
+    mesh.add(band);
+    const fuse = new THREE.Mesh(DYNAMITE_FUSE_GEO, DYNAMITE_FUSE_MAT);
+    fuse.position.y = 0.18;
+    mesh.add(fuse);
+    const spark = new THREE.Mesh(DYNAMITE_SPARK_GEO, DYNAMITE_SPARK_MAT);
+    spark.position.y = 0.25;
+    mesh.add(spark);
+    mesh.traverse((child) => { if (child instanceof THREE.Mesh) child.castShadow = false; });
+
+    const pos = this.throwOriginScratch.copy(playerPos);
+    pos.y += 0.5;
+    const aim = this.throwDirectionScratch.copy(context.cameraWorldDirection);
+    if (aim.lengthSq() < 1e-4) {
+      const yaw = context.model?.group?.rotation.y ?? 0;
+      aim.set(Math.sin(yaw), 0, Math.cos(yaw));
+    }
+    aim.normalize();
+    pos.addScaledVector(aim, 0.35);
+    const thrownPosition = pos.clone();
+    const { body, collider } = context.physics.createDynamicProp(thrownPosition, 'sphere', 0.13, 0.45);
+    // Let the charge hit cave walls and terrain, but not the player's own capsule or other props.
+    collider.setCollisionGroups(context.physics.packCollisionGroups(COLLISION_GROUPS.DYNAMIC_PROPS, COLLISION_GROUPS.ENVIRONMENT));
+    body.setLinvel({ x: aim.x * 9, y: aim.y * 9, z: aim.z * 9 }, true);
+    body.setAngvel({ x: 7, y: 4, z: 8 }, true);
+    parent.add(mesh);
+    mesh.position.copy(thrownPosition);
+    this.thrownDynamite.push({ mesh, body, position: thrownPosition, fuse: DYNAMITE_FUSE, canBlastCave: !!this.caveNetwork?.contains(playerPos) });
+    this.cooldown = 0.35;
+  }
+
+  private updateDynamite(dt: number, context: CharacterContext): void {
+    for (let i = this.thrownDynamite.length - 1; i >= 0; i--) {
+      const item = this.thrownDynamite[i];
+      item.fuse -= dt;
+      const p = item.body.translation();
+      const q = item.body.rotation();
+      item.position.set(p.x, p.y, p.z);
+      item.mesh.position.copy(item.position);
+      item.mesh.quaternion.set(q.x, q.y, q.z, q.w);
+      if (item.fuse <= 0) {
+        this.detonate(item, context);
+        context.physics.removeRigidBody(item.body);
+        item.mesh.removeFromParent();
+        this.thrownDynamite.splice(i, 1);
+      }
+    }
+
+    for (let i = this.blastPulses.length - 1; i >= 0; i--) {
+      const pulse = this.blastPulses[i];
+      pulse.life -= dt;
+      const age = 1 - Math.max(0, pulse.life) / 0.38;
+      pulse.mesh.scale.setScalar(0.3 + age * 5.1);
+      pulse.mesh.material.opacity = Math.max(0, 1 - age);
+      if (pulse.life <= 0) {
+        pulse.mesh.removeFromParent();
+        pulse.mesh.geometry.dispose();
+        pulse.mesh.material.dispose();
+        this.blastPulses.splice(i, 1);
+      }
+    }
+  }
+
+  private detonate(item: ThrownDynamite, context: CharacterContext): void {
+    const cave = this.caveNetwork;
+    if (item.canBlastCave) cave?.blast(item.position, DYNAMITE_RADIUS);
+    const parent = context.model?.group?.parent as THREE.Object3D | null;
+    if (parent) {
+      const pulse = new THREE.Mesh(
+        new THREE.SphereGeometry(0.5, 12, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffa52e, transparent: true, opacity: 0.75, depthWrite: false })
+      );
+      pulse.position.copy(item.position);
+      pulse.renderOrder = 8;
+      parent.add(pulse);
+      this.blastPulses.push({ mesh: pulse, life: 0.38 });
+    }
+    context.particleManager?.emitDirtClods(item.position, 20);
+    audioEngine.at(item.position).playRockBreak();
   }
 
   /** Faces the target and starts the swing; the hit lands IMPACT_DELAY later. */

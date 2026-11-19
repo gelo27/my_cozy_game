@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { MODULE_SIZE, WALL_THICKNESS } from '../BuildingConstants';
 import { BUILDING_MATERIALS } from '../BuildingMaterials';
+import { openingContour } from '../../OpeningContour';
 import type { PieceMeshTemplate } from './PieceMeshTemplate';
 import { WALL_EDGE_MATERIAL } from '../DefaultWallMaterials';
 
@@ -81,6 +82,65 @@ export function buildWindowPieceGeometry(width: number, height: number): PieceMe
     materials: [BUILDING_MATERIALS.windowChecker, BUILDING_MATERIALS.windowGlass],
     boundingBox: new THREE.Box3(),
   };
+}
+
+/** A single operable sash has one horizontal meeting rail and no central mullion. */
+export function buildSingleHungWindowPieceGeometry(width: number, height: number): PieceMeshTemplate {
+  return buildArchedWindowPieceGeometry(width, height, 'singleHung');
+}
+
+type SpecialWindowStyle = 'arch' | 'palladian' | 'round' | 'singleHung';
+
+/** Clean framed specialty windows: curved frame and glazing are built from matching profiles. */
+export function buildArchedWindowPieceGeometry(width: number, height: number, style: SpecialWindowStyle = 'arch'): PieceMeshTemplate {
+  const profile = style === 'singleHung' ? 'rect' : style === 'palladian' ? 'arch' : style;
+  const border = 0.075;
+  const depth = WALL_THICKNESS + 0.055;
+  const outer = new THREE.Shape(openingContour(profile, width, height));
+  const inner = openingContour(profile, width, height, border);
+  outer.holes.push(new THREE.Path(inner.slice().reverse()));
+  const extrude = (shape: THREE.Shape, thickness: number) =>
+    new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false }).translate(0, 0, -thickness / 2);
+
+  // Extrusion produces non-indexed triangles. Keep that layout for the rails and glass as well.
+  const parts: THREE.BufferGeometry[] = [extrude(outer, depth)];
+  const rail = (x0: number, y0: number, x1: number, y1: number, thickness = 0.035) => {
+    const box = new THREE.BoxGeometry(Math.hypot(x1 - x0, y1 - y0), thickness, depth * 0.68);
+    box.rotateZ(Math.atan2(y1 - y0, x1 - x0)).translate((x0 + x1) / 2, (y0 + y1) / 2, 0);
+    parts.push(box.toNonIndexed());
+    box.dispose();
+  };
+  const radius = width / 2 - border;
+  const spring = height / 2 - width / 2;
+  if (style === 'singleHung' || style === 'arch') {
+    const y = style === 'arch' ? spring : 0;
+    rail(-radius, y, radius, y, 0.05);
+  } else if (style === 'round') {
+    rail(-radius, 0, radius, 0);
+    rail(0, -radius, 0, -0.0175);
+    rail(0, 0.0175, 0, radius);
+  } else {
+    const hub = radius / 3;
+    for (const x of [-hub, hub]) rail(x, -height / 2 + border, x, spring);
+    const innerArch = new THREE.Shape();
+    innerArch.absarc(0, spring, hub + 0.0175, 0, Math.PI, false);
+    innerArch.absarc(0, spring, hub - 0.0175, Math.PI, 0, true);
+    innerArch.closePath();
+    parts.push(extrude(innerArch, depth * 0.68));
+    for (let i = 0; i <= 4; i++) {
+      const a = i * Math.PI / 4;
+      rail(Math.cos(a) * (hub + 0.0175), spring + Math.sin(a) * (hub + 0.0175),
+        Math.cos(a) * radius, spring + Math.sin(a) * radius);
+    }
+  }
+
+  const frame = mergeGeometries(parts)!;
+  parts.forEach(part => part.dispose());
+  const glass = extrude(new THREE.Shape(inner), 0.014);
+  const geometry = mergeGeometries([frame, glass], true)!;
+  frame.dispose();
+  glass.dispose();
+  return { geometry, materials: [BUILDING_MATERIALS.woodCream, BUILDING_MATERIALS.windowGlass], boundingBox: new THREE.Box3() };
 }
 
 export function buildOuterDoorFrameGeometry(width: number, height: number): PieceMeshTemplate {
