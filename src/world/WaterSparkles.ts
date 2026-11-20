@@ -40,6 +40,7 @@ const VERT = /* glsl */ `
 uniform float uWsTime;
 uniform sampler2D uWsNormals;
 uniform sampler2D uWsBed;
+uniform sampler2D uEstuary;
 uniform vec4 uWsWaveA;
 uniform vec4 uWsWaveB;
 ${WATER_SHARED_GLSL}
@@ -65,7 +66,8 @@ void main() {
   vec2 spot;
   // Only open water: deep enough, no duckweed, inside the sparkle field
   float depth = uSpOrigin.z - wsBedY(wp.xz);
-  if (depth > 0.05 && dist < reach && wsWeedMask(wp.xz) < 0.1) {
+  float inlandCover = wsInIsland(xz) * texture2D(uEstuary, wsBedUv(xz)).a;
+  if (inlandCover < 0.5 && depth > 0.05 && dist < reach && wsWeedMask(wp.xz) < 0.1) {
     float shade, wob;
     vec2 slope = wsWaves(wp.xz, dist, shade, wob);
     vec3 h = normalize(uSpLightDir + toCam / dist);

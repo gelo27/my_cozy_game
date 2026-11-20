@@ -855,7 +855,9 @@ vec3 terrainColor() {
   vec2 suv = (vTerrWorld.xz + uWorldSize * 0.5) / uWorldSize;
   vec2 uv = vTerrWorld.xz * 0.5;
   // Local water: the sea, or a river's surface near its channel
-  vec2 river = texture2D(tRiver, (vTerrWorld.xz + uWorldSize * 0.5 + 0.5) / (uWorldSize + 1.0)).rg;
+  vec2 riverUv = (vTerrWorld.xz + uWorldSize * 0.5 + 0.5) / (uWorldSize + 1.0);
+  vec3 river = texture2D(tRiver, riverUv).rgb;
+  float estuarySand = river.b;
   float waterY = river.g > 0.5 ? max(uWaterLevel, river.r) : uWaterLevel;
   terrWaterY = waterY;
   vec4 g = texture2D(tGrass, uv);
@@ -933,12 +935,11 @@ vec3 terrainColor() {
     if (other > 0.001) c = mix(c, surf / other, cover);
   }
   // Sandy shore by the sea and in estuaries, a narrow gravel strip along rivers upstream
-  bool riverBank = river.g > 0.5 && waterY > uWaterLevel + 0.3;
+  float riverBank = smoothstep(0.35, 0.75, river.g) * smoothstep(0.12, 0.45, waterY - uWaterLevel) * (1.0 - estuarySand);
   // River gravel only hugs the water (the weight is 1 within ~2.5 m of the channel): flat
   // floodplains that happen to sit just above the water stay grass
-  float beach = riverBank
-    ? smoothstep(waterY + 0.32, waterY + 0.08, vTerrWorld.y) * smoothstep(0.8, 0.97, river.g)
-    : smoothstep(waterY + 0.55, waterY + 0.15, vTerrWorld.y);
+  float beach = mix(1.0 - smoothstep(waterY + 0.15, waterY + 0.55, vTerrWorld.y),
+    (1.0 - smoothstep(waterY + 0.08, waterY + 0.32, vTerrWorld.y)) * smoothstep(0.8, 0.97, river.g), riverBank);
   // Painted sand is already part of the surface blend above; the shore adds sand on top
   if (beach > 0.001) c = mix(c, texture(tLayers, vec3(uv, ${SAND_LAYER}.0)).rgb, beach);
   float rock = smoothstep(0.8, 0.62, vTerrUpY);
@@ -1077,13 +1078,9 @@ vec3 terrainColor() {
     }
     c = mix(c, snow, sw);
   }
-  // River beds are gravel; everything below the waterline is wet and darker
-  float underRiver = smoothstep(waterY - 0.05, waterY - 0.4, vTerrWorld.y) * step(0.5, river.g);
-#ifdef TERRAIN_LITE
-  c = mix(c, vec3(0.42, 0.38, 0.32), underRiver * 0.6);
-#else
-  if (underRiver > 0.001) c = mix(c, rockTriplanar(0.85) * vec3(0.95, 0.9, 0.8), underRiver * 0.75);
-#endif
+  // Use the sea's sand layer and world-space scale for submerged channels and lakes.
+  float bedSand = smoothstep(0.0, 0.08, waterY - vTerrWorld.y) * smoothstep(0.0, 0.8, river.g);
+  if (bedSand > 0.0) c = mix(c, texture(tLayers, vec3(uv, ${SAND_LAYER}.0)).rgb, bedSand);
   c *= mix(1.0, 0.62, smoothstep(waterY, waterY - 1.5, vTerrWorld.y));
   return c;
 }`

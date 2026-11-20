@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { riverWorld } from './rivers/RiverWorld';
 import { SEA_FLOOR_Y, WORLD_SIZE } from './WorldSettings';
 import { waterSettings } from './WaterSettings';
 import { DUCKWEED_GLSL, duckweedUniforms } from './Duckweed';
@@ -27,6 +28,7 @@ const SHORE_RANGE = 8;
 
 export const waterSurfaceUniforms = {
   uWsTime: { value: 0 },
+  uEstuary: { value: riverWorld.estuary },
   uWsNormals: { value: null as THREE.Texture | null },
   /** Terrain heights (m, half float), one texel per terrain vertex. */
   uWsBed: { value: null as THREE.Texture | null },
@@ -139,6 +141,21 @@ uniform vec4 uWsSparkle;
 vec3 wsN;
 float wsFoam;
 ${WATER_SHARED_GLSL}
+uniform sampler2D uEstuary;
+vec2 wsCurrentWaves(vec2 xz, vec2 current, float dist, out float shade, out float wobble) {
+// Two offset phases let the current bend without stretching the waves over time.
+float phase = fract(uWsTime * 0.2);
+vec2 slope = wsWaves(xz - current * (phase * 5.0), dist, shade, wobble);
+if (dot(current, current) > 0.000001) {
+  float shadeB, wobbleB;
+  vec2 other = wsWaves(xz - current * (fract(phase + 0.5) * 5.0), dist, shadeB, wobbleB);
+  float blend = abs(2.0 * phase - 1.0);
+  slope = mix(slope, other, blend);
+  shade = mix(shade, shadeB, blend);
+  wobble = mix(wobble, wobbleB, blend);
+}
+  return slope;
+}
 /** Shallow turquoise -> deep blue (linear colours). */
 vec3 wsColour(float depth, float shade) {
   return mix(uWsShallow, uWsDeep, 1.0 - exp(-depth * uWsWaveA.x)) * shade;
@@ -173,6 +190,50 @@ float wsShoreLines(float d, vec2 dashP, float aa, float seed, float reachMax) {
   return v * (1.0 - smoothstep(0.06, 0.2, aa));
 }
 ${DUCKWEED_GLSL}
+`;
+
+/** Shared shading on both sides of the mesh boundary in a tidal mouth. */
+export const SEA_SURFACE_GLSL = /* glsl */ `
+vec4 wsSeaSurface(vec3 vSeaW, vec2 current, float opacity) {
+// Depth to the bed under this pixel (outside the island: the flat sea bed)
+float inIsland = wsInIsland(vSeaW.xz);
+float seaDepth = max(vSeaW.y - wsBedY(vSeaW.xz), 0.0);
+float seaDist = distance(vSeaW, cameraPosition);
+float shade, wobble;
+vec2 slope = wsCurrentWaves(vSeaW.xz, current, seaDist, shade, wobble);
+// Simulated waves around the player (developer toggle): they tilt the surface, so they catch the sun
+float simH;
+vec2 simG;
+wdSimSample(vSeaW.xz, simH, simG);
+slope += simG * uWdSimLook.y;
+wsN = normalize(vec3(slope.x, 1.0, slope.y));
+vec3 seaCol = wsColour(seaDepth, shade);
+
+// Shore: distance to the nearest land (m) from the shore field; a light band along the shore,
+// and the thin dashed lines that drift in toward it
+float shoreD = mix(${SHORE_RANGE.toFixed(1)}, texture2D(uWsShore, wsBedUv(vSeaW.xz)).r * ${SHORE_RANGE.toFixed(1)}, inIsland);
+float shoreAa = fwidth(shoreD);
+seaCol = mix(seaCol, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, shoreD)) * 0.3 * inIsland);
+wsFoam = wsShoreLines(shoreD, vSeaW.xz, shoreAa, 0.0, 99.0) * (1.0 - smoothstep(60.0, 140.0, seaDist));
+// Where the water touches the land: a thin crisp line, broken into pieces
+float lineD = seaDepth + wobble * 0.02;
+float lineBreak = smoothstep(0.3, 0.5, wdNoise(vSeaW.xz * 0.9 + uWsTime * 0.04));
+wsFoam = max(wsFoam, (1.0 - smoothstep(uWsFoam.x * 0.5, uWsFoam.x * 0.5 + fwidth(lineD) * 1.5 + 0.004, lineD)) * mix(0.35, 1.0, lineBreak));
+wsFoam *= inIsland * uWsShine.w;
+// Ripple rings from the swimmer, wading legs and splashes
+// (derivatives first: the distance test below skips the loop for far pixels)
+float seaRipAa = length(fwidth(vSeaW.xz));
+float seaSimAa = fwidth(simH);
+float seaRip = seaDist < 80.0 ? wdRipples(vSeaW.xz, seaRipAa) * (1.0 - smoothstep(45.0, 80.0, seaDist)) : 0.0;
+wsFoam = clamp(max(wsFoam, max(seaRip * 0.9, wdSimCrest(simH, seaSimAa))), 0.0, 1.0);
+// Duckweed painted on the water (Duckweed.ts): fronds over the water, foam and rings hidden under
+// them, the surface calmed; from below the light shines through them (WATER_LIGHT_GLSL)
+wsDuckweed(vSeaW.xz, seaDist, slope * 0.03);
+wsFoam *= 1.0 - wsWeed;
+seaCol = mix(seaCol, gl_FrontFacing ? wsWeedCol : wsWeedCol * 0.6, wsWeed);
+wsN = normalize(mix(wsN, vec3(0.0, 1.0, 0.0), wsWeed * 0.8));
+return vec4(mix(seaCol, uWsFoamCol, wsFoam), max(opacity, max(wsFoam, wsWeed)));
+}
 `;
 
 /** The surface normal (world wsN) into the view space normal; flipped for the underside. */

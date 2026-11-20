@@ -187,7 +187,10 @@ export function sampleRiver(
     const j = join[k];
     if (!j) continue;
     const q = samples[k];
-    if (j.edge >= 0 && j.s < q.s) q.s += (j.s - q.s) * (1 - smoothstep(j.edge, 0, 2.5));
+    if (j.lake) {
+      q.lakeBlend = 1 - smoothstep(j.edge, 1, JOIN_REACH);
+      q.s += (j.s - q.s) * q.lakeBlend;
+    } else if (j.edge >= 0 && j.s < q.s) q.s += (j.s - q.s) * (1 - smoothstep(j.edge, 0, 2.5));
     q.hw *= 1 + 0.7 * (1 - smoothstep(j.edge, 0, JOIN_REACH));
   }
 
@@ -200,7 +203,7 @@ export function sampleRiver(
       break;
     }
   }
-  if (coast > 0 && coast < S) {
+  if (coast > 0 && coast < S && !into) {
     const distM = samples[coast].dist;
     // Authored waterfalls and pinned levels near the coast keep their height: the funnel starts below them
     let lastFeature = -Infinity;
@@ -214,7 +217,7 @@ export function sampleRiver(
       q.hw *= 1 + 1.6 * e;
       q.depth *= 1 - 0.35 * e;
       const k = 1 - e;
-      q.s = sea + 0.03 + (q.s - sea - 0.03) * k * k;
+      q.s = sea + (0.03 + (q.s - sea - 0.03) * k * k) * (1 - smoothstep(e, 0.65, 0.82));
     }
   }
 
@@ -280,18 +283,21 @@ export function sampleRiver(
     }
   }
 
-  // 6. Fade the ribbon in at the source and out at the mouth: past the shoreline it fades over
-  // MOUTH_OUT metres into the sea; a river with no shoreline fades as its surface reaches the sea.
-  // Inside other water (a parent river, the river it joins, a lake) the ribbon fades out from that
-  // water's edge inward, so the surfaces meet with no step and never double up
+  // Fade at free ends and inside other rivers or lakes. Sea mouths have a shared
+  // coverage mask instead: pixels assigned to the ribbon must remain solid.
   const total = samples[S - 1].dist;
   for (let k = 0; k < S; k++) {
     const q = samples[k];
-    const sea_ = coast > 0 ? 1 - smoothstep(q.mouth, 1, 2) : smoothstep(q.s, sea + 0.04, sea + 0.3);
-    const ends = Math.min(from ? 1 : q.dist / 3, into ? 1 : (total - q.dist) / 3 + (q.mouth > 1 ? 1 : 0));
+    const seaFade = coast > 0 ? 1 : smoothstep(q.s, sea + 0.04, sea + 0.3);
+    const endFade = into || q.mouth > 0 ? 1 : (total - q.dist) / 3;
     const j = join[k];
-    const inside = j ? smoothstep(j.edge, -Math.min(3, Math.max(1, j.hw * 0.8)), -0.15) : 1;
-    q.alpha = Math.min(1, ends, sea_, inside);
+    const inside = j && !j.lake ? smoothstep(j.edge, -Math.min(3, Math.max(1, j.hw * 0.8)), -0.15) : 1;
+    // Entire rows safely inside the lake need no ribbon, including on a through-river.
+    if (j?.lake && j.edge < -q.hw - 12) {
+      q.alpha = 0;
+      continue;
+    }
+    q.alpha = Math.min(1, from ? 1 : q.dist / 3, endFade, j?.lake ? 1 : seaFade, inside);
   }
 
   // 7. Bounds

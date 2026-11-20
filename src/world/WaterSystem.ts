@@ -9,7 +9,7 @@ import { WaterSparkles } from './WaterSparkles';
 import {
   WATER_LIGHT_GLSL,
   WATER_NORMAL_GLSL,
-  WATER_SHORE_RANGE,
+  SEA_SURFACE_GLSL,
   WATER_SURFACE_GLSL,
   setWaterTerrain,
   updateWaterSurface,
@@ -67,49 +67,14 @@ varying vec3 vSeaW;
 uniform float uOpacity;
 ${WATER_DETAIL_GLSL}
 ${WATER_RIPPLE_GLSL}
-${WATER_SURFACE_GLSL}`
+${WATER_SURFACE_GLSL}
+${SEA_SURFACE_GLSL}`
         )
         .replace(
           '#include <map_fragment>',
-          `// Depth to the bed under this pixel (outside the island: the flat sea bed)
-float inIsland = wsInIsland(vSeaW.xz);
-float seaDepth = max(vSeaW.y - wsBedY(vSeaW.xz), 0.0);
-float seaDist = distance(vSeaW, cameraPosition);
-float shade, wobble;
-vec2 slope = wsWaves(vSeaW.xz, seaDist, shade, wobble);
-// Simulated waves around the player (developer toggle): they tilt the surface, so they catch the sun
-float simH;
-vec2 simG;
-wdSimSample(vSeaW.xz, simH, simG);
-slope += simG * uWdSimLook.y;
-wsN = normalize(vec3(slope.x, 1.0, slope.y));
-vec3 seaCol = wsColour(seaDepth, shade);
-
-// Shore: distance to the nearest land (m) from the shore field; a light band along the shore,
-// and the thin dashed lines that drift in toward it
-float shoreD = mix(${WATER_SHORE_RANGE.toFixed(1)}, texture2D(uWsShore, wsBedUv(vSeaW.xz)).r * ${WATER_SHORE_RANGE.toFixed(1)}, inIsland);
-float shoreAa = fwidth(shoreD);
-seaCol = mix(seaCol, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, shoreD)) * 0.3 * inIsland);
-wsFoam = wsShoreLines(shoreD, vSeaW.xz, shoreAa, 0.0, 99.0) * (1.0 - smoothstep(60.0, 140.0, seaDist));
-// Where the water touches the land: a thin crisp line, broken into pieces
-float lineD = seaDepth + wobble * 0.02;
-float lineBreak = smoothstep(0.3, 0.5, wdNoise(vSeaW.xz * 0.9 + uWsTime * 0.04));
-wsFoam = max(wsFoam, (1.0 - smoothstep(uWsFoam.x * 0.5, uWsFoam.x * 0.5 + fwidth(lineD) * 1.5 + 0.004, lineD)) * mix(0.35, 1.0, lineBreak));
-wsFoam *= inIsland * uWsShine.w;
-// Ripple rings from the swimmer, wading legs and splashes
-// (derivatives first: the distance test below skips the loop for far pixels)
-float seaRipAa = length(fwidth(vSeaW.xz));
-float seaSimAa = fwidth(simH);
-float seaRip = seaDist < 80.0 ? wdRipples(vSeaW.xz, seaRipAa) * (1.0 - smoothstep(45.0, 80.0, seaDist)) : 0.0;
-wsFoam = clamp(max(wsFoam, max(seaRip * 0.9, wdSimCrest(simH, seaSimAa))), 0.0, 1.0);
-// Duckweed painted on the water (Duckweed.ts): fronds over the water, foam and rings hidden under
-// them, the surface calmed; from below the light shines through them (WATER_LIGHT_GLSL)
-wsDuckweed(vSeaW.xz, seaDist, slope * 0.03);
-wsFoam *= 1.0 - wsWeed;
-seaCol = mix(seaCol, gl_FrontFacing ? wsWeedCol : wsWeedCol * 0.6, wsWeed);
-wsN = normalize(mix(wsN, vec3(0.0, 1.0, 0.0), wsWeed * 0.8));
-diffuseColor.rgb = mix(seaCol, uWsFoamCol, wsFoam);
-diffuseColor.a = max(uOpacity, max(wsFoam, wsWeed));`
+          `vec4 estuary = texture2D(uEstuary, wsBedUv(vSeaW.xz)) * wsInIsland(vSeaW.xz);
+if (estuary.a >= 0.5) discard;
+diffuseColor = wsSeaSurface(vSeaW, estuary.rg, uOpacity);`
         )
         .replace('#include <normal_fragment_maps>', WATER_NORMAL_GLSL)
         .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${WATER_LIGHT_GLSL}`);

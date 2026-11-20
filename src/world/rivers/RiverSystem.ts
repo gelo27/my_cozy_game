@@ -3,7 +3,7 @@ import { injectNightLights } from '../NightLighting';
 import type { TerrainSystem } from '../TerrainSystem';
 import { riverWorld } from './RiverWorld';
 import { WATER_DETAIL_GLSL, WATER_RIPPLE_GLSL, rippleUniforms } from '../../scene/WaterDetails';
-import { WATER_LIGHT_GLSL, WATER_NORMAL_GLSL, WATER_SURFACE_GLSL, waterSurfaceUniforms } from '../WaterSurface';
+import { SEA_SURFACE_GLSL, WATER_LIGHT_GLSL, WATER_NORMAL_GLSL, WATER_SURFACE_GLSL, waterSurfaceUniforms } from '../WaterSurface';
 import { buildLakeGeometry, buildRiverGeometry } from './RiverMesh';
 import type { RiverDef, RiverSample, WaterfallInfo } from './RiverTypes';
 
@@ -263,9 +263,8 @@ export class RiverSystem {
   // ---------------------------------------------------------------- materials
 
   private createMaterial(lake: boolean): THREE.MeshLambertMaterial {
-    // Opaque (like the sea): no blending or sorting. Where the ribbon used to fade out (its ends,
-    // the estuary over the sea) pixels are dropped with a screen-space dither instead. Pulled a
-    // little toward the camera so it never z-fights the sea plane in the estuary.
+    // Source and tributary fades use dithering. At the sea, both meshes use a
+    // complementary coverage mask and meet at exactly the same height.
     const mat = new THREE.MeshLambertMaterial({
       color: 0xffffff,
       side: THREE.DoubleSide,
@@ -314,7 +313,8 @@ uniform float uDay;
 ${WATER_DETAIL_GLSL}
 ${NOISE_GLSL}
 ${WATER_RIPPLE_GLSL}
-${WATER_SURFACE_GLSL}`
+${WATER_SURFACE_GLSL}
+${lake ? '' : SEA_SURFACE_GLSL}`
         )
         .replace(
           '#include <map_fragment>',
@@ -326,8 +326,26 @@ ${lake
   ? 'vec2 wp = vRiverUv; // lakes: world XZ, the waves just drift like the sea\'s'
   : 'vec2 wp = vec2(vRiverUv.x, vRiverUv.y - uWsTime * 1.1); // (across, along) metres, carried downstream'}
 float shade, wobble;
-vec2 slope = wsWaves(wp, rDist, shade, wobble);
-${lake ? '' : '// (across, along) back to world XZ\nslope = slope.x * vec2(-vFlow.y, vFlow.x) + slope.y * vFlow;'}
+float lakeMix = ${lake ? '1.0' : 'max(0.0, -vRiver.w)'};
+vec2 slope;
+float channelOpening = 0.0;
+if (lakeMix > 0.0) {
+  vec3 joinField = texture2D(uEstuary, wsBedUv(vRipW.xz)).rgb;
+  if (${lake ? 'joinField.b < 0.0' : 'joinField.b > 0.0'}) discard;
+  slope = wsCurrentWaves(vRipW.xz, joinField.rg, rDist, shade, wobble);
+  channelOpening = smoothstep(0.0, 0.35, length(joinField.rg));
+} else {
+  slope = wsWaves(wp, rDist, shade, wobble);
+}
+${lake ? '' : `if (lakeMix < 1.0) {
+  float riverShade = shade, riverWobble = wobble;
+  vec2 flowSlope = slope;
+  if (lakeMix > 0.0) flowSlope = wsWaves(wp, rDist, riverShade, riverWobble);
+  flowSlope = flowSlope.x * vec2(-vFlow.y, vFlow.x) + flowSlope.y * vFlow;
+  slope = mix(flowSlope, slope, lakeMix);
+  shade = mix(riverShade, shade, lakeMix);
+  wobble = mix(riverWobble, wobble, lakeMix);
+}`}
 // Simulated waves around the player (developer toggle)
 float simH;
 vec2 simG;
@@ -350,8 +368,9 @@ float bankAa = fwidth(bankD);
 ${lake
   ? 'vec2 dashP = vRiverUv;'
   : '// Dashes run along each bank and drift with the current\nvec2 dashP = vec2(vRiverUv.y - uTime * 0.25, vRiverUv.x > 0.0 ? 37.0 : 0.0);'}
-water = mix(water, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, max(bankD, 0.0))) * 0.3);
+water = mix(water, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, max(bankD, 0.0))) * 0.3 * (1.0 - channelOpening));
 float shore = wsShoreLines(bankD, dashP, bankAa, 0.0, ${lake ? '99.0' : 'halfW * 0.45 - 0.3'}) * (1.0 - smoothstep(60.0, 140.0, rDist));
+shore *= 1.0 - channelOpening;
 // Where the water touches the land: the sea's thin broken line, from the real depth
 float lineD = rDepth + wobble * 0.02;
 float lineBreak = smoothstep(0.3, 0.5, wdNoise(vRipW.xz * 0.9 + uWsTime * 0.04));
@@ -363,15 +382,6 @@ float ripAa = length(fwidth(vRipW.xz));
 float ripRings = rDist < 80.0 ? wdRipples(vRipW.xz, ripAa) * (1.0 - smoothstep(45.0, 80.0, rDist)) : 0.0;
 float simAa = fwidth(simH);
 ripRings = max(ripRings, wdSimCrest(simH, simAa));
-// Estuary: a lighter silty plume drifts out past the shore, and a soft band of foam marks where
-// the current meets the waves (the colour already matches the sea: it is the same water)
-float mouth = vRiver.w;
-vec2 fp = wp * 0.55;
-float plume = smoothstep(0.3, 1.0, mouth) * (1.0 - smoothstep(1.4, 2.0, mouth)) * smoothstep(0.4, 0.8, rNoise(fp * 0.35 + 11.0));
-water = mix(water, vec3(0.62, 0.78, 0.72), plume * 0.25);
-float meet = smoothstep(0.85, 1.0, mouth) * (1.0 - smoothstep(1.0, 1.35, mouth));
-foam = max(foam, meet * smoothstep(0.5, 0.8, rNoise(vec2(vRiverUv.x * 1.3, vRiverUv.y * 0.6 + uTime * 0.4) + 5.0)) * 0.6);
-foam *= 1.0 - smoothstep(1.3, 1.8, mouth);
 foam = clamp(max(foam, ripRings * 0.85), 0.0, 1.0);
 // Duckweed painted on the water (Duckweed.ts), as on the sea
 wsDuckweed(vRipW.xz, rDist, slope * 0.03);
@@ -381,10 +391,17 @@ wsN = normalize(mix(wsN, vWN, wsWeed * 0.8));
 wsFoam = foam;
 diffuseColor.rgb = mix(water, uWsFoamCol, foam);
 diffuseColor.a = mix(1.0, 0.96, foam) * vRiver.y;
-// Over open water no bank hides the ribbon's sides: feather them out in the estuary, with a
-// ragged noisy edge so the plume has no straight outline
-float edgeNoise = rNoise(vec2(vRiverUv.x * 0.4, vRiverUv.y * 0.25 - uTime * 0.3)) * 0.35;
-diffuseColor.a *= mix(1.0, 1.0 - smoothstep(0.35 + edgeNoise, 1.0, vRiver.z), smoothstep(0.6, 1.0, mouth));
+${lake ? '' : `if (vRiver.w > 0.0) {
+  vec4 estuary = texture2D(uEstuary, wsBedUv(vRipW.xz));
+  if (vRiver.w >= 0.82 && estuary.a < 0.5) discard;
+  vec3 riverNormal = wsN;
+  float riverFoam = wsFoam;
+  vec4 sea = wsSeaSurface(vRipW, estuary.rg, 1.0);
+  float blend = smoothstep(0.2, 0.8, vRiver.w);
+  wsN = normalize(mix(riverNormal, wsN, blend));
+  wsFoam = mix(riverFoam, wsFoam, blend);
+  diffuseColor.rgb = mix(diffuseColor.rgb, sea.rgb, blend);
+}`}
 // Opaque surface: the fade becomes a stable screen-space dither (interleaved gradient noise)
 float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
 // (foam used to be 96 % opaque: that still counts as solid)

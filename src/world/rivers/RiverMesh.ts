@@ -29,7 +29,10 @@ interface Row {
   mouth: number;
 }
 
-const row = (q: RiverSample, v: number): Row => ({ x: q.x, z: q.z, y: q.s, hw: q.hw, tx: q.tx, tz: q.tz, v, foam: q.foam, alpha: q.alpha, mouth: q.mouth });
+// Positive values mark sea mouths, negative values mark lake joins.
+const joinWeight = (q: RiverSample) => q.mouth || -(q.lakeBlend ?? 0);
+
+const row = (q: RiverSample, v: number): Row => ({ x: q.x, z: q.z, y: q.s, hw: q.hw, tx: q.tx, tz: q.tz, v, foam: q.foam, alpha: q.alpha, mouth: joinWeight(q) });
 
 /**
  * Water ribbon along a river's samples: flat across the channel at the surface height.
@@ -52,6 +55,8 @@ export function buildRiverGeometry(river: SampledRiver): THREE.BufferGeometry[] 
   while (k < S.length) {
     const q = S[k];
     rows.push(row(q, q.dist + vShift));
+    // The last flat rows straddle the shared shoreline mask. Beyond it only the sea renders.
+    if (q.mouth >= 1) break;
     const f = fallAt.get(k);
     if (!f || f.travel < 0.05 || f.end >= S.length - 1) {
       k++;
@@ -78,7 +83,7 @@ export function buildRiverGeometry(river: SampledRiver): THREE.BufferGeometry[] 
         v: q.dist + vShift + arc,
         foam: 1,
         alpha: q.alpha + (foot.alpha - q.alpha) * t,
-        mouth: q.mouth + (foot.mouth - q.mouth) * t,
+        mouth: joinWeight(q) + (joinWeight(foot) - joinWeight(q)) * t,
       });
     }
     // Resume with the pool, past where the arc lands

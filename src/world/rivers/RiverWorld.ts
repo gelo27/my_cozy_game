@@ -46,15 +46,20 @@ class RiverWorld {
   private readonly depth = new Float32Array(V * V);
   private readonly flowX = new Float32Array(V * V);
   private readonly flowZ = new Float32Array(V * V);
-  /** Terrain shader data: R = surface (dilated past the banks), G = 0..1 weight. */
-  private readonly shadeData = new Uint16Array(V * V * 2);
+  /** Terrain shader data: R = surface (dilated past the banks), G = bank weight, B = estuary sand. */
+  private readonly shadeData = new Uint16Array(V * V * 4);
   public readonly texture: THREE.DataTexture;
+  // RG: downstream current, B: signed ownership at lake joins (+ lake, - river), A: the ribbon's share of the surface.
+  private readonly estuaryData = new Uint16Array(V * V * 4);
+  public readonly estuary = new THREE.DataTexture(this.estuaryData, V, V, THREE.RGBAFormat, THREE.HalfFloatType);
   /** Bumped on every change (meshes, map, helpers redraw lazily). */
   public revision = 0;
 
   constructor(defs: RiverDef[]) {
     this.defs = defs;
-    this.texture = new THREE.DataTexture(this.shadeData, V, V, THREE.RGFormat, THREE.HalfFloatType);
+    this.estuary.minFilter = this.estuary.magFilter = THREE.LinearFilter;
+    this.estuary.needsUpdate = true;
+    this.texture = new THREE.DataTexture(this.shadeData, V, V, THREE.RGBAFormat, THREE.HalfFloatType);
     this.texture.magFilter = THREE.LinearFilter;
     this.texture.minFilter = THREE.LinearFilter;
     this.texture.generateMipmaps = false;
@@ -285,7 +290,8 @@ class RiverWorld {
       const row = (rect.z0 + z) * V + rect.x0;
       out.set(natural.subarray(row, row + w), z * w);
       this.surface.fill(NaN, row, row + w);
-      this.shadeData.fill(0, row * 2, (row + w) * 2);
+      this.estuaryData.fill(0, row * 4, (row + w) * 4);
+      this.shadeData.fill(0, row * 4, (row + w) * 4);
     }
     const wet = new Uint8Array(w * h);
     const shadeW = new Float32Array(w * h);
@@ -301,6 +307,7 @@ class RiverWorld {
       }
     }
     this.texture.needsUpdate = true;
+    this.estuary.needsUpdate = true;
     this.revision++;
     return out;
   }
@@ -356,11 +363,54 @@ class RiverWorld {
         const hw = a.hw + (b.hw - a.hw) * t;
         const dep = a.depth + (b.depth - a.depth) * t;
         // Estuary weight: 0 upstream, 1 at the shoreline and beyond
-        const e = Math.min(1, a.mouth + (b.mouth - a.mouth) * t);
+        const mouth = a.mouth + (b.mouth - a.mouth) * t;
+        const e = Math.min(1, mouth);
         const R = hw + BANK;
         if (d > R + 6) continue;
         const i = (iz - rect.z0) * ow + ix - rect.x0;
         const g = iz * V + ix;
+
+        const lakeBlend = (a.lakeBlend ?? 0) * (1 - t) + (b.lakeBlend ?? 0) * t;
+        if (lakeBlend > 0 && mouth === 0) {
+          const offset = g * 4;
+          // The lake pass stores distance inside its shoreline. The handoff lies
+          // just inside the actual lake mesh, including on a curved shoreline.
+          const inside = THREE.DataUtils.fromHalfFloat(this.shadeData[offset + 3]);
+          const side = 1 - smoothstep(d / hw, 0.3, 1);
+          const strength = lakeBlend * side * (1 - smoothstep(inside, 0.1, 1));
+          this.estuaryData[offset] = THREE.DataUtils.toHalfFloat((a.tx + (b.tx - a.tx) * t) * strength);
+          this.estuaryData[offset + 1] = THREE.DataUtils.toHalfFloat((a.tz + (b.tz - a.tz) * t) * strength);
+          // Never cut a hole past an end cap or outside the river ribbon.
+          const px = ix - WORLD_HALF, pz = iz - WORLD_HALF;
+          const start = S[0], end = S[S.length - 1];
+          const alongStart = (px - start.x) * start.tx + (pz - start.z) * start.tz;
+          const alongEnd = (end.x - px) * end.tx + (end.z - pz) * end.tz;
+          let cap = 1;
+          if (bestK[j] === 0) cap *= smoothstep(alongStart, 0, 1);
+          if (bestK[j] === S.length - 2) cap *= smoothstep(alongEnd, 0, 1);
+          const cover = cap * (1 - smoothstep(d / hw, 0.65, 1)) * lakeBlend;
+          const previous = THREE.DataUtils.fromHalfFloat(this.estuaryData[offset + 2]);
+          this.estuaryData[offset + 2] = THREE.DataUtils.toHalfFloat(Math.min(previous, inside - 0.18 * cover));
+        }
+        // The ocean plane spans the entire map. Remove it below inland water,
+        // even where a deep channel cuts the terrain below sea level.
+        const bankCover = 1 - smoothstep(d, hw, hw + 0.8);
+        const ribbonAlpha = a.alpha + (b.alpha - a.alpha) * t;
+        const seaJoin = smoothstep(e, 0.65, 0.82);
+        const joinCover = 1 - smoothstep(d, Math.max(0, hw - 1.5), hw);
+        const cover = (bankCover + (joinCover - bankCover) * seaJoin)
+          * (1 - smoothstep(e, 0.84, 0.96)) * ribbonAlpha;
+        const maskIndex = g * 4 + 3;
+        this.estuaryData[maskIndex] = Math.max(this.estuaryData[maskIndex], THREE.DataUtils.toHalfFloat(cover));
+
+        if (mouth > 0) {
+          const side = 1 - smoothstep(d / hw, 0.35, 1);
+          const strength = side * smoothstep(e, 0, 0.65) * (1 - smoothstep(mouth, 1, 2));
+          const offset = g * 4;
+          this.estuaryData[offset] = THREE.DataUtils.toHalfFloat((a.tx + (b.tx - a.tx) * t) * strength);
+          this.estuaryData[offset + 1] = THREE.DataUtils.toHalfFloat((a.tz + (b.tz - a.tz) * t) * strength);
+          this.shadeData[offset + 2] = THREE.DataUtils.toHalfFloat(smoothstep(mouth, 0.15, 1.1));
+        }
 
         if (d <= R) {
           const cur = out[i];
@@ -404,10 +454,10 @@ class RiverWorld {
         // bilinear filtering near the fade never mixes in empty texels
         const sw = 1 - smoothstep(d, hw + 2.5, hw + 4);
         if (sw >= shadeW[i]) {
-          if (sw > 0 || shadeW[i] === 0) this.shadeData[g * 2] = THREE.DataUtils.toHalfFloat(s);
+          if (sw > 0 || shadeW[i] === 0) this.shadeData[g * 4] = THREE.DataUtils.toHalfFloat(s);
           if (sw > 0) {
             shadeW[i] = sw;
-            this.shadeData[g * 2 + 1] = THREE.DataUtils.toHalfFloat(sw);
+            this.shadeData[g * 4 + 1] = THREE.DataUtils.toHalfFloat(sw);
           }
         }
       }
@@ -474,6 +524,11 @@ class RiverWorld {
         if (sd > R) continue;
         const i = (iz - rect.z0) * ow + ix - rect.x0;
         const g = iz * V + ix;
+        const lakeCover = 1 - smoothstep(sd, 0, 0.8);
+        this.estuaryData[g * 4 + 3] = Math.max(this.estuaryData[g * 4 + 3], THREE.DataUtils.toHalfFloat(lakeCover));
+        const interior = THREE.DataUtils.toHalfFloat(Math.min(1, Math.max(0, (-sd - 0.6) / 9)));
+        this.shadeData[g * 4 + 3] = Math.max(this.shadeData[g * 4 + 3], interior);
+        this.estuaryData[g * 4 + 2] = this.shadeData[g * 4 + 3];
         const cur = out[i];
         let y: number;
         if (sd <= 0) {
@@ -499,10 +554,10 @@ class RiverWorld {
         }
         const sw = 1 - smoothstep(Math.max(0, sd), 2.5, 4);
         if (sw >= shadeW[i]) {
-          if (sw > 0 || shadeW[i] === 0) this.shadeData[g * 2] = THREE.DataUtils.toHalfFloat(level);
+          if (sw > 0 || shadeW[i] === 0) this.shadeData[g * 4] = THREE.DataUtils.toHalfFloat(level);
           if (sw > 0) {
             shadeW[i] = sw;
-            this.shadeData[g * 2 + 1] = THREE.DataUtils.toHalfFloat(sw);
+            this.shadeData[g * 4 + 1] = THREE.DataUtils.toHalfFloat(sw);
           }
         }
       }

@@ -64,6 +64,8 @@ export interface RiverSample {
    * the first 10 m past the shoreline.
    */
   mouth: number;
+  /** Blend to lake waves at a lake inlet or outlet, including crossings mid-river. */
+  lakeBlend?: number;
 }
 
 export interface WaterfallInfo {
