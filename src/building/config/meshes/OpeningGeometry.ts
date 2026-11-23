@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { MODULE_SIZE, WALL_THICKNESS } from '../BuildingConstants';
+import { BAY_EAVE_Y, BAY_RIDGE_X, BAY_FOOTPRINT, MODULE_SIZE, WALL_THICKNESS } from '../BuildingConstants';
 import { BUILDING_MATERIALS } from '../BuildingMaterials';
 import { openingContour } from '../../OpeningContour';
 import type { PieceMeshTemplate } from './PieceMeshTemplate';
@@ -83,6 +83,53 @@ export function buildWindowPieceGeometry(width: number, height: number): PieceMe
     boundingBox: new THREE.Box3(),
   };
 }
+
+/** Three glazed faces share a continuous sill and cap around an open interior recess. */
+export function buildBayWindowGeometry(): PieceMeshTemplate {
+  const footprint = new THREE.Shape(BAY_FOOTPRINT.map(([x, z]) => new THREE.Vector2(x, -z)));
+  const sill = new THREE.ExtrudeGeometry(footprint, { depth: 0.09, bevelEnabled: false })
+    .rotateX(-Math.PI / 2).translate(0, -0.75, 0);
+  const frame: THREE.BufferGeometry[] = [sill, sill.clone().translate(0, BAY_EAVE_Y + 0.66, 0)];
+  const panes: THREE.BufferGeometry[] = [];
+  const corners = BAY_FOOTPRINT.slice(1, 5);
+  const paneBottom = -0.66;
+  const paneTop = BAY_EAVE_Y - 0.09;
+  const paneHeight = paneTop - paneBottom;
+  const paneCenter = (paneTop + paneBottom) / 2;
+  for (const [x, z] of corners) {
+    const post = new THREE.BoxGeometry(0.1, paneHeight, 0.15);
+    frame.push(post.translate(x * 0.96, paneCenter, z - 0.075).toNonIndexed());
+  }
+  for (let i = 1; i < corners.length; i++) {
+    const [ax, az] = corners[i - 1];
+    const [bx, bz] = corners[i];
+    const dx = (bx - ax) * 0.96;
+    const dz = bz - az;
+    const panel = (height: number, depth: number, y: number) =>
+      new THREE.BoxGeometry(Math.hypot(dx, dz), height, depth)
+        .rotateY(-Math.atan2(dz, dx))
+        .translate((ax + bx) * 0.48, y, (az + bz) / 2 - 0.075).toNonIndexed();
+    panes.push(panel(paneHeight, 0.014, paneCenter));
+  }
+  const wood = mergeGeometries(frame)!;
+  const glass = mergeGeometries(panes)!;
+  // The ridge meets the wall. Separate face normals keep the hips crisp.
+  const eave = BAY_FOOTPRINT.map(([x, z]) => new THREE.Vector3(x, BAY_EAVE_Y, z));
+  const left = new THREE.Vector3(-BAY_RIDGE_X, 0.75, eave[0].z);
+  const right = new THREE.Vector3(BAY_RIDGE_X, 0.75, eave[0].z);
+  const [a, b, c, d, e, f] = eave;
+  const triangles = [a,b,left, b,c,left, c,d,right, c,right,left,
+    d,e,right, e,f,right, f,a,left, f,left,right];
+  const roof = new THREE.BufferGeometry().setFromPoints(triangles);
+  roof.computeVertexNormals();
+  roof.setAttribute('uv', new THREE.Float32BufferAttribute(
+    triangles.flatMap(p => [p.x, p.z + p.y]), 2));
+  const geometry = mergeGeometries([wood, glass, roof], true)!;
+  for (const part of [...frame, ...panes, wood, glass, roof]) part.dispose();
+  return { geometry, materials: [BUILDING_MATERIALS.woodCream, BUILDING_MATERIALS.windowGlass,
+    BUILDING_MATERIALS.roofSlate], boundingBox: new THREE.Box3() };
+}
+
 
 /** A single operable sash has one horizontal meeting rail and no central mullion. */
 export function buildSingleHungWindowPieceGeometry(width: number, height: number): PieceMeshTemplate {

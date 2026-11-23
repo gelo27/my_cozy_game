@@ -6,9 +6,9 @@ import { renderTerrainMap, EXPLORE_GRID } from '../../explore/MapRenderer';
 import type { SiteKind } from '../../world/IslandSites';
 import { WORLD_SIZE, WORLD_HALF } from '../../world/WorldSettings';
 import { t } from '../../i18n/i18n';
+import { MARKER_ICON } from './mapMarkerIcons';
 
 export const SITE_ICON: Record<SiteKind, string> = { lighthouse: '🗼', ruins: '🏛️', hut: '🛖', cave: '🕳️' };
-export const MARKER_ICON: Record<MapMarkerIcon, string> = { pin: '📍', star: '⭐', home: '🏠', alert: '❗' };
 
 const panel = 'bg-[#fffaf0]/95 text-[#4a3b2a] border border-[#e9dcc3] shadow-[0_6px_20px_rgba(60,40,10,0.18)]';
 

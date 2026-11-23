@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { PropInstance, PropSystem } from './PropSystem';
-import { uBushBend, uBushBendCount } from './TreeModels';
+import { uBushBend, uBushBendCount, uHedgeBend, uHedgeBendCount } from './TreeModels';
+import { HEDGE_TILE, HEDGE_TYPE } from './Hedge';
 import { uFlowerBend, uFlowerBendCount } from './FlowerModels';
 import { audioEngine } from '../audio/AudioEngine';
 
@@ -30,6 +31,9 @@ export const FLOWER_SWAY_OPTIONS: SwayOptions = {
 
 const BUSH_OPTIONS: SwayOptions = {
   type: 'bush', radius: 0.72, maxBend: 0.32, bend: uBushBend, bendCount: uBushBendCount, rustle: true,
+};
+export const HEDGE_SWAY_OPTIONS: SwayOptions = {
+  ...BUSH_OPTIONS, type: HEDGE_TYPE, radius: HEDGE_TILE * Math.SQRT1_2, bend: uHedgeBend, bendCount: uHedgeBendCount,
 };
 /** A bush rustles at most this often (s), and only when the push on it changes this fast (m/s). */
 const RUSTLE_GAP = 0.3;

@@ -22,7 +22,8 @@ import { STRUCTURE_MATERIALS } from './StructureBuilder';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { CaveNetwork, CaveContentsWorld } from './cave/CaveNetwork';
 import { updateCavePortals } from './cave/CavePortalMaterial';
-import { isCaveLayout, CaveLight } from './cave/CaveGen';
+import { isCaveLayout, CaveLight, CaveExcavation } from './cave/CaveGen';
+import type { CaveNuggetSave } from './cave/CaveNuggets';
 import cavesJson from './cave/caves.json';
 import { ForageField, ForageNode } from './ForageField';
 import { EXPLORE_GRID } from './MapRenderer';
@@ -81,7 +82,8 @@ export interface ExplorationSaveData {
   chests: string[];
   recipes: string[];
   markers: MapMarker[];
-  caveExcavations?: { x: number; y: number; z: number; r: number }[];
+  caveExcavations?: CaveExcavation[];
+  caveNuggets?: CaveNuggetSave[];
 }
 
 const DISCOVER_RADIUS = 30;
@@ -103,7 +105,19 @@ export class ExplorationManager {
   public readonly sites: IslandSite[] = getIslandSites().filter((site) => site.kind === 'cave');
   public readonly explored = new Uint8Array(EXPLORE_GRID * EXPLORE_GRID);
   public readonly discovered = new Set<string>();
-  public markers: MapMarker[] = [];
+  private mapMarkers: MapMarker[] = [];
+  private readonly markerListeners = new Set<() => void>();
+
+  public get markers(): readonly MapMarker[] {
+    return this.mapMarkers;
+  }
+
+  public getMarkers = (): readonly MapMarker[] => this.mapMarkers;
+
+  public subscribeMarkers = (listener: () => void): (() => void) => {
+    this.markerListeners.add(listener);
+    return () => this.markerListeners.delete(listener);
+  };
   /** Id of the cave the player is in, or null outdoors. */
   public inCave: string | null = null;
   /** Bumped whenever getLights() may return something different. */
@@ -301,12 +315,12 @@ export class ExplorationManager {
   }
 
   private enterCave(cave: CaveEntry, character: CharacterController, camera: ThirdPersonCamera): void {
-    // The network is generated in a worker from startup; if it is not done yet the fade waits for it
+    this.network.ensureGenerated();
     this.startTransition(
       () => {
         const e = this.network.entrances.find((en) => en.id === cave.site.id);
         if (!e) return;
-        this.network.finishColliders();
+        this.network.finishEntranceColliders(e.spawn);
         character.respawn(e.spawn.clone().setY(e.spawn.y + 0.9));
         character.model.setFacingAngleInstant(e.yaw);
         camera.targetYaw = e.yaw + Math.PI;
@@ -594,14 +608,17 @@ export class ExplorationManager {
   }
 
   public addMarker(x: number, z: number, icon: MapMarkerIcon): void {
-    if (this.markers.length >= 40) this.markers.shift();
-    this.markers.push({ id: this.markerSeq++, x, z, icon });
-    this.revision++;
+    this.setMarkers([...this.mapMarkers.slice(-39), { id: this.markerSeq++, x, z, icon }]);
   }
 
   public removeMarker(id: number): void {
-    this.markers = this.markers.filter((m) => m.id !== id);
+    this.setMarkers(this.mapMarkers.filter((m) => m.id !== id));
+  }
+
+  private setMarkers(markers: MapMarker[]): void {
+    this.mapMarkers = markers;
     this.revision++;
+    this.markerListeners.forEach((listener) => listener());
   }
 
   /** Landmarks for the map and compass: discovered ones by name, nearby unknown ones as "?". */
@@ -660,8 +677,9 @@ export class ExplorationManager {
       discovered: [...this.discovered],
       chests: [...this.openedChestIds],
       recipes: [...this.gameplay.knownRecipes],
-      markers: this.markers,
+      markers: this.mapMarkers,
       caveExcavations: this.network.getExcavations(),
+      caveNuggets: this.network.nuggets.serialize(),
     };
   }
 
@@ -680,14 +698,15 @@ export class ExplorationManager {
     data?.chests?.forEach((id) => this.markChestOpened(id, true));
     this.gameplay.knownRecipes.clear();
     data?.recipes?.forEach((id) => this.gameplay.knownRecipes.add(id));
-    this.markers = data?.markers ?? [];
+    const markers = data?.markers ?? [];
     this.network.restoreExcavations(data?.caveExcavations ?? []);
+    this.network.nuggets.restore(data?.caveNuggets ?? []);
     this.inCave = null;
     this.lightRevision++;
     this.gameplay.anchorOverride = null;
-    this.markerSeq = this.markers.reduce((m, k) => Math.max(m, k.id), 0) + 1;
+    this.markerSeq = markers.reduce((m, k) => Math.max(m, k.id), 0) + 1;
     this.caveLightKey = NaN;
-    this.revision++;
+    this.setMarkers(markers);
   }
 
   public dispose(): void {

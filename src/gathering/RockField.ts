@@ -54,7 +54,8 @@ const LOD_PASS_SECONDS = 0.2;
 const LOD_PASS_MOVE = 1;
 
 /** Flying stone chips: at most this many at once (the oldest goes first), how long they lie, how fast they vanish (s). */
-const CHIP_MAX = isMobileDevice() ? 32 : 64;
+const MOBILE_CHIPS = isMobileDevice();
+const CHIP_MAX = MOBILE_CHIPS ? 32 : 64;
 const CHIP_LIFE_HIT = 2.2;
 const CHIP_LIFE_BREAK = 3.6;
 const CHIP_SHRINK = 0.5;
@@ -153,6 +154,8 @@ export class RockField {
   private lodTimer = 0;
   private static readonly _tint = new THREE.Color();
   private readonly chips: Chip[] = [];
+  private readonly caveChipOrigin = new THREE.Vector3();
+  private readonly caveChipVelocity = new THREE.Vector3();
   private readonly chipMesh: THREE.InstancedMesh;
   /** Chip slots moved (spawn / removal): their colours are rewritten once. */
   private chipColorsDirty = false;
@@ -309,6 +312,23 @@ export class RockField {
   }
 
   /** `eye`: the camera position (rocks pick their LOD from it). */
+  /** Send the same stone chips into the cave, including from floors and ceilings. */
+  public emitCaveChips(point: THREE.Vector3, normal: THREE.Vector3): void {
+    const velocity = this.caveChipVelocity;
+    const { stone } = rockColors('stone');
+    const count = MOBILE_CHIPS ? 4 : 7;
+    const largeCount = MOBILE_CHIPS ? 1 : 2;
+    for (let i = 0; i < count; i++) {
+      const large = i < largeCount;
+      const size = large ? 0.40 + Math.random() * 0.14 : 0.12 + Math.random() * 0.11;
+      const from = this.caveChipOrigin.copy(point).addScaledVector(normal, 0.07 + size * 0.6);
+      velocity.set((Math.random() - 0.5) * 3.4, 1.2 + Math.random() * 2.4, (Math.random() - 0.5) * 3.4);
+      const outwardSpeed = 0.8 + Math.random() * 1.3;
+      velocity.addScaledVector(normal, Math.max(0, outwardSpeed - velocity.dot(normal)));
+      this.spawnChip(from, velocity, size, stone, MOBILE_CHIPS ? 1.15 : 1.7, !MOBILE_CHIPS);
+    }
+  }
+
   public update(dt: number, eye?: THREE.Vector3): void {
     if (eye) this.updateLods(dt, eye);
     if (this.chips.length || this.chipMesh.count) this.updateChips(dt);

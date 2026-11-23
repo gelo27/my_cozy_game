@@ -304,7 +304,7 @@ export class WorkerNPC extends NPCAgent {
     /** Unique id (job claims). */
     public readonly id: number
   ) {
-    super(physics, scene, nav, spawn, name, doors, color);
+    super(physics, scene, nav, spawn, name, doors, color, 'route');
     // Trips stay around the farm; a long search would only mean the spot is unreachable. Long
     // walks (to the forest) are planned in small, spaced-out pieces: no frame spikes on phones
     this.planNodes = 1000;
@@ -381,7 +381,7 @@ export class WorkerNPC extends NPCAgent {
       const aim = this.aim ?? this.target;
       // Height matters too: standing right under a bed upstairs is not being at it. Checked against
       // the target (a standing spot on the floor), not the aim (a chest, a crop: not at feet level)
-      const sameFloor = Math.abs(this.target.y - feet.y) < SAME_FLOOR;
+      const sameFloor = !this.isSwimming && Math.abs(this.target.y - feet.y) < SAME_FLOOR;
       const d = sameFloor ? Math.hypot(aim.x - feet.x, aim.z - feet.z) : Infinity;
       // Stuck close by also counts, unless a wall stands in between (it would sleep / work through it)
       const arrived =
@@ -392,11 +392,11 @@ export class WorkerNPC extends NPCAgent {
       const hopeless = this.noRouteTime > NO_ROUTE_GIVE_UP;
       const longTrip = this.task || this.errand;
       if (this.activity !== 'toBed' && (hopeless || this.routeTime > (longTrip ? TASK_GIVE_UP : SPOT_GIVE_UP))) {
-        // No way there (water, walls): forget it, the next think picks another spot / job
+        // No way there: the next think picks another spot or job.
         this.giveUpTrip();
       } else if (this.activity === 'toBed') {
-        if (arrived || hopeless || this.routeTime > ROUTE_GIVE_UP) {
-          const seen = Math.hypot(player.x - feet.x, player.z - feet.z) < 25;
+        const seen = Math.hypot(player.x - feet.x, player.z - feet.z) < 25;
+        if (arrived || ((!this.isSwimming || !seen) && (hopeless || this.routeTime > ROUTE_GIVE_UP))) {
           if (!arrived && !seen) this.placeAt(this.target);
           this.fallAsleep(arrived || !seen);
           return;
@@ -892,8 +892,6 @@ export class WorkerNPC extends NPCAgent {
     this.clearPath();
     this.carryMesh.visible = false;
     this.sleepingInBed = inBed && !!this.bed;
-    // The capsule would block the bed and the player walking past a sleeper on the floor
-    this.collider.setEnabled(false);
     const g = this.model.group;
     if (this.sleepingInBed && this.bed) {
       g.position.copy(this.bed.lie);
@@ -912,7 +910,6 @@ export class WorkerNPC extends NPCAgent {
     this.bedOnLoad = false;
     this.activity = 'leisure';
     this.napping = false;
-    this.collider.setEnabled(true);
     this.model.group.rotation.x = 0;
     this.zzz.visible = false;
     if (this.sleepingInBed && this.bed) this.placeAt(this.bed.stand);
@@ -975,7 +972,6 @@ export class WorkerNPC extends NPCAgent {
       // Restored from a save: straight into its bed
       this.bedOnLoad = false;
       this.bed = bed;
-      this.collider.setEnabled(true);
       this.placeAt(bed.stand);
       this.fallAsleep(true);
       return;

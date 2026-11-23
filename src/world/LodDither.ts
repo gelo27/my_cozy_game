@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { inheritVertexLightingQuality } from './VertexLightingQuality';
 
 /**
  * Screen-door (dithered) crossfade between two LODs, as open-world games do it: during a switch
@@ -43,6 +44,7 @@ function create(base: THREE.Material): DitherMaterial {
       );
   };
   m.customProgramCacheKey = () => `lod-dither-${base.uuid}`;
+  inheritVertexLightingQuality(base, m);
   return m;
 }
 
@@ -101,6 +103,7 @@ export function acquireInstancedDither(base: THREE.Material): THREE.Material {
         }`);
   };
   m.customProgramCacheKey = () => `lod-dither-inst-${base.uuid}`;
+  inheritVertexLightingQuality(base, m);
   instanced.set(base, m);
   return m;
 }
@@ -159,6 +162,7 @@ export function acquireDistanceDither(base: THREE.Material, range: FadeRange): T
   };
   const key = base.customProgramCacheKey();
   m.customProgramCacheKey = () => `dist-dither-${key}`;
+  inheritVertexLightingQuality(base, m);
   distanceTwins.set(base, m);
   return m;
 }

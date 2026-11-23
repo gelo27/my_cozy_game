@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { injectPlayerShadow } from '../character/PlayerShadow';
 import { isMobileDevice } from './WorldSettings';
 import { FlameField, fireFx, type FlameSpot } from './FlameField';
 import type { PropSystem } from './PropSystem';
@@ -258,7 +259,7 @@ const LIGHT_DECL = `
  * (the 1 m terrain) and, on phones, overdrawn foliage, where it looks the same and costs a fraction.
  * `twoSided` (per-vertex only) lights both sides of double-sided foliage.
  */
-export function injectNightLights(shader: PatchableShader, opts: { perVertex?: boolean; twoSided?: boolean; ground?: boolean } = {}): void {
+export function injectNightLights(shader: PatchableShader, opts: { perVertex?: boolean; twoSided?: boolean; ground?: boolean; playerShadow?: boolean } = {}): void {
   if (shader.fragmentShader.includes('uFakeLightCount') || shader.vertexShader.includes('uFakeLightCount')) return;
   if (!shader.fragmentShader.includes('#include <opaque_fragment>') || !shader.vertexShader.includes('#include <project_vertex>')) return;
 
@@ -267,6 +268,7 @@ export function injectNightLights(shader: PatchableShader, opts: { perVertex?: b
   const groundDef = opts.ground ? '\n#define FAKE_LIGHT_GROUND' : '';
   injectCloudShadows(shader);
   injectGroundMist(shader);
+  if (opts.playerShadow) injectPlayerShadow(shader);
   // Daylight dimmed inside houses (per-pixel materials only: the per-vertex ones are the terrain,
   // which lies under the floors, and phone foliage)
   if (!opts.perVertex) injectInteriorShade(shader);
@@ -335,7 +337,7 @@ export function installGlobalNightLights(): void {
   proto.onBeforeCompile = function (shader) {
     const m = this as THREE.Material & Record<string, unknown>;
     if (m.isMeshLambertMaterial || m.isMeshStandardMaterial || m.isMeshPhongMaterial || m.isMeshToonMaterial) {
-      injectNightLights(shader);
+      injectNightLights(shader, { playerShadow: true });
       injectWaterline(shader);
     }
   };

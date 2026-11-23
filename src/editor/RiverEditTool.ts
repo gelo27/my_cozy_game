@@ -4,6 +4,8 @@ import type { TerrainSystem } from '../world/TerrainSystem';
 import type { RiverSystem } from '../world/rivers/RiverSystem';
 import { riverWorld, stringifyRivers } from '../world/rivers/RiverWorld';
 import type { RiverDef, RiverPoint } from '../world/rivers/RiverTypes';
+import { sampleLake } from '../world/rivers/RiverSpline';
+import { worldSettings } from '../world/WorldSettings';
 
 export type RiverKind = 'river' | 'stream' | 'lake';
 
@@ -130,11 +132,12 @@ export class RiverEditTool {
       name: `${p.name} ${n}`,
       width: p.width,
       depth: p.depth,
+      fitTerrain: true,
       points: first ? [{ x: round(first.x), z: round(first.z) }] : [],
     };
     if (kind === 'lake') {
       def.kind = 'lake';
-      def.points = first ? lakeOutline(first.x, first.z) : [];
+      def.points = first ? this.initialLakeOutline(def, first.x, first.z) : [];
     }
     this.hooks.pushUndo();
     this.rivers.addRiver(def);
@@ -163,6 +166,7 @@ export class RiverEditTool {
       name: `Гілка ${n} (${parent.name})`,
       width: round(Math.max(1.2, (p.w ?? parent.width) * 0.6)),
       depth: round(Math.max(0.3, (p.d ?? parent.depth) * 0.7)),
+      fitTerrain: true,
       points: [{ x: p.x, z: p.z }],
     };
     this.hooks.pushUndo();
@@ -187,11 +191,37 @@ export class RiverEditTool {
     if (!r) return;
     if (undo) this.hooks.pushUndo();
     Object.assign(r, patch);
-    if (r.levees !== false) delete r.levees; // default on: keep rivers.json minimal
+    if (r.levees === !r.fitTerrain) delete r.levees;
     if (r.level === undefined) delete r.level;
     if (patch.name === undefined || Object.keys(patch).length > 1) this.changed(r.id, !undo);
     this.unsaved = true;
     this.hooks.touch();
+  }
+
+  /** Place the selected waterway back on the terrain and clear manually fixed elevations. */
+  public fitToTerrain(): void {
+    const r = this.river;
+    if (!r) return;
+    this.hooks.pushUndo();
+    if (!r.fitTerrain) delete r.levees;
+    r.fitTerrain = true;
+    delete r.level;
+    for (const point of r.points) delete point.y;
+    this.changed(r.id);
+    this.terrain.commit();
+    this.unsaved = true;
+    this.hooks.touch();
+  }
+
+  private initialLakeOutline(def: RiverDef, x: number, z: number): RiverPoint[] {
+    const ground = (px: number, pz: number) => this.terrain.getPlacementHeight(px, pz);
+    const centre = ground(x, z);
+    for (const radius of [LAKE_START_RADIUS, 8, 6, 4]) {
+      const points = lakeOutline(x, z, radius);
+      const level = sampleLake({ ...def, level: undefined, points }, ground, worldSettings.waterLevel).lake!.level;
+      if (centre - level <= 0.9) return points;
+    }
+    return lakeOutline(x, z, 2.75);
   }
 
   /** Changes the selected point. `undefined` values clear an override (back to auto). */
@@ -278,7 +308,7 @@ export class RiverEditTool {
     }
     if (r.kind === 'lake' && r.points.length === 0) {
       this.hooks.pushUndo();
-      r.points = lakeOutline(hit.x, hit.z);
+      r.points = this.initialLakeOutline(r, hit.x, hit.z);
       this.changed(r.id);
       this.terrain.commit();
       this.unsaved = true;
@@ -465,11 +495,11 @@ function round(v: number): number {
 }
 
 /** Six points in a slightly irregular ring: a starting shape for a new lake. */
-function lakeOutline(x: number, z: number): RiverPoint[] {
+function lakeOutline(x: number, z: number, radius: number): RiverPoint[] {
   const pts: RiverPoint[] = [];
   for (let i = 0; i < 6; i++) {
     const a = (i / 6) * Math.PI * 2;
-    const r = LAKE_START_RADIUS * (i % 2 ? 0.85 : 1.1);
+    const r = radius * (i % 2 ? 0.85 : 1.1);
     pts.push({ x: round(x + Math.cos(a) * r), z: round(z + Math.sin(a) * r) });
   }
   return pts;

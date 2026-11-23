@@ -9,12 +9,17 @@ import { riverWorld } from './rivers/RiverWorld';
 import { coastRadius, fbm } from './IslandGenerator';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { BUSH_MATERIAL, TREE_MATERIAL, TreeLods, foliageMaterialOf, getTreeLods, loadTreeModels, rebuildTreeLeaves, stepTreeWind } from './TreeModels';
+import { HEDGE_HEIGHT, HEDGE_TILE, HEDGE_TYPE } from './Hedge';
+import { HEDGE_CORNERS, HEDGE_DIRECTIONS, hedgeLods, loadHedgeShapes, resetHedgeLeaves } from './HedgeModels';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
 import { BUSH_FADE_RANGE, FadeRange, TREE_FADE_RANGE, acquireDistanceDither, acquireDither, acquireInstancedDither } from './LodDither';
 import { LodInstances } from './LodInstances';
 import { withSnowCover } from './SnowCover';
 import { buildDecorRockLods } from './RockModels';
 import { FLOWER_MATERIAL, loadFlowerModels } from './FlowerModels';
+import { COUCH_GRASS_MATERIAL, loadCouchGrassModel } from './CouchGrassModel';
+import { withVertexLightingQuality } from './VertexLightingQuality';
 import { ALGAE, CHAIN_SPECIES, ChainField, ChainKind, LILY } from './AlgaeChains';
 import { WebField, WebParams, clampWeb, webPreviewGeometry } from './SpiderWebs';
 
@@ -35,21 +40,23 @@ const VIEW_DIST: Record<string, number> = {
   tree_birch: 240,
   rock_big: 200,
   bush: 130,
+  [HEDGE_TYPE]: 130,
   rock_small: 95,
   flowers: 75,
+  couch_grass: 65,
   mushrooms: 60,
 };
 /**
  * Types that dissolve (dithered, per instance) over the last this-many metres of their draw
  * distance instead of popping out cell by cell.
  */
-const FADE_BAND: Record<string, number> = { flowers: 16 };
+const FADE_BAND: Record<string, number> = { flowers: 16, couch_grass: 12 };
 /**
  * Trees and bushes (LOD types) dissolve over the last this-many metres of their draw distance: the
  * farthest LOD's list of a cell wears the distance dither while the cell reaches into the band.
  */
-const LOD_FADE_BAND: Record<string, number> = { tree_pine: 40, tree_round: 40, tree_maple: 40, tree_birch: 40, bush: 18 };
-const lodFadeRange = (type: string): FadeRange => (type === 'bush' ? BUSH_FADE_RANGE : TREE_FADE_RANGE);
+const LOD_FADE_BAND: Record<string, number> = { tree_pine: 40, tree_round: 40, tree_maple: 40, tree_birch: 40, bush: 18, [HEDGE_TYPE]: 18 };
+const lodFadeRange = (type: string): FadeRange => (type === 'bush' || type === HEDGE_TYPE ? BUSH_FADE_RANGE : TREE_FADE_RANGE);
 /**
  * Distances (from the camera, per tree) where a tree steps down to its next LOD (the trees pack
  * has 3); a few metres of hysteresis keep a tree from flickering between two levels at a boundary.
@@ -65,7 +72,7 @@ const lodDists = (type: string, out: number[]): number[] => {
   if (rock) return rock;
   if (type === 'tree_round' || type === 'tree_maple' || type === 'tree_birch') out[0] = veg.oakNearDist;
   else if (type === 'tree_pine') out[0] = veg.pineNearDist;
-  else if (type === 'bush') out[0] = veg.bushNearDist;
+  else if (type === 'bush' || type === HEDGE_TYPE) out[0] = veg.bushNearDist;
   else return LOD_DISTS;
   out[1] = Math.max(out[0] + 1, veg.treeFarDist);
   return out;
@@ -190,7 +197,7 @@ const M = {
 };
 
 const WHITE = new THREE.Color(1, 1, 1);
-const VERTEX_COLOR_MAT = new THREE.MeshLambertMaterial({ vertexColors: true });
+const VERTEX_COLOR_MAT = withVertexLightingQuality(new THREE.MeshLambertMaterial({ vertexColors: true }));
 
 /** Faceted procedural stone for the decorative rocks (built once per type, three LODs). */
 const ROCK_MATERIAL = withSnowCover(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }));
@@ -221,6 +228,9 @@ export class PropBuilder {
   }
   box(mat: THREE.Material, w: number, h: number, d: number, x = 0, y = 0, z = 0, ry = 0) {
     this.add(mat, new THREE.BoxGeometry(w, h, d), x, y, z, ry);
+  }
+  hedge(mat: THREE.Material) {
+    this.add(mat, new RoundedBoxGeometry(HEDGE_TILE, HEDGE_HEIGHT, HEDGE_TILE, 2, 0.22), 0, HEDGE_HEIGHT / 2, 0);
   }
   cyl(mat: THREE.Material, rt: number, rb: number, h: number, x = 0, y = 0, z = 0, seg = 8) {
     this.add(mat, new THREE.CylinderGeometry(rt, rb, h, seg), x, y, z);
@@ -328,6 +338,10 @@ export const PROP_DEFS: PropDef[] = [
     },
   },
   {
+    id: HEDGE_TYPE, name: 'Декоративний кущ', icon: 'Sprout', category: 'nature',
+    build: (b) => b.hedge(M.bush),
+  },
+  {
     id: 'rock_small', name: 'Камінець', icon: 'Gem', category: 'nature',
     build: (b) => {
       b.rock(M.rock, 0.35, 0, 0.18, 0);
@@ -353,6 +367,13 @@ export const PROP_DEFS: PropDef[] = [
         b.cyl(M.leaf, 0.015, 0.015, 0.3, x, 0.15, z, 4);
         b.ball(i % 2 ? M.petalPink : M.petalYellow, 0.07, x, 0.32, z, 0);
       }
+    },
+  },
+  {
+    id: 'couch_grass', name: 'Пирій повзучий', icon: 'Sprout', category: 'nature',
+    build: (b) => {
+      b.cone(M.leaf, 0.14, 0.65, -0.14, 0.325, 0);
+      b.cone(M.leaf, 0.12, 0.9, 0.12, 0.45, 0.09);
     },
   },
   {
@@ -532,6 +553,7 @@ export const MILLSTONE_SPOT = { x: -1.5, z: 13 };
 
 interface PropBatch {
   def: PropDef;
+  hedgeMask?: number;
   mesh: THREE.InstancedMesh;
   ids: number[]; // instance slot -> prop id
   cx: number;
@@ -621,8 +643,10 @@ export class PropSystem {
     this.webs.onAnchors = () => this.revision++;
     // Oak and pine come from the trees pack; until it loads (or if it fails) the procedural trees stand in
     void loadTreeModels().then((lods) => lods && this.applyTreeModels(lods));
+    void loadHedgeShapes().then(loaded => { if (loaded) this.applyHedgeModels(); });
     // Tulips from the flowers pack replace the procedural flowers (kept if the pack fails)
     void loadFlowerModels().then((clump) => clump && this.applyModel('flowers', clump, FLOWER_MATERIAL));
+    void loadCouchGrassModel().then((geometry) => geometry && this.applyModel('couch_grass', geometry, COUCH_GRASS_MATERIAL));
     if (!MOBILE) {
       // Hidden, so the load-time shader prewarm compiles the rocks' LOD crossfade program too
       const geo = getDecorRockLods('rock_big')![2].clone();
@@ -689,6 +713,21 @@ export class PropSystem {
     this.group.add(warm3);
   }
 
+  private applyHedgeModels(): void {
+    for (const batch of this.batches.values()) {
+      if (batch.hedgeMask === undefined) continue;
+      const lod = hedgeLods(batch.hedgeMask);
+      if (!lod) continue;
+      batch.lod = lod;
+      batch.mesh.geometry = lod[0];
+      batch.mesh.material = [foliageMaterialOf(HEDGE_TYPE)];
+      batch.lods?.dispose();
+      batch.lods = this.makeLods(batch);
+      batch.passX = Infinity;
+      batch.fading = false;
+    }
+  }
+
   private readonly geometries = new Map<string, { geometry: THREE.BufferGeometry; materials: THREE.Material[] }>();
   private readonly lodGeometries = new Map<string, THREE.BufferGeometry>();
   /** Frames left before an old save's forests get densified (waits for buildings' colliders). */
@@ -720,16 +759,17 @@ export class PropSystem {
     return [near, far];
   }
 
-  private getBatch(type: string, x: number, z: number): PropBatch | null {
+  private getBatch(type: string, x: number, z: number, hedgeMask = 0): PropBatch | null {
     const size = PropSystem.cellSize(type);
     const cx = Math.floor(x / size);
     const cz = Math.floor(z / size);
-    const key = `${type}|${cx}|${cz}`;
+    const key = `${type}|${cx}|${cz}` + (type === HEDGE_TYPE ? `|${hedgeMask}` : '');
     let batch = this.batches.get(key);
     if (batch) return batch;
     const def = PROP_DEF_MAP.get(type);
     if (!def) return null;
-    let shared = this.geometries.get(type);
+    const hedge = type === HEDGE_TYPE ? hedgeLods(hedgeMask) : null;
+    let shared = hedge ? { geometry: hedge[0], materials: [foliageMaterialOf(type)] } : this.geometries.get(type);
     if (!shared) {
       const models = getTreeLods()?.[type];
       if (models) shared = { geometry: models[0], materials: [foliageMaterialOf(type)] };
@@ -747,9 +787,9 @@ export class PropSystem {
     this.setCellBounds(mesh, cx, cz, size);
     this.group.add(mesh);
     batch = {
-      def, mesh, ids: [], cx, cz, size,
+      def, mesh, ids: [], cx, cz, size, hedgeMask: type === HEDGE_TYPE ? hedgeMask : undefined,
       viewDist: (VIEW_DIST[type] ?? 160) * VIEW_SCALE,
-      lod: this.getLod(type, shared.geometry),
+      lod: hedge ?? this.getLod(type, shared.geometry),
       lods: null,
       passX: Infinity,
       passZ: Infinity,
@@ -763,7 +803,7 @@ export class PropSystem {
   /** Per-tree LOD lists for a cell of a LOD type (instances re-added from its master mesh). */
   private makeLods(b: PropBatch): LodInstances | null {
     if (!b.lod) return null;
-    const materials = this.geometries.get(b.def.id)?.materials ?? (b.mesh.material as THREE.Material[]);
+    const materials = b.hedgeMask !== undefined ? [foliageMaterialOf(HEDGE_TYPE)] : this.geometries.get(b.def.id)?.materials ?? (b.mesh.material as THREE.Material[]);
     const lods = new LodInstances(this.group, b.lod, materials, b.mesh.boundingSphere!, b.mesh.name);
     for (const id of b.ids) lods.add(id, this.matrixOf(id, PropSystem._m2), this.levelFor(b, this.props.get(id)!, -1));
     // The master mesh keeps the instances (picking, chop poses) but the lists draw them
@@ -851,7 +891,7 @@ export class PropSystem {
   }
 
   /** Shows only the cells within each type's draw distance of the camera (call once per frame). */
-  public updateVisibility(camera: THREE.Vector3): void {
+  public updateVisibility(camera: THREE.Vector3, editing = false): void {
     const now = performance.now();
     const dt = this.lastVisibilityAt ? Math.min(0.1, (now - this.lastVisibilityAt) / 1000) : 0;
     this.lastVisibilityAt = now;
@@ -865,6 +905,8 @@ export class PropSystem {
       this.leafRebuildAt = 0;
       const lods = rebuildTreeLeaves();
       if (lods) this.applyTreeModels(lods);
+      resetHedgeLeaves();
+      this.applyHedgeModels();
     }
     const treeView = veg.treeViewDist * VIEW_SCALE;
     TREE_FADE_RANGE.value.set(treeView - LOD_FADE_BAND.tree_pine, treeView);
@@ -883,6 +925,15 @@ export class PropSystem {
       const d2 = dx * dx + dz * dz;
       const view = TREE_TYPES.has(b.def.id) ? treeView : b.viewDist;
       const band = FADE_BAND[b.def.id];
+      // The fly camera can place grass past its gameplay draw distance.
+      if (editing && b.def.id === 'couch_grass') {
+        b.mesh.visible = b.ids.length > 0 && d2 < 300 * 300;
+        if (b.fading) {
+          b.mesh.material = this.geometries.get(b.def.id)!.materials;
+          b.fading = false;
+        }
+        continue;
+      }
       if (band && !b.lods) {
         this.passFade(b, camera, Math.sqrt(d2), band);
         continue;
@@ -991,7 +1042,7 @@ export class PropSystem {
     const fading = Math.hypot(fx, fz) > view - band - band * 0.15 - 1;
     if (fading === b.fading) return;
     b.fading = fading;
-    const solid = this.geometries.get(b.def.id)?.materials;
+    const solid = b.hedgeMask !== undefined ? [foliageMaterialOf(HEDGE_TYPE)] : this.geometries.get(b.def.id)?.materials;
     if (!solid) return;
     const range = lodFadeRange(b.def.id);
     b.lods!.setFarMaterials(fading ? solid.map((m) => acquireDistanceDither(m, range)) : null);
@@ -1060,6 +1111,7 @@ export class PropSystem {
     this.attach(prop, batch);
     this.createBody(prop, batch.def);
     this.noteSolid(prop);
+    if (type === HEDGE_TYPE) this.refreshHedges(x, z, scale);
     this.revision++;
     return id;
   }
@@ -1078,6 +1130,7 @@ export class PropSystem {
     this.poses.delete(id);
     this.transient.delete(id);
     this.props.delete(id);
+    if (prop.type === HEDGE_TYPE) this.refreshHedges(prop.position.x, prop.position.z, prop.scale);
     this.editorHidden.delete(id);
     this.editorTopologyRevision++;
     this.revision++;
@@ -1140,10 +1193,52 @@ export class PropSystem {
     return e;
   }
 
+  private refreshHedges(x: number, z: number, scale: number): void {
+    const nearby: PropInstance[] = [];
+    const reach = HEDGE_TILE * scale + 0.03;
+    this.forEachNear(x, z, reach, prop => {
+      if (Math.abs(prop.position.x - x) <= reach && Math.abs(prop.position.z - z) <= reach) nearby.push(prop);
+    }, HEDGE_TYPE);
+    for (const prop of nearby) {
+      const batch = this.batchOf.get(prop.id)!;
+      const mask = this.hedgeMaskAt(prop.position, prop.scale, prop.rotationY);
+      if (mask === batch.hedgeMask) continue;
+      this.detach(prop.id);
+      this.attach(prop, this.getBatch(HEDGE_TYPE, prop.position.x, prop.position.z, mask)!);
+    }
+  }
+
+  public hedgeMaskAt(position: THREE.Vector3, scale = 1, yaw = 0): number {
+    if (Math.abs(Math.sin(yaw * 2)) > 0.01) return 0;
+    let mask = 0;
+    let diagonals = 0;
+    const step = HEDGE_TILE * scale;
+    const cos = Math.round(Math.cos(yaw)), sin = Math.round(Math.sin(yaw));
+    this.forEachNear(position.x, position.z, step + 0.03, prop => {
+      if (Math.abs(prop.scale - scale) > 0.01 || Math.abs(Math.sin(prop.rotationY * 2)) > 0.01 ||
+          Math.abs(prop.position.y - position.y) > 0.12) return;
+      const dx = prop.position.x - position.x, dz = prop.position.z - position.z;
+      const localX = cos * dx - sin * dz, localZ = sin * dx + cos * dz;
+      const at = (x: number, z: number) => Math.abs(localX - x * step) < 0.025 && Math.abs(localZ - z * step) < 0.025;
+      HEDGE_DIRECTIONS.forEach(([x, z], i) => {
+        if (at(x, z)) mask |= 1 << i;
+      });
+      HEDGE_CORNERS.forEach(([x, z], i) => {
+        if (at(x, z)) diagonals |= 1 << i;
+      });
+    }, HEDGE_TYPE);
+    HEDGE_CORNERS.forEach(([, , sides], i) => {
+      if ((mask & sides) === sides && !(diagonals & (1 << i))) mask |= 1 << (4 + i);
+    });
+    return mask;
+  }
+
   public setTransform(id: number, position: THREE.Vector3, rotationY: number, scale: number, tilt?: [number, number]): void {
     const prop = this.props.get(id);
     if (!prop) return;
     this.noteSolid(prop);
+    const { x: oldX, z: oldZ } = prop.position;
+    const oldScale = prop.scale;
     prop.position.copy(position);
     prop.rotationY = rotationY;
     prop.scale = scale;
@@ -1174,6 +1269,10 @@ export class PropSystem {
     if (body) this.physics.removeRigidBody(body);
     this.createBody(prop, batch.def);
     this.noteSolid(prop);
+    if (prop.type === HEDGE_TYPE) {
+      this.refreshHedges(oldX, oldZ, oldScale);
+      this.refreshHedges(position.x, position.z, scale);
+    }
     this.revision++;
   }
 
@@ -1225,7 +1324,9 @@ export class PropSystem {
   }
 
   /** Geometry to preview a type with (the editor's placement ghost); null while it loads. */
-  public previewGeometry(type: string, length?: number, web?: Partial<WebParams> | null, head?: number): THREE.BufferGeometry | null {
+  public previewGeometry(type: string, length?: number, web?: Partial<WebParams> | null, head?: number, hedgeMask = 0): THREE.BufferGeometry | null {
+    const hedge = type === HEDGE_TYPE ? hedgeLods(hedgeMask) : null;
+    if (hedge) return hedge[0];
     const def = PROP_DEF_MAP.get(type);
     if (!def) return null;
     if (def.chain) return CHAIN_SPECIES[def.chain].geometry(length ?? CHAIN_SPECIES[def.chain].cfg.defaultLinks, head);
@@ -1320,11 +1421,13 @@ export class PropSystem {
     const first = this.terrainRevision === -1;
     this.terrainRevision = this.terrain.revision;
     if (first) return;
+    const movedHedges: PropInstance[] = [];
     for (const prop of this.props.values()) {
       if (!prop.grounded) continue;
       const y = this.terrain.getHeight(prop.position.x, prop.position.z);
       if (Math.abs(y - prop.position.y) > 0.01) {
         prop.position.y = y;
+        if (prop.type === HEDGE_TYPE) movedHedges.push(prop);
         const batch = this.batchOf.get(prop.id);
         if (!batch) {
           if (PROP_DEF_MAP.get(prop.type)?.web) {
@@ -1342,6 +1445,7 @@ export class PropSystem {
         if (body) body.setTranslation({ x: prop.position.x, y: y + this.colliderOffset(batch.def), z: prop.position.z }, false);
       }
     }
+    for (const hedge of movedHedges) this.refreshHedges(hedge.position.x, hedge.position.z, hedge.scale);
   }
 
   private colliderOffset(def: PropDef): number {
@@ -1349,7 +1453,7 @@ export class PropSystem {
   }
 
   private writeMatrix(batch: PropBatch, slot: number, prop: PropInstance): void {
-    PropSystem._q.setFromAxisAngle(PropSystem._up, prop.rotationY);
+    PropSystem._q.setFromAxisAngle(PropSystem._up, batch.hedgeMask ? 0 : prop.rotationY);
     const pose = this.poses.get(prop.id);
     if (pose) PropSystem._q.premultiply(PropSystem._tilt.setFromAxisAngle(pose.axis, pose.angle));
     PropSystem._s.setScalar(this.editorHidden.has(prop.id) ? 0 : prop.scale * (pose ? Math.max(pose.scale, 1e-4) : 1));

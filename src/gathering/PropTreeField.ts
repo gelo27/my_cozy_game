@@ -14,9 +14,10 @@ import type { FallingLeaves } from '../particles/FallingLeaves';
 import { SEED_OF_TREE } from './TreeNursery';
 import { isCrownColor } from '../world/DerivedTrees';
 import { TREE_TYPES } from '../world/PropSystem';
+import { HEDGE_HEIGHT, HEDGE_TILE, HEDGE_TYPE } from '../world/Hedge';
 
 /** Placeable prop types that can be chopped with the axe. */
-const CHOPPABLE = new Set([...TREE_TYPES, 'bush']);
+const CHOPPABLE = new Set([...TREE_TYPES, 'bush', HEDGE_TYPE]);
 /** Axe hits to clear a bush; a cleared bush is gone for good (removed from the saved world). */
 const BUSH_HITS = 2;
 /** Wood a cleared bush gives (one small log flies to the player). */
@@ -26,6 +27,7 @@ const BUSH_TEAR_DELAY = 0.3;
 /** Trunk radius of a prop tree at scale 1: its collider's (the oak's trunk is much thicker than the pine's). */
 function trunkRadius(type: string): number {
   if (type === 'bush') return 0.6;
+  if (type === HEDGE_TYPE) return HEDGE_TILE / 2;
   const c = PROP_DEF_MAP.get(type)?.collider;
   return c && c.kind === 'cyl' ? c.r : 0.35;
 }
@@ -136,6 +138,7 @@ export interface PropTreeNode {
   maxHealth: number;
   /** A bush (cleared for good) rather than a tree. */
   bush?: boolean;
+  hedge?: boolean;
 }
 
 interface TreeState {
@@ -184,6 +187,7 @@ export class PropTreeField {
   public onWood: ((amount: number, at: THREE.Vector3) => void) | null = null;
   /** A felled tree's / cleared bush's seed reached the player (the engine puts it in the backpack). */
   public onSeed: ((itemId: string, amount: number) => void) | null = null;
+  public onRecoverHedge: (() => boolean) | null = null;
   /** Where the wood logs fly to (the player); without it the wood is given at once. */
   public getCollector: (() => THREE.Vector3) | null = null;
   private readonly states = new Map<number, TreeState>();
@@ -274,7 +278,7 @@ export class PropTreeField {
       const st = this.states.get(p.id);
       if (st && st.fall >= 0) return;
       if (this.dyingBushes.has(p.id)) return;
-      // Bushes only when no tree trunk is in reach (a tree is the likelier target)
+      // A wild bush yields priority to nearby trees and editable hedge sections.
       if (p.type === 'bush' && best && best.type !== 'bush') return;
       const dy = point.y - p.position.y;
       if (dy < -2 || dy > 4) return;
@@ -287,14 +291,15 @@ export class PropTreeField {
     });
     if (!best) return null;
     const found = best as PropInstance;
-    if (found.type === 'bush') {
+    if (found.type === 'bush' || found.type === HEDGE_TYPE) {
       return {
         propId: found.id,
         position: found.position.clone(),
-        radius: trunkRadius('bush') * found.scale,
+        radius: trunkRadius(found.type) * found.scale,
         health: this.bushHealth.get(found.id) ?? BUSH_HITS,
         maxHealth: BUSH_HITS,
         bush: true,
+        hedge: found.type === HEDGE_TYPE,
       };
     }
     const st = this.states.get(found.id);
@@ -338,6 +343,7 @@ export class PropTreeField {
   public hit(node: PropTreeNode, direction: THREE.Vector3, sink?: ItemSink): boolean {
     const prop = this.getProp(node.propId);
     if (!prop) return false;
+    if (prop.type === HEDGE_TYPE) return !sink && this.hitHedge(prop);
     if (sink && prop.type !== 'bush') this.sinks.set(node.propId, sink);
     else if (!sink) this.sinks.delete(node.propId);
     if (prop.type === 'bush') return this.hitBush(prop, direction);
@@ -375,6 +381,24 @@ export class PropTreeField {
     audioEngine.at(surface).playWoodChopHit(true);
     audioEngine.at(prop.position, 5).playTreeFallCreak();
     return true;
+  }
+
+  /** Recover the actual hedge section immediately so a save keeps it in exactly one place. */
+  private hitHedge(prop: PropInstance): boolean {
+    const left = (this.bushHealth.get(prop.id) ?? BUSH_HITS) - 1;
+    const recovered = left <= 0;
+    if (recovered && !this.onRecoverHedge?.()) return false;
+
+    const centre = prop.position.clone().setY(prop.position.y + HEDGE_HEIGHT * prop.scale * 0.5);
+    this.leaves?.emit(centre, HEDGE_TILE * prop.scale * 0.5, 0.45 * prop.scale, recovered ? 44 : 22, LEAF_COLOR.bush, recovered ? 2.8 : 1.8);
+    audioEngine.at(centre, 4).playBushChop(recovered);
+    if (recovered) {
+      this.bushHealth.delete(prop.id);
+      this.props.remove(prop.id);
+    } else {
+      this.bushHealth.set(prop.id, left);
+    }
+    return recovered;
   }
 
   /** A bush hit: it shakes and sheds leaves; the last hit clears it for good. */

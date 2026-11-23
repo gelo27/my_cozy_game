@@ -13,15 +13,29 @@ import type { FieldSaveData } from '../farming/FieldManager';
 import type { ExplorationSaveData } from '../explore/ExplorationManager';
 import type { OrchardSaveData } from '../gathering/AppleOrchard';
 import type { NurserySaveData } from '../gathering/TreeNursery';
-import type { WorkerSaveData } from '../npc/WorkerManager';
+import { MAX_WORKERS, type WorkerSaveData } from '../npc/WorkerManager';
 import { STORAGE_CHEST, STORAGE_CHEST_SPOT } from '../npc/FarmStorage';
 import { ROCK_TYPES } from '../gathering/GatheringConfig';
 import type { AuthoredRock } from '../gathering/RockField';
 import { PEST_KINDS, type AuthoredPest, type PestKind } from '../gameplay/Pests';
 
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
+const LEGACY_SAVE_VERSION = 2;
 const KEY_PREFIX = 'cozyfarm.save.';
 export const AUTOSAVE_SLOT = 'auto';
+
+function migrateOreId(id: string): string {
+  if (id === 'gold_nugget') return 'gold_ore';
+  if (id === 'silver_nugget') return 'silver_ore';
+  return id;
+}
+
+function mergeOreStacks(items: Record<string, number>): Record<string, number> {
+  const { gold_nugget = 0, silver_nugget = 0, ...counts } = items;
+  counts.gold_ore = (counts.gold_ore ?? 0) + gold_nugget;
+  counts.silver_ore = (counts.silver_ore ?? 0) + silver_nugget;
+  return counts;
+}
 
 export interface WorldSaveData {
   version: number;
@@ -220,7 +234,13 @@ function isExplorationSave(value: unknown): boolean {
   return isRecord(value) && typeof value.explored === 'string' &&
     isStringArray(value.discovered) && isStringArray(value.chests) &&
     isStringArray(value.recipes) && Array.isArray(value.markers) &&
-    value.markers.length <= 100_000 && value.markers.every(isRecord);
+    value.markers.length <= 100_000 && value.markers.every(isRecord) &&
+    (value.caveExcavations === undefined || (Array.isArray(value.caveExcavations) && value.caveExcavations.every(cut =>
+      isRecord(cut) && isFiniteNumber(cut.x) && isFiniteNumber(cut.y) && isFiniteNumber(cut.z) && isFiniteNumber(cut.r) && cut.r > 0))) &&
+    (value.caveNuggets === undefined || (Array.isArray(value.caveNuggets) && value.caveNuggets.every(nugget =>
+      isRecord(nugget) && isFiniteNumber(nugget.x) && isFiniteNumber(nugget.y) && isFiniteNumber(nugget.z) &&
+      (nugget.metal === 'gold' || nugget.metal === 'silver') && typeof nugget.collected === 'boolean' &&
+      Array.isArray(nugget.normal) && nugget.normal.length === 3 && nugget.normal.every(isFiniteNumber))));
 }
 
 function isWeatherDirectorSave(value: unknown): boolean {
@@ -233,7 +253,7 @@ function isWeatherDirectorSave(value: unknown): boolean {
 
 /** Runtime guard for both local saves and user-supplied world files. */
 function isWorldSaveData(value: unknown): value is WorldSaveData {
-  if (!isRecord(value) || value.version !== SAVE_VERSION ||
+  if (!isRecord(value) || (value.version !== SAVE_VERSION && value.version !== LEGACY_SAVE_VERSION) ||
       typeof value.savedAt !== 'string' || !isTerrainSave(value.terrain) ||
       !isFiniteNumber(value.waterLevel) || !isFiniteNumber(value.timeOfDay) ||
       value.timeOfDay < 0 || value.timeOfDay > 24 ||
@@ -271,7 +291,7 @@ function isWorldSaveData(value: unknown): value is WorldSaveData {
         row.slice(1).every(isFiniteNumber)))) return false;
   if (value.exploration !== undefined && !isExplorationSave(value.exploration)) return false;
   if (value.workers !== undefined &&
-      (!Array.isArray(value.workers) || value.workers.length > 10 || !value.workers.every(isWorkerSave))) return false;
+      (!Array.isArray(value.workers) || value.workers.length > MAX_WORKERS || !value.workers.every(isWorkerSave))) return false;
   if (value.authoredRocks !== undefined) {
     if (!Array.isArray(value.authoredRocks) || value.authoredRocks.length > 512) return false;
     const ids = new Set<number>();
@@ -419,8 +439,9 @@ export class SaveSystem {
     w.nursery.deserialize(data.nursery);
 
     const inv = w.inventoryManager;
+    const inventoryItems = mergeOreStacks(data.inventory.items);
     for (const item of inv.getItems()) {
-      const count = data.inventory.items[item.id];
+      const count = inventoryItems[item.id];
       if (count === undefined) continue;
       if (count > item.count) inv.addItem(item.id, count - item.count);
       else if (count < item.count) inv.removeItem(item.id, item.count - count);
@@ -430,9 +451,10 @@ export class SaveSystem {
       inv.addItem('dynamite', Math.max(0, 99 - inv.getItemCount('dynamite')));
       data.inventory.dynamiteStackGifted = true;
     }
-    if (data.inventory.equipped !== inv.getEquippedItemId()) inv.equipItem(data.inventory.equipped);
+    const equipped = data.inventory.equipped === null ? null : migrateOreId(data.inventory.equipped);
+    if (equipped !== inv.getEquippedItemId()) inv.equipItem(equipped);
     // Saves from before the hotbar keep the default tool row
-    if (data.inventory.hotbar) inv.setHotbar(data.inventory.hotbar);
+    if (data.inventory.hotbar) inv.setHotbar(data.inventory.hotbar.map(id => id === null ? null : migrateOreId(id)));
     // Saves from before the slingshot: it joins the hotbar once (if a slot is free)
     if (data.inventory.items.slingshot === undefined && !inv.isOnHotbar('slingshot')) inv.addToHotbar('slingshot');
     // Saves from before dynamite: the new starter stack joins the hotbar once (if a slot is free)
@@ -449,10 +471,16 @@ export class SaveSystem {
     if (data.moped) w.moped.place(new THREE.Vector3(...data.moped.p), data.moped.yaw);
     if (data.boat) w.boat.place(new THREE.Vector3(...data.boat.p), data.boat.yaw);
     if (data.pets?.length) w.gameplay.pets.deserialize(data.pets);
-    w.gameplay.storage?.deserialize(data.storage);
-    if (data.workers && w.gameplay.workers) w.gameplay.workers.deserialize(data.workers);
+    w.gameplay.storage?.deserialize(data.storage && mergeOreStacks(data.storage));
+    if (data.workers && w.gameplay.workers) {
+      w.gameplay.workers.deserialize(data.workers.map(worker => ({
+        ...worker, carry: worker.carry?.map(item => ({ ...item, itemId: migrateOreId(item.itemId) })),
+      })));
+    }
     w.rocks.restoreAuthored(data.authoredRocks ?? []);
-    w.gameplay.pests.restoreAuthored(data.authoredPests ?? []);
+    // Older worlds still carry enemy placements made before the map was cleared.
+    if (data.version === LEGACY_SAVE_VERSION) w.gameplay.pests.clear();
+    else w.gameplay.pests.restoreAuthored(data.authoredPests ?? []);
     this.onApplied?.();
   }
 

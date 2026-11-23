@@ -868,7 +868,7 @@ export class PestSystem {
   /** Whether the caves' colliders are all built (spider spots are checked with rays against them). */
   public caveReady: () => boolean = () => false;
   /** Natural spawning and respawning (the developer panel can switch it off to test by hand). */
-  public naturalSpawn = true;
+  public naturalSpawn = false;
   /** Bumped whenever pests come or go (the developer panel's list). */
   public revision = 0;
   private respawnTimer = 0;
@@ -1272,6 +1272,7 @@ export class PestSystem {
   public clear(): void {
     for (const p of this.pests) p.dispose();
     this.pests.length = 0;
+    this.authored.clear();
     this.revision++;
     flushSpiderLegs();
   }

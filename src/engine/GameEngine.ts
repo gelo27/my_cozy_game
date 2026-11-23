@@ -8,6 +8,7 @@ import { loadWheatModel } from '../farming/WheatModel';
 import { loadCropModels } from '../farming/CropModels';
 import { FIELD_CELLS } from '../farming/FieldManager';
 import { hitchLog } from './HitchLog';
+import { onUserSettingsChange, userSettings } from '../config/userSettings';
 import { loadTreeModels, setFoliageWeatherWind } from '../world/TreeModels';
 import { setSnowCover } from '../world/SnowCover';
 import type { Season } from '../world/Seasons';
@@ -17,6 +18,7 @@ import { InputManager } from '../input/InputManager';
 import { ParticleManager } from '../particles/ParticleManager';
 import { WaterEffects } from '../scene/WaterEffects';
 import { WaterParticleSystem } from '../particles/WaterParticleSystem';
+import { UnderwaterParticles } from '../particles/UnderwaterParticles';
 import { BuildingManager } from '../building/BuildingManager';
 import { PreviewGhostRenderer } from '../building/PreviewGhostRenderer';
 import { patchCutawayMaterials, updateCutaway } from '../building/BuildCutaway';
@@ -89,6 +91,7 @@ import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
 import { GridNavigator } from '../navigation/GridNavigator';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { NPCAgent } from '../npc/NPCAgent';
+import { npcWaterPathHeight } from '../npc/NPCWater';
 import { MAX_WORKERS, WorkerManager } from '../npc/WorkerManager';
 import { TaskBoard, WorkerRole } from '../npc/TaskBoard';
 import { FarmStorage, STORAGE_CHEST } from '../npc/FarmStorage';
@@ -99,7 +102,7 @@ import { FlowerBeds } from '../gathering/FlowerBeds';
 import { TreeNursery } from '../gathering/TreeNursery';
 import { GroundAim } from '../gathering/GroundAim';
 import { loadAppleModels } from '../world/AppleTreeModel';
-import { BushSway, FLOWER_SWAY_OPTIONS } from '../world/BushSway';
+import { BushSway, FLOWER_SWAY_OPTIONS, HEDGE_SWAY_OPTIONS } from '../world/BushSway';
 import { FallingLeaves } from '../particles/FallingLeaves';
 import { RockField } from '../gathering/RockField';
 import { GATHERING_CONFIG, ROCK_SPOTS, TREE_SPOTS } from '../gathering/GatheringConfig';
@@ -112,6 +115,7 @@ import { buildLighthousePier } from '../world/Pier';
 import { getIslandSites } from '../world/IslandSites';
 import { WildlifeSystem } from '../wildlife/WildlifeSystem';
 import { StaticShadows } from '../world/StaticShadows';
+import { updatePlayerShadow } from '../character/PlayerShadow';
 import { InteriorLighting, interiorSettings } from '../world/InteriorLighting';
 import { GrassField } from '../world/GrassField';
 import { LightningStrikes } from '../world/Lightning';
@@ -127,6 +131,7 @@ import { LightShafts } from '../world/LightShafts';
 import { RiverSystem } from '../world/rivers/RiverSystem';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { WeatherSystem } from '../world/WeatherSystem';
+import { HEDGE_TYPE } from '../world/Hedge';
 import { PropSystem, PropInstance, PROP_GLOW_MATERIALS } from '../world/PropSystem';
 import { NightLighting, installGlobalNightLights, setGroundMist } from '../world/NightLighting';
 import { SaveSystem, AUTOSAVE_SLOT } from '../world/SaveSystem';
@@ -221,6 +226,7 @@ export interface GameWorld {
   orchard: AppleOrchard;
   nursery: TreeNursery;
   bushSway: BushSway;
+  hedgeSway: BushSway;
   flowerSway: BushSway;
   fallingLeaves: FallingLeaves;
   rocks: RockField;
@@ -286,6 +292,7 @@ export class GameEngine {
   };
   /** Fake god rays while the camera is under water. */
   private lightShafts: LightShafts | null = null;
+  private underwaterParticles: UnderwaterParticles | null = null;
   private readonly footsteps = new FootstepAudio();
   private readonly mistColor = new THREE.Color();
   private readonly wheatRustle = new WheatRustle();
@@ -297,6 +304,7 @@ export class GameEngine {
   private paused = false;
   /** Draw one frame while paused (after a resize the canvas is cleared). */
   private pausedRedraw = false;
+  private readonly stopWatchingGraphicsQuality: () => void;
   /** 1 on land, fading to 0 when the player is far out at sea (no crickets there). */
   private landNear = 1;
   private portalId = '';
@@ -409,6 +417,12 @@ export class GameEngine {
     window.addEventListener('resize', this.handleResize);
     this.resizeObserver = new ResizeObserver(this.handleResize);
     this.resizeObserver.observe(container);
+    let graphicsQuality = userSettings.graphicsQuality;
+    this.stopWatchingGraphicsQuality = onUserSettingsChange(() => {
+      if (graphicsQuality === userSettings.graphicsQuality) return;
+      graphicsQuality = userSettings.graphicsQuality;
+      if (this.paused) this.pausedRedraw = true;
+    });
 
     this.init();
   }
@@ -424,9 +438,12 @@ export class GameEngine {
     window.removeEventListener('pagehide', this.handlePageHide);
     window.removeEventListener('resize', this.handleResize);
     this.resizeObserver.disconnect();
+    this.stopWatchingGraphicsQuality();
     this.input.dispose();
     this.world?.editor.dispose();
     this.world?.debugRenderer.dispose();
+    this.world?.character.swimAbility?.waterParticles?.dispose();
+    this.underwaterParticles?.dispose();
     // Cave network: GPU buffers, colliders, the generator worker if still running, its sounds
     this.world?.exploration.dispose();
     caveAudio.dispose();
@@ -518,9 +535,11 @@ export class GameEngine {
       water.setTerrain(terrain);
       setRippleCamera(this.camera.camera);
       this.lightShafts = new LightShafts(scene);
+      this.underwaterParticles = new UnderwaterParticles(scene);
       waterRippleSim.setGround((x, z) => terrain.getHeight(x, z));
       // Painted and natural basin puddles hold water too (steps and rain drops).
       waterRippleSim.setExtraWet((ox, oz, area, out) => {
+        if (terrain.puddleFill <= 0.12) return false;
         const x0 = Math.max(0, Math.floor(ox) + WORLD_HALF), x1 = Math.min(WORLD_SIZE - 1, Math.ceil(ox + area) + WORLD_HALF);
         const z0 = Math.max(0, Math.floor(oz) + WORLD_HALF), z1 = Math.min(WORLD_SIZE - 1, Math.ceil(oz + area) + WORLD_HALF);
         let any = false;
@@ -530,7 +549,7 @@ export class GameEngine {
         for (let z = z0; z <= z1; z++) {
           for (let x = x0, i = z * WORLD_SIZE + x0; x <= x1; x++, i++) {
             const wx = x - WORLD_HALF, wz = z - WORLD_HALF;
-            if (tiles[i] !== TerrainTileType.PUDDLE && (this.puddleFill < 0.12 || terrain.puddlePotentialAt(wx + 0.5, wz + 0.5) < 0.4)) continue;
+            if (!terrain.hasPuddleAt(wx + 0.5, wz + 0.5, tiles[i], 0.12)) continue;
             any = true;
             if (wx < out.minX) out.minX = wx;
             if (wz < out.minZ) out.minZ = wz;
@@ -601,6 +620,7 @@ export class GameEngine {
       propTrees.getCollector = () => character.getPosition();
       farmingManager.getCollector = () => character.getPosition();
       const bushSway = new BushSway(props);
+      const hedgeSway = new BushSway(props, HEDGE_SWAY_OPTIONS);
       propTrees.bushSway = bushSway;
       const flowerSway = new BushSway(props, FLOWER_SWAY_OPTIONS);
       // A freshly dug field clears the flowers and mushrooms standing on it
@@ -624,6 +644,12 @@ export class GameEngine {
       propTrees.onWood = (amount) => giveResources([{ itemId: 'wood', amount }]);
       // A felled tree / cleared bush drops its seed: a cone, an acorn or a cutting to plant again
       propTrees.onSeed = (itemId, amount) => giveResources([{ itemId, amount }]);
+      propTrees.onRecoverHedge = () => {
+        const item = inventoryManager.getItem(HEDGE_TYPE);
+        if (!item || item.count >= item.maxStack) return false;
+        giveResources([{ itemId: HEDGE_TYPE, amount: 1 }]);
+        return true;
+      };
       character.setGatheringSystems(forest, rocks, inventoryManager, propTrees);
       // Player-planted apple trees: not on fields, not in the caves
       const orchard = new AppleOrchard(scene, physics, terrain, particleManager);
@@ -681,13 +707,15 @@ export class GameEngine {
 
       // Villager companion: paths come from a physics-sampled grid that resets when anything is built
       // Props changing one at a time (a felled tree, a placed lamp) only forget the cells around them
-      const nav = new GridNavigator(physics, () => (buildingManager.revision * 100003 + props.solidRevision) * 7919 + terrain.revision, {
+      const nav = new GridNavigator(physics, () =>
+        `${buildingManager.revision}|${props.solidRevision}|${terrain.revision}|${riverWorld.revision}|${worldSettings.waterLevel}`, {
         cell: 0.5,
         radius: 0.28,
         height: 1.5, // the character capsule is 1.5 m tall
         maxStepUp: 0.45,
         maxDrop: 1.2,
         minFloorY: () => worldSettings.waterLevel - 0.25,
+        waterPathHeight: npcWaterPathHeight,
         doors: () => buildingManager.getDoorOpenings(),
         stairs: () => buildingManager.getStairs(),
         edits: () => props.drainNavEdits(),
@@ -748,6 +776,7 @@ export class GameEngine {
       gameplay.workers = workers;
       exploration = new ExplorationManager(scene, physics, terrain, props, rocks, inventoryManager, gameplay, weather, nightLighting, particleManager);
       character.gatheringAbility.caveNetwork = exploration.caveNetwork;
+      character.gatheringAbility.onNuggetCollected = (itemId) => callbacks.onResourcesGathered([{ itemId, amount: 1 }]);
       exploration.onNotify = (text, type) => callbacks.onNotify(text, type);
       exploration.onItems = (items) => callbacks.onResourcesGathered(items);
       const explorer = exploration;
@@ -843,6 +872,7 @@ export class GameEngine {
         orchard,
         nursery,
         bushSway,
+        hedgeSway,
         flowerSway,
         fallingLeaves,
         rocks,
@@ -886,9 +916,6 @@ export class GameEngine {
       }
       if (this.isDisposed) return;
       if (!gameplay.pets.pets.length) gameplay.pets.spawnDefaults(SPAWN_POSITION);
-      // Hedgehogs and baby dragons in the wilds, sharks in the sea, spiders in the caves (not saved:
-      // each session gets fresh ones; the cave spiders come once the network has built)
-      gameplay.pests.populate(character.getPosition());
 
       window.addEventListener('keydown', this.handleKeyDown);
       window.addEventListener('keyup', this.handleKeyUp);
@@ -1101,7 +1128,7 @@ export class GameEngine {
       const tile = feet ? this.terrainTileUnder(feet, character.groundCollider) : null;
       character.groundSpeed = tile !== null ? GROUND_SPEED[tile] ?? 1 : 1;
       // Wading through a puddle: the feet push a wake into the wave simulation
-      if (feet && this.puddleFill > 0.25 && (tile === TerrainTileType.PUDDLE || terrain.puddlePotentialAt(feet.x, feet.z) > 0.4)) {
+      if (feet && tile !== null && terrain.hasPuddleAt(feet.x, feet.z, tile)) {
         setWaterBody(feet.x, feet.z, character.telemetry.speed, 0.28);
       }
       character.update(dt, inputManager, tpCamera);
@@ -1110,10 +1137,8 @@ export class GameEngine {
       // and advance its idle/fall animation instead of leaving it at the last gameplay pose.
       character.syncEditorVisual(rawDt);
     }
-    // Splash drops, the swimmer's rising air bubbles and the caustics' clock
+    // Splash drops and the swimmer's rising air bubbles
     character.swimAbility?.waterParticles?.update(dt);
-    const camPos = this.camera.camera.position;
-    character.swimAbility?.waterEffects?.update(dt, camPos.y < riverWorld.waterLevelAt3(camPos.x, camPos.y, camPos.z));
     const buildings = character.buildAbility?.buildingManager;
     buildings?.flushPendingRegeneration();
     // Ground under roofs (greenhouses) stays dry: refresh the terrain mask when buildings change
@@ -1130,7 +1155,7 @@ export class GameEngine {
     // World systems
     terrain.update(rawDt);
     w.props.update();
-    w.props.updateVisibility(this.camera.camera.position);
+    w.props.updateVisibility(this.camera.camera.position, editing);
     const rainOnWater = w.exploration.inCave ? 0 : w.weather.rainIntensity * (1 - w.weather.snowAmount);
     w.water.update(dt, this.camera.camera.position);
     // Ripple wave simulation around the player (developer toggle; asleep when nothing stirs)
@@ -1180,6 +1205,15 @@ export class GameEngine {
       updateCutaway(dt, cutOn, tpCamera.camera.position, this.cutawayTarget, p.y - 0.75);
     }
     w.weather.update(dt, tpCamera.camera.position);
+    const camPos = tpCamera.camera.position;
+    const caveSurface = riverWorld.caveLevelAt(camPos.x, camPos.y, camPos.z);
+    const inCave = Boolean(w.exploration.inCave) || Number.isFinite(caveSurface);
+    const surfaceY = inCave ? caveSurface : riverWorld.waterLevelAt(camPos.x, camPos.z);
+    character.swimAbility?.waterEffects?.update(dt, camPos.y < surfaceY);
+    this.underwaterParticles?.update(
+      dt, tpCamera.camera, surfaceY, inCave, w.weather.nightFactor,
+      this.renderer.domElement.height,
+    );
     w.terrain.setPuddleSky(w.weather.puddleSky);
     w.water.sparkles.update(
       this.camera.camera.position,
@@ -1206,12 +1240,14 @@ export class GameEngine {
     // Bodies that part the field wheat (springs run only for stalks they touch)
     const fields = farmingManager.fields;
     const bushes = w.bushSway;
+    const hedges = w.hedgeSway;
     const flowers = w.flowerSway;
     fields.clearPushers();
     // The rustle is gathered around the player (or the ride), where the listener cares about it
     const earPos = ride ? ride.getPosition() : character.getPosition();
     fields.setRustleEar(earPos.x, earPos.z, !editing);
     bushes.clearPushers();
+    hedges.clearPushers();
     flowers.clearPushers();
     const grassField = w.grass;
     grassField.clearPushers();
@@ -1231,6 +1267,7 @@ export class GameEngine {
         const cp = character.body.translation();
         fields.addPusher(cp.x, cp.y - 0.9, cp.z, 0.8);
         bushes.addPusher(cp.x, cp.y - 0.9, cp.z, 0.4);
+        hedges.addPusher(cp.x, cp.y - 0.9, cp.z, 0.4);
         flowers.addPusher(cp.x, cp.y - 0.9, cp.z, 0.35);
         if (!isDriving) grassField.addPusher(cp.x, cp.y - 0.9, cp.z, 0.55);
         algae.addPusher(cp.x, cp.y - 0.9, cp.z, 0.35, 1.8);
@@ -1291,6 +1328,7 @@ export class GameEngine {
     setGlassNight(w.exploration.inCave ? 0 : w.weather.nightFactor);
     webs.update(dt, this.camera.camera);
     bushes.update(dt);
+    hedges.update(dt);
     flowers.update(dt);
     w.fallingLeaves.update(dt);
     const grass = w.grass;
@@ -1379,6 +1417,10 @@ export class GameEngine {
     debugRenderer.update(character);
 
     w.terrain.updateLod(tpCamera.camera.position);
+    updatePlayerShadow(
+      character.model.group.position, tpCamera.camera,
+      character.model.group.visible && !isDriving && !character.isRagdoll && (editing || !character.swimAbility.isSwimming)
+    );
     hitchLog.mark(7);
     if (this.gpuWarmupPending) {
       this.gpuWarmupPending = false;
@@ -1771,7 +1813,7 @@ export class GameEngine {
     if (w.exploration.inCave) return 'stone';
     const t = this.terrainTileUnder(p, collider);
     if (t !== null) {
-      if (this.puddleFill > 0.25 && (t === TerrainTileType.PUDDLE || w.terrain.puddlePotentialAt(p.x, p.z) > 0.4)) return 'water';
+      if (w.terrain.hasPuddleAt(p.x, p.z, t)) return 'water';
       const tile = TILE_SURFACE[t] ?? 'grass';
       // Fallen snow covers the ground once it is more than a dusting (it melts on fields and dirt tracks)
       return w.weather.snowCover > 0.35 && tile !== 'dirt' && p.y > worldSettings.waterLevel + 0.3 ? 'snow' : tile;
@@ -1784,8 +1826,11 @@ export class GameEngine {
     if (!w || this.paused || this.mode !== 'play' || !audioEngine.context) return;
     const surface = this.surfaceUnder(point, collider);
     // A step into a puddle's water: a splash ring (the wave simulation spreads it)
-    if (surface === 'water' && (this.terrainTileUnder(point, collider) === TerrainTileType.PUDDLE || w.terrain.puddlePotentialAt(point.x, point.z) > 0.4)) {
-      emitWaterRipple(point.x + (Math.random() - 0.5) * 0.25, point.z + (Math.random() - 0.5) * 0.25, Math.min(1, 0.45 + intensity * 0.35), 1.4);
+    if (surface === 'water') {
+      const tile = this.terrainTileUnder(point, collider);
+      if (tile !== null && w.terrain.hasPuddleAt(point.x, point.z, tile)) {
+        emitWaterRipple(point.x + (Math.random() - 0.5) * 0.25, point.z + (Math.random() - 0.5) * 0.25, Math.min(1, 0.45 + intensity * 0.35), 1.4);
+      }
     }
     // Rain soaks open ground: steps get a squelch layer (not under roofs, in caves or on floors)
     const weather = w.weather;

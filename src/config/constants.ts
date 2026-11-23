@@ -161,6 +161,15 @@ export const WATER_FOG_CONFIG = {
 } as const;
 
 export const WATER_PHYSICS_CONFIG = {
+  // Surface-to-bed depth in metres. Shallower rivers use their own wading thresholds.
+  WADE_DEPTH_ENTER: 0.88,
+  WADE_DEPTH_EXIT: 0.78,
+  RIVER_SWIM_DEPTH_ENTER: 0.75,
+  RIVER_SWIM_DEPTH_EXIT: 0.65,
+  // Grounded wading speed by depth, measured above the soles.
+  WADE_DRAG_START_DEPTH: 0.04,
+  WADE_DRAG_FULL_DEPTH: 0.6,
+  WADE_MIN_SPEED_RATIO: 0.55,
   SURFACE_Y: 0.0,
   SWIM_SURFACE_OFFSET: 0.03, // Resting depth of the body centre below the surface (meters): about half the body out
   SWIM_GLIDE_LIFT: 0.15, // Extra height (m) while swimming along the surface: the flat body rides with its back out

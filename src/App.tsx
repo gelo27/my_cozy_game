@@ -22,10 +22,12 @@ import { WorkersPanel } from './components/game/WorkersPanel';
 import { WorkerRadialMenu } from './components/game/WorkerRadialMenu';
 import { StoragePanel } from './components/game/StoragePanel';
 import { WorldMap } from './components/game/WorldMap';
+import { MapMarkerHUD } from './components/game/MapMarkerHUD';
 import { SavingBadge } from './components/game/SavingBadge';
 import { PauseMenu } from './components/game/PauseMenu';
 import { EditorUI } from './components/editor/EditorUI';
 import { useLang, dataName, t } from './i18n/i18n';
+import { isPreciousOreItem } from './inventory/types/InventoryTypes';
 import { uiScreens } from './ui/UiScreens';
 import { ErrorOverlay, JsonDropOverlay, LoadingOverlay, ToastPill } from './components/ViewportOverlays';
 
@@ -144,7 +146,11 @@ export default function App() {
       onGameplayPrompt: promptStore.setPlay,
       onResourcesGathered: (items) => {
         const inventory = engineRef.current?.world?.inventoryManager;
-        const text = items.map(({ itemId, amount }) => `+${amount} ${dataName('item', itemId, inventory?.getItem(itemId)?.name ?? itemId)}`).join(', ');
+        const text = items.map(({ itemId, amount }) => {
+          const item = inventory?.getItem(itemId);
+          const received = `+${amount} ${dataName('item', itemId, item?.name ?? itemId)}`;
+          return item && isPreciousOreItem(itemId) ? `${received} · ${t('gather.oreTotal', { total: item.count })}` : received;
+        }).join(', ');
         showToast({ text, type: 'success' });
       },
       onWireframeToggled: setIsWireframe,
@@ -226,7 +232,11 @@ export default function App() {
               />
             ) : (
               <>
-                <ViewportHUD isWireframe={isWireframe} hideHearts={isBuildingUI} telemetry={character?.telemetry} camera={engine?.camera ?? null} />
+                <ViewportHUD isWireframe={isWireframe} hideHearts={isBuildingUI} telemetry={character?.telemetry} camera={engine?.camera ?? null}>
+                  {engine && !isBuildingUI && !isMapOpen && !isInventoryOpen && !isPaused && !panelOpen && !hud?.inCave && (
+                    <MapMarkerHUD world={world} camera={engine.camera.camera} />
+                  )}
+                </ViewportHUD>
                 <ControlsOverlay inputManager={engine?.input ?? null} telemetry={character?.telemetry} />
 
                 <GameHUD

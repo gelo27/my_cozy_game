@@ -45,7 +45,7 @@ export async function caveCacheKey(req: CaveGenRequest): Promise<string | null> 
   try {
     let coast = 0;
     for (let i = 0; i < req.coast.length; i++) coast += req.coast[i] * (i + 1);
-    const text = caveGenSource + JSON.stringify({ seed: req.seed, entrances: req.entrances, layout: req.layout ?? null, coast });
+    const text = caveGenSource + JSON.stringify({ seed: req.seed, entrances: req.entrances, layout: req.layout ?? null, excavations: req.excavations, coast });
     const hash = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(text));
     return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
   } catch {

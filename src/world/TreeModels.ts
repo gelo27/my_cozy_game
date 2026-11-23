@@ -4,9 +4,11 @@ import { CrownLeafOptions, addCrownLeaves } from './CrownLeaves';
 import { addRingScallops } from './RingScallops';
 import { loadPineCrown, trunkWithCrown } from './PineCrownModel';
 import { injectNightLights, FOLIAGE_NIGHT_LIGHTS } from './NightLighting';
+import { withVertexLightingQuality } from './VertexLightingQuality';
 import { injectWaterline } from '../scene/WaterDetails';
 import { injectSnowCover } from './SnowCover';
 import { vegetationSettings as veg } from './VegetationSettings';
+import { HEDGE_HEIGHT, HEDGE_TILE, HEDGE_TYPE } from './Hedge';
 import { BIRCH_PAINT, BIRCH_SHAPE, MAPLE_PAINT, MAPLE_SHAPE, TreePaint, crownBrightness, paintTree, reshapeOak } from './DerivedTrees';
 
 const TREES_URL = `${import.meta.env.BASE_URL}models/trees_pack.glb`;
@@ -41,16 +43,21 @@ export const MAX_BENT_BUSHES = 8;
 /** Per bent bush: world x, z of its instance, then its top's world XZ offset. */
 // Kept on globalThis so a hot-reloaded copy of this module (Vite HMR) shares the uniforms the
 // compiled bush material already reads, instead of BushSway writing into an orphaned copy.
-const bendStore = globalThis as { __bushBend?: { value: THREE.Vector4[] }; __bushBendCount?: { value: number } };
+const bendStore = globalThis as {
+  __bushBend?: { value: THREE.Vector4[] }; __bushBendCount?: { value: number };
+  __hedgeBend?: { value: THREE.Vector4[] }; __hedgeBendCount?: { value: number };
+};
 export const uBushBend = (bendStore.__bushBend ??= { value: Array.from({ length: MAX_BENT_BUSHES }, () => new THREE.Vector4()) });
 export const uBushBendCount = (bendStore.__bushBendCount ??= { value: 0 });
+export const uHedgeBend = (bendStore.__hedgeBend ??= { value: Array.from({ length: MAX_BENT_BUSHES }, () => new THREE.Vector4()) });
+export const uHedgeBendCount = (bendStore.__hedgeBendCount ??= { value: 0 });
 
 /**
  * Foliage material: vertex colours, double-sided (the pack's crowns are open underneath, so
  * looking up from below the trunk showed straight through them) and leaf wind. The bush variant
  * also leans the few bushes something is pushing through; trees never pay for that loop.
  */
-function foliageMaterial(bend: boolean): THREE.MeshLambertMaterial {
+function foliageMaterial(bend?: 'bush' | 'hedge'): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
   mat.onBeforeCompile = (shader) => {
     injectNightLights(shader, FOLIAGE_NIGHT_LIGHTS);
@@ -72,40 +79,55 @@ uniform float uLeafWind;`;
         transformed += vec3(w, 0.35 * cos(uTreeWind * 2.9 + ph), 0.6 * w) * (uLeafWind * sway);
       }`;
     if (bend) {
-      shader.uniforms.uBushBend = uBushBend;
-      shader.uniforms.uBushBendCount = uBushBendCount;
+      const hedge = bend === 'hedge';
+      shader.uniforms.uBushBend = hedge ? uHedgeBend : uBushBend;
+      shader.uniforms.uBushBendCount = hedge ? uHedgeBendCount : uBushBendCount;
       head += `
 uniform vec4 uBushBend[${MAX_BENT_BUSHES}];
 uniform int uBushBendCount;`;
       body += `
       #ifdef USE_INSTANCING
+      {
+      mat3 im = mat3(instanceMatrix);
+      float scaleSq = dot(im[0], im[0]);
+      vec2 bendXZ = vec2(0.0);
+      ${hedge ? `
+      // Sample by the rest position of the vertex so both sections move their shared edge together.
+      vec2 restXZ = (instanceMatrix * vec4(position, 1.0)).xz;
+      float tileSize = ${HEDGE_TILE} * sqrt(scaleSq);` : ''}
       for (int i = 0; i < ${MAX_BENT_BUSHES}; i++) {
         if (i >= uBushBendCount) break;
         vec4 bb = uBushBend[i];
+        ${hedge ? `
+        vec2 weight = max(vec2(0.0), 1.0 - abs(restXZ - bb.xy) / tileSize);
+        bendXZ += bb.zw * (weight.x * weight.y);` : `
         vec2 d = instanceMatrix[3].xz - bb.xy;
         if (dot(d, d) > 0.0025) continue;
-        // World-space lean into the instance's frame (it may be rotated and scaled), more at the top
-        mat3 im = mat3(instanceMatrix);
-        vec3 lb = (transpose(im) * vec3(bb.z, 0.0, bb.w)) / dot(im[0], im[0]);
-        float k = clamp(position.y / 1.0, 0.0, 1.3);
-        k *= k;
-        transformed.xz += lb.xz * k;
-        transformed.y -= dot(lb.xz, lb.xz) * 0.5 * k;
-        break;
+        bendXZ = bb.zw;
+        break;`}
+      }
+      // World-space lean into the instance's frame, with the base fixed.
+      vec3 lb = (transpose(im) * vec3(bendXZ.x, 0.0, bendXZ.y)) / max(scaleSq, 0.000001);
+      float k = clamp(position.y / ${hedge ? HEDGE_HEIGHT : '1.0'}, 0.0, 1.3);
+      k *= k;
+      transformed.xz += lb.xz * k;
+      transformed.y -= dot(lb.xz, lb.xz) * 0.5 * k;
       }
       #endif`;
     }
     shader.vertexShader = shader.vertexShader.replace('#include <common>', head).replace('#include <begin_vertex>', body);
     injectSnowCover(shader);
   };
-  mat.customProgramCacheKey = () => (bend ? 'bush-wind-bend' : 'tree-wind');
-  return mat;
+  mat.customProgramCacheKey = () => bend ? `${bend}-wind-bend` : 'tree-wind';
+  return withVertexLightingQuality(mat);
 }
 
-export const TREE_MATERIAL = foliageMaterial(false);
-export const BUSH_MATERIAL = foliageMaterial(true);
+export const TREE_MATERIAL = foliageMaterial();
+export const BUSH_MATERIAL = foliageMaterial('bush');
+const HEDGE_MATERIAL = foliageMaterial('hedge');
 /** The material a model type draws with. */
-export const foliageMaterialOf = (type: string): THREE.Material => (type === 'bush' ? BUSH_MATERIAL : TREE_MATERIAL);
+export const foliageMaterialOf = (type: string): THREE.Material =>
+  type === HEDGE_TYPE ? HEDGE_MATERIAL : type === 'bush' ? BUSH_MATERIAL : TREE_MATERIAL;
 /** Leaf options from the vegetation panel; seeds keep every rebuild the same tree. */
 const oakLeaves = (): CrownLeafOptions => ({
   count: veg.oakCount, spacing: veg.oakSpacing, size: veg.oakSize, offset: veg.oakOffset,
@@ -127,7 +149,7 @@ const birchLeaves = (): CrownLeafOptions => ({ ...oakLeaves(), size: veg.oakSize
 /** Colours of the oak-derived trees, applied after their leaves (the oak's crown brightness as reference). */
 const PAINT: Record<string, TreePaint> = { tree_maple: MAPLE_PAINT, tree_birch: BIRCH_PAINT };
 let oakCrownBrightness = 1;
-const bushLeaves = (): CrownLeafOptions => ({
+export const bushLeaves = (): CrownLeafOptions => ({
   count: veg.bushCount, spacing: veg.bushSpacing, size: veg.bushSize, offset: veg.bushOffset,
   innerShade: veg.bushInnerShade, seed: 777, shape: 'scale', lightFrom: 'centre',
 });
@@ -248,6 +270,7 @@ function shadeCrown(g: THREE.BufferGeometry, k: number): THREE.BufferGeometry {
 }
 
 const BUSH_COLOR = new THREE.Color(0x3f8a3a);
+
 /** The bush: one slightly squashed sphere (the leaves give it its lumpy outline). */
 function bushSphere(detail: number): THREE.BufferGeometry {
   const g = new THREE.IcosahedronGeometry(0.62, detail);

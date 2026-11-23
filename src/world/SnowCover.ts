@@ -150,7 +150,7 @@ export function injectSnowCover(shader: PatchableShader): void {
 /** For a plain material with no onBeforeCompile of its own: night lights, waterline and snow. */
 export function withSnowCover<T extends THREE.Material>(mat: T): T {
   mat.onBeforeCompile = (shader) => {
-    injectNightLights(shader);
+    injectNightLights(shader, { playerShadow: true });
     injectWaterline(shader);
     injectSnowCover(shader);
   };

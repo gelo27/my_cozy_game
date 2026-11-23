@@ -16,6 +16,7 @@ export enum BuildingPieceType {
   WOOD_WALL_WINDOW_SINGLE_HUNG = 'WOOD_WALL_WINDOW_SINGLE_HUNG',
   WOOD_WALL_WINDOW_ARCH = 'WOOD_WALL_WINDOW_ARCH',
   WOOD_WALL_WINDOW_PALLADIAN = 'WOOD_WALL_WINDOW_PALLADIAN',
+  WOOD_WALL_WINDOW_BAY = 'WOOD_WALL_WINDOW_BAY',
   WOOD_WALL_WINDOW_ROUND = 'WOOD_WALL_WINDOW_ROUND',
   WOOD_WALL_DOORWAY_2X2 = 'WOOD_WALL_DOORWAY_2X2',
   WOOD_WALL_DOORWAY_1X2 = 'WOOD_WALL_DOORWAY_1X2',
@@ -202,6 +203,7 @@ export const PIECE_TRAITS: Record<BuildingPieceType, PieceTraits> = {
   [T.WOOD_WALL_WINDOW_SINGLE_HUNG]: { kind: 'window', wallSize: [1, 2] },
   [T.WOOD_WALL_WINDOW_ARCH]: { kind: 'window', wallSize: [1, 2] },
   [T.WOOD_WALL_WINDOW_PALLADIAN]: { kind: 'window', wallSize: [1, 2] },
+  [T.WOOD_WALL_WINDOW_BAY]: { kind: 'window', wallSize: [2.5, 1.5] },
   [T.WOOD_WALL_WINDOW_ROUND]: { kind: 'window', wallSize: [1, 1] },
 
   [T.WOOD_WALL_DOORWAY_2X2]: { kind: 'doorway', wallSize: [2, 2] },

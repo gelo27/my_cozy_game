@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BuiltPiece, BuildingPieceType, getWallSize, isDoorPiece, isDoorwayPiece } from '../types/BuildingTypes';
-import { WALL_THICKNESS } from '../config/BuildingConstants';
+import { BAY_EAVE_Y, WALL_THICKNESS } from '../config/BuildingConstants';
 import { MeshBuffers } from './MeshBuffers';
 import { SolvedWall, WallRow } from './WallJoints';
 import { openingContour } from '../OpeningContour';
@@ -43,6 +43,10 @@ export function findWallOpenings(wall: BuiltPiece, openingPieces: BuiltPiece[]):
     const profile = op.type === BuildingPieceType.WOOD_WALL_WINDOW_ROUND ? 'round'
       : op.type === BuildingPieceType.WOOD_WALL_WINDOW_ARCH || op.type === BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN ? 'arch' : 'rect';
     const points = openingContour(profile, ow, oh);
+    // Keep the wall behind the solid canopy, including the corners above the hips.
+    if (op.type === BuildingPieceType.WOOD_WALL_WINDOW_BAY) {
+      for (const p of points) p.y = Math.min(p.y, BAY_EAVE_Y);
+    }
     for (const p of points) { p.x += lx; p.y += op.position.y; }
     out.push({ outline: convexObstacle(points, 0, 0), piece: op });
   }
@@ -119,7 +123,7 @@ export function emitWall(b: MeshBuffers, solved: SolvedWall, openings: WallOpeni
   });
 }
 
-/** Point on the face edge a→b at wall-local x (clamped to the edge) */
+/** Point on the face edge aв†’b at wall-local x (clamped to the edge) */
 function onEdge(a: THREE.Vector2, b: THREE.Vector2, xa: number, xb: number, x: number): THREE.Vector2 {
   const span = Math.abs(xb - xa) < 1e-5 ? 1e-5 : xb - xa;
   const t = THREE.MathUtils.clamp((x - xa) / span, 0, 1);

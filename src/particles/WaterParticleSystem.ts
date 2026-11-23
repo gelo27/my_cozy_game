@@ -1,6 +1,7 @@
 import { worldSettings } from '../world/WorldSettings';
 import * as THREE from 'three';
 import { WATER_EFFECTS_CONFIG, WATER_PHYSICS_CONFIG } from '../config/constants';
+import { WaterEntrySplash } from './WaterEntrySplash';
 
 interface SplashParticle {
   position: THREE.Vector3;
@@ -11,6 +12,7 @@ interface SplashParticle {
   life: number;
   active: boolean;
   color: THREE.Color;
+  surfaceY: number;
 }
 
 interface PlayerSpriteBubble {
@@ -37,6 +39,7 @@ export class WaterParticleSystem {
   private splashParticles: SplashParticle[] = [];
   private splashInstancedMesh: THREE.InstancedMesh;
   private maxSplash = WATER_EFFECTS_CONFIG.MAX_SPLASH_PARTICLES;
+  private readonly entrySplash: WaterEntrySplash;
 
   // 2. 2D Sprite Underwater Bubbles (Spawned from player head)
   private bubbleSprites: PlayerSpriteBubble[] = [];
@@ -51,10 +54,11 @@ export class WaterParticleSystem {
     this.group = new THREE.Group();
     this.group.name = 'WaterParticleSystem';
     scene.add(this.group);
+    this.entrySplash = new WaterEntrySplash(this.group);
 
     // Splash Mesh Setup (Small 3D spheres)
     const splashGeo = new THREE.SphereGeometry(1.0, 6, 6);
-    const splashMat = new THREE.MeshBasicMaterial({
+    const splashMat = new THREE.MeshLambertMaterial({
       color: 0xffffff,
       transparent: true,
       opacity: 1.0,
@@ -81,6 +85,7 @@ export class WaterParticleSystem {
         life: 0,
         active: false,
         color: new THREE.Color(this.splashColor),
+        surfaceY: 0,
       });
     }
 
@@ -188,6 +193,14 @@ export class WaterParticleSystem {
     return texture;
   }
 
+  /** Player impact: the graphic splash handles the silhouette, with spray around its rim. */
+  public emitEntrySplash(surface: THREE.Vector3, impactSpeed: number): void {
+    if (!Number.isFinite(impactSpeed) || impactSpeed < WATER_PHYSICS_CONFIG.ENTRY_SPLASH_VELOCITY_MIN) return;
+    const strength = THREE.MathUtils.smoothstep(impactSpeed, WATER_PHYSICS_CONFIG.ENTRY_SPLASH_VELOCITY_MIN, 17);
+    this.entrySplash.emit(surface, strength);
+    this.emitWaterSplash(surface, Math.max(2.6, impactSpeed * 0.65));
+  }
+
   /**
    * Spawns a multi-droplet vertical splash fountain & radial crown when hitting water from height
    */
@@ -196,7 +209,7 @@ export class WaterParticleSystem {
 
     const intensity = Math.min(Math.abs(impactSpeed) / 8.0, 2.5);
     const count = Math.min(36, Math.round(14 * Math.max(0.6, intensity)));
-    const surfaceY = worldSettings.waterLevel;
+    const surfaceY = position.y;
 
     // 1. Upward fountain central burst
     const centralCount = Math.round(count * 0.45);
@@ -214,7 +227,7 @@ export class WaterParticleSystem {
       const lifetime = 0.45 + Math.random() * 0.35;
       const scale = (0.12 + Math.random() * 0.12) * Math.min(1.6, intensity);
 
-      this.spawnSplashParticle(x, y, z, vx, vy, vz, scale, lifetime, this.splashColor);
+      this.spawnSplashParticle(x, y, z, vx, vy, vz, scale, lifetime, surfaceY);
     }
 
     // 2. Expanding radial spray crown
@@ -233,7 +246,7 @@ export class WaterParticleSystem {
       const lifetime = 0.35 + Math.random() * 0.3;
       const scale = (0.09 + Math.random() * 0.08) * Math.min(1.4, intensity);
 
-      this.spawnSplashParticle(x, y, z, vx, vy, vz, scale, lifetime, this.splashColor);
+      this.spawnSplashParticle(x, y, z, vx, vy, vz, scale, lifetime, surfaceY);
     }
   }
 
@@ -246,7 +259,7 @@ export class WaterParticleSystem {
     vz: number,
     scale: number,
     lifetime: number,
-    color: THREE.Color
+    surfaceY: number
   ): void {
     let p = this.splashParticles.find((item) => !item.active);
     if (!p) {
@@ -268,7 +281,7 @@ export class WaterParticleSystem {
     p.maxLife = lifetime;
     p.life = lifetime;
     p.active = true;
-    p.color.copy(color);
+    p.surfaceY = surfaceY;
   }
 
   /**
@@ -332,6 +345,7 @@ export class WaterParticleSystem {
    * Update particle simulation loops
    */
   public update(dt: number): void {
+    this.entrySplash.update(dt);
     // 1. Update Splash Particles (Gravity curve: g = -14.0 m/s^2)
     let activeSplash = 0;
     const gravityY = -14.0;
@@ -352,7 +366,7 @@ export class WaterParticleSystem {
       p.position.z += p.velocity.z * dt;
 
       // Shrink / pop upon reaching surface on way down
-      if (p.position.y < worldSettings.waterLevel - 0.1 && p.velocity.y < 0) {
+      if (p.position.y < p.surfaceY - 0.1 && p.velocity.y < 0) {
         p.active = false;
         continue;
       }
@@ -426,6 +440,7 @@ export class WaterParticleSystem {
   }
 
   public dispose(): void {
+    this.entrySplash.dispose();
     if (this.splashInstancedMesh) {
       this.splashInstancedMesh.geometry.dispose();
       (this.splashInstancedMesh.material as THREE.Material).dispose();
@@ -442,5 +457,6 @@ export class WaterParticleSystem {
       this.group.remove(b.sprite);
     }
     this.bubbleSprites = [];
+    this.group.removeFromParent();
   }
 }

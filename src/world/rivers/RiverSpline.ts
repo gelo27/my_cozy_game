@@ -71,7 +71,12 @@ export function sampleRiver(
   sea: number,
   near?: (x: number, z: number) => WaterNear | null
 ): SampledRiver {
-  const pts = def.points;
+  const first = def.points[0];
+  const last = def.points.at(-1);
+  const reversed = !!(def.fitTerrain && first && last &&
+    !def.points.some(p => p.y !== undefined || p.fall) &&
+    groundAt(last.x, last.z) > groundAt(first.x, first.z) + 0.25);
+  const pts = reversed ? def.points.slice().reverse() : def.points;
   const samples: RiverSample[] = [];
   const pointSample: number[] = [];
   const out: SampledRiver = { def, samples, pointSample, falls: [], minX: Infinity, minZ: Infinity, maxX: -Infinity, maxZ: -Infinity };
@@ -165,8 +170,12 @@ export function sampleRiver(
     const q = samples[k];
     // The lowest of the centre and both sides, so the water never floats above a bank
     const nx = -q.tz * q.hw * 0.6, nz = q.tx * q.hw * 0.6;
-    const ground = Math.min(groundAt(q.x, q.z), groundAt(q.x + nx, q.z + nz), groundAt(q.x - nx, q.z - nz));
-    let v = ground - SURFACE_BELOW_GROUND;
+    const centre = groundAt(q.x, q.z);
+    const low = Math.min(centre, groundAt(q.x + nx, q.z + nz), groundAt(q.x - nx, q.z - nz));
+    // A steep bank beside the centreline should not drag the entire fitted channel into a gorge.
+    const ground = def.fitTerrain ? Math.max(low, centre - 0.35) : low;
+    const clearance = def.fitTerrain ? Math.min(SURFACE_BELOW_GROUND, q.depth * 0.4) : SURFACE_BELOW_GROUND;
+    let v = ground - clearance;
     const pinned = pin.get(k);
     if (pinned !== undefined) v = pinned;
     if (k > 0) {
@@ -308,6 +317,7 @@ export function sampleRiver(
     out.minZ = Math.min(out.minZ, q.z - r);
     out.maxZ = Math.max(out.maxZ, q.z + r);
   }
+  if (reversed) pointSample.reverse();
   return out;
 }
 
@@ -345,7 +355,8 @@ export function sampleLake(def: RiverDef, groundAt: (x: number, z: number) => nu
   }
   let low = Infinity;
   for (const q of samples) low = Math.min(low, groundAt(q.x, q.z));
-  const level = Math.max(sea + 0.03, def.level ?? low - SURFACE_BELOW_GROUND);
+  const clearance = def.fitTerrain ? Math.min(0.2, def.depth * 0.4) : SURFACE_BELOW_GROUND;
+  const level = Math.max(sea + 0.03, def.level ?? low - clearance);
   const S = samples.length;
   for (let k = 0; k < S; k++) {
     const q = samples[k];

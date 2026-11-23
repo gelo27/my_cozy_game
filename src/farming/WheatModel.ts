@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { injectNightLights, FOLIAGE_NIGHT_LIGHTS } from '../world/NightLighting';
 import { injectPickGlow } from '../world/PickGlow';
+import { withVertexLightingQuality } from '../world/VertexLightingQuality';
 import { CropStage } from './types/FarmingTypes';
 
 const WHEAT_URL = `${import.meta.env.BASE_URL}models/wheat.glb`;
@@ -58,7 +59,7 @@ export function createFieldCropMaterial(sway: number, height: number): THREE.Mes
     injectPickGlow(shader, 'area');
   };
   mat.customProgramCacheKey = () => 'field-crop-sway-glow2';
-  return mat;
+  return withVertexLightingQuality(mat);
 }
 
 /** The field wheat's material (instanced, springy). */

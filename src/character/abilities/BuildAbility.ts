@@ -29,6 +29,7 @@ const PIECE_TYPES_ORDER: BuildingPieceType[] = [
   BuildingPieceType.WOOD_WALL_WINDOW_SINGLE_HUNG,
   BuildingPieceType.WOOD_WALL_WINDOW_ARCH,
   BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN,
+  BuildingPieceType.WOOD_WALL_WINDOW_BAY,
   BuildingPieceType.WOOD_WALL_WINDOW_ROUND,
   BuildingPieceType.WOOD_STAIRS_2X2,
   BuildingPieceType.ROOF_GABLE_2X2,

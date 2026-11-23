@@ -37,7 +37,7 @@ const NOISE_GLSL = `
 export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
   mat.onBeforeCompile = (shader) => {
-    injectNightLights(shader);
+    injectNightLights(shader, { playerShadow: true });
     Object.assign(shader.uniforms, caveUniforms, causticsUniforms);
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -45,8 +45,9 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
         `#include <common>
         attribute vec4 caveData;
         attribute float caveWet;
+        attribute float caveFracture;
         varying vec4 vCave;
-        varying float vWet;
+        varying vec2 vCaveSurface;
         varying vec3 vCavePos;
         varying vec3 vCaveWorld;
         varying vec3 vCaveNrm;`
@@ -60,7 +61,7 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
         '#include <begin_vertex>',
         `#include <begin_vertex>
         vCave = caveData;
-        vWet = caveWet;
+        vCaveSurface = vec2(caveWet, caveFracture);
         vCavePos = position;
         vCaveNrm = normal;`
       );
@@ -72,7 +73,7 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
         uniform vec3 uDigPoint;
         uniform float uDigGlow;
         varying vec4 vCave;
-        varying float vWet;
+        varying vec2 vCaveSurface;
         varying vec3 vCavePos;
         varying vec3 vCaveWorld;
         varying vec3 vCaveNrm;
@@ -89,6 +90,7 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
         float detail = 1.0 - smoothstep(14.0, 38.0, dist);
         float grain = cNoise(cp * 2.3) * 0.5 + cNoise(cp * 7.1) * 0.5 * detail;
         float big = cNoise(cp * 0.21 + 3.7);
+        float fracture = smoothstep(0.12, 0.76, vCaveSurface.y + (grain - 0.35) * 0.14);
         vec3 bw = vCave.rgb / max(vCave.r + vCave.g + vCave.b, 0.001);
         vec3 albedo = vec3(0.0);
         vec3 glow = vec3(0.0);
@@ -101,7 +103,7 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
           float mossN = cNoise(cp * 0.9 + 11.0) * 0.7 + grain * 0.3;
           float moss = smoothstep(0.15, 0.6, up + (mossN - 0.5) * 0.9);
           vec3 mossC = mix(vec3(0.16, 0.32, 0.10), vec3(0.30, 0.48, 0.16), mossN);
-          albedo += mix(lime, mossC, moss) * (0.85 + grain * 0.3) * bw.x;
+          albedo += mix(lime, mossC, moss * (1.0 - fracture * 0.92)) * (0.85 + grain * 0.3) * bw.x;
         }
         if (bw.y > 0.01) {
           // Crystal caverns
@@ -129,8 +131,15 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
           albedo *= 1.0 - smoothstep(0.93, 0.99, ridge) * gate * 0.6 * bw.z; // scorched rim
           glow += vec3(0.9, 0.28, 0.05) * crack * pulse * 0.9 * bw.z;
         }
+        if (vCaveSurface.y > 0.02) {
+          // Expose the same bedrock, keeping its strata and grain continuous across the cut.
+          float rim = smoothstep(0.06, 0.32, vCaveSurface.y) * (1.0 - smoothstep(0.32, 0.68, vCaveSurface.y));
+          albedo *= 1.0 + fracture * (0.23 + grain * 0.16) - rim * 0.18;
+          glow = glow * (1.0 - fracture * 0.45) + albedo * fracture * 0.028;
+        }
         // Near and under the water (see CaveGen WET_*): a dark wet band at the shore, then a blue-green
         // tint deepening with depth and moving caustics on what faces up
+        float vWet = vCaveSurface.x;
         if (vWet > 0.002) {
           float depth = (vWet * 255.0 - 1.0) / 254.0 * ${WET_RANGE.toFixed(1)} - ${WET_ABOVE.toFixed(2)};
           float shore = 1.0 - smoothstep(0.0, ${WET_ABOVE.toFixed(2)}, -depth);
@@ -159,7 +168,7 @@ export function createCaveRockMaterial(): THREE.MeshLambertMaterial {
         totalEmissiveRadiance += glow + vec3(0.08, 1.0, 0.22) * digMark * uDigGlow;`
       );
   };
-  mat.customProgramCacheKey = () => 'cave-rock-v6';
+  mat.customProgramCacheKey = () => 'cave-rock-v8';
   return mat;
 }
 

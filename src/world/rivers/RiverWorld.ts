@@ -39,6 +39,7 @@ class RiverWorld {
   public defs: RiverDef[];
   /** Natural heights (no rivers), metres, set by the terrain on first generation. */
   private natural: Float32Array | null = null;
+  private placementGround: ((x: number, z: number) => number) | null = null;
   private readonly sampled = new Map<string, SampledRiver>();
   /** Water surface where a river holds water, NaN elsewhere. */
   public readonly surface = new Float32Array(V * V).fill(NaN);
@@ -139,11 +140,11 @@ class RiverWorld {
     if (!s || s.def !== def) {
       this.computing.add(id);
       try {
-        const ground = (x: number, z: number) => this.naturalAt(x, z);
+        const ground = (def.fitTerrain && this.placementGround) || ((x: number, z: number) => this.naturalAt(x, z));
         s =
           def.kind === 'lake'
             ? sampleLake(def, ground, worldSettings.waterLevel)
-            : sampleRiver(def, ground, worldSettings.waterLevel, (x, z) => this.waterNear(x, z, id));
+            : sampleRiver(def, ground, worldSettings.waterLevel, (x, z) => this.waterNear(x, z, def));
       } finally {
         this.computing.delete(id);
       }
@@ -160,15 +161,19 @@ class RiverWorld {
    * distance to its edge (negative inside). Lakes never depend on rivers, so they are always safe
    * to ask; a river being sampled is skipped (a branch asks its parent, not the other way round).
    */
-  private waterNear(x: number, z: number, self: string): WaterNear | null {
+  private waterNear(x: number, z: number, self: RiverDef): WaterNear | null {
     let best: WaterNear | null = null;
+    const ground = self.fitTerrain ? this.placementGround?.(x, z) : undefined;
+    const sameElevation = (y: number) => ground === undefined || Math.abs(y - ground) < 3;
     for (const d of this.defs) {
-      if (d.id === self || this.computing.has(d.id)) continue;
+      if (d.id === self.id || this.computing.has(d.id) || (!self.fitTerrain && d.fitTerrain)) continue;
       const o = this.get(d.id);
       if (!o || x < o.minX || x > o.maxX || z < o.minZ || z > o.maxZ) continue;
       if (o.lake) {
         const edge = lakeEdgeDistance(o.lake.xs, o.lake.zs, x, z);
-        if (!best || edge < best.edge) best = { id: d.id, s: o.lake.level, edge, hw: 50, lake: true };
+        if (sameElevation(o.lake.level) && (!best || edge < best.edge)) {
+          best = { id: d.id, s: o.lake.level, edge, hw: 50, lake: true };
+        }
         continue;
       }
       if (o.samples.length < 2 || d.kind === 'lake') continue;
@@ -184,7 +189,7 @@ class RiverWorld {
           bk = k;
         }
       }
-      if (bk >= 0 && (!best || bd < best.edge)) best = { id: d.id, s: S[bk].s, edge: bd, hw: S[bk].hw, lake: false };
+      if (bk >= 0 && sameElevation(S[bk].s) && (!best || bd < best.edge)) best = { id: d.id, s: S[bk].s, edge: bd, hw: S[bk].hw, lake: false };
     }
     return best;
   }
@@ -201,6 +206,25 @@ class RiverWorld {
   public setNatural(heights: Float32Array): void {
     this.natural = heights;
     this.sampled.clear();
+  }
+
+  public setPlacementGround(ground: (x: number, z: number) => number): void {
+    this.placementGround = ground;
+    this.invalidateTerrainProfiles();
+  }
+
+  public invalidateTerrainProfiles(ids?: readonly string[]): void {
+    for (const d of this.defs) {
+      if (d.fitTerrain && (!ids || ids.includes(d.id))) this.sampled.delete(d.id);
+    }
+  }
+
+  public terrainRiverRegion(): GridRect | null {
+    let rect: GridRect | null = null;
+    for (const d of this.defs) {
+      if (d.fitTerrain) rect = unionRect(rect, this.rectOf(this.get(d.id)!));
+    }
+    return rect;
   }
 
   /** Re-samples one river after its def changed; returns the terrain area to regenerate. */
@@ -276,7 +300,7 @@ class RiverWorld {
   // ---------------------------------------------------------------- carving
 
   /**
-   * Generated heights (metres) for a rectangle of vertices: natural terrain with every river
+   * Generated heights (metres) for a rectangle of vertices: natural terrain with built-in waterways
    * carved in. Also rewrites the water surface grid and shader data inside the rectangle.
    * Rivers apply in order; where one meets another's water it only ever cuts, never builds a
    * levee across it, so confluences stay open.
@@ -295,8 +319,27 @@ class RiverWorld {
     }
     const wet = new Uint8Array(w * h);
     const shadeW = new Float32Array(w * h);
-    // Lakes first: rivers then only cut into their water, never build levees across it
-    const all = this.all();
+    this.carve(rect, out, wet, shadeW, false);
+    return out;
+  }
+
+  /** Carve terrain-fit waterways into the current uncarved surface after the generated pass. */
+  public carveTerrainRegion(rect: GridRect, out: Float32Array): void {
+    const w = rect.x1 - rect.x0 + 1;
+    const wet = new Uint8Array(out.length);
+    const shadeW = new Float32Array(out.length);
+    for (let z = rect.z0; z <= rect.z1; z++) for (let x = rect.x0; x <= rect.x1; x++) {
+      const local = (z - rect.z0) * w + x - rect.x0;
+      const vertex = z * V + x;
+      wet[local] = Number.isNaN(this.surface[vertex]) ? 0 : 1;
+      shadeW[local] = THREE.DataUtils.fromHalfFloat(this.shadeData[vertex * 4 + 1]);
+    }
+    this.carve(rect, out, wet, shadeW, true);
+  }
+
+  private carve(rect: GridRect, out: Float32Array, wet: Uint8Array, shadeW: Float32Array, fitTerrain: boolean): void {
+    // Lakes first so rivers open onto their water.
+    const all = this.defs.filter(d => !!d.fitTerrain === fitTerrain).map(d => this.get(d.id)!);
     for (const pass of [true, false]) {
       for (const river of all) {
         if (!!river.lake !== pass) continue;
@@ -309,13 +352,14 @@ class RiverWorld {
     this.texture.needsUpdate = true;
     this.estuary.needsUpdate = true;
     this.revision++;
-    return out;
   }
 
   private carveRiver(river: SampledRiver, out: Float32Array, rect: GridRect, wet: Uint8Array, shadeW: Float32Array): void {
     const S = river.samples;
     const r = this.rectOf(river)!;
-    const levees = river.def.levees !== false;
+    const fitTerrain = !!river.def.fitTerrain;
+    const levees = river.def.levees ?? !fitTerrain;
+    const bank = fitTerrain ? 4 : BANK;
     const sea = worldSettings.waterLevel;
     const bx0 = Math.max(rect.x0, r.x0), bz0 = Math.max(rect.z0, r.z0);
     const bx1 = Math.min(rect.x1, r.x1), bz1 = Math.min(rect.z1, r.z1);
@@ -327,7 +371,7 @@ class RiverWorld {
     // Nearest centre-line segment for every vertex near the river
     for (let k = 0; k < S.length - 1; k++) {
       const a = S[k], b = S[k + 1];
-      const R = Math.max(a.hw, b.hw) + BANK;
+      const R = Math.max(a.hw, b.hw) + bank;
       const cx0 = Math.max(bx0, Math.floor(Math.min(a.x, b.x) - R + WORLD_HALF));
       const cx1 = Math.min(bx1, Math.ceil(Math.max(a.x, b.x) + R + WORLD_HALF));
       const cz0 = Math.max(bz0, Math.floor(Math.min(a.z, b.z) - R + WORLD_HALF));
@@ -365,7 +409,7 @@ class RiverWorld {
         // Estuary weight: 0 upstream, 1 at the shoreline and beyond
         const mouth = a.mouth + (b.mouth - a.mouth) * t;
         const e = Math.min(1, mouth);
-        const R = hw + BANK;
+        const R = hw + bank;
         if (d > R + 6) continue;
         const i = (iz - rect.z0) * ow + ix - rect.x0;
         const g = iz * V + ix;
@@ -419,7 +463,7 @@ class RiverWorld {
             // Rounded channel bed, deepest in the middle
             const q = d / hw;
             y = s - dep * (1 - q * q) - 0.02;
-            if (wet[i]) y = Math.min(y, cur);
+            if (wet[i] || fitTerrain) y = Math.min(y, cur);
             // At the mouth the bed only ever deepens: it never builds up the sea floor
             if (cur < y) y += (cur - y) * e;
           } else {
@@ -430,8 +474,8 @@ class RiverWorld {
             const cut = s + x * 0.6 * (1 - 0.65 * e) + Math.max(0, x - 4) ** 2 * 0.15 * (1 - 0.7 * e);
             const raise = levees && !wet[i] && cur > sea - 0.05 && e < 1;
             const levee = s + 0.25 * (1 - e) - Math.max(0, x - 1.5) * 0.5;
-            y = Math.min(raise ? Math.max(cur, levee) : cur, cut);
-            y += (cur - y) * smoothstep(d, R - 3, R);
+            y = Math.min(raise ? Math.max(cur, fitTerrain ? Math.min(levee, cur + 0.35) : levee) : cur, cut);
+            y += (cur - y) * smoothstep(d, fitTerrain ? hw : R - 3, R);
           }
           out[i] = y;
           if (d <= hw + 0.9) {
@@ -474,7 +518,9 @@ class RiverWorld {
     const r = this.rectOf(lake)!;
     const level = L.level;
     const depth = lake.def.depth;
-    const levees = lake.def.levees !== false;
+    const fitTerrain = !!lake.def.fitTerrain;
+    const levees = lake.def.levees ?? !fitTerrain;
+    const bank = fitTerrain ? 4 : BANK;
     const sea = worldSettings.waterLevel;
     const xs = L.xs, zs = L.zs, n = xs.length;
     const bx0 = Math.max(rect.x0, r.x0), bz0 = Math.max(rect.z0, r.z0);
@@ -482,7 +528,7 @@ class RiverWorld {
     if (bx1 < bx0 || bz1 < bz0) return;
     const bw = bx1 - bx0 + 1, bh = bz1 - bz0 + 1;
     const bestD = new Float32Array(bw * bh).fill(Infinity);
-    const R = BANK + 1;
+    const R = bank + 1;
     for (let i = 0; i < n; i++) {
       const ax = xs[i], az = zs[i], bx = xs[(i + 1) % n], bz = zs[(i + 1) % n];
       const cx0 = Math.max(bx0, Math.floor(Math.min(ax, bx) - R + WORLD_HALF));
@@ -539,8 +585,8 @@ class RiverWorld {
           const cut = level + 0.12 + x * 0.5 + Math.max(0, x - 4) ** 2 * 0.12;
           const raise = levees && !wet[i] && cur > sea - 0.05;
           const levee = level + 0.25 - Math.max(0, x - 1.5) * 0.5;
-          y = Math.min(raise ? Math.max(cur, levee) : cur, cut);
-          y += (cur - y) * smoothstep(x, BANK - 3, BANK);
+          y = Math.min(raise ? Math.max(cur, fitTerrain ? Math.min(levee, cur + 0.35) : levee) : cur, cut);
+          y += (cur - y) * smoothstep(x, fitTerrain ? 0 : bank - 3, bank);
         }
         out[i] = y;
         if (sd <= 0.9) {
@@ -585,6 +631,6 @@ export function stringifyRivers(defs: RiverDef[]): string {
     return JSON.stringify(o);
   };
   const river = (d: RiverDef) =>
-    `  {\n    "id": ${JSON.stringify(d.id)},\n    "name": ${JSON.stringify(d.name)},\n${d.kind ? `    "kind": ${JSON.stringify(d.kind)},\n` : ''}${d.level !== undefined ? `    "level": ${round(d.level)},\n` : ''}    "width": ${round(d.width)},\n    "depth": ${round(d.depth)},${d.levees === false ? '\n    "levees": false,' : ''}\n    "points": [\n${d.points.map((p) => `      ${point(p)}`).join(',\n')}\n    ]\n  }`;
+    `  {\n    "id": ${JSON.stringify(d.id)},\n    "name": ${JSON.stringify(d.name)},\n${d.kind ? `    "kind": ${JSON.stringify(d.kind)},\n` : ''}${d.level !== undefined ? `    "level": ${round(d.level)},\n` : ''}${d.fitTerrain ? `    "fitTerrain": true,\n` : ''}    "width": ${round(d.width)},\n    "depth": ${round(d.depth)},${d.levees === undefined ? '' : `\n    "levees": ${d.levees},`}\n    "points": [\n${d.points.map((p) => `      ${point(p)}`).join(',\n')}\n    ]\n  }`;
   return defs.length ? `[\n${defs.map(river).join(',\n')}\n]\n` : '[]\n';
 }

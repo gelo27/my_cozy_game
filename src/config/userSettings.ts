@@ -2,6 +2,8 @@
  * Player preferences from the pause menu (volumes, mouse), kept in localStorage.
  * Systems read the live object; `onUserSettingsChange` notifies them after every edit.
  */
+export type GraphicsQuality = 'standard' | 'performance';
+
 export interface UserSettings {
   /** 0..1 */
   master: number;
@@ -14,6 +16,7 @@ export interface UserSettings {
   /** Multiplier of the default mouse / touch look speed. */
   sensitivity: number;
   invertY: boolean;
+  graphicsQuality: GraphicsQuality;
 }
 
 const DEFAULTS: UserSettings = {
@@ -24,6 +27,7 @@ const DEFAULTS: UserSettings = {
   musicOn: true,
   sensitivity: 1,
   invertY: false,
+  graphicsQuality: 'standard',
 };
 
 const STORAGE_KEY = 'farm-user-settings';
@@ -36,6 +40,10 @@ function load(): UserSettings {
     const data = JSON.parse(raw) as Partial<Record<keyof UserSettings, unknown>>;
     for (const k of Object.keys(DEFAULTS) as (keyof UserSettings)[]) {
       const v = data[k];
+      if (k === 'graphicsQuality') {
+        if (v === 'standard' || v === 'performance') s.graphicsQuality = v;
+        continue;
+      }
       if (typeof v === typeof DEFAULTS[k] && (typeof v !== 'number' || Number.isFinite(v))) (s as Record<string, unknown>)[k] = v;
     }
   } catch { /* storage unavailable or corrupt: defaults */ }

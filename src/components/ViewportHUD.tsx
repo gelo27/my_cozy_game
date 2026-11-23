@@ -6,6 +6,7 @@ import { ZeldaOxygenWheel } from './ZeldaOxygenWheel';
 import { PlayerHearts } from './PlayerHearts';
 
 interface ViewportHUDProps {
+  children?: React.ReactNode;
   isWireframe: boolean;
   telemetry?: CharacterTelemetry;
   camera?: ThirdPersonCamera | null;
@@ -83,8 +84,9 @@ const AimReticle: React.FC<{ telemetry?: CharacterTelemetry }> = ({ telemetry })
   );
 };
 
-export const ViewportHUD: React.FC<ViewportHUDProps> = ({ telemetry, camera, hideHearts }) => (
+export const ViewportHUD: React.FC<ViewportHUDProps> = ({ telemetry, camera, hideHearts, children }) => (
   <div id="viewport-tactical-hud" className="absolute inset-0 pointer-events-none select-none z-20 overflow-hidden">
+    {children}
     <AimReticle telemetry={telemetry} />
     {!hideHearts && <PlayerHearts />}
     <ZeldaOxygenWheel telemetry={telemetry} camera={camera} />

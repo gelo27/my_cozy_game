@@ -1,13 +1,14 @@
 import { injectNightLights } from './NightLighting';
+import { withVertexLightingQuality } from './VertexLightingQuality';
 import { updateSnowMask } from './SnowCover';
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
-import { TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/types/TerrainTypes';
+import { GRASSY_TILES, TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/types/TerrainTypes';
 import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
 import { coastRadius, islandHeight } from './IslandGenerator';
-import { riverWorld, GridRect } from './rivers/RiverWorld';
+import { riverWorld, unionRect, GridRect } from './rivers/RiverWorld';
 import { causticsUniforms, CAUSTICS_GLSL } from '../scene/WaterEffects';
 import { rippleSimUniforms } from '../scene/WaterRippleSim';
 import { TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
@@ -18,6 +19,8 @@ const CHUNK = 64; // metres per render + physics chunk -> 8x8; fits the 512 m ma
 const CHUNKS = N / CHUNK;
 export const TERRAIN_CHUNK = CHUNK;
 export const TERRAIN_CHUNKS = CHUNKS;
+/** Ground this close to a water surface belongs to the shoreline, not a rain puddle (m). */
+export const PUDDLE_SHORE_CLEARANCE = 0.04;
 /** Vertex step per LOD level (1 m, 2 m, 4 m, 8 m). */
 const LOD_STEPS = [1, 2, 4, 8];
 /**
@@ -114,6 +117,9 @@ export interface TerrainSaveData {
 export class TerrainSystem {
   public readonly group = new THREE.Group();
   public readonly heights = new Float32Array(V * V);
+  // Store fitted cuts separately so refits, removal and saves retain the terrain underneath.
+  private readonly riverCuts = new Float32Array(V * V);
+  public onTerrainRiversRebuilt: (() => void) | null = null;
   public readonly tiles = new Uint8Array(N * N);
 
   private readonly material: THREE.MeshLambertMaterial;
@@ -198,6 +204,8 @@ export class TerrainSystem {
 
     this.material = this.createMaterial();
     this.generateDefaultWorld();
+    riverWorld.setPlacementGround((x, z) => this.getPlacementHeight(x, z));
+    this.recutTerrainRivers();
     this.rebuildPuddleMask(0, 0, N - 1, N - 1);
     this.puddleMaskFullPending = true;
     this.buildChunks();
@@ -207,6 +215,14 @@ export class TerrainSystem {
   // ---------------------------------------------------------------- queries
 
   public getHeight(x: number, z: number): number {
+    return this.sampleHeight(x, z, false);
+  }
+
+  public getPlacementHeight(x: number, z: number): number {
+    return this.sampleHeight(x, z, true);
+  }
+
+  private sampleHeight(x: number, z: number, uncarved: boolean): number {
     const fx = THREE.MathUtils.clamp(x + WORLD_HALF, 0, N);
     const fz = THREE.MathUtils.clamp(z + WORLD_HALF, 0, N);
     const ix = Math.min(Math.floor(fx), N - 1);
@@ -214,10 +230,12 @@ export class TerrainSystem {
     const tx = fx - ix;
     const tz = fz - iz;
     const h = this.heights;
-    const a = h[iz * V + ix];
-    const b = h[iz * V + ix + 1];
-    const c = h[(iz + 1) * V + ix];
-    const d = h[(iz + 1) * V + ix + 1];
+    const row = iz * V + ix;
+    const cut = this.riverCuts;
+    const a = h[row] - (uncarved ? cut[row] : 0);
+    const b = h[row + 1] - (uncarved ? cut[row + 1] : 0);
+    const c = h[row + V] - (uncarved ? cut[row + V] : 0);
+    const d = h[row + V + 1] - (uncarved ? cut[row + V + 1] : 0);
     return (a * (1 - tx) + b * tx) * (1 - tz) + (c * (1 - tx) + d * tx) * tz;
   }
 
@@ -261,12 +279,19 @@ export class TerrainSystem {
     return this.tiles[iz * N + ix];
   }
 
-  /** 0..1 natural basin likelihood at world position (used by visuals and footsteps). */
-  public puddlePotentialAt(x: number, z: number): number {
+  /** 0..1 natural basin likelihood before checking for flooding. */
+  private puddlePotentialAt(x: number, z: number): number {
     const ix = Math.floor(x + WORLD_HALF);
     const iz = Math.floor(z + WORLD_HALF);
     if (ix < 0 || iz < 0 || ix >= N || iz >= N) return 0;
     return this.puddleMaskData[iz * N + ix] / 255;
+  }
+
+  /** Painted and natural puddles can hold rain only above the local surface water. */
+  public hasPuddleAt(x: number, z: number, tile: TerrainTileType, minFill = 0.25): boolean {
+    return this.puddleFill > minFill &&
+      (tile === TerrainTileType.PUDDLE || this.puddlePotentialAt(x, z) > 0.4) &&
+      this.getHeight(x, z) > riverWorld.waterLevelAt(x, z) + PUDDLE_SHORE_CLEARANCE;
   }
 
   /** Texture shared with terrain / grass shaders; no per-frame copies. */
@@ -515,11 +540,53 @@ export class TerrainSystem {
       for (let ix = rect.x0; ix <= rect.x1; ix++) {
         const i = iz * V + ix;
         const cm = Math.round(carved[(iz - rect.z0) * w + ix - rect.x0] * 100);
-        if (applyToLive) this.heights[i] += (cm - base.heights[i]) / 100;
+        if (applyToLive) {
+          this.heights[i] += (cm - base.heights[i]) / 100 - this.riverCuts[i];
+          this.riverCuts[i] = 0;
+        }
         base.heights[i] = cm;
       }
     }
+    if (applyToLive && riverWorld.defs.some(d => d.fitTerrain)) {
+      riverWorld.invalidateTerrainProfiles(riverWorld.lastChanged);
+      this.carveTerrainRivers(rect);
+    }
     this.markHeightsDirty(rect.x0, rect.z0, rect.x1, rect.z1);
+  }
+
+  private carveTerrainRivers(rect: GridRect): void {
+    const w = rect.x1 - rect.x0 + 1;
+    const carved = new Float32Array(w * (rect.z1 - rect.z0 + 1));
+    for (let z = rect.z0; z <= rect.z1; z++) {
+      const row = z * V + rect.x0;
+      carved.set(this.heights.subarray(row, row + w), (z - rect.z0) * w);
+    }
+    riverWorld.carveTerrainRegion(rect, carved);
+    for (let z = rect.z0; z <= rect.z1; z++) for (let x = rect.x0; x <= rect.x1; x++) {
+      const i = z * V + x;
+      const y = carved[(z - rect.z0) * w + x - rect.x0];
+      this.riverCuts[i] = y - this.heights[i];
+      this.heights[i] = y;
+    }
+  }
+
+  private recutTerrainRivers(): void {
+    const previous = riverWorld.terrainRiverRegion();
+    riverWorld.invalidateTerrainProfiles();
+    const rect = unionRect(previous, riverWorld.terrainRiverRegion());
+    if (!rect) return;
+    this.refreshRivers(rect);
+    this.onTerrainRiversRebuilt?.();
+  }
+
+  public captureUncarvedHeights(): Float32Array {
+    return this.heights.map((y, i) => y - this.riverCuts[i]);
+  }
+
+  public restoreUncarvedHeights(heights: Float32Array): void {
+    this.heights.set(heights);
+    this.riverCuts.fill(0);
+    this.invalidateSaveCache();
   }
 
   private generateDefaultWorld(): void {
@@ -532,6 +599,8 @@ export class TerrainSystem {
 
   public resetFlat(): void {
     this.heights.fill(0);
+    this.riverCuts.fill(0);
+    this.recutTerrainRivers();
     this.tiles.fill(TerrainTileType.GRASS);
     this.markHeightsDirty(0, 0, N, N);
     this.markSplatDirty(0, 0, N - 1, N - 1);
@@ -780,7 +849,7 @@ export class TerrainSystem {
 
   private createMaterial(): THREE.MeshLambertMaterial {
     const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-    // Phones get a lighter fragment path: 2-3 fewer texture fetches and no snow glints
+    // Phones already use the cheaper surface shader at standard quality.
     const lite = isMobileDevice();
     if (lite) mat.defines = { TERRAIN_LITE: '' };
     mat.customProgramCacheKey = () => (lite ? 'terrain-lite' : 'terrain');
@@ -793,7 +862,7 @@ export class TerrainSystem {
     // The sea bed past the map edge continues the sand (WaterSystem): its own 2D texture
     this.sandLayer = createLayerTexture(TerrainTileType.SAND_BEACH);
     mat.onBeforeCompile = (shader) => {
-      injectNightLights(shader, { perVertex: lite, ground: true });
+      injectNightLights(shader, { perVertex: lite, ground: true, playerShadow: true });
       Object.assign(shader.uniforms, this.uniforms, causticsUniforms, rippleSimUniforms, {
         tRiver: { value: riverWorld.texture },
         tTiles: { value: this.tileTex },
@@ -813,6 +882,9 @@ export class TerrainSystem {
         .replace(
           '#include <common>',
           `#include <common>
+#if defined(QUALITY_VERTEX_LIGHTING) && !defined(TERRAIN_LITE)
+  #define TERRAIN_LITE
+#endif
 varying vec3 vTerrWorld;
 varying float vTerrUpY;
 varying vec3 vTerrN;
@@ -851,18 +923,59 @@ vec3 rockTriplanar(float scale) {
   if (w.z > 0.01) c += texture2D(tRock, p.xy + 0.71).rgb * w.z;
   return c;
 }
+#ifndef TERRAIN_LITE
+// Three neighbouring hex centres form a triangle. Each centre has a fixed transform:
+// both sides of a triangle edge use the same two samples there, so no seam can appear.
+vec3 terrHexColor(vec2 uv, vec2 dx, vec2 dy, int layer) {
+  vec2 skew = vec2(uv.x - uv.y * 0.5773503, uv.y * 1.1547005) * 0.81;
+  ivec2 cell = ivec2(floor(skew));
+  vec2 f = fract(skew);
+  bool upper = f.x + f.y > 1.0;
+  ivec2 corner = upper ? cell + ivec2(1) : cell;
+  vec3 w = upper ? vec3(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x)
+                 : vec3(1.0 - f.x - f.y, f.x, f.y);
+  // Emphasise the closest sample to keep the texture crisp inside each tile.
+  w *= w * w;
+  w /= w.x + w.y + w.z;
+  vec3 color = vec3(0.0);
+  for (int i = 0; i < 3; i++) {
+    ivec2 tile = i == 0 ? corner : cell + (i == 1 ? ivec2(1, 0) : ivec2(0, 1));
+    uint seed = uint(tile.x) * 0x8da6b343u ^ uint(tile.y) * 0xd8163841u ^ 0xcb1ab31fu;
+    seed = (seed ^ (seed >> 16u)) * 0x7feb352du;
+    seed = (seed ^ (seed >> 15u)) * 0x846ca68bu;
+    seed ^= seed >> 16u;
+    vec2 offset = vec2(float(seed & 1023u), float((seed >> 10u) & 1023u)) / 1024.0;
+    vec2 axis = (seed & 0x100000u) == 0u ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+    axis *= (seed & 0x200000u) == 0u ? 1.0 : -1.0;
+    mat2 rotation = mat2(axis, vec2(-axis.y, axis.x));
+    vec2 p = rotation * uv + offset;
+    // Gradients follow the rotation, never the discontinuous tile ID or random offset.
+    vec2 gx = rotation * dx, gy = rotation * dy;
+    vec3 sampleColor = layer < 0 ? textureGrad(tGrass, p, gx, gy).rgb
+      : textureGrad(tLayers, vec3(p, float(layer)), gx, gy).rgb;
+    color += sampleColor * w[i];
+  }
+  return color;
+}
+#endif
+vec3 terrSurfaceColor(vec2 uv, vec2 dx, vec2 dy, int id) {
+#ifndef TERRAIN_LITE
+  if (T_HEX[id] > 0.5) return terrHexColor(uv, dx, dy, T_LAYER[id]);
+#endif
+  return textureGrad(tLayers, vec3(uv, float(T_LAYER[id])), dx, dy).rgb;
+}
 vec3 terrainColor() {
   vec2 suv = (vTerrWorld.xz + uWorldSize * 0.5) / uWorldSize;
   vec2 uv = vTerrWorld.xz * 0.5;
+  vec2 duvX = dFdx(uv), duvY = dFdy(uv);
   // Local water: the sea, or a river's surface near its channel
   vec2 riverUv = (vTerrWorld.xz + uWorldSize * 0.5 + 0.5) / (uWorldSize + 1.0);
   vec3 river = texture2D(tRiver, riverUv).rgb;
   float estuarySand = river.b;
   float waterY = river.g > 0.5 ? max(uWaterLevel, river.r) : uWaterLevel;
   terrWaterY = waterY;
-  vec4 g = texture2D(tGrass, uv);
 #ifdef TERRAIN_LITE
-  // Phones: analytic border noise instead of a second grass fetch
+  // Analytic border noise instead of a second grass fetch
   float n = (sin(vTerrWorld.x * 0.37 + sin(vTerrWorld.z * 0.23) * 2.0) * sin(vTerrWorld.z * 0.41 + vTerrWorld.x * 0.11)) * 0.3;
 #else
   float n = texture2D(tGrass, vTerrWorld.xz * 0.061).a - 0.5;
@@ -887,7 +1000,10 @@ vec3 terrainColor() {
   terrAddTile(terrTileAt(t0 + ivec2(1, 0), tMax), tf.x * (1.0 - tf.y), sIds, sW, sN);
   terrAddTile(terrTileAt(t0 + ivec2(0, 1), tMax), (1.0 - tf.x) * tf.y, sIds, sW, sN);
   terrAddTile(terrTileAt(t0 + ivec2(1, 1), tMax), tf.x * tf.y, sIds, sW, sN);
-  vec3 c = g.rgb;
+  vec3 paintedColor = vec3(0.0);
+  float paintedCover = 0.0;
+  vec3 sandColor = vec3(0.0);
+  bool hasSandColor = false;
   // Weights of bare earth (rain darkens it, fallen snow melts on it) and of painted snow tiles
   float earthW = 0.0;
   float snowTileW = 0.0;
@@ -912,8 +1028,6 @@ vec3 terrainColor() {
     // ground ones are renormalised among themselves: a snow / asphalt seam shows asphalt under the
     // thinning snow, never grass
     vec4 wt = sp * (cover / max(pSum, 1e-4));
-    vec2 duvX = dFdx(uv);
-    vec2 duvY = dFdy(uv);
     vec3 surf = vec3(0.0);
     float other = 0.0;
     for (int i = 0; i < 4; i++) {
@@ -929,10 +1043,18 @@ vec3 terrainColor() {
         snowTileW += w;
         continue;
       }
-      surf += textureGrad(tLayers, vec3(uv, float(T_LAYER[id])), duvX, duvY).rgb * w;
+      vec3 layerColor = terrSurfaceColor(uv, duvX, duvY, id);
+      if (id == ${TerrainTileType.SAND_BEACH}) {
+        sandColor = layerColor;
+        hasSandColor = true;
+      }
+      surf += layerColor * w;
       other += w;
     }
-    if (other > 0.001) c = mix(c, surf / other, cover);
+    if (other > 0.001) {
+      paintedColor = surf / other;
+      paintedCover = cover;
+    }
   }
   // Sandy shore by the sea and in estuaries, a narrow gravel strip along rivers upstream
   float riverBank = smoothstep(0.35, 0.75, river.g) * smoothstep(0.12, 0.45, waterY - uWaterLevel) * (1.0 - estuarySand);
@@ -940,8 +1062,22 @@ vec3 terrainColor() {
   // floodplains that happen to sit just above the water stay grass
   float beach = mix(1.0 - smoothstep(waterY + 0.15, waterY + 0.55, vTerrWorld.y),
     (1.0 - smoothstep(waterY + 0.08, waterY + 0.32, vTerrWorld.y)) * smoothstep(0.8, 0.97, river.g), riverBank);
+  float bedSand = smoothstep(0.0, 0.08, waterY - vTerrWorld.y) * smoothstep(0.0, 0.8, river.g);
+  if (!hasSandColor && (beach > 0.001 || bedSand > 0.0)) {
+    sandColor = terrSurfaceColor(uv, duvX, duvY, ${TerrainTileType.SAND_BEACH});
+  }
+  // Skip the grass fetches where it is fully covered by a painted surface or shore sand.
+  vec3 c = paintedColor;
+  if (paintedCover < 1.0 && beach < 1.0) {
+#ifdef TERRAIN_LITE
+    vec3 grassColor = textureGrad(tGrass, uv, duvX, duvY).rgb;
+#else
+    vec3 grassColor = terrHexColor(uv, duvX, duvY, -1);
+#endif
+    c = mix(grassColor, paintedColor, paintedCover);
+  }
   // Painted sand is already part of the surface blend above; the shore adds sand on top
-  if (beach > 0.001) c = mix(c, texture(tLayers, vec3(uv, ${SAND_LAYER}.0)).rgb, beach);
+  if (beach > 0.001) c = mix(c, sandColor, beach);
   float rock = smoothstep(0.8, 0.62, vTerrUpY);
   if (rock > 0.001) c = mix(c, rockTriplanar(0.5), rock);
   // Ice: a cold sky sheen, strongest at grazing angles (a cheap Fresnel instead of a reflection)
@@ -957,10 +1093,14 @@ vec3 terrainColor() {
   float roofed = wetDry.y;
   float wet = max(wetDry.x, uRainWet * earthW * (1.0 - roofed));
   if (wet > 0.004) c = mix(c, vec3(0.0123, 0.0052, 0.003), wet * (0.82 + 0.36 * n));
-  // The CPU-built mask marks concave basins from terrain heights; read it only while wet.
-  float autoPool = 0.0;
-  if (uPuddleFill > 0.01) autoPool = texture2D(tPuddleMask, suv).r * (1.0 - roofed) * smoothstep(0.02, 0.18, uPuddleFill);
-  puddleW = max(puddleW, autoPool);
+  // Clip both painted and natural pools at the local shoreline, including blended tile edges.
+  if (vTerrWorld.y <= waterY + ${PUDDLE_SHORE_CLEARANCE}) {
+    puddleW = 0.0;
+  } else if (uPuddleFill > 0.01) {
+    // The CPU-built mask marks concave basins from terrain heights; read it only while wet.
+    float autoPool = texture2D(tPuddleMask, suv).r * (1.0 - roofed) * smoothstep(0.02, 0.18, uPuddleFill);
+    puddleW = max(puddleW, autoPool);
+  }
   // Mud and puddle beds: footprints pressed in (dark, wet hollows), and a wet sheen of the sky,
   // brighter at grazing angles and in the rain
   float soft = (mudW + puddleW) * (1.0 - rock);
@@ -1078,9 +1218,8 @@ vec3 terrainColor() {
     }
     c = mix(c, snow, sw);
   }
-  // Use the sea's sand layer and world-space scale for submerged channels and lakes.
-  float bedSand = smoothstep(0.0, 0.08, waterY - vTerrWorld.y) * smoothstep(0.0, 0.8, river.g);
-  if (bedSand > 0.0) c = mix(c, texture(tLayers, vec3(uv, ${SAND_LAYER}.0)).rgb, bedSand);
+  // Submerged channels and lakes use the same sand sample as the shore and painted sand.
+  if (bedSand > 0.0) c = mix(c, sandColor, bedSand);
   c *= mix(1.0, 0.62, smoothstep(waterY, waterY - 1.5, vTerrWorld.y));
   return c;
 }`
@@ -1094,7 +1233,7 @@ vec3 terrainColor() {
             'reflectedLight.directDiffuse *= causticsSun(vTerrWorld, terrWaterY, vTerrUpY);'
         );
     };
-    return mat;
+    return withVertexLightingQuality(mat);
   }
 
   // ---------------------------------------------------------------- physics
@@ -1165,7 +1304,7 @@ vec3 terrainColor() {
   private encode(): TerrainSaveData {
     const base = TerrainSystem.base();
     const dh = new Int16Array(V * V);
-    for (let i = 0; i < dh.length; i++) dh[i] = Math.round(this.heights[i] * 100) - base.heights[i];
+    for (let i = 0; i < dh.length; i++) dh[i] = Math.round((this.heights[i] - this.riverCuts[i]) * 100) - base.heights[i];
     const dt = new Int16Array(N * N);
     for (let i = 0; i < dt.length; i++) dt[i] = this.tiles[i];
     return { size: N, enc: 'd2', heights: rleEncode(dh), tiles: rleEncode(dt) };
@@ -1211,6 +1350,8 @@ vec3 terrainColor() {
     } else {
       return;
     }
+    this.riverCuts.fill(0);
+    this.recutTerrainRivers();
     this.markHeightsDirty(0, 0, N, N);
     this.markSplatDirty(0, 0, N - 1, N - 1);
     this.commit();
@@ -1344,7 +1485,6 @@ const SURFACE_TRAITS: Partial<Record<TerrainTileType, { jitter?: number; earth?:
   [TerrainTileType.PUDDLE]: { earth: true, puddle: true },
 };
 
-const SAND_LAYER = SURFACE_TILES.indexOf(TerrainTileType.SAND_BEACH);
 const SNOW_LAYER = SURFACE_TILES.indexOf(TerrainTileType.SNOW);
 
 /** GLSL lookup tables indexed by tile id (layer, jitter, traits) and the tile fetch helpers. */
@@ -1357,6 +1497,7 @@ const SURFACE_GLSL = (() => {
   const ice: number[] = new Array(count).fill(0);
   const mud: number[] = new Array(count).fill(0);
   const puddle: number[] = new Array(count).fill(0);
+  const hex: number[] = new Array(count).fill(0);
   const cycle = [0.45, -0.45, 0.3, -0.3];
   SURFACE_TILES.forEach((t, i) => {
     const tr = SURFACE_TRAITS[t] ?? {};
@@ -1367,6 +1508,7 @@ const SURFACE_GLSL = (() => {
     ice[t] = tr.ice ? 1 : 0;
     mud[t] = tr.mud ? 1 : 0;
     puddle[t] = tr.puddle ? 1 : 0;
+    hex[t] = GRASSY_TILES.has(t) || tr.earth || t === TerrainTileType.SAND_BEACH ? 1 : 0;
   });
   const f = (v: number[]) => v.map((x) => x.toFixed(3)).join(', ');
   return `
@@ -1378,6 +1520,9 @@ const float T_OVERLAY[${count}] = float[${count}](${f(overlay)});
 const float T_ICE[${count}] = float[${count}](${f(ice)});
 const float T_MUD[${count}] = float[${count}](${f(mud)});
 const float T_PUDDLE[${count}] = float[${count}](${f(puddle)});
+#ifndef TERRAIN_LITE
+const float T_HEX[${count}] = float[${count}](${f(hex)});
+#endif
 int terrTileAt(ivec2 p, ivec2 tMax) {
   return int(texelFetch(tTiles, clamp(p, ivec2(0), tMax), 0).r * 255.0 + 0.5);
 }
@@ -1869,7 +2014,7 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
   ctx.globalAlpha = 1;
 
   if (type === TerrainTileType.GRASS) {
-    // Macro variation noise in alpha: soft blobs, used to break up blend edges and tint
+    // Macro variation noise in alpha for irregular surface edges and weather effects.
     const img = ctx.getImageData(0, 0, size, size);
     const blobs = Array.from({ length: 40 }, () => [rnd() * size, rnd() * size, 20 + rnd() * 50, rnd()]);
     for (let y = 0; y < size; y++) {

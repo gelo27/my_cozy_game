@@ -9,7 +9,7 @@ import { DoorControl } from './NPCAgent';
 import { BedSpot, CHEST_STANDS, HUNGRY, WorkerActivity, WorkerErrand, WorkerNPC } from './WorkerNPC';
 import { Items, TaskBoard, TaskKind, WORKER_ROLES, WorkerRole } from './TaskBoard';
 
-export const MAX_WORKERS = 10;
+export const MAX_WORKERS = 30;
 /** Coins a new farmhand costs to hire (the first ones come with the farm). */
 export const WORKER_HIRE_COST = 40;
 
@@ -121,10 +121,10 @@ export class WorkerManager {
     if (this.workers.length >= MAX_WORKERS) return null;
     // First free name / colour slot (names stay unique after someone leaves)
     const used = new Set(this.workers.map((x) => x.slot));
-    let i = slot !== undefined && !used.has(slot) ? slot : 0;
+    let i = slot !== undefined && Number.isInteger(slot) && slot >= 0 && slot < MAX_WORKERS && !used.has(slot) ? slot : 0;
     while (used.has(i)) i++;
     const p = pos.clone();
-    p.y = this.groundHeight(p.x, p.z);
+    if (slot === undefined) p.y = this.groundHeight(p.x, p.z);
     const spot = this.nav.snap(p.x, p.z, p.y);
     if (spot) p.set(spot.x, spot.y, spot.z);
     const w = new WorkerNPC(this.physics, this.scene, this.nav, p, t(`worker.name${i}` as TKey), this.doors, TINTS[i % TINTS.length], i / MAX_WORKERS, this.nextId++);

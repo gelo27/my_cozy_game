@@ -5,7 +5,7 @@ import {
   BACKPACK_COLUMNS,
   BACKPACK_MAX_SLOTS,
 } from '../inventory/InventoryManager';
-import { InventoryItem } from '../inventory/types/InventoryTypes';
+import { InventoryItem, isPreciousOreItem } from '../inventory/types/InventoryTypes';
 import { X, Lock } from 'lucide-react';
 import { t, useLang, dataName, itemDesc } from '../i18n/i18n';
 import { ItemIcon } from './ItemIcon';
@@ -122,7 +122,7 @@ export const HeartopiaInventoryHUD: React.FC<HeartopiaInventoryHUDProps> = ({
       <div className="text-4xl filter drop-shadow-sm pointer-events-none">
         <ItemIcon item={item} />
       </div>
-      {item.count > 1 && (
+      {(item.count > 1 || isPreciousOreItem(item.id)) && (
         <div
           className="absolute bottom-0.5 right-1.5 text-sm font-black leading-none text-white pointer-events-none"
           style={{

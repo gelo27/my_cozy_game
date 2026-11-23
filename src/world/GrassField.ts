@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { injectNightLights } from './NightLighting';
+import { withVertexLightingQuality } from './VertexLightingQuality';
 import { WORLD_HALF, WORLD_SIZE, worldSettings } from './WorldSettings';
 import { riverWorld } from './rivers/RiverWorld';
-import { TERRAIN_CHUNK, TERRAIN_CHUNKS, type TerrainSystem } from './TerrainSystem';
+import { PUDDLE_SHORE_CLEARANCE, TERRAIN_CHUNK, TERRAIN_CHUNKS, type TerrainSystem } from './TerrainSystem';
 import { GRASSY_TILES, TerrainTileType } from '../terrain/types/TerrainTypes';
 
 // Blade tints of the other grassy tiles (sRGB in, linear out: what the grass shader works in)
@@ -427,7 +428,9 @@ float grBeach = (grRiver.g > 0.5 && grWaterY > uGrSea + 0.3)
   : smoothstep(grWaterY + 0.55, grWaterY + 0.15, grY);
 float grEdge = 1.0 - smoothstep(GR_SIZE * 0.22, GR_SIZE * 0.49, length(grLocal));
 float grDens = grD.r * (1.0 - grBeach);
-float grPool = texture2D(uGrPuddleMask, grUv).r * smoothstep(0.02, 0.2, uGrPuddleFill);
+float grPool = grY > grWaterY + ${PUDDLE_SHORE_CLEARANCE}
+  ? texture2D(uGrPuddleMask, grUv).r * smoothstep(0.02, 0.2, uGrPuddleFill)
+  : 0.0;
 // Height: per blade, clumps of taller and shorter grass, thinning out at density borders
 float grClump = grNoise(grRoot * 0.21) * 0.7 + grNoise(grRoot * 0.73 + 5.3) * 0.3;
 float grH = uGrHeightK * mix(0.5, 1.0, aGrRnd.x) * (0.45 + grClump * 1.0)
@@ -519,6 +522,6 @@ uniform float uGrBendLight;`
           '#include <lights_fragment_end>\nreflectedLight.directDiffuse *= 1.0 - vGrShade;\nreflectedLight.indirectDiffuse *= 1.0 - vGrShade * 0.3;'
         );
     };
-    return mat;
+    return withVertexLightingQuality(mat, true);
   }
 }

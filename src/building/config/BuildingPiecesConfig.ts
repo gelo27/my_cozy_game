@@ -13,7 +13,7 @@ import { MODULE_SIZE, HALF_SIZE, WALL_THICKNESS, FLOOR_THICKNESS } from './Build
 import { applyDefaultWallFaces } from './DefaultWallMaterials';
 import type { PieceMeshTemplate } from './meshes/PieceMeshTemplate';
 import { buildGreenhouseWallGeometry, GH_LEAF_W, GH_LEAF_H, GH_LEAF_Y, GH_HINGE_X, pushBox, greenhouseDoorLeafParts, greenhouseDoorFrameParts, mergeGreenhouseParts, buildGreenhouseDoorGeometry, buildGreenhouseDoorFrame, buildGreenhouseDoorLeaf } from './meshes/GreenhouseGeometry';
-import { buildWindowPieceGeometry, buildSingleHungWindowPieceGeometry, buildArchedWindowPieceGeometry, buildOuterDoorFrameGeometry, buildDoorwayWallGeometry, buildSingleDoorGeometry, buildDoubleDoorGeometry, buildGrandSideliteDoorFrameGeometry, buildGrandMahoganyDoorLeaf, buildWhite2PanelDoorFrameGeometry, buildWhite2PanelDoorLeaf, buildCottageWindowDoorFrameGeometry, buildCottageWindowDoorLeaf, buildColonial6PanelDoorFrameGeometry, buildColonial6PanelDoorLeaf } from './meshes/OpeningGeometry';
+import { buildBayWindowGeometry, buildWindowPieceGeometry, buildSingleHungWindowPieceGeometry, buildArchedWindowPieceGeometry, buildOuterDoorFrameGeometry, buildDoorwayWallGeometry, buildSingleDoorGeometry, buildDoubleDoorGeometry, buildGrandSideliteDoorFrameGeometry, buildGrandMahoganyDoorLeaf, buildWhite2PanelDoorFrameGeometry, buildWhite2PanelDoorLeaf, buildCottageWindowDoorFrameGeometry, buildCottageWindowDoorLeaf, buildColonial6PanelDoorFrameGeometry, buildColonial6PanelDoorLeaf } from './meshes/OpeningGeometry';
 import { buildStraightRailingGeometry, buildStairRailingGeometry, buildWhiteDecorativeFenceGeometry } from './meshes/RailingGeometry';
 
 // Textures, materials, unit sizes and the mesh template type live in their own modules;
@@ -931,6 +931,7 @@ export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
   [BuildingPieceType.WOOD_WALL_WINDOW_SINGLE_HUNG]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_SINGLE_HUNG, 'Single-Hung Window 1x2m', 'Одностулкове підвісне вікно 1х2м', 1, 2, 1),
   [BuildingPieceType.WOOD_WALL_WINDOW_ARCH]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_ARCH, 'Arched Window 1x2m', 'Аркове вікно 1х2м', 1, 2, 2),
   [BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN, 'Palladian Window 1x2m', 'Паладіанське вікно 1х2м', 1, 2, 3),
+  [BuildingPieceType.WOOD_WALL_WINDOW_BAY]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_BAY, 'Bay Window 2.5x1.5m', 'Еркерне вікно 2,5×1,5 м', 2.5, 1.5, 5),
   [BuildingPieceType.WOOD_WALL_WINDOW_ROUND]: windowPieceDef(BuildingPieceType.WOOD_WALL_WINDOW_ROUND, 'Round Window 1x1m', 'Кругле вікно 1х1м', 1, 1, 2),
 
   [BuildingPieceType.WOOD_STAIRS_2X2]: {
@@ -2378,6 +2379,8 @@ function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
       return buildArchedWindowPieceGeometry(1.0, 2.0, 'arch');
     case BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN:
       return buildArchedWindowPieceGeometry(1.0, 2.0, 'palladian');
+    case BuildingPieceType.WOOD_WALL_WINDOW_BAY:
+      return buildBayWindowGeometry();
     case BuildingPieceType.WOOD_WALL_WINDOW_ROUND:
       return buildArchedWindowPieceGeometry(1.0, 1.0, 'round');
 

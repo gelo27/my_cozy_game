@@ -143,6 +143,20 @@ export interface CaveGenRequest extends CaveGenInput {
   preserveContents?: boolean;
   /** Existing shoreline masks reused by a rock-only gameplay edit. */
   reuseWetPools?: CavePool[];
+  excavations?: CaveExcavation[];
+}
+
+export interface CaveExcavation { x: number; y: number; z: number; r: number }
+
+export function appendExcavations(layout: CaveLayout, cuts: CaveExcavation[]): void {
+  const key = ({ x, y, z }: { x: number; y: number; z: number }) => `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`;
+  const existing = new Set(layout.items.filter(it => it.t === 'dig').map(key));
+  for (const cut of cuts) {
+    const id = key(cut);
+    if (existing.has(id)) continue;
+    existing.add(id);
+    layout.items.push({ ...cut, id: layout.nextItem++, t: 'dig' });
+  }
 }
 
 // ------------------------------------------------------------------ output
@@ -161,6 +175,8 @@ export interface CaveChunk {
   data: Uint8Array;
   /** 0 = dry; otherwise depth below the nearest water surface (see WET_*). */
   wet: Uint8Array;
+  /** Normalized coverage of exposed fracture surfaces. */
+  fracture: Uint8Array;
   indices: Uint16Array;
   /** The first N indices are rock and stalagmites (collide); the rest are stalactites (render only). */
   colliderIndexCount: number;
@@ -377,6 +393,7 @@ interface RockPrim extends Box {
 /** Player cuts are subtracted after authored rock is added, so shelves and pillars can be mined too. */
 interface DigPrim extends Box {
   d(x: number, y: number, z: number): number;
+  fractureAt(x: number, y: number, z: number, nx: number, ny: number, nz: number): number;
 }
 
 /** Floor height along a tunnel, t = 0..1 from end A to end B. */
@@ -1346,6 +1363,18 @@ class DigSphere implements AirPrim, DigPrim {
     this.minZ = z - r - 1; this.maxZ = z + r + 1;
   }
   d(x: number, y: number, z: number): number { return Math.hypot(x - this.x, y - this.y, z - this.z) - this.r; }
+
+  fractureAt(x: number, y: number, z: number, nx: number, ny: number, nz: number): number {
+    const dx = this.x - x, dy = this.y - y, dz = this.z - z;
+    const outer = this.r + 0.65;
+    const rr = dx * dx + dy * dy + dz * dz;
+    if (rr > outer * outer || rr < 1e-6) return 0;
+    const radius = Math.sqrt(rr);
+    // The concave cut faces its centre. Nearby untouched walls tend to face away from it.
+    const facing = (nx * dx + ny * dy + nz * dz) / radius;
+    const surface = 1 - clamp01((Math.abs(radius - this.r) - 0.16) / 0.49);
+    return surface * clamp01((facing - 0.12) / 0.53);
+  }
 }
 
 // ------------------------------------------------------------------ water
@@ -1973,6 +2002,7 @@ class Mesher {
     const normals: number[] = [];
     const data: number[] = [];
     const wet: number[] = [];
+    const fracture: number[] = [];
     cellVert.fill(-1);
     const cvi = (i: number, j: number, k: number) => ((k - 1) * (C + 2) + (j - 1)) * (C + 2) + (i - 1);
     for (let k = 1; k <= C + 1; k++) {
@@ -2027,6 +2057,11 @@ class Mesher {
           biomeWeights(px, pz, _bw);
           data.push(_bw[0] * 255, _bw[1] * 255, _bw[2] * 255, Math.max(0.2, 1 - occ * 0.85) * 255);
           wet.push(this.wetAt(px, py, pz));
+          let exposed = 0;
+          for (const cut of this.b.index.digsAt(px, pz)) {
+            exposed = Math.max(exposed, cut.fractureAt(px, py, pz, nx, ny, nz));
+          }
+          fracture.push(Math.round(exposed * 255));
         }
       }
     }
@@ -2057,7 +2092,10 @@ class Mesher {
       const before = positions.length / 3;
       addCone(c, positions, normals, data, c.up ? indices : hanging);
       const w = this.wetAt(c.x, c.up ? c.y + 0.3 : c.y - c.len, c.z);
-      for (let v = before; v < positions.length / 3; v++) wet.push(w);
+      for (let v = before; v < positions.length / 3; v++) {
+        wet.push(w);
+        fracture.push(0);
+      }
     }
     const colliderIndexCount = indices.length;
     for (const i of hanging) indices.push(i);
@@ -2082,6 +2120,7 @@ class Mesher {
       normals: new Float32Array(normals),
       data: new Uint8Array(data),
       wet: new Uint8Array(wet),
+      fracture: new Uint8Array(fracture),
       indices: new Uint16Array(indices),
       colliderIndexCount,
     };
@@ -2292,6 +2331,7 @@ export function planCaveNetwork(req: CaveGenRequest): CavePlan {
   const fresh = !isCaveLayout(req.layout);
   const layout: CaveLayout = fresh ? planCaveLayout(req) : (req.layout as CaveLayout);
   ensureEntrances(layout, req, mulberry(req.seed * 31 + 7));
+  if (req.excavations?.length) appendExcavations(layout, req.excavations);
   const built = buildField(layout, req);
   // Mining changes a few rock chunks. Re-running every cave's water flood fill and recreating all
   // decorations on each swing is wasteful; reuse the current shore masks for these local edits.

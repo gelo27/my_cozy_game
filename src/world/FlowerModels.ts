@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { injectNightLights, FOLIAGE_NIGHT_LIGHTS } from './NightLighting';
+import { withVertexLightingQuality } from './VertexLightingQuality';
 import { injectWaterline } from '../scene/WaterDetails';
 import { fieldCropTime } from '../farming/WheatModel';
 import { injectPickGlow } from './PickGlow';
@@ -121,7 +122,7 @@ attribute vec2 aTulip;`
       );
   };
   mat.customProgramCacheKey = () => 'tulip-clump-3-glow2';
-  return mat;
+  return withVertexLightingQuality(mat);
 }
 
 export const FLOWER_MATERIAL = createFlowerMaterial();

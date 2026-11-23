@@ -64,7 +64,7 @@ export interface CharacterContext {
   airControl: number;
   /** Traction of the ground underfoot: 1 normally, low on ice (the player slides on). */
   groundGrip: number;
-  /** Share of the usual walking speed on this ground (mud and puddles drag at the boots). */
+  /** Ground movement multiplier, including drag from mud, puddles and wading. */
   groundSpeed: number;
   gravity: number;
 }

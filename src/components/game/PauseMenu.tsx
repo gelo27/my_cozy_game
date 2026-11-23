@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Play, Save, Volume2, VolumeX, RotateCcw, Maximize, Minimize, BedDouble, Flag } from 'lucide-react';
-import { userSettings, updateUserSettings, onUserSettingsChange, resetUserSettings, UserSettings } from '../../config/userSettings';
+import { userSettings, updateUserSettings, onUserSettingsChange, resetUserSettings, type GraphicsQuality, type UserSettings } from '../../config/userSettings';
 import { t, useLang, setLang, LANGS } from '../../i18n/i18n';
 import { TKey } from '../../i18n/en';
 
@@ -16,6 +16,10 @@ type VolumeKey = 'sfx' | 'music';
 const CHANNELS: { key: VolumeKey; on: 'sfxOn' | 'musicOn'; label: TKey }[] = [
   { key: 'sfx', on: 'sfxOn', label: 'pause.sfx' },
   { key: 'music', on: 'musicOn', label: 'pause.music' },
+];
+const QUALITY_OPTIONS: { value: GraphicsQuality; label: TKey }[] = [
+  { value: 'standard', label: 'pause.qualityStandard' },
+  { value: 'performance', label: 'pause.qualityPerformance' },
 ];
 
 const Range: React.FC<{ value: number; min?: number; max?: number; step?: number; disabled?: boolean; onChange(v: number): void }> = ({
@@ -136,6 +140,20 @@ export const PauseMenu: React.FC<{ onResume(): void; onSave(): void; onRespawn()
             </Row>
           ))}
         </div>
+
+        <label className="flex items-center justify-between gap-3 mb-4 text-sm font-semibold">
+          <span>{t('pause.graphicsQuality')}</span>
+          <select
+            value={s.graphicsQuality}
+            onChange={(e) => {
+              const quality = QUALITY_OPTIONS.find((option) => option.value === e.target.value);
+              if (quality) updateUserSettings({ graphicsQuality: quality.value });
+            }}
+            className="min-h-9 min-w-0 rounded-xl border border-[#e9dcc3] bg-white px-2"
+          >
+            {QUALITY_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{t(label)}</option>)}
+          </select>
+        </label>
 
         <p className="text-[11px] font-bold uppercase tracking-wider text-[#a08d70] mb-1">{t('pause.controls')}</p>
         <div className="space-y-1 mb-4">

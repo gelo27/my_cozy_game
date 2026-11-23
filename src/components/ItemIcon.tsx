@@ -1,6 +1,6 @@
 import React from 'react';
-import { Shovel } from 'lucide-react';
-import { InventoryItem, getItemEmoji } from '../inventory/types/InventoryTypes';
+import { Gem, Shovel } from 'lucide-react';
+import { InventoryItem, getItemEmoji, isPreciousOreItem } from '../inventory/types/InventoryTypes';
 
 /**
  * Item glyph for slots and tooltips. Emoji for most items; the shovel draws a vector icon because
@@ -8,6 +8,9 @@ import { InventoryItem, getItemEmoji } from '../inventory/types/InventoryTypes';
  */
 export const ItemIcon: React.FC<{ item?: InventoryItem | null }> = ({ item }) => {
   if (item?.id === 'shovel') return <Shovel className="w-[1.1em] h-[1.1em] text-[#8b5a2b]" strokeWidth={2.4} />;
+  if (item && isPreciousOreItem(item.id)) {
+    return <Gem className="w-[1.1em] h-[1.1em]" fill={item.color} stroke={item.id === 'gold_ore' ? '#8e4c0e' : '#4b6485'} strokeWidth={1.8} />;
+  }
   // Pine cone: there is no emoji for it (🌲 is already the wood), so a small drawn one
   if (item?.id === 'pine_cone') {
     return (

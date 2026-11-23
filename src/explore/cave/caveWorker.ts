@@ -23,7 +23,7 @@ ctx.onmessage = (e) => {
     } else {
       const mesh = meshCaveChunks(msg.job);
       const transfer: Transferable[] = [];
-      for (const c of mesh.chunks) transfer.push(c.positions.buffer, c.normals.buffer, c.data.buffer, c.wet.buffer, c.indices.buffer);
+      for (const c of mesh.chunks) transfer.push(c.positions.buffer, c.normals.buffer, c.data.buffer, c.wet.buffer, c.fracture.buffer, c.indices.buffer);
       ctx.postMessage({ id: msg.id, ok: true, mesh }, transfer);
     }
   } catch (err) {

@@ -12,16 +12,6 @@ import { WaterEffects } from '../../scene/WaterEffects';
 import { WaterParticleSystem } from '../../particles/WaterParticleSystem';
 import { setWaterBody, setWaterLimb } from '../../scene/WaterDetails';
 
-/**
- * Water shallower than this (m, surface to bed) is waded on foot; deeper is swum. The body is
- * 1.5 m tall with the waist ~0.85 m above the soles: water over the waist is swum.
- */
-const WADE_DEPTH_ENTER = 0.88;
-const WADE_DEPTH_EXIT = 0.78;
-// Narrow river channels are intentionally shallower than the sea; let the player swim in them
-// instead of being permanently forced into the wading state.
-const RIVER_SWIM_DEPTH_ENTER = 0.75;
-const RIVER_SWIM_DEPTH_EXIT = 0.65;
 /** Within this distance (m) below the resting height the swimmer is caught by the surface. */
 const SURFACE_CAPTURE = 0.55;
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -37,6 +27,7 @@ export class SwimAbility implements IAbility {
   private readonly sLat = new THREE.Vector3();
   private readonly sLatTarget = new THREE.Vector3();
   private readonly sHead = new THREE.Vector3();
+  private readonly splashOrigin = new THREE.Vector3();
   private readonly sBubbleVel = new THREE.Vector3();
   private readonly sLin = { x: 0, y: 0, z: 0 };
 
@@ -104,6 +95,7 @@ export class SwimAbility implements IAbility {
         context.body.setGravityScale(1, true);
       }
       this.isSwimming = false;
+      this.wasSwimming = false;
       context.isSwimming = false;
       context.canMantle = false;
       context.isMantling = false;
@@ -129,26 +121,34 @@ export class SwimAbility implements IAbility {
       bed = Math.max(bed, level - (pos.y - CAPSULE_HALF_TOTAL));
     }
     const swimDepthLimit = inRiverChannel
-      ? (this.isSwimming ? RIVER_SWIM_DEPTH_EXIT : RIVER_SWIM_DEPTH_ENTER)
-      : (this.isSwimming ? WADE_DEPTH_EXIT : WADE_DEPTH_ENTER);
+      ? (this.isSwimming ? WATER_PHYSICS_CONFIG.RIVER_SWIM_DEPTH_EXIT : WATER_PHYSICS_CONFIG.RIVER_SWIM_DEPTH_ENTER)
+      : (this.isSwimming ? WATER_PHYSICS_CONFIG.WADE_DEPTH_EXIT : WATER_PHYSICS_CONFIG.WADE_DEPTH_ENTER);
     const shallow = bed < swimDepthLimit;
 
     // 1. Water Bounds Check
     // Capsule height is 1.5m (center at pos.y). Enter water when center drops below water level + 0.45m.
     // Cave pools lie in their own pocket outside the sea bounds and have their own extent
-    const inWaterVolume =
-      (inCavePool ||
-        (pos.x >= this.waterMin.x &&
-          pos.x <= this.waterMax.x &&
-          pos.z >= this.waterMin.z &&
-          pos.z <= this.waterMax.z &&
-          pos.y >= this.waterMin.y)) &&
-      pos.y <= this.waterMax.y + 0.45 &&
-      !shallow;
+    const inWaterBounds = inCavePool ||
+      (pos.x >= this.waterMin.x &&
+        pos.x <= this.waterMax.x &&
+        pos.z >= this.waterMin.z &&
+        pos.z <= this.waterMax.z &&
+        pos.y >= this.waterMin.y);
+    const inWaterVolume = inWaterBounds && pos.y <= level + 0.45 && !shallow;
 
     this.isSwimming = inWaterVolume && !this.isMantling;
     if (!this.isSwimming) this.surfaced = false;
     context.isSwimming = this.isSwimming;
+
+    // Apply water drag before MovementAbility picks a walking, running or crouching speed.
+    if (inWaterBounds && context.ground.isGrounded && !this.isSwimming && !this.isMantling) {
+      const feetY = Math.max(context.ground.surfaceHitPoint.y, pos.y - CAPSULE_HALF_TOTAL);
+      const { WADE_DRAG_START_DEPTH, WADE_DRAG_FULL_DEPTH, WADE_MIN_SPEED_RATIO } = WATER_PHYSICS_CONFIG;
+      const drag = THREE.MathUtils.clamp(
+        (level - feetY - WADE_DRAG_START_DEPTH) / (WADE_DRAG_FULL_DEPTH - WADE_DRAG_START_DEPTH), 0, 1
+      );
+      context.groundSpeed *= THREE.MathUtils.lerp(1, WADE_MIN_SPEED_RATIO, drag);
+    }
 
     // Water Depth (distance from surface to head)
     const headY = pos.y + 0.4;
@@ -157,17 +157,10 @@ export class SwimAbility implements IAbility {
 
     // 2. Water Entry Impact Splash
     if (this.isSwimming && !this.wasSwimming) {
-      const impactSpeed = Math.abs(vel.y);
+      const impactSpeed = -vel.y;
       if (impactSpeed >= WATER_PHYSICS_CONFIG.ENTRY_SPLASH_VELOCITY_MIN) {
-        if (this.waterParticles) {
-          this.waterParticles.emitWaterSplash(
-            new THREE.Vector3(pos.x, this.waterMax.y, pos.z),
-            impactSpeed
-          );
-        }
-        if (this.waterEffects) {
-          this.waterEffects.emitRippleBurst(pos.x, pos.z, impactSpeed * 0.4);
-        }
+        this.waterParticles?.emitEntrySplash(this.splashOrigin.set(pos.x, level, pos.z), impactSpeed);
+        if (!inCavePool) this.waterEffects?.emitRippleBurst(pos.x, pos.z, impactSpeed * 0.4);
       }
     }
     this.wasSwimming = this.isSwimming;

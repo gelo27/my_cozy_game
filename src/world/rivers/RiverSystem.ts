@@ -61,6 +61,7 @@ export class RiverSystem {
     this.material = this.createMaterial(false);
     this.lakeMaterial = this.createMaterial(true);
     this.splashMaterial = this.createSplashMaterial();
+    terrain.onTerrainRiversRebuilt = () => this.rebuildAll();
     this.rebuildAll();
   }
 
@@ -371,10 +372,7 @@ ${lake
 water = mix(water, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, max(bankD, 0.0))) * 0.3 * (1.0 - channelOpening));
 float shore = wsShoreLines(bankD, dashP, bankAa, 0.0, ${lake ? '99.0' : 'halfW * 0.45 - 0.3'}) * (1.0 - smoothstep(60.0, 140.0, rDist));
 shore *= 1.0 - channelOpening;
-// Where the water touches the land: the sea's thin broken line, from the real depth
-float lineD = rDepth + wobble * 0.02;
-float lineBreak = smoothstep(0.3, 0.5, wdNoise(vRipW.xz * 0.9 + uWsTime * 0.04));
-shore = max(shore, (1.0 - smoothstep(uWsFoam.x * 0.5, uWsFoam.x * 0.5 + fwidth(lineD) * 1.5 + 0.004, lineD)) * mix(0.35, 1.0, lineBreak));
+shore = max(shore, wsWaterline(rDepth));
 foam = max(foam, shore * uWsShine.w);
 // Ripple rings from the swimmer / wader (world space, shared with the sea)
 // (derivatives first: the distance test skips the loop for far pixels)

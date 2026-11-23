@@ -5,12 +5,13 @@ import { PhysicsWorld } from '../../physics/PhysicsWorld';
 import type { ExtraLight } from '../../world/NightLighting';
 import {
   planCaveNetwork, meshCaveChunks, chunkEntranceDistance, CaveGenRequest, CaveGenOutput, CaveEntranceIn, CaveChunk, CaveLayout, Box,
-  CavePlan, CaveMeshJob, CaveMeshResult, CRYSTAL_COLORS,
+  CavePlan, CaveMeshJob, CaveMeshResult, CRYSTAL_COLORS, CaveExcavation, appendExcavations,
 } from './CaveGen';
 import { caveCacheKey, loadCaveCache, CaveCacheWriter } from './CaveCache';
 import { createCaveRockMaterial, createCaveWaterMaterial, caveUniforms } from './CaveMaterial';
 import { createCavePortalMaterial, LAND_DAYLIGHT_PORTAL, SEA_DAYLIGHT_PORTAL } from './CavePortalMaterial';
 import { CaveDrips } from './CaveDrips';
+import { CaveNuggets } from './CaveNuggets';
 
 /** Chunks farther than this from the player are hidden (the cave fog swallows them long before). */
 const VIEW_RADIUS = 62;
@@ -110,6 +111,7 @@ export class CaveNetwork {
   private gen = 0;
   private revCounter = 0;
   private build: BuildState | null = null;
+  private activeRequest: CaveGenRequest | null = null;
   private inFlight = false;
   private queued: CaveGenRequest | null = null;
   private loggedFirst = false;
@@ -119,6 +121,7 @@ export class CaveNetwork {
   private readonly rockMat = createCaveRockMaterial();
   private readonly waterMat = createCaveWaterMaterial();
   private readonly chunks = new Map<number, ChunkView>();
+  private readonly chunkBodies = new Set<number>();
   private colliderQueue: ChunkView[] = [];
   /** Water, crystals, embers, entrances: rebuilt whole on every build. */
   private readonly decor = new THREE.Group();
@@ -131,7 +134,11 @@ export class CaveNetwork {
   private cullTimer = 0;
   private time = 0;
   private wasVisible = false;
-  private pendingExcavations: { x: number; y: number; z: number; r: number }[] | null = null;
+  private pendingExcavations: CaveExcavation[] | null = null;
+  private activeInitialCuts: CaveExcavation[] | undefined;
+  public readonly nuggets: CaveNuggets;
+  private readonly nuggetLocal = new THREE.Vector3();
+  private readonly nuggetRay: RAPIER.Ray;
 
   constructor(
     scene: THREE.Scene,
@@ -140,15 +147,23 @@ export class CaveNetwork {
     public readonly entrancesIn: CaveEntranceIn[],
     private readonly coast: Float32Array,
     private readonly seed: number,
-    layout: CaveLayout | null
+    private readonly initialLayout: CaveLayout | null
   ) {
     this.group.name = 'CaveNetwork';
     this.group.position.copy(origin);
+    this.nuggets = new CaveNuggets(this.group, seed);
+    this.nuggetRay = new RAPIER.Ray(new THREE.Vector3(), new THREE.Vector3());
     this.group.visible = false;
     this.decor.name = 'CaveDecor';
     this.group.add(this.decor);
     scene.add(this.group);
-    this.start({ seed, entrances: entrancesIn, coast, layout }, true);
+  }
+
+  public ensureGenerated(): void {
+    if (this.inFlight || this.layout || this.disposed) return;
+    this.activeInitialCuts = this.pendingExcavations ?? undefined;
+    this.pendingExcavations = null;
+    this.start({ seed: this.seed, entrances: this.entrancesIn, coast: this.coast, layout: this.initialLayout ? structuredClone(this.initialLayout) : null, excavations: this.activeInitialCuts }, true);
   }
 
   /**
@@ -173,13 +188,25 @@ export class CaveNetwork {
   }
 
   /** Persisted player cuts, applied once the generated layout is available. */
-  public restoreExcavations(cuts: { x: number; y: number; z: number; r: number }[]): void {
+  public restoreExcavations(cuts: CaveExcavation[]): void {
     this.pendingExcavations = cuts;
     if (this.layout) this.applyPendingExcavations();
   }
 
-  public getExcavations(): { x: number; y: number; z: number; r: number }[] {
-    return (this.layout?.items ?? []).filter((it) => it.t === 'dig').map(({ x, y, z, r }) => ({ x, y, z, r: r ?? 0.9 }));
+  public getExcavations(): CaveExcavation[] {
+    if (!this.layout) return this.pendingExcavations ?? this.activeInitialCuts ?? [];
+    const layout = this.latestLayout()!;
+    const cuts = layout.items.filter(it => it.t === 'dig').map(({ x, y, z, r }) => ({ x, y, z, r: r ?? 0.9 }));
+    const keys = new Set(cuts.map(({ x, y, z }) => `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`));
+    for (const cut of this.pendingExcavations ?? []) {
+      const { x, y, z } = cut;
+      if (!keys.has(`${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`)) cuts.push(cut);
+    }
+    return cuts;
+  }
+
+  private latestLayout(): CaveLayout | null {
+    return this.queued?.layout ?? this.build?.plan.layout ?? this.activeRequest?.layout ?? this.layout;
   }
 
   /** Carves a compact sphere just behind a wall impact, then rebuilds only its nearby chunks. */
@@ -191,12 +218,13 @@ export class CaveNetwork {
     const r = 1.35;
     // Distant chunks may still be meshing after the entrance is playable. Extend the newest
     // queued layout so a new strike cannot overwrite an earlier queued excavation.
-    const base = this.queued?.layout ?? this.build?.plan.layout ?? this.layout;
+    const base = this.latestLayout()!;
     const next = structuredClone(base);
     const item = { id: next.nextItem++, t: 'dig' as const, x: p.x, y: p.y, z: p.z, r };
     next.items.push(item);
     const pad = r + 2;
     this.rebuild(next, [{ minX: p.x - pad, maxX: p.x + pad, minY: p.y - pad, maxY: p.y + pad, minZ: p.z - pad, maxZ: p.z + pad }], this.seed, true);
+    this.nuggets.discover(p, worldNormal);
     return true;
   }
 
@@ -205,7 +233,7 @@ export class CaveNetwork {
     if (!this.layout || !this.ready || !this.contains(worldPoint)) return false;
     const r = THREE.MathUtils.clamp(radius, 1.5, 4.5);
     const p = worldPoint.clone().sub(this.origin);
-    const base = this.queued?.layout ?? this.build?.plan.layout ?? this.layout;
+    const base = this.latestLayout()!;
     const next = structuredClone(base);
     next.items.push({ id: next.nextItem++, t: 'dig', x: p.x, y: p.y, z: p.z, r });
     const pad = r + 2;
@@ -223,15 +251,10 @@ export class CaveNetwork {
     if (!this.layout || !this.pendingExcavations?.length) { this.pendingExcavations = null; return; }
     const cuts = this.pendingExcavations;
     this.pendingExcavations = null;
-    const next = structuredClone(this.layout);
-    const existing = new Set(next.items.filter((it) => it.t === 'dig').map((it) => `${it.x.toFixed(2)},${it.y.toFixed(2)},${it.z.toFixed(2)}`));
-    for (const c of cuts) {
-      const key = `${c.x.toFixed(2)},${c.y.toFixed(2)},${c.z.toFixed(2)}`;
-      if (existing.has(key)) continue;
-      existing.add(key);
-      next.items.push({ id: next.nextItem++, t: 'dig', x: c.x, y: c.y, z: c.z, r: c.r });
-    }
-    if (next.items.length !== this.layout.items.length) this.rebuild(next, null, this.seed, true);
+    const base = this.latestLayout()!;
+    const next = structuredClone(base);
+    appendExcavations(next, cuts);
+    if (next.items.length !== base.items.length) this.rebuild(next, null, this.seed, true);
   }
 
   /** Keeps the workers alive between builds (for the editor); off terminates them once idle. */
@@ -250,6 +273,7 @@ export class CaveNetwork {
    */
   private start(req: CaveGenRequest, useCache: boolean): void {
     this.inFlight = true;
+    this.activeRequest = req;
     this.startT = performance.now();
     const gen = ++this.gen;
     this.build = null;
@@ -410,6 +434,8 @@ export class CaveNetwork {
     const b = this.build;
     if (!b || b.gen !== gen) return;
     this.build = null;
+    this.nuggets.invalidateSurfaces();
+    this.activeRequest = null;
     this.inFlight = false;
     this.markReady();
     b.cache?.finish();
@@ -421,11 +447,11 @@ export class CaveNetwork {
       console.info(`[CaveNetwork] ${s.hubs} chambers, ${s.tunnels} tunnels, ${s.pools} pools, ${s.chunks} chunks, ${s.triangles} triangles in ${ms} ms (${this.poolSize()} workers)`);
     }
     this.onBuilt?.(b.plan.layout, this.stats);
-    this.applyPendingExcavations();
     const next = this.queued;
     this.queued = null;
     if (next) this.start(next, false);
-    else if (!this.keepWorker) this.stopWorkers();
+    this.applyPendingExcavations();
+    if (!this.inFlight && !this.keepWorker) this.stopWorkers();
   }
 
   private stopWorkers(): void {
@@ -449,6 +475,7 @@ export class CaveNetwork {
       geo.setAttribute('normal', new THREE.BufferAttribute(c.normals, 3));
       geo.setAttribute('caveData', new THREE.BufferAttribute(c.data, 4, true));
       geo.setAttribute('caveWet', new THREE.BufferAttribute(c.wet, 1, true));
+      geo.setAttribute('caveFracture', new THREE.BufferAttribute(c.fracture, 1, true));
       geo.setIndex(new THREE.BufferAttribute(c.indices, 1));
       geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(c.cx, c.cy, c.cz), c.radius);
       const mesh = new THREE.Mesh(geo, this.rockMat);
@@ -467,6 +494,7 @@ export class CaveNetwork {
 
   /** Everything of a build but the rock: water, decorations, lights, drips, entrances, contents. */
   private applyPlan(plan: CavePlan, preserveContents = false): void {
+    this.activeInitialCuts = undefined;
     const o = this.origin;
     const W = (p: [number, number, number]) => new THREE.Vector3(p[0] + o.x, p[1] + o.y, p[2] + o.z);
 
@@ -544,7 +572,10 @@ export class CaveNetwork {
   }
 
   private removeChunk(view: ChunkView): void {
-    if (view.body && this.physics.isInitialized()) this.physics.removeRigidBody(view.body);
+    if (view.body) {
+      this.chunkBodies.delete(view.body.handle);
+      if (this.physics.isInitialized()) this.physics.removeRigidBody(view.body);
+    }
     view.body = null;
     view.data = null;
     view.mesh.geometry.dispose();
@@ -648,6 +679,7 @@ export class CaveNetwork {
    * ceilings seen from above are culled and the floors, tunnels and water show through).
    */
   public setEditorView(on: boolean): void {
+    if (on) this.ensureGenerated();
     if (this.editorView === on) return;
     this.editorView = on;
     this.cullTimer = 0;
@@ -718,9 +750,13 @@ export class CaveNetwork {
 
   // ---------------------------------------------------------------- frame
 
-  /** Builds every collider still queued (before the player is put inside). */
-  public finishColliders(): void {
-    while (this.colliderQueue.length) this.buildCollider(this.colliderQueue.pop()!);
+  /** Builds nearby colliders before teleporting into the entrance. */
+  public finishEntranceColliders(spawn: THREE.Vector3): void {
+    this.colliderQueue = this.colliderQueue.filter(view => {
+      if (view.center.distanceTo(spawn) - view.radius > 12) return true;
+      this.buildCollider(view);
+      return false;
+    });
   }
 
   private buildCollider(view: ChunkView): void {
@@ -729,18 +765,44 @@ export class CaveNetwork {
     const idx = new Uint32Array(c.colliderIndexCount);
     for (let i = 0; i < idx.length; i++) idx[i] = c.indices[i];
     view.body = this.physics.createStaticTrimesh(this.origin, c.positions, idx).body;
+    this.chunkBodies.add(view.body.handle);
     view.data = null;
     // The GPU keeps its own copy: once uploaded, the JS arrays are dropped
     const geo = view.mesh.geometry;
-    for (const name of ['position', 'normal', 'caveData', 'caveWet'] as const) {
+    for (const name of ['position', 'normal', 'caveData', 'caveWet', 'caveFracture'] as const) {
       const attr = geo.getAttribute(name) as THREE.BufferAttribute;
       attr.onUpload(releaseArray);
     }
     geo.index?.onUpload(releaseArray);
   }
 
+  public aimNugget(origin: THREE.Vector3, direction: THREE.Vector3, maxDistance: number) {
+    const target = this.nuggets.target(this.nuggetLocal.copy(origin).sub(this.origin), direction, maxDistance);
+    if (target) target.position.add(this.origin);
+    return target;
+  }
+
+  public readonly isCaveCollider = (collider: RAPIER.Collider): boolean => {
+    const body = collider.parent();
+    return !!body && this.chunkBodies.has(body.handle);
+  };
+
+  private readonly findNuggetSurface = (cut: THREE.Vector3, inward: THREE.Vector3) => {
+    const ray = this.nuggetRay;
+    ray.origin.x = cut.x + this.origin.x;
+    ray.origin.y = cut.y + this.origin.y;
+    ray.origin.z = cut.z + this.origin.z;
+    ray.dir = inward;
+    const hit = this.physics.world.castRayAndGetNormal(ray, 3.2, false, undefined, undefined, undefined, undefined, this.isCaveCollider);
+    if (!hit || hit.timeOfImpact < 0.35) return null;
+    const normal = new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z);
+    if (normal.dot(inward) > 0) normal.negate();
+    return { position: cut.clone().addScaledVector(inward, hit.timeOfImpact), normal };
+  };
+
   public update(dt: number, player: THREE.Vector3, inCave: boolean): void {
     if (!this.ready) return;
+    const surfacesReady = !this.busy && this.colliderQueue.length === 0;
     // Colliders in the background, a few per frame
     for (let i = 0; i < COLLIDERS_PER_FRAME && this.colliderQueue.length; i++) this.buildCollider(this.colliderQueue.pop()!);
 
@@ -769,14 +831,17 @@ export class CaveNetwork {
         const d = c.center.distanceTo(player) - c.radius;
         c.mesh.visible = d < VIEW_RADIUS;
       }
+      if (surfacesReady) this.nuggets.refresh(this.nuggetLocal.copy(player).sub(this.origin), this.findNuggetSurface);
     }
     this.wasVisible = true;
+    this.nuggets.updateClock(this.time);
     this.drips?.update(dt, player);
   }
 
   public dispose(): void {
     this.disposed = true;
     this.queued = null;
+    this.activeRequest = null;
     this.gen++;
     this.build?.cache?.abort();
     this.build = null;
@@ -784,6 +849,7 @@ export class CaveNetwork {
     for (const c of [...this.chunks.values()]) this.removeChunk(c);
     this.colliderQueue = [];
     this.clearDecor();
+    this.nuggets.dispose();
     this.rockMat.dispose();
     this.waterMat.dispose();
     if (this.drips) {

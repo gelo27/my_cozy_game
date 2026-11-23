@@ -3,6 +3,7 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { InputManager } from '../input/InputManager';
 import { TerrainSystem, TerrainBrushKind } from '../world/TerrainSystem';
 import { PropSystem, PROP_DEF_MAP } from '../world/PropSystem';
+import { HEDGE_TYPE, snapHedge } from '../world/Hedge';
 import { ALGAE_DEFAULT_LINKS, LILY } from '../world/AlgaeChains';
 import { WEB_DEFAULTS, WebParams, clampWeb } from '../world/SpiderWebs';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
@@ -466,7 +467,7 @@ export class EditorController {
 
   private snapshot(): Snapshot {
     return {
-      heights: this.terrain.heights.slice(),
+      heights: this.terrain.captureUncarvedHeights(),
       tiles: this.terrain.tiles.slice(),
       props: this.props.captureEditorProps(),
       rivers: stringifyRivers(riverWorld.defs),
@@ -484,9 +485,8 @@ export class EditorController {
       else this.rivers.select(this.rivers.selectedRiver, -1);
     }
     if (s.caves && s.caves !== (this.caves.work ? JSON.stringify(this.caves.work) : '')) this.caves.setLayout(JSON.parse(s.caves));
-    this.terrain.heights.set(s.heights);
+    this.terrain.restoreUncarvedHeights(s.heights);
     this.terrain.tiles.set(s.tiles);
-    this.terrain.invalidateSaveCache();
     const save = this.terrain.serialize();
     this.terrain.deserialize(save); // marks all chunks/splat/physics dirty
     this.props.restoreEditorProps(s.props);
@@ -597,6 +597,17 @@ export class EditorController {
       }
       const hit = this.props.pick(this.raycaster);
       this.select(hit ? hit.id : null);
+    } else if (tool === 'place') {
+      const rect = this.dom.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const cursor = new THREE.Vector2((e.clientX - rect.left) / rect.width * 2 - 1, 1 - (e.clientY - rect.top) / rect.height * 2);
+      this.updatePlacementHit(cursor);
+      this.updateGhost(this.hasHit);
+      if (!this.ghost.visible) return;
+      this.pushUndo();
+      this.stroking = true;
+      this.lastPlaceAt.set(Infinity, 0, 0);
+      this.placeAtHit();
     } else if (this.hasHit) {
       this.pushUndo();
       this.stroking = true;
@@ -676,17 +687,10 @@ export class EditorController {
     this.rivers.update(dt);
     this.caves.update(dt);
 
-    this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
-    this.hasHit = !!this.terrain.raycast(this.raycaster.ray, 300, this.hit);
-    this.hitOnTerrain = true;
-    this.hitNormal.set(0, 1, 0);
     const { tool } = this.state;
-    // Placing in the caves: the terrain ray misses the cave pocket, its colliders take the hit
-    if (tool === 'place' || tool === 'enemy') this.castIntoCaves();
+    this.updatePlacementHit(this.input.mouseNDC);
     // Sharks go in the water: the sea surface under the cursor counts as the hit
     if (tool === 'enemy' && this.state.enemyKind === 'shark') this.castOntoSea();
-    // Water lilies set "on the surface" aim at the water, not the bottom seen through it
-    if (tool === 'place' && this.lilyOnSurface()) this.castOntoSea();
     // Duckweed is painted on the water surface (sea, lakes, rivers), not on the bottom under it
     if (tool === 'duckweed') this.castOntoWater();
     this.sceneHover?.(tool === 'select' && this.hasHit && !this.looking ? this.hit : null);
@@ -707,26 +711,42 @@ export class EditorController {
       if (this.scatterErasing()) this.scatterErase(this.hit.x, this.hit.z, r);
       else this.scatterFill(this.hit.x, this.hit.z, r);
     } else if (tool === 'place') {
-      // Click places one; dragging scatters with spacing proportional to the prop size
-      const spacing = Math.max(1.2, this.state.placeScale * 2);
-      if (this.hit.distanceTo(this.lastPlaceAt) >= spacing) {
-        // Webs keep the ghost's turn (across the passage) and size
-        const rnd = this.state.placeRandomize && !PROP_DEF_MAP.get(this.state.placeType)?.web;
-        const rot = rnd ? Math.random() * Math.PI * 2 : this.ghost.rotation.y;
-        const scale = this.state.placeScale * (rnd ? 0.85 + Math.random() * 0.3 : 1);
-        const y = this.hitOnTerrain ? undefined : this.hit.y;
-        const links = this.placeLinks(scale);
-        if (links !== null) {
-          const id = this.props.add(
-            this.state.placeType, this.hit.x, this.hit.z, rot, scale, y, this.hitOnTerrain, links, this.state.placeAlgaeColors, this.state.placeWeb,
-            null, null, this.state.placeLilyHead
-          );
-          if (id !== null && this.lilyOnSurface()) this.centreLilyHead(id, rot, scale);
-          this.lastPlaceAt.copy(this.hit);
-          this.touch();
-        }
-      }
+      this.placeAtHit();
     }
+  }
+
+  private updatePlacementHit(cursor: THREE.Vector2): void {
+    this.raycaster.setFromCamera(cursor, this.camera);
+    this.hasHit = !!this.terrain.raycast(this.raycaster.ray, 300, this.hit);
+    this.hitOnTerrain = true;
+    this.hitNormal.set(0, 1, 0);
+    const { tool } = this.state;
+    if (tool === 'place' || tool === 'enemy') this.castIntoCaves();
+    if (tool === 'place' && this.lilyOnSurface()) this.castOntoSea();
+  }
+
+  private placeAtHit(): void {
+    const { placeType, placeRandomize, placeScale, placeAlgaeColors, placeWeb, placeLilyHead } = this.state;
+    const hedge = placeType === HEDGE_TYPE;
+    const at = hedge ? this.ghost.position : this.hit;
+    const spacing = hedge ? 0.5 : Math.max(1.2, placeScale * 2);
+    if (at.distanceTo(this.lastPlaceAt) < spacing) return;
+
+    const randomize = !hedge && placeRandomize && !PROP_DEF_MAP.get(placeType)?.web;
+    const yaw = hedge ? 0 : randomize ? Math.random() * Math.PI * 2 : this.ghost.rotation.y;
+    const scale = hedge ? 1 : placeScale * (randomize ? 0.85 + Math.random() * 0.3 : 1);
+    const y = this.hitOnTerrain ? undefined : this.hit.y;
+    const links = this.placeLinks(scale);
+    if (links === null) return;
+
+    const id = this.props.add(
+      placeType, at.x, at.z, yaw, scale, y, this.hitOnTerrain, links, placeAlgaeColors, placeWeb,
+      null, null, placeLilyHead,
+    );
+    if (id === null) return;
+    if (this.lilyOnSurface()) this.centreLilyHead(id, yaw, scale);
+    this.lastPlaceAt.copy(at);
+    this.touch();
   }
 
   // ---------------------------------------------------------------- object brush
@@ -1098,7 +1118,15 @@ export class EditorController {
       return;
     }
     // The type's shared geometry (algae: the stalk of the chosen length), rendered translucent
-    const geometry = this.props.previewGeometry(this.state.placeType, links, this.state.placeWeb, this.state.placeLilyHead);
+    const hedge = this.state.placeType === HEDGE_TYPE;
+    this.ghost.position.copy(this.hit);
+    if (hedge) {
+      const x = snapHedge(this.hit.x), z = snapHedge(this.hit.z);
+      this.ghost.position.set(x, this.hitOnTerrain ? this.terrain.getHeight(x, z) : this.hit.y, z);
+      this.ghost.rotation.y = 0;
+    }
+    const mask = hedge ? this.props.hedgeMaskAt(this.ghost.position) : 0;
+    const geometry = this.props.previewGeometry(this.state.placeType, links, this.state.placeWeb, this.state.placeLilyHead, mask);
     if (this.ghostType !== this.state.placeType || this.ghostGeometry !== geometry) {
       this.ghostType = this.state.placeType;
       this.ghostGeometry = geometry;
@@ -1108,9 +1136,8 @@ export class EditorController {
         this.ghost.add(mesh);
       }
     }
-    this.ghost.position.copy(this.hit);
     if (this.lilyOnSurface()) this.ghost.position.y = this.terrain.getHeight(this.hit.x, this.hit.z);
-    this.ghost.scale.setScalar(this.state.placeScale);
+    this.ghost.scale.setScalar(hedge ? 1 : this.state.placeScale);
     if (web) this.updateWebGhost();
   }
 }

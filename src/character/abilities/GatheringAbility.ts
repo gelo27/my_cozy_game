@@ -16,7 +16,9 @@ import { APPLE_SAPLING_ID, AppleOrchard, AppleTreeNode } from '../../gathering/A
 import { WebField, WEB_REACH } from '../../world/SpiderWebs';
 import { FlowerBeds, tulipItemIndex } from '../../gathering/FlowerBeds';
 import { TreeNursery, seedTreeType } from '../../gathering/TreeNursery';
+import { HEDGE_TYPE } from '../../world/Hedge';
 import type { CaveNetwork } from '../../explore/cave/CaveNetwork';
+import type { NuggetMetal } from '../../explore/cave/CaveNuggets';
 
 /** The axe reaches a pest this far past its body (m); a bit more than a tree, they move. */
 const PEST_REACH = 1.9;
@@ -62,7 +64,7 @@ type Target =
   | { type: 'pest'; node: Pest }
   | { type: 'apple'; node: AppleTreeNode }
   | { type: 'web'; node: { position: THREE.Vector3; radius: number } }
-  | { type: 'cave'; node: { position: THREE.Vector3; radius: number }; normal: THREE.Vector3 };
+  | { type: 'cave'; node: { position: THREE.Vector3; radius: number }; normal: THREE.Vector3; nugget?: { id: string; metal: NuggetMetal } };
 
 /** What the E / LMB prompt can be about (webs have their own). */
 type FieldTarget = Exclude<Target, { type: 'web' | 'cave' }>;
@@ -102,6 +104,7 @@ export class GatheringAbility implements IAbility {
   /** Pines, oaks and bushes planted from the seeds felled trees drop (wired by the engine). */
   public nursery: TreeNursery | null = null;
   public caveNetwork: CaveNetwork | null = null;
+  public onNuggetCollected: ((itemId: string) => void) | null = null;
   private readonly facingScratch = new THREE.Vector3();
   private readonly throwOriginScratch = new THREE.Vector3();
   private readonly throwDirectionScratch = new THREE.Vector3();
@@ -236,7 +239,20 @@ export class GatheringAbility implements IAbility {
       : this.isCaveMining ? { kind: 'stone', title: 'Печерна порода', actionText: 'Підійди до стіни', hintText: '', progress: 0, canAct: false }
       : null;
 
+    if (target?.type === 'cave' && target.nugget) {
+      const item = this.inventory.getItem(`${target.nugget.metal}_ore`);
+      if (item) {
+        const full = item.count >= item.maxStack;
+        this.currentPrompt = {
+          kind: 'stone', title: dataName('item', item.id, item.name), actionText: t(full ? 'gather.oreFull' : 'gather.mine'),
+          hintText: '', progress: 0, canAct: !full,
+        };
+      }
+    }
+
     if (!target || context.isBuildModeActive || this.inventory.isInventoryOpen()) return;
+    if (target.type === 'cave' && target.nugget && !this.currentPrompt?.canAct) return;
+    if (target.type === 'propTree' && target.node.hedge && !this.currentPrompt?.canAct) return;
     // Competes with the other E targets only when this hand can do something to it
     const usable = target.type === 'apple' && tool !== 'axe' ? target.node.canKnock : !!tool && tool === this.requiredTool(target);
     if (usable) interactionFocus.offer('gather', target.node.position);
@@ -423,7 +439,8 @@ export class GatheringAbility implements IAbility {
   private updateTreePlanting(playerPos: THREE.Vector3, context: CharacterContext, type: string): void {
     const nursery = this.nursery!;
     const itemId = this.inventory!.getEquippedItemId()!;
-    const title = t(type === 'bush' ? 'sapling.bush' : type === 'tree_pine' ? 'sapling.pine' : 'sapling.oak');
+    const hedge = type === HEDGE_TYPE;
+    const title = t(hedge ? 'hedge.title' : type === 'bush' ? 'sapling.bush' : type === 'tree_pine' ? 'sapling.pine' : 'sapling.oak');
     const aim = context.isGroundAiming ? context.groundAim : null;
     if (!aim) {
       nursery.hideGhost();
@@ -437,7 +454,7 @@ export class GatheringAbility implements IAbility {
     this.currentPrompt = {
       kind: 'tree',
       title,
-      actionText: ok ? t('sapling.plant') : check === 'tooClose' ? t('sapling.tooClose') : check === 'tooFar' ? t('aim.tooFar') : t('sapling.badGround'),
+      actionText: ok ? t(hedge ? 'hedge.place' : 'sapling.plant') : check === 'tooClose' ? t('sapling.tooClose') : check === 'tooFar' ? t('aim.tooFar') : t('sapling.badGround'),
       hintText: '',
       progress: 0,
       canAct: ok,
@@ -524,8 +541,20 @@ export class GatheringAbility implements IAbility {
     }
     if (target.type === 'cave') {
       const point = target.node.position;
+      if (target.nugget) {
+        const item = this.inventory?.getItem(`${target.nugget.metal}_ore`);
+        if (item && item.count < item.maxStack && this.caveNetwork?.nuggets.collect(target.nugget.id)) {
+          this.inventory?.addItem(item.id, 1);
+          this.onNuggetCollected?.(item.id);
+          this.rocks?.emitCaveChips(point, target.normal);
+          audioEngine.at(point).playMineHit(true);
+          hitFx.star(point, true);
+        }
+        return;
+      }
       if (this.caveNetwork?.excavate(point, target.normal)) {
         this.inventory?.addItem('stone', 1);
+        this.rocks?.emitCaveChips(point, target.normal);
         audioEngine.at(point).playMineHit();
         hitFx.star(point, true);
       }
@@ -594,10 +623,16 @@ export class GatheringAbility implements IAbility {
     const origin = this.caveRayOrigin.set(playerPos.x, playerPos.y + 0.35, playerPos.z);
     const direction = this.caveRayDirection.copy(context.cameraWorldDirection).normalize();
     const reach = GATHERING_CONFIG.REACH + 1.2;
-    const hit = context.physics.castRayAndGetNormal(origin, direction, reach, context.collider);
-    if (!hit || !cave.contains(hit.point)) return null;
+    // Flying chips and other dynamic bodies should not intercept the wall aim.
+    const groups = context.physics.packCollisionGroups(COLLISION_GROUPS.CHARACTER, COLLISION_GROUPS.ENVIRONMENT);
+    const hit = context.physics.castRayAndGetNormal(origin, direction, reach, context.collider, groups);
+    const nugget = cave.aimNugget(origin, direction, hit?.hit.timeOfImpact ?? reach);
+    if (nugget && playerPos.distanceTo(nugget.position) <= reach) {
+      return { type: 'cave', node: { position: nugget.position, radius: 0.15 }, normal: nugget.normal, nugget };
+    }
+    if (!hit || !cave.isCaveCollider(hit.hit.collider)) return null;
     if (playerPos.distanceTo(hit.point) > reach) return null;
-    return { type: 'cave', node: { position: hit.point.clone(), radius: 0.15 }, normal: hit.normal.clone() };
+    return { type: 'cave', node: { position: hit.point, radius: 0.15 }, normal: hit.normal };
   }
 
   private equippedTool(): GatherTool | null {
@@ -644,6 +679,18 @@ export class GatheringAbility implements IAbility {
           hintText: t('gather.splitHint', { n: GATHERING_CONFIG.TREE_WOOD_YIELD }),
           progress: 0,
           canAct: hasTool,
+        };
+      }
+      if (target.type === 'propTree' && target.node.hedge) {
+        const item = this.inventory?.getItem(HEDGE_TYPE);
+        const full = !!item && item.count >= item.maxStack;
+        return {
+          kind: 'tree',
+          title: t('hedge.title'),
+          actionText: hasTool ? t('gather.clearBush', { done: maxHealth - health, max: maxHealth }) : t('gather.needAxe'),
+          hintText: !hasTool ? t('gather.takeAxe') : t(full ? 'hedge.stackFull' : 'hedge.recover'),
+          progress,
+          canAct: hasTool && !full,
         };
       }
       if (target.type === 'propTree' && target.node.bush) {

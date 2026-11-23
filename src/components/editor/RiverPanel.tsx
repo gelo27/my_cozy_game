@@ -71,6 +71,9 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
             onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
             className="bg-black/30 border border-white/10 rounded px-2 py-1 outline-none focus:border-sky-500"
           />
+          <button className={chip(false)} onClick={() => tool.fitToTerrain()} title="Увімкнути прив’язку до поточного рельєфу та скинути задані вручну висоти">
+            <Waves className="w-3.5 h-3.5" /> Підлаштувати до рельєфу
+          </button>
           {!tool.isLake && (
             <Slider label="Ширина" value={river.width} min={0.8} max={20} step={0.1} onStart={() => tool.beginEdit()} onChange={(v) => tool.setRiver({ width: v }, false)} fmt={(v) => `${v.toFixed(1)} м`} />
           )}
@@ -86,7 +89,7 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
                 Рівень води — авто (нижче найнижчого берега)
               </label>
               {river.level !== undefined ? (
-                <Slider label="Рівень води" value={river.level} min={0} max={60} step={0.05} onStart={() => tool.beginEdit()} onChange={(v) => tool.setRiver({ level: v }, false)} fmt={(v) => `${v.toFixed(2)} м`} />
+                <NumberField label="Рівень води Y (м)" value={river.level} onCommit={(v) => tool.setRiver({ level: v })} />
               ) : (
                 <p className="text-zinc-500 tabular-nums">Рівень: {(sampled?.lake?.level ?? 0).toFixed(2)} м</p>
               )}
@@ -96,7 +99,7 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
           <label className="flex items-start gap-2 text-zinc-300" title="Невисокі вали там, де вода тече вище навколишньої землі">
             <input
               type="checkbox"
-              checked={river.levees !== false}
+              checked={river.levees ?? !river.fitTerrain}
               onChange={(e) => tool.setRiver({ levees: e.target.checked })}
               className="accent-sky-500 mt-0.5"
             />
@@ -115,6 +118,7 @@ export const RiverPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
             <p className="text-zinc-500 tabular-nums">
               Довжина {sampled.samples[sampled.samples.length - 1].dist.toFixed(0)} м · перепад{' '}
               {(sampled.samples[0].s - sampled.samples[sampled.samples.length - 1].s).toFixed(1)} м
+              {sampled.pointSample[0] > 0 ? ' · течія від останньої точки' : ''}
               {sampled.falls.length ? ` · водоспадів: ${sampled.falls.length}` : ''}
             </p>
           )}

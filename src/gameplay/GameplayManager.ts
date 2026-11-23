@@ -458,7 +458,7 @@ export class GameplayManager {
     this.lastPlayerPos.copy(pos);
     const anchor = this.anchorOverride ?? pos;
     this.pets.update(dt, anchor, moving && !this.anchorOverride);
-    this.companion?.update(dt, anchor);
+    this.companion?.update(dt, anchor, !this.anchorOverride && !!this.character.swimAbility?.isSwimming);
     this.workers?.update(dt, pos);
     this.updateBuff(dt);
     this.updateCooking(dt);

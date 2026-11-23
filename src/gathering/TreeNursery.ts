@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type RAPIER from '@dimforge/rapier3d-compat';
 import type { PropSystem } from '../world/PropSystem';
+import { HEDGE_HEIGHT, HEDGE_TILE, HEDGE_TYPE, snapHedge } from '../world/Hedge';
+import { GROUND_AIM_REACH } from './GroundAim';
 import type { TerrainSystem } from '../world/TerrainSystem';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
 import type { ParticleManager } from '../particles/ParticleManager';
@@ -20,6 +22,7 @@ const TREE_OF_SEED: Record<string, string> = {
   pine_cone: 'tree_pine',
   acorn: 'tree_round',
   bush_sapling: 'bush',
+  [HEDGE_TYPE]: HEDGE_TYPE,
 };
 /** The prop type a seed item grows into (null for anything else). */
 export const seedTreeType = (itemId: string | null): string | null => (itemId ? TREE_OF_SEED[itemId] ?? null : null);
@@ -79,6 +82,7 @@ export class TreeNursery {
   private ghostKey = '';
   private lodsRevision = -1;
   private probe: RAPIER.Cylinder | null = null;
+  private hedgeProbe: RAPIER.Cuboid | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -95,22 +99,27 @@ export class TreeNursery {
 
   /** Shows a ghost sapling where the crosshair meets the ground and checks the spot. */
   public updateGhost(playerPos: THREE.Vector3, type: string, aim: { point: THREE.Vector3; inReach: boolean }): TreePlantCheck {
-    const x = aim.point.x, z = aim.point.z;
+    const hedge = type === HEDGE_TYPE;
+    const x = hedge ? snapHedge(aim.point.x) : aim.point.x;
+    const z = hedge ? snapHedge(aim.point.z) : aim.point.z;
     const key = `${type},${Math.round(x * 20)},${Math.round(z * 20)},${this.props.revision},${this.terrain.revision},${this.revision},${Math.floor(performance.now() / 500)}`;
     if (key !== this.ghostKey) {
       this.ghostKey = key;
       this.ghostPos.set(x, this.terrain.getHeight(x, z), z);
       this.ghostCheck = this.checkSpot(type, x, this.ghostPos.y, z, playerPos.y);
     }
-    const check: TreePlantCheck = aim.inReach ? this.ghostCheck : 'tooFar';
+    const distance = Math.hypot(x - playerPos.x, z - playerPos.z);
+    const check: TreePlantCheck = hedge
+      ? distance > GROUND_AIM_REACH ? 'tooFar' : distance < HEDGE_TILE * 0.8 ? 'tooClose' : this.ghostCheck
+      : aim.inReach ? this.ghostCheck : 'tooFar';
     const ghost = this.ghostMesh(type);
     if (ghost) {
       ghost.visible = true;
       ghost.material = check === 'ok' ? foliageMaterialOf(type) : this.ghostBad;
       ghost.position.copy(this.ghostPos);
-      ghost.rotation.y = this.ghostYaw;
+      ghost.rotation.y = hedge ? 0 : this.ghostYaw;
       // A bit bigger than a fresh sapling so it reads at a glance
-      ghost.scale.setScalar(this.ghostScale * START_SCALE * 2);
+      ghost.scale.setScalar(hedge ? 1 : this.ghostScale * START_SCALE * 2);
     }
     return check;
   }
@@ -125,8 +134,15 @@ export class TreeNursery {
 
   /** Plants a sapling at the ghost (after updateGhost said 'ok'). */
   public plantAtGhost(type: string): boolean {
-    if (this.ghostCheck !== 'ok' || !GROW_SECONDS[type]) return false;
+    if (this.ghostCheck !== 'ok') return false;
     const { x, y, z } = this.ghostPos;
+    if (type === HEDGE_TYPE) {
+      if (this.props.add(type, x, z, 0, 1, y) === null) return false;
+      this.ghostKey = '';
+      audioEngine.at(this.ghostPos).playPlantSeed();
+      return true;
+    }
+    if (!GROW_SECONDS[type]) return false;
     this.addSapling(type, x, y, z, this.ghostYaw, this.ghostScale, 0);
     this.ghostYaw = Math.random() * Math.PI * 2;
     this.ghostScale = 0.9 + Math.random() * 0.25;
@@ -162,6 +178,11 @@ export class TreeNursery {
     let close = false;
     this.props.forEachNear(x, z, room + 2.5, (p) => {
       if (close) return;
+      if (type === HEDGE_TYPE && p.type === HEDGE_TYPE) {
+        close = Math.abs(p.position.x - x) < HEDGE_TILE - 0.03 &&
+          Math.abs(p.position.z - z) < HEDGE_TILE - 0.03;
+        return;
+      }
       const other = ROOM[p.type];
       if (other === undefined) return;
       // The bigger of the two keeps its room (a bush may stand nearer a bush than a tree)
@@ -178,8 +199,12 @@ export class TreeNursery {
     // Buildings, rocks, trunks, stations, fences: any collider but the terrain
     if (this.physics.isInitialized()) {
       const R = this.physics.rapier;
+      const hedge = type === HEDGE_TYPE;
+      const shape = hedge
+        ? (this.hedgeProbe ??= new R.Cuboid(HEDGE_TILE / 2 - 0.035, HEDGE_HEIGHT / 2, HEDGE_TILE / 2 - 0.035))
+        : (this.probe ??= new R.Cylinder(0.3, 0.35));
       const hit = this.physics.world.intersectionWithShape(
-        { x, y: y + 0.4, z }, { x: 0, y: 0, z: 0, w: 1 }, (this.probe ??= new R.Cylinder(0.3, 0.35)), undefined,
+        { x, y: y + (hedge ? HEDGE_HEIGHT / 2 : 0.4), z }, { x: 0, y: 0, z: 0, w: 1 }, shape, undefined,
         this.physics.packCollisionGroups(0xffff, COLLISION_GROUPS.ENVIRONMENT | COLLISION_GROUPS.DYNAMIC_PROPS),
         undefined, undefined,
         (c) => ((c.collisionGroups() >>> 16) & COLLISION_GROUPS.TERRAIN) === 0,
@@ -193,6 +218,7 @@ export class TreeNursery {
 
   private geometryOf(type: string): THREE.BufferGeometry | null {
     const lods = getTreeLods()?.[type];
+    if (type === HEDGE_TYPE) return this.props.previewGeometry(type, undefined, undefined, undefined, this.props.hedgeMaskAt(this.ghostPos));
     if (!lods) return null;
     // The middle LOD: a sapling is small, the most detailed mesh would be wasted on it
     return lods[Math.min(1, lods.length - 1)] ?? lods[0] ?? null;

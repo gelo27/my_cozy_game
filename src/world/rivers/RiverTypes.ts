@@ -26,6 +26,8 @@ export interface RiverDef {
    * flow into, out of or through). Omitted: a river running from the first point to the last.
    */
   kind?: 'lake';
+  /** Fit to the editable terrain. Omitted for waterways carved into the generated island. */
+  fitTerrain?: boolean;
   /** Lakes: pinned water level (m). Omitted: just below the lowest ground on the shore. */
   level?: number;
   /** Default channel width (m). */
@@ -37,7 +39,7 @@ export interface RiverDef {
    * Off: the banks are only ever cut down, never built up.
    */
   levees?: boolean;
-  /** Points from the source downstream to the mouth. */
+  /** Control points in draw order. An unconstrained terrain-fit channel can flow in reverse. */
   points: RiverPoint[];
 }
 

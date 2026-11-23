@@ -1,3 +1,4 @@
+import { BAY_EAVE_Y, BAY_RIDGE_X, BAY_FOOTPRINT } from './config/BuildingConstants';
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { HouseRoofKind } from './types/BuildingTypes';
@@ -1791,6 +1792,13 @@ export class BuildingManager {
         break;
       }
 
+      case BuildingPieceType.WOOD_WALL_WINDOW_BAY: {
+        const points = BAY_FOOTPRINT.flatMap(([x, z]) => [x, -0.75, z, x, BAY_EAVE_Y, z]);
+        points.push(-BAY_RIDGE_X, 0.75, BAY_FOOTPRINT[0][1], BAY_RIDGE_X, 0.75, BAY_FOOTPRINT[0][1]);
+        colliderDesc = this.physics.rapier.ColliderDesc.convexHull(new Float32Array(points))!
+          .setFriction(0.6).setRestitution(0).setCollisionGroups(colGroup);
+        break;
+      }
       case BuildingPieceType.WOOD_WALL_WINDOW_ROUND: {
         colliderDesc = this.physics.rapier.ColliderDesc.cuboid(0.5, 0.5, WALL_THICKNESS / 2.0)
           .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);

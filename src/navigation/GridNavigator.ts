@@ -47,6 +47,8 @@ export interface NavConfig {
   maxDrop: number;
   /** Lowest walkable floor (e.g. the water surface for agents that don't swim). */
   minFloorY: () => number;
+  /** Traversable water height at the agent’s feet, or NaN for ordinary ground sampling. */
+  waterPathHeight?: (x: number, z: number, refY: number, floorY: number) => number;
   /** Door openings, re-read when the revision changes. */
   doors?: () => NavDoor[];
   /**
@@ -122,7 +124,8 @@ export class GridNavigator {
   private cells = new Map<number, Cell>();
   /** Steep cell-to-cell climbs already checked for a continuous ramp (edge key → ok). */
   private slopes = new Map<number, boolean>();
-  private revision = -1;
+  private revision: number | string = -1;
+  private sampleWater = false;
   /** Open door leaves are no obstacle for villagers (they walk through them). */
   private readonly solid = (c: RAPIER.Collider): boolean => !NPC_GHOST_COLLIDERS.has(c.handle);
   private readonly ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
@@ -145,7 +148,7 @@ export class GridNavigator {
 
   constructor(
     private readonly physics: PhysicsWorld,
-    private readonly getRevision: () => number,
+    private readonly getRevision: () => number | string,
     public readonly cfg: NavConfig
   ) {
     // Starts above step height so stairs and kerbs don't count as obstacles
@@ -172,7 +175,11 @@ export class GridNavigator {
     const cz = this.toCell(p.z);
     for (let dz = -r; dz <= r; dz++) {
       for (let dx = -r; dx <= r; dx++) {
-        for (let lv = -3; lv <= 3; lv++) this.cells.delete(this.key(cx + dx, cz + dz, this.level(p.y) + lv));
+        for (let lv = -3; lv <= 3; lv++) {
+          const key = this.key(cx + dx, cz + dz, this.level(p.y) + lv) * 2;
+          this.cells.delete(key);
+          this.cells.delete(key + 1);
+        }
       }
     }
     this.slopes.clear();
@@ -187,10 +194,12 @@ export class GridNavigator {
     this.lastPartial = false;
     this.lastSearching = false;
     this.sampleLimit = this.samples + sampleBudget;
+    this.sampleWater = !!this.cfg.waterPathHeight;
     try {
       return this.plan(start, goal, maxNodes);
     } finally {
       this.sampleLimit = Infinity;
+      this.sampleWater = false;
     }
   }
 
@@ -324,34 +333,48 @@ export class GridNavigator {
    * reached by walking along the ground floor right under it.
    */
   public lineWalkable(ax: number, az: number, ay: number, bx: number, bz: number, cachedOnly = false, by?: number): boolean {
+    const y = this.segmentHeight(ax, az, ay, bx, bz, cachedOnly);
+    return Number.isFinite(y) && (by === undefined || Math.abs(y - by) < 0.6);
+  }
+
+  /** Floor under a worker's next short step, using the same clearance and water cells as planning. */
+  public routeHeight(ax: number, az: number, ay: number, bx: number, bz: number): number {
+    this.checkRevision();
+    this.sampleWater = !!this.cfg.waterPathHeight;
+    try {
+      return this.segmentHeight(ax, az, ay, bx, bz, false);
+    } finally {
+      this.sampleWater = false;
+    }
+  }
+
+  private segmentHeight(ax: number, az: number, ay: number, bx: number, bz: number, cachedOnly: boolean): number {
     const dx = bx - ax;
     const dz = bz - az;
     const len = Math.hypot(dx, dz);
     const step = this.cfg.cell * 0.5;
     const n = Math.max(1, Math.ceil(len / step));
     let y = ay;
-    let lastCx = NaN, lastCz = NaN;
+    let lastCx = this.toCell(ax), lastCz = this.toCell(az);
     for (let i = 1; i <= n; i++) {
       const t = i / n;
       const cx = this.toCell(ax + dx * t);
       const cz = this.toCell(az + dz * t);
-      if (cx === lastCx && cz === lastCz) continue;
+      if (i > 1 && cx === lastCx && cz === lastCz) continue;
       // Moving diagonally between cells: both side cells must be open too (no clipping corners)
-      if (!Number.isNaN(lastCx) && cx !== lastCx && cz !== lastCz) {
+      if (cx !== lastCx && cz !== lastCz) {
         if (
           !this.passable(this.sample(cx, lastCz, y, cachedOnly), y, lastCx, lastCz, cx, lastCz, cachedOnly) ||
           !this.passable(this.sample(lastCx, cz, y, cachedOnly), y, lastCx, lastCz, lastCx, cz, cachedOnly)
-        ) return false;
+        ) return NaN;
       }
       const c = this.sample(cx, cz, y, cachedOnly);
-      const fx = Number.isNaN(lastCx) ? this.toCell(ax) : lastCx;
-      const fz = Number.isNaN(lastCz) ? this.toCell(az) : lastCz;
-      if (!this.passable(c, y, fx, fz, cx, cz, cachedOnly)) return false;
+      if (!this.passable(c, y, lastCx, lastCz, cx, cz, cachedOnly)) return NaN;
       y = c.y;
       lastCx = cx;
       lastCz = cz;
     }
-    return by === undefined || Math.abs(y - by) < 0.6;
+    return y;
   }
 
   // ------------------------------------------------------------------ A*
@@ -537,7 +560,8 @@ export class GridNavigator {
   }
 
   private continuousSlope(fx: number, fz: number, fy: number, tx: number, tz: number, ty: number, cachedOnly: boolean): boolean {
-    const key = this.key(fx, fz, this.level(fy)) * 9 + (tx - fx + 1) * 3 + (tz - fz + 1);
+    const edge = this.key(fx, fz, this.level(fy)) * 9 + (tx - fx + 1) * 3 + (tz - fz + 1);
+    const key = edge * 2 + Number(this.sampleWater);
     const known = this.slopes.get(key);
     if (known !== undefined) return known;
     if (cachedOnly) return false;
@@ -558,7 +582,8 @@ export class GridNavigator {
   private static readonly UNKNOWN: Cell = { walkable: false, y: 0 };
 
   private sample(cx: number, cz: number, refY: number, cachedOnly = false): Cell {
-    const key = this.key(cx, cz, this.level(refY));
+    // A swimming route can cross water even though a spawn or work spot needs a floor.
+    const key = this.key(cx, cz, this.level(refY)) * 2 + Number(this.sampleWater);
     let c = this.cells.get(key);
     if (c) return c;
     if (cachedOnly) return GridNavigator.UNKNOWN;
@@ -591,10 +616,14 @@ export class GridNavigator {
     this.ray.origin.y = top;
     this.ray.origin.z = z;
     const hit = world.castRay(this.ray, this.cfg.maxStepUp + 0.6 + this.cfg.maxDrop + 3, true, this.flags, undefined, undefined, exclude, this.solid);
-    if (!hit) return { walkable: false, y: refY };
-    const y = top - hit.timeOfImpact;
-    // Started inside something (wall, trunk): not a floor
-    if (hit.timeOfImpact < 0.01 || y < this.cfg.minFloorY()) return { walkable: false, y };
+    // Started inside something (wall, trunk): not a floor or a clear swimming cell.
+    if (hit && hit.timeOfImpact < 0.01) return { walkable: false, y: refY };
+    const floorY = hit ? top - hit.timeOfImpact : -Infinity;
+    const waterY = this.sampleWater ? this.cfg.waterPathHeight!(x, z, refY, floorY) : NaN;
+    const y = Number.isFinite(waterY) ? waterY : floorY;
+    if (!Number.isFinite(y) || (!Number.isFinite(waterY) && y < this.cfg.minFloorY())) {
+      return { walkable: false, y: refY };
+    }
     const half = (this.cfg.height - this.cfg.maxStepUp) / 2;
     const blocker = world.intersectionWithShape(
       { x, y: y + this.cfg.maxStepUp + half, z },

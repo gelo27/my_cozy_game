@@ -15,6 +15,7 @@ import {
   PIECE_TRAITS,
 } from '../building/types/BuildingTypes';
 import { describeWallSeg, WallSeg } from '../building/continuous/WallJoints';
+import { findWallOpenings } from '../building/continuous/WallGeometry';
 import { isMobileDevice } from './WorldSettings';
 
 /**
@@ -191,6 +192,7 @@ const mod = (a: number, n: number): number => ((a % n) + n) % n;
 interface Cluster {
   key: string;
   segs: WallSeg[];
+  shortWindows: WallSeg[];
   covers: BuiltPiece[];
   /** World cells of its map (walls plus a margin) */
   rect: Rect;
@@ -437,7 +439,11 @@ export class InteriorLighting {
       const dz = bb ? Math.max(bb.min.z - cz, 0, cz - bb.max.z) : Math.abs(p.position.z - cz);
       return dx * dx + dz * dz <= reach * reach;
     });
-    const segs = roomWalls(pieces.filter(isBlocker).map((p) => describeWallSeg(p)));
+    const allSegs = pieces.filter(isBlocker).map(describeWallSeg);
+    const segs = roomWalls(allSegs);
+    const roomSegs = new Set(segs);
+    // A short window can cut a full wall even when it cannot enclose a room on its own.
+    const shortWindows = allSegs.filter((s) => isWindowPiece(s.piece.type) && !roomSegs.has(s));
     const covers = pieces.filter(isCover);
 
     // Union of walls whose ends come within 1 m of each other
@@ -503,11 +509,17 @@ export class InteriorLighting {
         return !!bb && bb.max.x >= x0 && bb.min.x <= x1 && bb.max.z >= z0 && bb.min.z <= z1;
       });
       if (mine.length === 0) continue; // no roof, no floor: nothing can be inside
-      const key = this.keyOf(g, mine);
+      const windows = shortWindows.filter(({ piece: p, halfW }) => {
+        const margin = halfW + WALL_R;
+        if (p.position.x < x0 - margin || p.position.x > x1 + margin ||
+            p.position.z < z0 - margin || p.position.z > z1 + margin) return false;
+        return g.some(({ piece: wall }) => isSolidWallPiece(wall.type) && findWallOpenings(wall, [p]).length > 0);
+      });
+      const key = this.keyOf([...g, ...windows], mine);
       found.add(key);
       let cl = this.clusters.get(key);
       if (!cl) {
-        cl = { key, segs: g, covers: mine, rect, data: null, maxY: 0, cells: 0, openings: 0, comp: null };
+        cl = { key, segs: g, shortWindows: windows, covers: mine, rect, data: null, maxY: 0, cells: 0, openings: 0, comp: null };
         this.clusters.set(key, cl);
       }
       if (!cl.data && this.job?.cl !== cl && !this.queue.includes(cl)) this.queue.push(cl);
@@ -930,7 +942,7 @@ export class InteriorLighting {
 
     // 4. Daylight through windows and doorways that open to the outside
     const openings: Opening[] = [];
-    for (const s of segs) {
+    for (const s of [...segs, ...cl.shortWindows]) {
       const p = s.piece;
       const win = isWindowPiece(p.type);
       const doorway = isDoorwayPiece(p.type);

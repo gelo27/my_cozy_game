@@ -117,7 +117,17 @@ const MAPLE: typeof SHAPE = [
 /** Fan from the middle over the 10 rim vertices (closing back to the stem). */
 const MAPLE_TRIS = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 7, 0, 7, 8, 0, 8, 9, 0, 9, 10, 0, 10, 1];
 
-export function addCrownLeaves(src: THREE.BufferGeometry, opts: CrownLeafOptions): THREE.BufferGeometry {
+export interface CrownLeafAnchor {
+  position: THREE.Vector3;
+  normal: THREE.Vector3;
+  /** Horizontal direction away from the exposed crown's centre or centreline. */
+  outward: THREE.Vector3;
+  seed: number;
+}
+
+export function addCrownLeaves(
+  src: THREE.BufferGeometry, opts: CrownLeafOptions, anchors?: readonly CrownLeafAnchor[]
+): THREE.BufferGeometry {
   const P = src.getAttribute('position');
   const C = src.getAttribute('color');
   const N = src.getAttribute('normal');
@@ -195,51 +205,72 @@ export function addCrownLeaves(src: THREE.BufferGeometry, opts: CrownLeafOptions
   const across = new THREE.Vector3();
   const lit = new THREE.Vector3();
   const v = new THREE.Vector3();
+  const radial = new THREE.Vector3();
   const DOWN = new THREE.Vector3(0, -1, 0);
 
   let placed = 0;
-  for (let attempt = 0; attempt < opts.count * 25 && placed < opts.count; attempt++) {
-    // Area-weighted face, uniform point on it
-    const r = rand() * total;
-    let lo = 0;
-    let hi = cdf.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (cdf[mid] < r) lo = mid + 1;
-      else hi = mid;
+  const attempts = anchors?.length ?? opts.count * 25;
+  for (let attempt = 0; attempt < attempts && placed < opts.count; attempt++) {
+    const anchor = anchors?.[attempt];
+    let i0 = 0;
+    if (anchor) {
+      p.copy(anchor.position);
+      fn.copy(anchor.normal);
+    } else {
+      // Area-weighted face, uniform point on it
+      const r = rand() * total;
+      let lo = 0;
+      let hi = cdf.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (cdf[mid] < r) lo = mid + 1;
+        else hi = mid;
+      }
+      const t = tris[lo];
+      i0 = vi(t, 0);
+      a.fromBufferAttribute(P, i0);
+      b.fromBufferAttribute(P, vi(t, 1));
+      c.fromBufferAttribute(P, vi(t, 2));
+      let u = rand();
+      let w = rand();
+      if (u + w > 1) {
+        u = 1 - u;
+        w = 1 - w;
+      }
+      p.copy(a).addScaledVector(e1.subVectors(b, a), u).addScaledVector(e2.subVectors(c, a), w);
+      if (tooClose(p)) continue;
+      const key = cellKey(p.x, p.y, p.z);
+      if (!grid.has(key)) grid.set(key, []);
+      grid.get(key)!.push(p.clone());
+      fn.subVectors(b, a).cross(e2.subVectors(c, a)).normalize();
+      radial.subVectors(p, center).normalize();
+      if (fn.dot(radial) < 0) fn.negate();
+      fn.lerp(radial, 0.35).normalize();
     }
-    const t = tris[lo];
-    const i0 = vi(t, 0);
-    a.fromBufferAttribute(P, i0);
-    b.fromBufferAttribute(P, vi(t, 1));
-    c.fromBufferAttribute(P, vi(t, 2));
-    let u = rand();
-    let w = rand();
-    if (u + w > 1) {
-      u = 1 - u;
-      w = 1 - w;
-    }
-    p.copy(a).addScaledVector(e1.subVectors(b, a), u).addScaledVector(e2.subVectors(c, a), w);
-    if (tooClose(p)) continue;
-    const key = cellKey(p.x, p.y, p.z);
-    if (!grid.has(key)) grid.set(key, []);
-    grid.get(key)!.push(p.clone());
     placed++;
 
-    // Surface frame: outward normal (smoothed towards the crown's roundness), "down the slope",
-    // and across. On the underside, where there is no slope, hang outwards instead.
-    fn.subVectors(b, a).cross(e2.subVectors(c, a)).normalize();
-    const radial = v.subVectors(p, center).normalize();
-    if (fn.dot(radial) < 0) fn.negate();
-    fn.lerp(radial, 0.35).normalize();
+    const leafRand = anchor ? rng(anchor.seed) : rand;
     down.copy(DOWN).addScaledVector(fn, -DOWN.dot(fn));
-    if (down.lengthSq() < 0.04) down.set(radial.x, 0, radial.z);
+    if (anchor && fn.y > 0.8) {
+      // Fan out across the top, then follow the slope down the bevel and sides.
+      radial.copy(anchor.outward);
+      if (radial.lengthSq() < 1e-6) {
+        const angle = leafRand() * Math.PI * 2;
+        radial.set(Math.cos(angle), 0, Math.sin(angle));
+      }
+      radial.addScaledVector(fn, -radial.dot(fn)).normalize();
+      down.normalize().lerp(radial, THREE.MathUtils.smoothstep(fn.y, 0.8, 0.98));
+    } else if (!anchor && down.lengthSq() < 0.04) {
+      down.set(radial.x, 0, radial.z);
+    }
     // A slight random twist so the rows aren't ruler-straight
-    down.addScaledVector(across.crossVectors(fn, down).normalize(), (rand() - 0.5) * 0.5).normalize();
+    down.addScaledVector(across.crossVectors(fn, down).normalize(), (leafRand() - 0.5) * 0.5).normalize();
     across.crossVectors(fn, down).normalize();
 
     // Lighting: mostly the round crown (or the cone around the trunk), a bit of the leaf's own tilt
-    if (opts.lightFrom === 'axis') {
+    if (anchor) {
+      lit.copy(fn);
+    } else if (opts.lightFrom === 'axis') {
       lit.set(p.x - center.x, 0, p.z - center.z).normalize().multiplyScalar(0.6).addScaledVector(fn, 0.4).normalize();
     } else {
       lit.copy(radial).multiplyScalar(0.75).addScaledVector(fn, 0.25).normalize();
@@ -252,13 +283,13 @@ export function addCrownLeaves(src: THREE.BufferGeometry, opts: CrownLeafOptions
     const maple = opts.shape === 'maple';
     const shape = needle ? NEEDLE : scallop ? SCALLOP : maple ? MAPLE : SHAPE;
     const leafTris = needle ? NEEDLE_TRIS : scallop ? SCALLOP_TRIS : maple ? MAPLE_TRIS : FAN;
-    const len = opts.size * (0.85 + rand() * 0.3);
-    const wid = needle || scallop ? (opts.width ?? 0.07) * (0.85 + rand() * 0.3) : len * (0.85 + rand() * 0.2);
+    const len = opts.size * (0.85 + leafRand() * 0.3);
+    const wid = needle || scallop ? (opts.width ?? 0.07) * (0.85 + leafRand() * 0.3) : len * (0.85 + leafRand() * 0.2);
     const cr = C.getX(i0);
     const cg = C.getY(i0);
     const cb = C.getZ(i0);
     // Lighter towards the top of the crown (sky light), varied per scale
-    const shade = (0.88 + rand() * 0.16) * (0.78 + 0.32 * heightOf(p.y));
+    const shade = (0.88 + leafRand() * 0.16) * (0.78 + 0.32 * heightOf(p.y));
 
     const base = pos.length / 3;
     for (const s of shape) {
@@ -267,7 +298,12 @@ export function addCrownLeaves(src: THREE.BufferGeometry, opts: CrownLeafOptions
         .addScaledVector(down, s.y * len)
         .addScaledVector(fn, s.lift * len);
       pos.push(v.x, v.y, v.z);
-      nor.push(lit.x, lit.y, lit.z);
+      if (anchor) {
+        v.copy(lit).addScaledVector(across, s.x * 0.25).addScaledVector(down, s.y * 0.18).normalize();
+        nor.push(v.x, v.y, v.z);
+      } else {
+        nor.push(lit.x, lit.y, lit.z);
+      }
       const k = shade * s.tone;
       col.push(cr * k, cg * k, cb * k);
       sway.push(s.sway);

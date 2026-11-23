@@ -2,6 +2,9 @@ import type { CropType } from '../../farming/types/FarmingTypes';
 
 export type InventoryCategory = 'tools' | 'seeds' | 'crops' | 'food' | 'materials' | 'all';
 
+/** Holds both legacy gold stacks even if each was full before they were merged. */
+export const GOLD_ORE_STACK = 1998;
+
 export interface InventoryItem {
   id: string;
   name: string;
@@ -276,6 +279,18 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     sellPrice: 1,
   },
   {
+    id: 'decorative_bush',
+    name: 'Декоративний кущ',
+    category: 'seeds',
+    count: 24,
+    maxStack: 99,
+    iconName: 'Sprout',
+    color: '#3f8a3a',
+    description: 'Підстрижений кущ для живоплоту. Спорядь, прицілься в землю й натисни E. Секції стикуються на сітці.',
+    isEquippable: true,
+    sellPrice: 2,
+  },
+  {
     id: 'bush_sapling',
     name: 'Відросток куща',
     category: 'seeds',
@@ -446,7 +461,8 @@ export const DEFAULT_INVENTORY_ITEMS: InventoryItem[] = [
     sellPrice: 6,
   },
   ...mat('copper_ore', 'Мідна руда', 'Gem', '#b87333', 'Зеленкувато-мідна руда з гірських схилів.', 8),
-  ...mat('gold_ore', 'Золота руда', 'Gem', '#e8b84a', 'Рідкісна руда з золотими жилками. Трапляється високо в горах і глибоко в печерах.', 25),
+  ...mat('gold_ore', 'Золота руда', 'Gem', '#e8b84a', 'Золота руда й самородки з гір та печер.', 25, GOLD_ORE_STACK),
+  ...mat('silver_ore', 'Срібна руда', 'Gem', '#b9cdea', 'Срібна руда й самородки з печер.', 28),
   ...mat('crystal', 'Кристал', 'Gem', '#9b7bff', 'Світний печерний кристал. Цінується в крамниці.', 40),
   ...mat('gem_ruby', 'Рубін', 'Gem', '#e0115f', 'Старовинний самоцвіт зі скарбу.', 250),
   ...mat('sand', 'Пісок', 'Box', '#e6d3a3', 'Чистий морський пісок з пляжу.', 1),
@@ -558,12 +574,16 @@ function fish(id: string, name: string, color: string, description: string, sell
   return [{ id, name, category: 'food', count: 0, maxStack: 99, iconName: 'Fish', color, description, isEquippable: false, sellPrice }];
 }
 
-function mat(id: string, name: string, iconName: string, color: string, description: string, sellPrice: number): InventoryItem[] {
-  return [{ id, name, category: 'materials', count: 0, maxStack: 999, iconName, color, description, isEquippable: false, sellPrice }];
+function mat(id: string, name: string, iconName: string, color: string, description: string, sellPrice: number, maxStack = 999): InventoryItem[] {
+  return [{ id, name, category: 'materials', count: 0, maxStack, iconName, color, description, isEquippable: false, sellPrice }];
 }
 
 function food(id: string, name: string, color: string, description: string, sellPrice: number): InventoryItem[] {
   return [{ id, name, category: 'food', count: 0, maxStack: 99, iconName: 'Soup', color, description, isEquippable: false, sellPrice }];
+}
+
+export function isPreciousOreItem(id: string): boolean {
+  return id === 'gold_ore' || id === 'silver_ore';
 }
 
 export function getItemEmoji(item?: InventoryItem | null): string {
@@ -597,7 +617,7 @@ export function getItemEmoji(item?: InventoryItem | null): string {
   if (item.id.startsWith('tulip_')) return '🌷';
   if (item.id === 'acorn') return '🌰';
   if (item.id === 'pine_cone') return '🌲';
-  if (item.id === 'bush_sapling') return '🌿';
+  if (item.id === 'bush_sapling' || item.id === 'decorative_bush') return '🌿';
   if (item.id.startsWith('crate_')) return '📦';
   if (item.id === 'crate_wheat') return '📦';
   if (item.id === 'crate_carrot') return '📦';

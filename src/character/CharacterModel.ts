@@ -126,6 +126,7 @@ export class CharacterModel {
   /** Called when a foot touches the ground while walking/running; intensity ~0.35 sneak, 0.6 walk, 1 run. */
   public onFootstep: ((intensity: number) => void) | null = null;
   // Ground speed (m/s) at which each clip's feet stay planted, measured once the model loads
+  private static gaitCalibration?: { walk: number; run: number; plants: Map<LocomotionClip, number[]> };
   private walkGroundSpeed: number = FALLBACK_GROUND_SPEED.WALK;
   private runGroundSpeed: number = FALLBACK_GROUND_SPEED.RUN;
 
@@ -418,8 +419,15 @@ export class CharacterModel {
       if (e.action === this.oneShot) this.cancelOneShot();
     });
 
-    this.walkGroundSpeed = this.measureGroundSpeed(root, 'WALK') ?? FALLBACK_GROUND_SPEED.WALK;
-    this.runGroundSpeed = this.measureGroundSpeed(root, 'RUN') ?? FALLBACK_GROUND_SPEED.RUN;
+    if (!CharacterModel.gaitCalibration) {
+      const walk = this.measureGroundSpeed(root, 'WALK') ?? FALLBACK_GROUND_SPEED.WALK;
+      const run = this.measureGroundSpeed(root, 'RUN') ?? FALLBACK_GROUND_SPEED.RUN;
+      CharacterModel.gaitCalibration = { walk, run, plants: new Map(this.footPlants) };
+    }
+    const gait = CharacterModel.gaitCalibration;
+    this.walkGroundSpeed = gait.walk;
+    this.runGroundSpeed = gait.run;
+    for (const [clip, plants] of gait.plants) this.footPlants.set(clip, plants);
 
     this.playLocomotion('IDLE', true);
   }

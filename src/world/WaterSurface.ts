@@ -189,6 +189,12 @@ float wsShoreLines(float d, vec2 dashP, float aa, float seed, float reachMax) {
   // Lines thinner than a pixel far away: fade instead of flicker
   return v * (1.0 - smoothstep(0.06, 0.2, aa));
 }
+
+// The line touching land has solid foam coverage and an antialiased outer edge.
+float wsWaterline(float depth) {
+  float edge = uWsFoam.x * 0.5;
+  return 1.0 - smoothstep(edge, edge + fwidth(depth) * 1.5 + 0.004, depth);
+}
 ${DUCKWEED_GLSL}
 `;
 
@@ -215,10 +221,7 @@ float shoreD = mix(${SHORE_RANGE.toFixed(1)}, texture2D(uWsShore, wsBedUv(vSeaW.
 float shoreAa = fwidth(shoreD);
 seaCol = mix(seaCol, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, shoreD)) * 0.3 * inIsland);
 wsFoam = wsShoreLines(shoreD, vSeaW.xz, shoreAa, 0.0, 99.0) * (1.0 - smoothstep(60.0, 140.0, seaDist));
-// Where the water touches the land: a thin crisp line, broken into pieces
-float lineD = seaDepth + wobble * 0.02;
-float lineBreak = smoothstep(0.3, 0.5, wdNoise(vSeaW.xz * 0.9 + uWsTime * 0.04));
-wsFoam = max(wsFoam, (1.0 - smoothstep(uWsFoam.x * 0.5, uWsFoam.x * 0.5 + fwidth(lineD) * 1.5 + 0.004, lineD)) * mix(0.35, 1.0, lineBreak));
+wsFoam = max(wsFoam, wsWaterline(seaDepth));
 wsFoam *= inIsland * uWsShine.w;
 // Ripple rings from the swimmer, wading legs and splashes
 // (derivatives first: the distance test below skips the loop for far pixels)

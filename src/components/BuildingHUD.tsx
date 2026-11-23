@@ -41,9 +41,10 @@ import { DEFAULT_ROOF_STYLE, RoofStyle } from '../building/ProceduralRoofSystem'
 import { InputManager } from '../input/InputManager';
 import { AimStatus, Chip, Crosshair, ModeBar, PrimaryAction, Shelf, ShelfCard, ShelfSection, ToolButton, ToolColumn } from './buildui/BuildUI';
 
-const WindowGlyph: React.FC<{ shape: 'single' | 'arch' | 'palladian' | 'round' }> = ({ shape }) => (
+const WindowGlyph: React.FC<{ shape: 'single' | 'arch' | 'palladian' | 'round' | 'bay' }> = ({ shape }) => (
   <svg viewBox="0 0 32 32" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    {shape === 'round' ? <><circle cx="16" cy="16" r="10" /><path d="M6 16h20M16 6v20M9 9l14 14M23 9 9 23" /></> :
+    {shape === 'bay' ? <path d="M3 6l7-5h12l7 5M3 6l6 3h14l6-3v19l-6 3H9l-6-3zM9 9v19M23 9v19M3 14l6 3h14l6-3" /> :
+      shape === 'round' ? <><circle cx="16" cy="16" r="10" /><path d="M6 16h20M16 6v20M9 9l14 14M23 9 9 23" /></> :
       shape === 'arch' || shape === 'palladian' ? <><path d="M5 27V14a11 11 0 0 1 22 0v13M5 27h22" />
         {shape === 'palladian' && <><path d="M16 5v22M7 16h18M16 16 9 8M16 16l7-8" /></>}</> :
         <><rect x="6" y="4" width="20" height="24" rx="1" /><path d="M6 16h20" /></>}
@@ -177,6 +178,14 @@ const PIECE_ITEMS: PieceItemConfig[] = [
     slot: 7,
     icon: <WindowGlyph shape="round" />,
     dimBadge: '1x1м · кругле',
+  },
+
+  {
+    type: BuildingPieceType.WOOD_WALL_WINDOW_BAY,
+    category: PieceCategory.WINDOWS,
+    slot: 8,
+    icon: <WindowGlyph shape="bay" />,
+    dimBadge: '2,5×1,5 м',
   },
 
   // Doors & Doorways

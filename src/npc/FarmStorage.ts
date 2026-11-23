@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GOLD_ORE_STACK } from '../inventory/types/InventoryTypes';
 
 /** Prop type of the storage chest (a station in the PropSystem). */
 export const STORAGE_CHEST = 'storage_chest';
@@ -6,6 +7,10 @@ export const STORAGE_CHEST = 'storage_chest';
 export const STORAGE_CHEST_SPOT = { x: 1.2, z: 11.5 };
 /** One stack in the chest holds at most this many of an item. */
 export const STORAGE_STACK = 999;
+
+function stackLimit(id: string): number {
+  return id === 'gold_ore' ? GOLD_ORE_STACK : STORAGE_STACK;
+}
 
 /**
  * The farm's shared store. Every storage chest opens onto the same stock (like a farm cellar), so a
@@ -31,7 +36,7 @@ export class FarmStorage {
   public put(id: string, n: number): number {
     if (n <= 0) return 0;
     const have = this.count(id);
-    const add = Math.min(n, STORAGE_STACK - have);
+    const add = Math.min(n, stackLimit(id) - have);
     if (add <= 0) return 0;
     this.items.set(id, have + add);
     this.changed();
@@ -87,7 +92,7 @@ export class FarmStorage {
 
   public deserialize(data: Record<string, number> | undefined): void {
     this.items.clear();
-    if (data) for (const [id, n] of Object.entries(data)) if (typeof n === 'number' && n > 0) this.items.set(id, Math.min(STORAGE_STACK, Math.floor(n)));
+    if (data) for (const [id, n] of Object.entries(data)) if (typeof n === 'number' && n > 0) this.items.set(id, Math.min(stackLimit(id), Math.floor(n)));
     this.changed();
   }
 
