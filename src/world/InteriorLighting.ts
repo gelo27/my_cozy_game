@@ -23,19 +23,19 @@ import { isMobileDevice } from './WorldSettings';
  *
  * There are no shadow maps, so the sun and the sky light reach every surface, walls or not, and a
  * room with the lamps off looked as bright as the yard. Every house (a cluster of touching walls)
- * gets a small top-down "interior map" baked once, cached, and copied into a world-anchored ring
- * texture around the player that every lit material samples once per pixel:
+ * gets a small top-down interior map per storey, baked once, cached, and copied into a
+ * world-anchored ring texture around the player:
  *
  * - R: how enclosed the cell is, 0 (outdoors) .. 1 (deep inside a room); cells near windows and
  *   doorways that open to the outside are lighter, the light falling off into the room;
  * - G: the world height of the cover above (roof or upper floor);
- * - B: a sharp inside mask (the room up to the walls' inner half). R runs on into the walls so it
- *   filters smoothly, the mask keeps it off the outer faces and the ground around the house.
+ * - B: an inside mask whose 0.5 contour follows the wall centre lines. R is extended past
+ *   that contour so filtering does not brighten the inside edge.
+ * - A: the world height of the bottom of this storey.
  *
  * A pixel is inside when its cell is enclosed and it is below the cover; its sky / sun light is then
  * scaled down (the fake night lamps are added after this, so lit rooms stay lit). The pixel is
- * looked up a little along its normal, so a wall's outer face reads the yard and its inner face the
- * room, and a roof's top reads the open sky and its underside the attic.
+ * looked up at its world XZ position, with a small vertical offset for roof and floor faces.
  *
  * Rooms come from the walls: walls, windows and doors are drawn into the grid, the outside is flood
  * filled from the edges, and what the fill does not reach is inside, if a roof or a floor covers it
@@ -55,6 +55,10 @@ const N = MOBILE ? 192 : 384;
 const RECENTER = 8;
 /** Wall half thickness drawn into the grid (a little more than the 0.16 m wall, closes joints). */
 const WALL_R = Math.max(0.17, CELL * 0.5 + 0.01);
+/** Keep enough of the signed wall distance to interpolate across neighbouring texels. */
+const MASK_RANGE = CELL * Math.SQRT2;
+/** Width on either side of the wall centre over which the lighting changes. */
+const MASK_FEATHER = 0.035 / (2 * MASK_RANGE);
 /** Cells of outdoors kept around a house's walls in its map. */
 const MARGIN = Math.ceil(0.75 / CELL) + 1;
 /** Radius (cells) of the corner shading neighbourhood: about 0.75 m. */
@@ -80,7 +84,8 @@ export const interiorSettings = {
 };
 
 export const interiorUniforms = {
-  uIntMap: { value: null as THREE.Texture | null },
+  uIntMap: { value: null as THREE.DataArrayTexture | null },
+  uIntLayers: { value: 1 },
   /** World XZ box of the baked houses inside the window: min x, min z, max x, max z. */
   uIntBox: { value: new THREE.Vector4(0, 0, 0, 0) },
   /** x: 1 / (texture size in metres), y: highest cover + margin (pixels above skip the lookup). */
@@ -90,27 +95,36 @@ export const interiorUniforms = {
 };
 
 export const INTERIOR_GLSL = /* glsl */ `
+#ifndef SKIP_INTERIOR_SHADE
 #define INTERIOR_SHADE
-uniform sampler2D uIntMap;
+uniform highp sampler2DArray uIntMap;
+uniform int uIntLayers;
 uniform vec4 uIntBox;
 uniform vec2 uIntA;
-uniform vec3 uIntB;`;
+uniform vec3 uIntB;
+#endif`;
 
 /**
  * After the lights: scales the sky and sun light of pixels inside a room. Leaves the pixel's
  * darkness in `intDark` (0 outdoors), which also keeps street lamps out of rooms (NightLighting).
  */
 export const INTERIOR_END = /* glsl */ `
+#ifdef INTERIOR_SHADE
 float intDark = 0.0;
 if (uIntB.z > 0.5) {
   mat3 intInv = transpose(mat3(viewMatrix));
-  vec3 intQ = cameraPosition + intInv * (-vViewPosition) + (intInv * normal) * 0.35;
+  vec3 intQ = cameraPosition + intInv * (-vViewPosition);
+  intQ.y += (intInv * normal).y * 0.025;
   // Early out: only pixels over a baked house and below its highest roof read the map
   if (intQ.x > uIntBox.x && intQ.z > uIntBox.y && intQ.x < uIntBox.z && intQ.z < uIntBox.w && intQ.y < uIntA.y) {
     // World-anchored ring texture: the repeat wrap does the modulo
-    vec3 intT = texture2D(uIntMap, intQ.xz * uIntA.x).rgb;
-    float intK = intT.r * smoothstep(0.35, 0.75, intT.b)
-      * (1.0 - smoothstep(intT.g - 0.12, intT.g + 0.02, intQ.y));
+    float intK = 0.0;
+    for (int layer = uIntLayers - 1; layer >= 0; --layer) {
+      vec4 intT = texture(uIntMap, vec3(intQ.xz * uIntA.x, float(layer)));
+      if (intT.b <= ${(0.5 - MASK_FEATHER).toFixed(6)} || intQ.y < intT.a || intQ.y >= intT.g) continue;
+      intK = intT.r * smoothstep(${(0.5 - MASK_FEATHER).toFixed(6)}, ${(0.5 + MASK_FEATHER).toFixed(6)}, intT.b);
+      break;
+    }
     intDark = intK;
     if (intK > 0.001) {
       float intAmb = mix(1.0, uIntB.x, intK);
@@ -121,7 +135,8 @@ if (uIntB.z > 0.5) {
       reflectedLight.directSpecular *= intSun;
     }
   }
-}`;
+}
+#endif`;
 
 interface PatchableShader {
   uniforms: Record<string, THREE.IUniform>;
@@ -196,13 +211,18 @@ interface Cluster {
   covers: BuiltPiece[];
   /** World cells of its map (walls plus a margin) */
   rect: Rect;
-  /** Half floats RGBA per cell of `rect`, null until baked */
-  data: Uint16Array | null;
+  layers: StoreyMap[] | null;
+}
+
+interface StoreyMap {
+  /** Half floats RGBA per cell of the house's rectangle. */
+  data: Uint16Array;
   maxY: number;
   cells: number;
-  openings: number;
   /** Kept after the bake for re-summing the light when a door opens or closes */
   comp: Compose | null;
+  /** Exterior texels that borrow darkness from a room texel for filtering. */
+  edgeSources: Map<number, number>;
 }
 
 interface Opening {
@@ -329,12 +349,62 @@ interface Compose {
   openings: Opening[];
 }
 
+/** Refines the flood-filled boundary to sub-cell precision at exterior wall faces. */
+function* refineWallMask(
+  segs: WallSeg[], ox: number, oz: number, W: number, H: number,
+  blocked: Uint8Array, outside: Uint8Array, mask: Uint8Array,
+): Generator<void, Float32Array> {
+  const coverage = Float32Array.from(mask);
+  const nearest = new Float32Array(W * H).fill(Infinity);
+  const side = (x: number, z: number, nx: number, nz: number): number => {
+    for (let d = CELL * 0.5; d <= WALL_R + CELL * 1.5; d += CELL * 0.5) {
+      const i = Math.floor((x + nx * d) / CELL);
+      const j = Math.floor((z + nz * d) / CELL);
+      if (i < 0 || j < 0 || i >= W || j >= H) return -1;
+      const c = j * W + i;
+      if (!blocked[c]) return outside[c] ? -1 : 1;
+    }
+    return 0;
+  };
+  for (let index = 0; index < segs.length; index++) {
+    const s = segs[index];
+    const ax = s.p1.x - ox, az = s.p1.y - oz, bx = s.p2.x - ox, bz = s.p2.y - oz;
+    const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - MASK_RANGE) / CELL));
+    const i1 = Math.min(W - 1, Math.floor((Math.max(ax, bx) + MASK_RANGE) / CELL));
+    const j0 = Math.max(0, Math.floor((Math.min(az, bz) - MASK_RANGE) / CELL));
+    const j1 = Math.min(H - 1, Math.floor((Math.max(az, bz) + MASK_RANGE) / CELL));
+    const inset = Math.min(WALL_R + CELL, s.halfW);
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const x = (i + 0.5) * CELL - ax, z = (j + 0.5) * CELL - az;
+        const along = x * s.dir.x + z * s.dir.y;
+        const across = x * s.left.x + z * s.left.y;
+        const end = along - THREE.MathUtils.clamp(along, 0, s.halfW * 2);
+        const dist = across * across + end * end;
+        const c = j * W + i;
+        if (dist >= MASK_RANGE * MASK_RANGE || dist > nearest[c] + 1e-6) continue;
+        // At joints, probe slightly along the wall to avoid classifying its neighbour.
+        const t = THREE.MathUtils.clamp(along, inset, s.halfW * 2 - inset);
+        const px = ax + s.dir.x * t, pz = az + s.dir.y * t;
+        const left = side(px, pz, s.left.x, s.left.y);
+        const right = side(px, pz, -s.left.x, -s.left.y);
+        if (left === 0 || right !== -left) continue;
+        const value = 0.5 + across * left / (2 * MASK_RANGE);
+        coverage[c] = Math.abs(dist - nearest[c]) <= 1e-6 ? Math.min(coverage[c], value) : value;
+        nearest[c] = dist;
+      }
+    }
+    if (index % 32 === 31) yield;
+  }
+  return coverage;
+}
+
 export class InteriorLighting {
-  public readonly texture: THREE.DataTexture;
+  public texture: THREE.DataArrayTexture;
   /** Statistics for the dev tools. */
   public readonly stats = { houses: 0, baked: 0, queued: 0, interiorCells: 0, openings: 0, lastBakeMs: 0, frameMs: 0 };
 
-  private readonly data = new Uint16Array(N * N * 4);
+  private data = new Uint16Array(N * N * 4);
   private readonly clusters = new Map<string, Cluster>();
   /** Keys found by the last discovery */
   private current = new Set<string>();
@@ -345,7 +415,6 @@ export class InteriorLighting {
   /** Window centre (world cell); NaN = not placed yet */
   private winX = NaN;
   private winZ = NaN;
-  private focusY = 0;
   private seenRevision = -1;
   private checkTimer = 0;
   private dirtyTexture = false;
@@ -355,14 +424,17 @@ export class InteriorLighting {
     private readonly physics: PhysicsWorld,
     private readonly buildings: BuildingManager
   ) {
-    this.texture = new THREE.DataTexture(this.data, N, N, THREE.RGBAFormat, THREE.HalfFloatType);
-    this.texture.magFilter = THREE.LinearFilter;
-    this.texture.minFilter = THREE.LinearFilter;
-    this.texture.generateMipmaps = false;
-    this.texture.wrapS = THREE.RepeatWrapping;
-    this.texture.wrapT = THREE.RepeatWrapping;
-    this.texture.needsUpdate = true;
-    interiorUniforms.uIntMap.value = this.texture;
+    this.texture = this.makeTexture(1);
+  }
+
+  private makeTexture(depth: number): THREE.DataArrayTexture {
+    const texture = new THREE.DataArrayTexture(this.data, N, N, depth);
+    texture.type = THREE.HalfFloatType;
+    texture.magFilter = texture.minFilter = THREE.LinearFilter;
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    texture.needsUpdate = true;
+    interiorUniforms.uIntMap.value = texture;
+    return texture;
   }
 
   /** Drops every baked house (after changing `windowLight` / `cornerShade`). */
@@ -387,7 +459,8 @@ export class InteriorLighting {
       u.z = 0;
       return;
     }
-    this.focusY = focus.y;
+    const box = interiorUniforms.uIntBox.value;
+    u.z = box.x < box.z ? 1 : 0;
 
     // 1. Window follows the player: only copies from the cache
     const moved = !(Math.abs(focus.x - this.winX * CELL) < RECENTER && Math.abs(focus.z - this.winZ * CELL) < RECENTER);
@@ -519,10 +592,10 @@ export class InteriorLighting {
       found.add(key);
       let cl = this.clusters.get(key);
       if (!cl) {
-        cl = { key, segs: g, shortWindows: windows, covers: mine, rect, data: null, maxY: 0, cells: 0, openings: 0, comp: null };
+        cl = { key, segs: g, shortWindows: windows, covers: mine, rect, layers: null };
         this.clusters.set(key, cl);
       }
-      if (!cl.data && this.job?.cl !== cl && !this.queue.includes(cl)) this.queue.push(cl);
+      if (!cl.layers && this.job?.cl !== cl && !this.queue.includes(cl)) this.queue.push(cl);
     }
     this.current = found;
 
@@ -539,18 +612,18 @@ export class InteriorLighting {
     // Copy in baked houses that are around but not on the texture yet
     for (const key of found) {
       const cl = this.clusters.get(key)!;
-      if (cl.data && !this.written.has(cl)) this.write(cl);
+      if (cl.layers && !this.written.has(cl)) this.write(cl);
     }
 
     // Keep a few baked houses that left, forget the rest
     let spare = 0;
     for (const [key, cl] of this.clusters) {
       if (found.has(key) || this.written.has(cl)) continue;
-      if (++spare > CACHE_SPARE || !cl.data) this.clusters.delete(key);
+      if (++spare > CACHE_SPARE || !cl.layers) this.clusters.delete(key);
     }
 
     let baked = 0;
-    for (const key of found) if (this.clusters.get(key)?.data) baked++;
+    for (const key of found) if (this.clusters.get(key)?.layers) baked++;
     this.stats.houses = found.size;
     this.stats.baked = baked;
   }
@@ -562,18 +635,16 @@ export class InteriorLighting {
   private checkDoors(): void {
     // Kept houses too, so one coming back into view is not copied in with the old light
     for (const cl of this.clusters.values()) {
-      const cp = cl.comp;
-      if (!cp || !cl.data) continue;
       let changed = false;
-      for (const o of cp.openings) {
-        if (o.door && !!o.door.isOpen !== o.wasOpen) { changed = true; break; }
+      for (const { comp, data, edgeSources } of cl.layers ?? []) {
+        if (!comp?.openings.some((o) => o.door && !!o.door.isOpen !== o.wasOpen)) continue;
+        const k = composeDarkness(comp);
+        const toHalf = THREE.DataUtils.toHalfFloat;
+        for (let c = 0; c < k.length; c++) data[c * 4] = k[c] > 0 ? toHalf(k[c]) : 0;
+        for (const [edge, source] of edgeSources) data[edge * 4] = data[source * 4];
+        changed = true;
       }
-      if (!changed) continue;
-      const k = composeDarkness(cp);
-      const out = cl.data;
-      const toHalf = THREE.DataUtils.toHalfFloat;
-      for (let c = 0; c < k.length; c++) out[c * 4] = k[c] > 0 ? toHalf(k[c]) : 0;
-      if (this.written.has(cl)) this.write(cl);
+      if (changed && this.written.has(cl)) this.write(cl);
     }
   }
 
@@ -607,29 +678,39 @@ export class InteriorLighting {
     for (const cl of this.written.keys()) this.write(cl);
     for (const key of this.current) {
       const cl = this.clusters.get(key);
-      if (cl?.data && !this.written.has(cl)) this.write(cl);
+      if (cl?.layers && !this.written.has(cl)) this.write(cl);
     }
   }
 
   /** Copies a baked house into the ring texture (the part inside the window). */
   private write(cl: Cluster): void {
-    const src = cl.data;
-    if (!src) return;
+    const layers = cl.layers;
+    if (!layers?.length) return;
     const clip = intersect(cl.rect, this.windowRect());
     if (!clip) return;
     const w = cl.rect.x1 - cl.rect.x0 + 1;
+    if (layers.length > this.texture.image.depth) {
+      const data = new Uint16Array(N * N * 4 * layers.length);
+      data.set(this.data);
+      this.data = data;
+      this.texture.dispose();
+      this.texture = this.makeTexture(layers.length);
+    }
     const dst = this.data;
-    for (let gz = clip.z0; gz <= clip.z1; gz++) {
-      const row = mod(gz, N) * N;
-      for (let gx = clip.x0; gx <= clip.x1; gx++) {
-        const s = ((gz - cl.rect.z0) * w + (gx - cl.rect.x0)) * 4;
-        const t = (row + mod(gx, N)) * 4;
-        // A neighbour's room wins over this house's outdoor margin
-        if (src[s + 2] === 0 && dst[t + 2] !== 0) continue;
-        dst[t] = src[s];
-        dst[t + 1] = src[s + 1];
-        dst[t + 2] = src[s + 2];
-        dst[t + 3] = 0;
+    for (let layer = 0; layer < layers.length; layer++) {
+      const src = layers[layer].data;
+      for (let gz = clip.z0; gz <= clip.z1; gz++) {
+        const row = (layer * N + mod(gz, N)) * N;
+        for (let gx = clip.x0; gx <= clip.x1; gx++) {
+          const s = ((gz - cl.rect.z0) * w + (gx - cl.rect.x0)) * 4;
+          const t = (row + mod(gx, N)) * 4;
+          // A neighbour's room wins over this house's outdoor margin
+          if (src[s + 2] < dst[t + 2]) continue;
+          dst[t] = src[s];
+          dst[t + 1] = src[s + 1];
+          dst[t + 2] = src[s + 2];
+          dst[t + 3] = src[s + 3];
+        }
       }
     }
     this.written.set(cl, clip);
@@ -637,9 +718,11 @@ export class InteriorLighting {
   }
 
   private clear(r: Rect): void {
-    for (let gz = r.z0; gz <= r.z1; gz++) {
-      const row = mod(gz, N) * N;
-      for (let gx = r.x0; gx <= r.x1; gx++) this.data.fill(0, (row + mod(gx, N)) * 4, (row + mod(gx, N)) * 4 + 4);
+    for (let layer = 0; layer < this.texture.image.depth; layer++) {
+      for (let gz = r.z0; gz <= r.z1; gz++) {
+        const row = (layer * N + mod(gz, N)) * N;
+        for (let gx = r.x0; gx <= r.x1; gx++) this.data.fill(0, (row + mod(gx, N)) * 4, (row + mod(gx, N)) * 4 + 4);
+      }
     }
     this.dirtyTexture = true;
   }
@@ -673,15 +756,26 @@ export class InteriorLighting {
     const box = interiorUniforms.uIntBox.value;
     const win = this.windowRect();
     let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity, y = -Infinity;
+    let layers = 1;
+    let cells = 0, openings = 0;
     for (const [cl, r] of this.written) {
       x0 = Math.min(x0, r.x0);
       z0 = Math.min(z0, r.z0);
       x1 = Math.max(x1, r.x1);
       z1 = Math.max(z1, r.z1);
-      y = Math.max(y, cl.maxY);
+      if (!cl.layers) continue;
+      layers = Math.max(layers, cl.layers.length);
+      for (const layer of cl.layers) {
+        y = Math.max(y, layer.maxY);
+        cells += layer.cells;
+        openings += layer.comp?.openings.length ?? 0;
+      }
     }
+    this.stats.interiorCells = cells;
+    this.stats.openings = openings;
     const on = interiorUniforms.uIntB.value;
-    if (x0 === Infinity) {
+    if (y === -Infinity) {
+      box.set(0, 0, 0, 0);
       on.z = 0;
       return;
     }
@@ -692,6 +786,7 @@ export class InteriorLighting {
     z1 = Math.min(z1, win.z1 - 1);
     box.set(x0 * CELL, z0 * CELL, (x1 + 1) * CELL, (z1 + 1) * CELL);
     interiorUniforms.uIntA.value.y = y + 0.1;
+    interiorUniforms.uIntLayers.value = layers;
     on.z = 1;
   }
 
@@ -743,9 +838,30 @@ export class InteriorLighting {
     }
   }
 
-  /** Bakes one house's map; yields often so the work spreads over frames. */
+  /** Bake independent room and opening fields on either side of intermediate floors. */
   private *bake(cl: Cluster): Generator<void, boolean> {
-    const { rect, segs } = cl;
+    const dividers: number[] = [];
+    const floors = [...new Set(cl.covers.filter((p) => isFloorPiece(p.type)).map((p) => p.position.y))].sort((a, b) => a - b);
+    for (const y of floors) {
+      if (dividers.length && y - dividers[dividers.length - 1] < 0.2) continue;
+      if (cl.segs.some((s) => s.yBase < y - 0.65) && cl.segs.some((s) => s.yTop > y + 0.65)) dividers.push(y);
+    }
+
+    const bottom = cl.segs.reduce((y, s) => Math.min(y, s.yBase), Infinity);
+    const levels = [bottom - 0.35, ...dividers, Infinity];
+    const layers: StoreyMap[] = [];
+    for (let i = 0; i < levels.length - 1; i++) {
+      const map = yield* this.bakeStorey(cl, levels[i], levels[i + 1]);
+      if (!map) return false;
+      layers.push(map);
+    }
+    cl.layers = layers;
+    return true;
+  }
+
+  private *bakeStorey(cl: Cluster, bottom: number, top: number): Generator<void, StoreyMap | null> {
+    const { rect } = cl;
+    const segs = cl.segs.filter((s) => Math.min(s.yTop, top) - Math.max(s.yBase, bottom) > 0.2);
     const W = rect.x1 - rect.x0 + 1;
     const H = rect.z1 - rect.z0 + 1;
     const NN = W * H;
@@ -809,8 +925,8 @@ export class InteriorLighting {
     }
     yield;
 
-    // 3. Cover above every enclosed cell (and the walls near one): the first roof / floor a
-    // downward ray meets. No cover = open to the sky. Each cover collider is cast directly (no
+    // 3. Find the ceiling of this storey for every enclosed cell. The same slab is the
+    // ceiling below and the walkable floor above. Each cover collider is cast directly (no
     // world query with a filter callback per candidate), only the few whose bounds hold the cell.
     const casters: { c: RAPIER.Collider; roof: boolean; x0: number; z0: number; x1: number; z1: number }[] = [];
     let topY = -Infinity;
@@ -828,7 +944,7 @@ export class InteriorLighting {
         add(p.staticCollider);
       }
     }
-    if (!Number.isFinite(topY)) return false;
+    if (!Number.isFinite(topY)) return null;
     // Index cover colliders in 4 m bins. A house can contain hundreds of floor tiles; scanning its
     // entire cover list for every 0.25 m room sample wastes most of the bake on distant AABBs.
     const CASTER_BIN = 4;
@@ -848,7 +964,7 @@ export class InteriorLighting {
       }
     }
     const castTop = topY + 1;
-    const castLen = castTop - this.focusY + 200;
+    const castLen = Math.max(0, castTop - bottom + 0.4);
     const ray = (this.ray ??= new this.physics.rapier.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 }));
     const enclosedOpen = (c: number) => !outside[c] && !blocked[c];
     // Enclosed cells open to the sky: the only thing above is the floor they stand on (walls with
@@ -879,7 +995,9 @@ export class InteriorLighting {
         ray.origin.x = px;
         ray.origin.y = castTop;
         ray.origin.z = pz;
-        let toi = Infinity, far = -Infinity, topRoof = false;
+        let ceiling = -Infinity;
+        let floor = -Infinity;
+        let coveredAbove = false;
         const binX = Math.floor((px - ox) / CASTER_BIN);
         const binZ = Math.floor((pz - oz) / CASTER_BIN);
         const nearby = casterBins.get(binZ * binColumns + binX);
@@ -888,8 +1006,10 @@ export class InteriorLighting {
             if (px < cc.x0 || px > cc.x1 || pz < cc.z0 || pz > cc.z1) continue;
             const t = cc.c.castRay(ray, castLen, true);
             if (t < 0) continue;
-            if (t < toi) { toi = t; topRoof = cc.roof; }
-            if (t > far) far = t;
+            const y = castTop - t;
+            if (y > top + 0.2) coveredAbove = true;
+            else if (y > bottom + (cc.roof ? 0.05 : 0.65)) ceiling = Math.max(ceiling, y);
+            else floor = Math.max(floor, y);
           }
         }
         if (++casts % 48 === 0) {
@@ -897,17 +1017,18 @@ export class InteriorLighting {
           // A piece removed while this bake waited frees its collider; a cast on a freed collider
           // panics inside Rapier and leaves the whole physics world unusable, so stop here (the
           // next discovery bakes the house again)
-          for (const cc of casters) if (!cc.c.isValid()) return false;
+          for (const cc of casters) if (!cc.c.isValid()) return null;
         }
-        if (toi === Infinity) continue;
-        cover[c] = castTop - toi;
-        // One level of floor (a floor on a foundation counts as one) and no roof: open sky
-        if (!topRoof && far - toi < 1.2 && !blocked[c]) sky[c] = 1;
+        if (ceiling > -Infinity) cover[c] = Math.min(ceiling, top);
+        else if (coveredAbove) cover[c] = top;
+        else if (floor > -Infinity) {
+          cover[c] = floor;
+          if (!blocked[c]) sky[c] = 1;
+        } else continue;
         k[c] = 1;
         cells++;
       }
     }
-    cl.cells = cells;
     // Open-sky cells take the height of the nearest ceiling instead of their floor: with the floor's
     // height the shading cut off in a hard line along the opening's edge; this way the light is a
     // soft gradient from the darkness value alone
@@ -934,15 +1055,15 @@ export class InteriorLighting {
       }
     }
     if (cells === 0) {
-      cl.data = new Uint16Array(NN * 4);
-      cl.maxY = -Infinity;
-      return true;
+      return { data: new Uint16Array(NN * 4), maxY: -Infinity, cells: 0, comp: null, edgeSources: new Map() };
     }
     yield;
 
     // 4. Daylight through windows and doorways that open to the outside
     const openings: Opening[] = [];
-    for (const s of [...segs, ...cl.shortWindows]) {
+    for (const s of [...cl.segs, ...cl.shortWindows]) {
+      const height = Math.min(s.yTop, top) - Math.max(s.yBase, bottom);
+      if (height <= 0.2) continue;
       const p = s.piece;
       const win = isWindowPiece(p.type);
       const doorway = isDoorwayPiece(p.type);
@@ -964,7 +1085,6 @@ export class InteriorLighting {
       else if (a === 1 && b === 2) sgn = -1;
       else continue; // between two rooms, or nowhere near one
       const width = s.halfW * 2;
-      const height = s.yTop - s.yBase;
       openings.push({
         cx,
         cz,
@@ -983,7 +1103,6 @@ export class InteriorLighting {
         field: null,
       });
     }
-    cl.openings = openings.length;
 
     // Light reaches a cell along the shortest path through the rooms (a chamfer distance transform
     // from the opening, walls stop it), so it falls off around corners and through inner doors.
@@ -1214,7 +1333,6 @@ export class InteriorLighting {
     }
 
     const comp: Compose = { W, H, inside, blocked, mask, ao, skyLit, openings };
-    cl.comp = comp;
     k.set(composeDarkness(comp));
     yield;
 
@@ -1304,22 +1422,40 @@ export class InteriorLighting {
     }
     yield;
 
-    // 7. Pack as half floats
+    // 7. Pack the sub-cell wall boundary with padding for linear filtering.
+    const coverage = yield* refineWallMask(segs, ox, oz, W, H, blocked, outside, mask);
+    const edgeSources = new Map<number, number>();
     const out = new Uint16Array(NN * 4);
     const toHalf = THREE.DataUtils.toHalfFloat;
-    const one = toHalf(1);
+    const baseY = toHalf(bottom);
     let maxY = -Infinity;
     for (let c = 0; c < NN; c++) {
-      const y = cover[c];
-      if (k[c] > 0) out[c * 4] = toHalf(k[c]);
-      if (!Number.isNaN(y)) {
-        out[c * 4 + 1] = toHalf(y);
-        if (mask[c] && y > maxY) maxY = y;
+      if (coverage[c] <= 0 && !(k[c] > 0)) continue;
+      let source = c;
+      if (!(k[c] > 0) || Number.isNaN(cover[c])) {
+        const i = c % W, j = Math.floor(c / W);
+        let nearest = Infinity;
+        for (let dj = -1; dj <= 1; dj++) {
+          for (let di = -1; di <= 1; di++) {
+            const ii = i + di, jj = j + dj;
+            if (ii < 0 || jj < 0 || ii >= W || jj >= H) continue;
+            const n = jj * W + ii;
+            const dist = di * di + dj * dj;
+            if (!(k[n] > 0) || Number.isNaN(cover[n]) || dist >= nearest) continue;
+            nearest = dist;
+            source = n;
+          }
+        }
+        if (source === c) continue;
+        edgeSources.set(c, source);
       }
-      if (mask[c]) out[c * 4 + 2] = one;
+      const y = Number.isNaN(cover[c]) ? cover[source] : cover[c];
+      out[c * 4] = toHalf(k[source]);
+      out[c * 4 + 1] = toHalf(y);
+      out[c * 4 + 2] = toHalf(coverage[c]);
+      out[c * 4 + 3] = baseY;
+      if (coverage[c] > 0.5 - MASK_FEATHER && y > maxY) maxY = y;
     }
-    cl.data = out;
-    cl.maxY = maxY;
-    return true;
+    return { data: out, maxY, cells, comp, edgeSources };
   }
 }

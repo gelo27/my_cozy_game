@@ -2564,7 +2564,7 @@ function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
 
       return {
         geometry: finalGeo,
-        materials: [BUILDING_MATERIALS.roof, BUILDING_MATERIALS.woodDark],
+        materials: [BUILDING_MATERIALS.roof, BUILDING_MATERIALS.thatchRoofTrim],
         boundingBox: new THREE.Box3(),
       };
     }

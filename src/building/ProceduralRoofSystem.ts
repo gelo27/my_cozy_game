@@ -257,10 +257,16 @@ const SHINGLE_TEXTURES: Record<RoofStyle, () => THREE.CanvasTexture> = {
 
 const shingleMaterials = new Map<RoofStyle, THREE.MeshLambertMaterial>();
 
+export function createRoofSurfaceMaterial(params: THREE.MeshLambertMaterialParameters): THREE.MeshLambertMaterial {
+  const material = new THREE.MeshLambertMaterial(params);
+  material.defines = { SKIP_INTERIOR_SHADE: 1 };
+  return material;
+}
+
 export function getRoofShingleMaterial(style: RoofStyle): THREE.MeshLambertMaterial {
   let mat = shingleMaterials.get(style);
   if (!mat) {
-    mat = new THREE.MeshLambertMaterial({ map: SHINGLE_TEXTURES[style]() });
+    mat = createRoofSurfaceMaterial({ map: SHINGLE_TEXTURES[style]() });
     mat.name = `RoofShingle_${style}`;
     shingleMaterials.set(style, mat);
   }
@@ -269,7 +275,7 @@ export function getRoofShingleMaterial(style: RoofStyle): THREE.MeshLambertMater
 
 export const PROCEDURAL_ROOF_MATERIALS = {
   heartopiaShingle: getRoofShingleMaterial('barkwood'),
-  woodTrim: new THREE.MeshLambertMaterial({
+  woodTrim: createRoofSurfaceMaterial({
     map: createSims4WhiteTrimTexture(),
     color: new THREE.Color(0xffffff),
   }),

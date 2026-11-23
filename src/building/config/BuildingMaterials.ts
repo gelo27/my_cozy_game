@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { createNorseWoodTexture, createChiseledStoneTexture, createThatchRoofTexture, createCheckerWallTexture, createCheckerFloorTexture, createCheckerWindowTexture, createCheckerPillarTexture, createRusticatedQuoinTexture, createWhitePaintedWoodTexture, createMahoganyWoodTexture, createCharcoalWoodTexture, createCreamWoodTexture } from './BuildingTextures';
 import { createGlassMaterial } from '../../scene/GlassMatcap';
-import { PROCEDURAL_ROOF_MATERIALS } from '../ProceduralRoofSystem';
+import { createRoofSurfaceMaterial, PROCEDURAL_ROOF_MATERIALS } from '../ProceduralRoofSystem';
 
 // Cached shared materials
 export const BUILDING_MATERIALS = {
@@ -61,9 +61,10 @@ export const BUILDING_MATERIALS = {
   stone: new THREE.MeshLambertMaterial({
     map: createChiseledStoneTexture(),
     }),
-  roof: new THREE.MeshLambertMaterial({
+  roof: createRoofSurfaceMaterial({
     map: createThatchRoofTexture(),
     }),
+  thatchRoofTrim: createRoofSurfaceMaterial({ color: 0x4a2e18 }),
   // Greenhouse: oak glazing frame + clear glass (double-sided so it reads from inside)
   greenhouseFrame: new THREE.MeshLambertMaterial({
     color: 0x9a6a3e, // warm oak: the greenhouse is timber-framed

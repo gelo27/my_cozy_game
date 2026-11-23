@@ -46,7 +46,7 @@ interface Pool {
   /** Shared by every material of this pool, so a regrown array reaches all their programs */
   uniform: { value: THREE.DataArrayTexture };
   layers: Map<THREE.Texture, { layer: number; version: number }>;
-  materials: Map<THREE.Side, THREE.MeshLambertMaterial>;
+  materials: Map<string, THREE.MeshLambertMaterial>;
   dummyMap: THREE.DataTexture;
 }
 
@@ -217,10 +217,12 @@ function layerOf(pool: Pool, tex: THREE.Texture): number | null {
   return layer;
 }
 
-function poolMaterial(pool: Pool, side: THREE.Side): THREE.MeshLambertMaterial {
-  let mat = pool.materials.get(side);
+function poolMaterial(pool: Pool, side: THREE.Side, skipInteriorShade: boolean): THREE.MeshLambertMaterial {
+  const key = `${side}|${skipInteriorShade}`;
+  let mat = pool.materials.get(key);
   if (mat) return mat;
   mat = new THREE.MeshLambertMaterial({ map: pool.dummyMap, vertexColors: true, side });
+  if (skipInteriorShade) mat.defines = { SKIP_INTERIOR_SHADE: 1 };
   const size = `${pool.width}x${pool.height}`;
   mat.name = `BuildingTextureArray_${size}`;
   const uniform = pool.uniform;
@@ -251,7 +253,7 @@ function poolMaterial(pool: Pool, side: THREE.Side): THREE.MeshLambertMaterial {
   // The half-texel constant differs per array size
   mat.customProgramCacheKey = () => `building-texture-array-${size}`;
   arrayMaterials.add(mat);
-  pool.materials.set(side, mat);
+  pool.materials.set(key, mat);
   return mat;
 }
 
@@ -284,7 +286,8 @@ export function textureArraySlot(m: THREE.Material): TextureArraySlot | null {
   } else {
     pool = defaultPoolKey ? pools.get(defaultPoolKey)! : getPool(512, 512, THREE.SRGBColorSpace);
   }
-  return { material: poolMaterial(pool, m.side), layer, color: m.color };
+  const skipInteriorShade = m.defines?.SKIP_INTERIOR_SHADE === 1;
+  return { material: poolMaterial(pool, m.side, skipInteriorShade), layer, color: m.color };
 }
 
 /** Diagnostics: layers and memory of the arrays. */
