@@ -10,6 +10,7 @@ import { getCropModel, loadCropModels } from './CropModels';
 import { CROP_BILLBOARD_MATERIAL, getCropBillboard, loadCropBillboards } from './CropBillboards';
 import { acquireChunkDither, acquireInstancedDither } from '../world/LodDither';
 import { isMobileDevice } from '../world/WorldSettings';
+import { userSettings } from '../config/userSettings';
 
 /** Field side in terrain cells (1 m each). */
 export const FIELD_CELLS = 3;
@@ -1000,6 +1001,8 @@ export class FieldManager {
 
   private updateCropLodSelection(camera: THREE.Vector3): void {
     this.pendingLodTransitions = false;
+    const performanceMode = userSettings.graphicsQuality === 'performance';
+    const startsPerFrame = performanceMode ? 1 : CROP_LOD_STARTS_PER_FRAME;
     let starts = 0;
     for (const b of this.batches.values()) {
       const wasVisible = b.visible;
@@ -1034,15 +1037,22 @@ export class FieldManager {
           continue;
         }
         if (slot.progress >= 0 || wantFar === slot.far) continue;
-        if (starts >= CROP_LOD_STARTS_PER_FRAME || this.activeLodTransitions.size >= MAX_CROP_LOD_TRANSITIONS) {
+        if (starts >= startsPerFrame || this.activeLodTransitions.size >= MAX_CROP_LOD_TRANSITIONS) {
           this.pendingLodTransitions = true;
           continue;
         }
         starts++;
+        this.lodRepack.add(b);
+        if (performanceMode) {
+          // One matrix repack per LOD change, without overlapping both meshes or uploading fades.
+          // The chunk's timed visibility dither is independent of this choice.
+          slot.far = wantFar;
+          this.cropLodLevels.set(slot.field, wantFar);
+          continue;
+        }
         slot.progress = 0.0001;
         b.transitions++;
         this.activeLodTransitions.set(slot, b);
-        this.lodRepack.add(b);
       }
     }
   }
@@ -1069,7 +1079,8 @@ export class FieldManager {
     if (batch.billboardMesh) batch.billboardMesh.count = 0;
     const spring = batch.springs;
     spring?.drawSlots.fill(-1);
-    const nearFade = near.geometry.getAttribute('aLodFade') as THREE.InstancedBufferAttribute | undefined;
+    const fadingLods = batch.transitions > 0;
+    const nearFade = fadingLods ? near.geometry.getAttribute('aLodFade') : undefined;
 
     for (const slot of batch.fields) {
       const crossing = slot.progress >= 0;
@@ -1090,12 +1101,11 @@ export class FieldManager {
         const far = batch.billboardMesh ??= this.createCropBillboardBatch(batch);
         slot.farDraw = far.count;
         for (let i = slot.start; i < slot.start + slot.count; i++) far.setMatrixAt(far.count++, batch.matrices[i]);
-        const attr = far.geometry.getAttribute('aLodFade') as THREE.InstancedBufferAttribute;
-        attr.array.fill(-fade, slot.farDraw, far.count);
+        if (fadingLods) far.geometry.getAttribute('aLodFade').array.fill(-fade, slot.farDraw, far.count);
       }
     }
-    this.uploadCropBatch(near);
-    if (batch.billboardMesh) this.uploadCropBatch(batch.billboardMesh);
+    this.uploadCropBatch(near, fadingLods);
+    if (batch.billboardMesh) this.uploadCropBatch(batch.billboardMesh, fadingLods);
     this.writeChunkCoverage(near, batch.chunk.coverage);
     if (batch.billboardMesh) this.writeChunkCoverage(batch.billboardMesh, batch.chunk.coverage);
     if (spring && near.count) {
@@ -1106,14 +1116,14 @@ export class FieldManager {
     this.updateCropMaterials(batch);
   }
 
-  private uploadCropBatch(mesh: THREE.InstancedMesh): void {
+  private uploadCropBatch(mesh: THREE.InstancedMesh, fadingLods: boolean): void {
     mesh.visible = mesh.count > 0;
     if (!mesh.count) return;
     mesh.instanceMatrix.clearUpdateRanges();
     mesh.instanceMatrix.addUpdateRange(0, mesh.count * 16);
     mesh.instanceMatrix.needsUpdate = true;
-    const fade = mesh.geometry.getAttribute('aLodFade') as THREE.InstancedBufferAttribute | undefined;
-    if (fade) {
+    if (fadingLods) {
+      const fade = mesh.geometry.getAttribute('aLodFade') as THREE.InstancedBufferAttribute;
       fade.clearUpdateRanges();
       fade.addUpdateRange(0, mesh.count);
       fade.needsUpdate = true;

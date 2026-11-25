@@ -363,6 +363,7 @@ export class GameEngine {
     updatePickGlow(dt, clump, field);
   }
 
+  private readonly isMobile = isMobileDevice();
   private maxPixelRatio = 1;
   private minPixelRatio = 0.75;
   private perfWindowMs = 0;
@@ -373,6 +374,8 @@ export class GameEngine {
   /** A pixel ratio that just proved too slow can't be returned to until this time. */
   private pixelRatioCeiling = Infinity;
   private pixelRatioCeilingUntil = 0;
+  private resolutionProbe: { ratio: number; fps: number } | null = null;
+  private resolutionProbeRetryAt = 0;
 
   constructor(private readonly container: HTMLElement, private readonly callbacks: GameEngineCallbacks) {
     // Dev: the hitch logger notes every push into React (each one is a commit after the frame)
@@ -390,7 +393,7 @@ export class GameEngine {
     const width = container.clientWidth || window.innerWidth;
     const height = container.clientHeight || window.innerHeight;
 
-    const isMobile = isMobileDevice();
+    const isMobile = this.isMobile;
     // Must run before any material compiles so every lit shader gets the night light loop
     installGlobalNightLights();
     // MSAA on top of a high-DPI backbuffer is wasted fill-rate; HiDPI screens are sharp enough without it
@@ -420,6 +423,13 @@ export class GameEngine {
     this.stopWatchingGraphicsQuality = onUserSettingsChange(() => {
       if (graphicsQuality === userSettings.graphicsQuality) return;
       graphicsQuality = userSettings.graphicsQuality;
+      const world = this.world;
+      if (world && this.paused && graphicsQuality === 'standard') {
+        world.grass.update(0, this.camera.camera, world.weather.sound.wind);
+      } else {
+        world?.grass.syncVisibility();
+      }
+      this.resetResolutionProbe();
       if (this.paused) this.pausedRedraw = true;
     });
 
@@ -499,6 +509,9 @@ export class GameEngine {
   public setPaused(paused: boolean): void {
     if (paused === this.paused) return;
     this.paused = paused;
+    this.resetResolutionProbe();
+    this.lastFpsUpdate = performance.now();
+    this.frameCount = this.frameMsAccum = 0;
     audioEngine.setPaused(paused);
     if (paused) this.saveProgress();
     // Do not let the paused time arrive as one big step
@@ -986,6 +999,9 @@ export class GameEngine {
       this.clock.getDelta();
       if (this.pausedRedraw) {
         this.pausedRedraw = false;
+        const w = this.world;
+        const { camera } = this.camera;
+        w.terrain.updateLod(camera.position, this.terrainSeaOcclusionLevel(w, camera));
         this.renderer.render(this.scene, this.camera.camera);
       }
       return;
@@ -1394,7 +1410,7 @@ export class GameEngine {
     w.particleManager.update(dt);
     w.debugRenderer.update(character);
 
-    w.terrain.updateLod(camera.position);
+    const seaLevel = this.terrainSeaOcclusionLevel(w, camera);
     updatePlayerShadow(
       character.model.group.position, camera,
       character.model.group.visible && !isDriving && !character.isRagdoll && (editing || !character.swimAbility.isSwimming)
@@ -1402,10 +1418,19 @@ export class GameEngine {
     hitchLog.mark(7);
     if (this.gpuWarmupPending) {
       this.gpuWarmupPending = false;
+      w.terrain.updateLod(camera.position);
       this.warmUpGpuUploads(camera);
     }
+    w.terrain.updateLod(camera.position, seaLevel);
     this.renderer.render(this.scene, camera);
     hitchLog.mark(8);
+  }
+
+  private terrainSeaOcclusionLevel(w: GameWorld, camera: THREE.PerspectiveCamera): number | null {
+    if (this.mode === 'editor' || w.exploration.inCave) return null;
+    const { x, y, z } = camera.position;
+    if (Number.isFinite(riverWorld.caveLevelAt(x, y, z))) return null;
+    return w.water.terrainOcclusionLevel(camera);
   }
 
   private publishGameplayHud(w: GameWorld, rawDt: number): void {
@@ -1527,10 +1552,17 @@ export class GameEngine {
     this.callbacks.onBuildingTelemetry({ ...next });
   }
 
+  private resetResolutionProbe(): void {
+    if (this.resolutionProbe) this.renderer.setPixelRatio(this.resolutionProbe.ratio);
+    this.resolutionProbe = null;
+    this.perfWindowMs = this.perfWindowFrames = 0;
+    this.perfSlowWindows = this.perfFastWindows = 0;
+  }
+
   /** Called ~3x per second. Ignores hidden tabs (rAF is paused/throttled there, fps means nothing). */
   private adaptResolution(fps: number, windowMs: number): void {
     if (document.hidden || !document.hasFocus()) {
-      this.perfWindowMs = this.perfWindowFrames = 0;
+      this.resetResolutionProbe();
       return;
     }
     this.perfWindowMs += windowMs;
@@ -1544,13 +1576,30 @@ export class GameEngine {
     // undone the higher level stays blocked for a minute instead of flip-flopping.
     const now = performance.now();
     const pr = this.renderer.getPixelRatio();
+    const target = this.maxFps > 0 ? Math.min(60, this.maxFps) : 60;
+    const severeThreshold = target * 0.75;
+    const probe = this.resolutionProbe;
+    if (probe) {
+      this.resolutionProbe = null;
+      if (avgFps < probe.fps + 2 && avgFps >= severeThreshold) {
+        this.renderer.setPixelRatio(probe.ratio);
+        this.resolutionProbeRetryAt = now + 20000;
+        return;
+      }
+    }
+    const canProbe = this.isMobile && userSettings.graphicsQuality === 'performance' &&
+      now >= this.resolutionProbeRetryAt;
+    const slowThreshold = canProbe ? target * (55 / 60) : severeThreshold;
     let next = pr;
-    this.perfSlowWindows = avgFps < 45 ? this.perfSlowWindows + 1 : 0;
-    this.perfFastWindows = avgFps > 58 ? this.perfFastWindows + 1 : 0;
+    this.perfSlowWindows = avgFps < slowThreshold ? this.perfSlowWindows + 1 : 0;
+    this.perfFastWindows = avgFps > target * (58 / 60) ? this.perfFastWindows + 1 : 0;
     if (this.perfSlowWindows >= 2) {
       next = Math.max(this.minPixelRatio, pr - 0.15);
-      if (now - this.lastPixelRatioRaise < 15000) this.pixelRatioCeilingUntil = now + 60000;
-      this.pixelRatioCeiling = Math.min(this.pixelRatioCeiling, pr);
+      if (next < pr - 0.01) {
+        if (avgFps >= severeThreshold) this.resolutionProbe = { ratio: pr, fps: avgFps };
+        if (now - this.lastPixelRatioRaise < 15000) this.pixelRatioCeilingUntil = now + 60000;
+        this.pixelRatioCeiling = Math.min(this.pixelRatioCeiling, pr);
+      }
       this.perfSlowWindows = this.perfFastWindows = 0;
     } else if (this.perfFastWindows >= 5) {
       if (now > this.pixelRatioCeilingUntil) this.pixelRatioCeiling = this.maxPixelRatio;

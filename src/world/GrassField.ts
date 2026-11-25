@@ -14,6 +14,7 @@ const glsl = (c: THREE.Color) => `vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c
 import { vegetationRevision, vegetationSettings as veg } from './VegetationSettings';
 import { GrassTrail, TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
 import { NOISE_TEX_GLSL, noiseTexUniform } from './NoiseTexture';
+import { userSettings } from '../config/userSettings';
 
 const N = WORLD_SIZE;
 const V = N + 1;
@@ -154,10 +155,16 @@ export class GrassField {
     this.mesh.name = 'Grass';
     this.mesh.frustumCulled = false;
     this.mesh.matrixAutoUpdate = false;
+    this.syncVisibility();
     scene.add(this.mesh);
   }
 
   // ---------------------------------------------------------------- per frame
+
+  public syncVisibility(): void {
+    this.mesh.visible = this.enabled && veg.grassEnabled && this.snowCover < 0.85 &&
+      userSettings.graphicsQuality !== 'performance';
+  }
 
   /** Call once per frame before update(), then addPusher() for each body walking through the grass. */
   public clearPushers(): void {
@@ -166,6 +173,7 @@ export class GrassField {
 
   /** A body at (x, y, z) (y = its lowest point) parting the blades within `radius` m, if it stands on the ground. */
   public addPusher(x: number, y: number, z: number, radius: number): void {
+    if (userSettings.graphicsQuality === 'performance' && this.snowCover <= 0) return;
     if (veg.grassTrail <= 0 || !this.terrain.isInside(x, z)) return;
     const g = this.terrain.getHeight(x, z);
     if (y - g > 0.45 || y - g < -0.6) return; // jumping, or swimming above a sunken meadow
@@ -174,18 +182,16 @@ export class GrassField {
 
   /** `wind` 0..1 (calm .. storm); `focus`: where the trampling is tracked (the player). */
   public update(dt: number, camera: THREE.Camera, wind: number, focus?: THREE.Vector3): void {
-    if (!this.enabled || !veg.grassEnabled) {
-      this.mesh.visible = false;
-      return;
-    }
+    this.syncVisibility();
+    if (!this.enabled || !veg.grassEnabled) return;
     const u = this.uniforms;
+    const performanceMode = userSettings.graphicsQuality === 'performance';
     // The trail also carves footprints into the snow (terrain), so it runs even with the blades buried
-    if (focus) {
+    if (focus && (!performanceMode || this.snowCover > 0)) {
       this.trail.update(dt, focus, veg.grassTrailRecover, this.printFill);
       u.uGrTrailC.value.copy(this.trail.center);
     }
-    // Deep snow buries every blade (see the vertex shader): skip the whole draw
-    this.mesh.visible = this.snowCover < 0.85;
+    if (performanceMode) return;
     u.uGrTrailK.value = veg.grassTrail;
     if (vegetationRevision.grass !== this.grassRevision) {
       this.grassRevision = vegetationRevision.grass;

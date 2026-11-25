@@ -3,6 +3,7 @@ import { riverWorld } from './rivers/RiverWorld';
 import { SEA_FLOOR_Y, WORLD_SIZE } from './WorldSettings';
 import { waterSettings } from './WaterSettings';
 import { DUCKWEED_GLSL, duckweedUniforms } from './Duckweed';
+import { onUserSettingsChange, userSettings } from '../config/userSettings';
 
 /**
  * The one water look, shared by the sea (WaterSystem) and the rivers / lakes (RiverSystem):
@@ -25,8 +26,11 @@ const HALF = WORLD_SIZE / 2;
 const V = WORLD_SIZE + 1;
 /** Shore distance texture covers 0..SHORE_RANGE metres (bytes, linear filtered). */
 const SHORE_RANGE = 8;
+const LITE_WAVE_START = 24;
+const LITE_WAVE_END = 42;
 
 export const waterSurfaceUniforms = {
+  uWsLite: { value: Number(userSettings.graphicsQuality === 'performance') },
   uWsTime: { value: 0 },
   uEstuary: { value: riverWorld.estuary },
   uWsNormals: { value: null as THREE.Texture | null },
@@ -53,6 +57,10 @@ export const waterSurfaceUniforms = {
   uWsSparkle: { value: new THREE.Vector4() },
   ...duckweedUniforms,
 };
+
+onUserSettingsChange(() => {
+  waterSurfaceUniforms.uWsLite.value = Number(userSettings.graphicsQuality === 'performance');
+});
 
 const normals = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}water_normals.jpg`);
 normals.wrapS = normals.wrapT = THREE.RepeatWrapping;
@@ -94,7 +102,19 @@ float wsBedY(vec2 xz) { return mix(${SEA_FLOOR_Y.toFixed(2)}, texture2D(uWsBed, 
 vec2 wsWaves(vec2 p, float dist, out float shade, out float wob) {
   float detail = 1.0 - smoothstep(uWsWaveB.z, uWsWaveB.w, dist);
   vec3 n1 = texture2D(uWsNormals, p * uWsWaveB.x + uWsTime * uWsWaveA.w * vec2(0.011, 0.007)).xyz * 2.0 - 1.0;
-  vec3 n2 = texture2D(uWsNormals, p * uWsWaveB.y + uWsTime * uWsWaveA.w * vec2(-0.015, 0.010)).xyz * 2.0 - 1.0;
+  vec3 n2 = n1;
+  #ifdef WATER_SURFACE_FRAGMENT
+  if (uWsLite > 0.5) {
+    // Compute derivatives before branching so mip selection stays defined at the LOD boundary.
+    vec2 uv = p * uWsWaveB.y + uWsTime * uWsWaveA.w * vec2(-0.015, 0.010);
+    vec2 dx = dFdx(uv), dy = dFdy(uv);
+    float layerMix = 1.0 - smoothstep(${LITE_WAVE_START.toFixed(1)}, ${LITE_WAVE_END.toFixed(1)}, dist);
+    if (layerMix > 0.0) n2 = mix(n1, textureGrad(uWsNormals, uv, dx, dy).xyz * 2.0 - 1.0, layerMix);
+  } else
+  #endif
+  {
+    n2 = texture2D(uWsNormals, p * uWsWaveB.y + uWsTime * uWsWaveA.w * vec2(-0.015, 0.010)).xyz * 2.0 - 1.0;
+  }
   shade = 0.94 + (n1.z + n2.z) * 0.04;
   wob = (n1.x + n2.y) * 0.6;
   return (n1.xy * 0.6 + n2.xy * 0.4) * mix(uWsWaveA.z, uWsWaveA.y, detail);
@@ -124,6 +144,7 @@ float wsSparkleFacet(vec2 id, vec2 need, float density, float spread, float rate
  * for wdNoise). Globals wsN / wsFoam are filled in map_fragment and read by the lighting.
  */
 export const WATER_SURFACE_GLSL = /* glsl */ `
+uniform float uWsLite;
 uniform float uWsTime;
 uniform sampler2D uWsNormals;
 uniform sampler2D uWsBed;
@@ -140,10 +161,15 @@ uniform vec4 uWsShoreB;
 uniform vec4 uWsSparkle;
 vec3 wsN;
 float wsFoam;
+#define WATER_SURFACE_FRAGMENT
 ${WATER_SHARED_GLSL}
+#undef WATER_SURFACE_FRAGMENT
 uniform sampler2D uEstuary;
 vec2 wsCurrentWaves(vec2 xz, vec2 current, float dist, out float shade, out float wobble) {
 // Two offset phases let the current bend without stretching the waves over time.
+if (uWsLite > 0.5) {
+  current *= 1.0 - smoothstep(${LITE_WAVE_START.toFixed(1)}, ${LITE_WAVE_END.toFixed(1)}, dist);
+}
 float phase = fract(uWsTime * 0.2);
 vec2 slope = wsWaves(xz - current * (phase * 5.0), dist, shade, wobble);
 if (dot(current, current) > 0.000001) {
@@ -247,17 +273,32 @@ normal = normalize((viewMatrix * vec4(gl_FrontFacing ? wsN : -wsN, 0.0)).xyz);`;
 export const WATER_LIGHT_GLSL = /* glsl */ `
 vec3 wsV = normalize(vViewPosition);
 float wsNV = clamp(dot(normal, wsV), 0.0, 1.0);
-// Sparkle grid (derivatives here, outside the branches): facets per pixel by area, so the
-// facets fade out where they get smaller than a pixel instead of turning into noise
-mat3 wsV2W = transpose(mat3(viewMatrix));
-vec2 wsSpG = (cameraPosition + wsV2W * (-vViewPosition)).xz * uWsSparkle.z;
-vec2 wsSpDx = dFdx(wsSpG);
-vec2 wsSpDy = dFdy(wsSpG);
-float wsSpPx = sqrt(abs(wsSpDx.x * wsSpDy.y - wsSpDx.y * wsSpDy.x));
-float wsSpFade = uWsSparkle.x > 0.0 ? 1.0 - smoothstep(0.5, 1.4, wsSpPx) : 0.0;
 vec3 wsSky = ambientLightColor;
 #if NUM_HEMI_LIGHTS > 0
 wsSky += hemisphereLights[0].skyColor;
+#endif
+#if NUM_DIR_LIGHTS > 0
+// Uniform branch keeps derivatives valid without evaluating the sparkle grid in Performance.
+if (uWsLite < 0.5 && uWsSparkle.x > 0.0) {
+  mat3 wsV2W = transpose(mat3(viewMatrix));
+  vec2 wsSpG = (cameraPosition + wsV2W * (-vViewPosition)).xz * uWsSparkle.z;
+  vec2 wsSpDx = dFdx(wsSpG);
+  vec2 wsSpDy = dFdy(wsSpG);
+  float wsSpPx = sqrt(abs(wsSpDx.x * wsSpDy.y - wsSpDx.y * wsSpDy.x));
+  float wsSpFade = 1.0 - smoothstep(0.5, 1.4, wsSpPx);
+  float wsBare = 1.0 - max(wsFoam, wsWeed);
+  if (gl_FrontFacing && wsSpFade > 0.0 && wsBare > 0.01) {
+    vec3 wsHw = wsV2W * normalize(directionalLights[0].direction + wsV);
+    if (wsHw.y > 0.05) {
+      vec2 need = wsHw.xz / wsHw.y - wsN.xz / max(wsN.y, 0.05);
+      vec2 spot;
+      float f = wsSparkleFacet(floor(wsSpG), need, uWsSparkle.y, uWsSparkle.w, 3.0, spot);
+      float r = clamp(wsSpPx * 2.2, 0.03, 0.45);
+      float m = 1.0 - smoothstep(r * 0.35, r, length(fract(wsSpG) - 0.5 - spot));
+      totalEmissiveRadiance += directionalLights[0].color * csSun * (f * m * wsSpFade * uWsSparkle.x * wsBare);
+    }
+  }
+}
 #endif
 if (gl_FrontFacing) {
   // Fresnel: grazing angles mirror the sky
@@ -267,21 +308,9 @@ if (gl_FrontFacing) {
   #if NUM_DIR_LIGHTS > 0
   // Sun glint: a sharp highlight plus a soft sheen around it
   float nh = max(dot(normal, normalize(directionalLights[0].direction + wsV)), 0.0);
-  totalEmissiveRadiance += directionalLights[0].color * csSun * (pow(nh, uWsShine.z) * uWsShine.y + pow(nh, 48.0) * 0.12) * wsBare;
-  // Sparkles: single tiny facets that mirror the sun (or the moon) straight into the eye.
-  // need = the extra slope a facet must have for that; each cell's facet has a random one.
-  if (wsSpFade > 0.0 && wsBare > 0.01) {
-    vec3 wsHw = wsV2W * normalize(directionalLights[0].direction + wsV);
-    if (wsHw.y > 0.05) {
-      vec2 need = wsHw.xz / wsHw.y - wsN.xz / max(wsN.y, 0.05);
-      vec2 spot;
-      float f = wsSparkleFacet(floor(wsSpG), need, uWsSparkle.y, uWsSparkle.w, 3.0, spot);
-      // A dot of ~2 px whatever the distance (cell units: wsSpPx cells per pixel)
-      float r = clamp(wsSpPx * 2.2, 0.03, 0.45);
-      float m = 1.0 - smoothstep(r * 0.35, r, length(fract(wsSpG) - 0.5 - spot));
-      totalEmissiveRadiance += directionalLights[0].color * csSun * (f * m * wsSpFade * uWsSparkle.x * wsBare);
-    }
-  }
+  float glint = pow(nh, uWsShine.z) * uWsShine.y;
+  if (uWsLite < 0.5) glint += pow(nh, 48.0) * 0.12;
+  totalEmissiveRadiance += directionalLights[0].color * csSun * glint * wsBare;
   // Duckweed fronds are waxy: a soft, broad sheen instead of the water's glint
   totalEmissiveRadiance += directionalLights[0].color * csSun * pow(nh, 20.0) * 0.06 * wsWeed;
   #endif

@@ -31,6 +31,9 @@ const LOD_STEPS = [1, 2, 4, 8];
  */
 const LOD_DIST_PC = [100, 190, 300];
 const LOD_DIST_MOBILE = [60, 120, 190];
+/** Keep vertices touching the sea and the bilinear border of the sea's estuary mask. */
+const SEA_CLIP_CLEARANCE = 0.02;
+const ESTUARY_MASK_GUARD = 1;
 
 /**
  * Index buffer for one chunk at vertex step `s`: an s-spaced grid inside, and a border ring whose
@@ -129,8 +132,10 @@ export class TerrainSystem {
   /** Per chunk, one geometry per LOD level sharing the position / normal buffers. */
   private readonly chunkLods: THREE.BufferGeometry[][] = [];
   private readonly lodDist = isMobileDevice() ? LOD_DIST_MOBILE : LOD_DIST_PC;
-  /** Triangles in the chunk meshes' current LODs (all chunks, before frustum culling). */
+  /** Triangles in the visible chunk meshes' current LODs, before frustum culling. */
   public lodTriangles = 0;
+  private seaMaskRevision = -1;
+  private readonly seaMaskHoles: GridRect[] = [];
   private readonly dirtyChunks = new Set<number>();
   private readonly tileData = new Uint8Array(N * N * 2);
   private readonly tileTex: THREE.DataTexture;
@@ -703,9 +708,20 @@ export class TerrainSystem {
     attr.needsUpdate = true;
   }
 
-  public updateLod(camera: THREE.Vector3): void {
+  public updateLod(camera: THREE.Vector3, seaLevel: number | null = null): void {
+    if (seaLevel !== null && this.seaMaskRevision !== riverWorld.revision) {
+      this.seaMaskRevision = riverWorld.revision;
+      this.seaMaskHoles.length = 0;
+      for (const river of riverWorld.all()) {
+        const rect = riverWorld.rectOf(river);
+        if (rect) this.seaMaskHoles.push(rect);
+      }
+    }
     let tris = 0;
     for (let c = 0; c < this.chunkMeshes.length; c++) {
+      const mesh = this.chunkMeshes[c];
+      mesh.visible = seaLevel === null || !this.seaOccludesChunk(camera, seaLevel, mesh.geometry.boundingBox!);
+      if (!mesh.visible) continue;
       const cx = c % CHUNKS, cz = (c - cx) / CHUNKS;
       const x0 = cx * CHUNK - WORLD_HALF, z0 = cz * CHUNK - WORLD_HALF;
       const dx = Math.max(x0 - camera.x, 0, camera.x - (x0 + CHUNK));
@@ -714,11 +730,32 @@ export class TerrainSystem {
       let level = 0;
       while (level < this.lodDist.length && d > this.lodDist[level]) level++;
       const geo = this.chunkLods[c][level];
-      const mesh = this.chunkMeshes[c];
       if (mesh.geometry !== geo) mesh.geometry = geo;
       tris += geo.index!.count / 3;
     }
     this.lodTriangles = tris;
+  }
+
+  private seaOccludesChunk(camera: THREE.Vector3, level: number, bounds: THREE.Box3): boolean {
+    const above = camera.y > level;
+    if (above ? bounds.max.y >= level - SEA_CLIP_CLEARANCE : bounds.min.y <= level + SEA_CLIP_CLEARANCE) return false;
+    if (this.seaMaskHoles.length === 0) return true;
+
+    // Project the chunk's bounds from the camera onto the sea plane. A river can punch a hole
+    // in the surface between the camera and the chunk, even when the chunk itself is well offshore.
+    const t0 = (level - camera.y) / (bounds.min.y - camera.y);
+    const t1 = (level - camera.y) / (bounds.max.y - camera.y);
+    const near = Math.min(t0, t1), far = Math.max(t0, t1);
+    const minX = bounds.min.x - camera.x, maxX = bounds.max.x - camera.x;
+    const minZ = bounds.min.z - camera.z, maxZ = bounds.max.z - camera.z;
+    const x0 = camera.x + minX * (minX < 0 ? far : near) + WORLD_HALF - ESTUARY_MASK_GUARD;
+    const x1 = camera.x + maxX * (maxX > 0 ? far : near) + WORLD_HALF + ESTUARY_MASK_GUARD;
+    const z0 = camera.z + minZ * (minZ < 0 ? far : near) + WORLD_HALF - ESTUARY_MASK_GUARD;
+    const z1 = camera.z + maxZ * (maxZ > 0 ? far : near) + WORLD_HALF + ESTUARY_MASK_GUARD;
+    for (const hole of this.seaMaskHoles) {
+      if (x0 <= hole.x1 && x1 >= hole.x0 && z0 <= hole.z1 && z1 >= hole.z0) return false;
+    }
+    return true;
   }
 
   private uploadSplat(): void {

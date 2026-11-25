@@ -5,6 +5,7 @@ import type { TerrainSystem } from './TerrainSystem';
 import { injectCaustics } from '../scene/WaterEffects';
 import { WATER_DETAIL_GLSL, WATER_RIPPLE_GLSL, rippleUniforms, updateWaterDetails } from '../scene/WaterDetails';
 import { waterSettings } from './WaterSettings';
+import { riverWorld } from './rivers/RiverWorld';
 import { WaterSparkles } from './WaterSparkles';
 import {
   WATER_LIGHT_GLSL,
@@ -121,6 +122,22 @@ diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
     this.terrain = terrain;
     this.terrainRevision = -1;
     this.bedSand.value = terrain.sandLayer;
+  }
+
+  /** The opaque sea can occlude land across it, as long as it also clears the camera's near plane. */
+  public terrainOcclusionLevel(camera: THREE.PerspectiveCamera): number | null {
+    if (!this.mesh.visible || this.material.transparent || waterSettings.transparent) return null;
+    const seaLevel = this.mesh.position.y;
+    const { x, y, z } = camera.position;
+    // Only use the plane when it covers the camera's view, even after a teleport or camera cut.
+    const offset = Math.max(Math.abs(x - this.mesh.position.x), Math.abs(z - this.mesh.position.z));
+    if (offset + camera.far >= OCEAN_SIZE / 2) return null;
+    const p = camera.projectionMatrix.elements;
+    const nearReach = camera.near * Math.hypot(1, (1 + Math.abs(p[8])) / p[0], (1 + Math.abs(p[9])) / p[5]);
+    if (Math.abs(y - seaLevel) <= nearReach + 0.01) return null;
+    const inlandLevel = riverWorld.riverSurfaceAt(x, z);
+    if (inlandLevel > seaLevel && y < inlandLevel) return null;
+    return seaLevel;
   }
 
   public update(dt: number, camera?: THREE.Vector3): void {
