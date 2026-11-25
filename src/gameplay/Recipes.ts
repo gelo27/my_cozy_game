@@ -3,7 +3,7 @@ export interface Recipe {
   dishId: string;
   name: string;
   ingredients: { itemId: string; count: number }[];
-  /** Any fish counts for "fish_any", any sea fish for "fish_sea_any". */
+  /** Base cooking time in seconds. */
   seconds: number;
   /** Found on the island (a recipe scroll or cookbook) before it can be cooked. */
   locked?: boolean;
@@ -68,13 +68,43 @@ export const RECIPES: Recipe[] = [
   },
 ];
 
-/** Cheapest first: cooking uses them up in this order. */
+/** Fish families accepted by wildcard recipe slots. */
 export const SEA_FISH_IDS = ['fish_mackerel', 'fish_seabass', 'fish_tuna', 'fish_moonfish'];
 
 export const FISH_IDS = [
   'fish_carp', 'fish_mackerel', 'fish_perch', 'fish_trout', 'fish_catfish', 'fish_seabass', 'fish_pike',
   'fish_golden', 'fish_tuna', 'fish_sturgeon', 'fish_moonfish',
 ];
+
+export type CookingMethod = 'mix' | 'pan' | 'pot' | 'oven';
+
+export function cookingMethod(recipe: Recipe): CookingMethod {
+  if (recipe.id === 'salad') return 'mix';
+  if (recipe.id === 'bread') return 'oven';
+  if (recipe.id === 'grilled_fish' || recipe.id === 'seafood_platter') return 'pan';
+  return 'pot';
+}
+
+export function matchesIngredient(requirement: string, itemId: string): boolean {
+  if (requirement === 'fish_any') return FISH_IDS.includes(itemId);
+  if (requirement === 'fish_sea_any') return SEA_FISH_IDS.includes(itemId);
+  return requirement === itemId;
+}
+
+/** Match each portion only once. A partial combination can still accept more ingredients. */
+export function matchesRecipe(recipe: Recipe, items: readonly string[], partial = false): boolean {
+  const slots = recipe.ingredients.flatMap(({ itemId, count }) => Array<string>(count).fill(itemId));
+  if (!partial && slots.length !== items.length) return false;
+  // Reserve exact ingredients and more restrictive fish slots first.
+  slots.sort((a, b) => Number(a === 'fish_any') - Number(b === 'fish_any')
+    || Number(a === 'fish_sea_any') - Number(b === 'fish_sea_any'));
+  const unused = [...items];
+  for (const slot of slots) {
+    const match = unused.findIndex((id) => matchesIngredient(slot, id));
+    if (match >= 0) unused.splice(match, 1);
+  }
+  return unused.length === 0;
+}
 
 /** Seconds of the speed buff and its multiplier when a dish is eaten. */
 export const DISH_BUFF: Record<string, { seconds: number; speed: number }> = {

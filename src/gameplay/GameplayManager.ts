@@ -24,7 +24,7 @@ import { COLLISION_GROUPS } from '../config/constants';
 import { BuildingPieceType, BuiltPiece } from '../building/types/BuildingTypes';
 import { worldSettings } from '../world/WorldSettings';
 import { critterSounds } from './CritterSounds';
-import { RECIPES, FISH_IDS, SEA_FISH_IDS, DISH_BUFF, Recipe } from './Recipes';
+import { RECIPES, DISH_BUFF, Recipe, matchesRecipe } from './Recipes';
 import { audioEngine } from '../audio/AudioEngine';
 import { CompanionNPC } from '../npc/CompanionNPC';
 import { MAX_WORKERS, WORKER_HIRE_COST, WorkerManager } from '../npc/WorkerManager';
@@ -83,7 +83,6 @@ export interface GameplayPrompt {
 export interface GameplayHudState {
   fishing: FishingState | null;
   panel: GameplayPanel;
-  cooking: { recipeId: string; progress: number } | null;
   buff: { label: string; secondsLeft: number } | null;
   weather: WeatherType;
   season: Season;
@@ -154,7 +153,6 @@ export class GameplayManager {
   /** Bumped on any change the HUD should show immediately. */
   public revision = 0;
 
-  private cookingJob: { recipe: Recipe; remaining: number } | null = null;
   private buff: { dishId: string; remaining: number; speed: number } | null = null;
   private baseSpeeds: { walk: number; sprint: number } | null = null;
   private promptTimer = 0;
@@ -352,7 +350,6 @@ export class GameplayManager {
       const seconds = SLEEP_HOURS * Math.max(0, worldSettings.secondsPerHour);
       if (seconds > 0) {
         this.onTimeSkip(seconds);
-        this.updateCooking(seconds);
         this.updateBuff(seconds);
       }
       this.lastSleepNight = s.night;
@@ -461,7 +458,6 @@ export class GameplayManager {
     this.companion?.update(dt, anchor, !this.anchorOverride && !!this.character.swimAbility?.isSwimming);
     this.workers?.update(dt, pos);
     this.updateBuff(dt);
-    this.updateCooking(dt);
     this.invulnerable -= dt;
     this.douseInWater(pos);
     if (!this.sleep) playerHealth.update(dt);
@@ -954,46 +950,12 @@ export class GameplayManager {
     return !recipe.locked || this.knownRecipes.has(recipe.id);
   }
 
-  public countIngredient(itemId: string): number {
-    if (itemId === 'fish_any') return FISH_IDS.reduce((s, id) => s + this.inventory.getItemCount(id), 0);
-    if (itemId === 'fish_sea_any') return SEA_FISH_IDS.reduce((s, id) => s + this.inventory.getItemCount(id), 0);
-    return this.inventory.getItemCount(itemId);
-  }
-
-  public canCook(recipe: Recipe): boolean {
-    return !this.cookingJob && this.isRecipeKnown(recipe) && recipe.ingredients.every((i) => this.countIngredient(i.itemId) >= i.count);
-  }
-
-  public cook(recipeId: string): void {
-    const recipe = RECIPES.find((r) => r.id === recipeId);
-    if (!recipe || !this.canCook(recipe)) return;
-    for (const ing of recipe.ingredients) {
-      if (ing.itemId === 'fish_any' || ing.itemId === 'fish_sea_any') {
-        let left = ing.count;
-        // Use the cheapest fish first
-        for (const id of ing.itemId === 'fish_any' ? FISH_IDS : SEA_FISH_IDS) {
-          while (left > 0 && this.inventory.removeItem(id, 1)) left--;
-        }
-      } else {
-        this.inventory.removeItem(ing.itemId, ing.count);
-      }
-    }
-    this.cookingJob = { recipe, remaining: recipe.seconds };
-    audioEngine.playBuildSelect();
+  public finishCooking(recipe: Recipe, ingredients: readonly string[]): boolean {
+    if (this.panel !== 'cook' || !RECIPES.includes(recipe) || !this.isRecipeKnown(recipe)) return false;
+    if (!matchesRecipe(recipe, ingredients) || !this.inventory.cookDish(recipe.dishId, ingredients)) return false;
+    audioEngine.playHarvest();
     this.revision++;
-  }
-
-  private updateCooking(dt: number): void {
-    if (!this.cookingJob) return;
-    this.cookingJob.remaining -= dt;
-    if (this.cookingJob.remaining <= 0) {
-      const { recipe } = this.cookingJob;
-      this.cookingJob = null;
-      this.inventory.addItem(recipe.dishId, 1);
-      audioEngine.playHarvest();
-      this.onNotify(t('play.cooked', { name: dataName('recipe', recipe.id, recipe.name) }), 'success');
-    }
-    this.revision++;
+    return true;
   }
 
   // ---------------------------------------------------------------- food buff
@@ -1053,9 +1015,6 @@ export class GameplayManager {
       // No prompt here: it reaches the HUD through promptStore (it changes on every field edge)
       fishing: f.phase === 'idle' ? null : { ...f },
       panel: this.panel,
-      cooking: this.cookingJob
-        ? { recipeId: this.cookingJob.recipe.id, progress: 1 - this.cookingJob.remaining / this.cookingJob.recipe.seconds }
-        : null,
       buff: this.buff
         ? { label: dataName('item', this.buff.dishId, this.inventory.getItem(this.buff.dishId)?.name ?? ''), secondsLeft: Math.ceil(this.buff.remaining) }
         : null,

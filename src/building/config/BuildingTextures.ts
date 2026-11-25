@@ -95,38 +95,6 @@ export function createChiseledStoneTexture(): THREE.CanvasTexture {
   return texture;
 }
 
-export function createThatchRoofTexture(): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 128;
-  const ctx = canvas.getContext('2d')!;
-  ctx.scale(0.25, 0.25);
-
-  ctx.fillStyle = '#7a633a'; // Viking thatch reed/straw
-  ctx.fillRect(0, 0, 512, 512);
-
-  const layers = 16;
-  const layerH = 512 / layers;
-  for (let i = 0; i < layers; i++) {
-    const y = i * layerH;
-    ctx.fillStyle = (i % 2 === 0) ? '#8c7243' : '#6b5430';
-    ctx.fillRect(0, y, 512, layerH);
-
-    ctx.strokeStyle = '#4a381f';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(0, y + layerH);
-    ctx.lineTo(512, y + layerH);
-    ctx.stroke();
-  }
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
 export function createCheckerWallTexture(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 128;
@@ -147,45 +115,6 @@ export function createCheckerWallTexture(): THREE.CanvasTexture {
       const isEven = (x + y) % 2 === 0;
       ctx.fillStyle = isEven ? colorA : colorB;
       ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
-
-      // Clean tile edge
-      ctx.strokeStyle = borderColor;
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x * tileSize + 0.75, y * tileSize + 0.75, tileSize - 1.5, tileSize - 1.5);
-    }
-  }
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
-export function createCheckerFloorTexture(): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 128;
-  const ctx = canvas.getContext('2d')!;
-  ctx.scale(0.25, 0.25);
-
-  const gridSize = 8; // 8x8 squares -> 64px per square
-  const tileSize = 512 / gridSize;
-
-  // Heartopia warm Scandinavian parquet palette: golden oak & light beech
-  const colorA = '#e2ba86'; // Warm sunlit beech parquet
-  const colorB = '#ba8b57'; // Rich warm oak parquet
-  const borderColor = 'rgba(120, 75, 35, 0.45)'; // Subtle parquet wood seam
-
-  for (let y = 0; y < gridSize; y++) {
-    for (let x = 0; x < gridSize; x++) {
-      const isEven = (x + y) % 2 === 0;
-      ctx.fillStyle = isEven ? colorA : colorB;
-      ctx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
-
-      // Parquet plank sub-grain
-      ctx.fillStyle = isEven ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.05)';
-      ctx.fillRect(x * tileSize + 2, y * tileSize + 2, tileSize - 4, tileSize / 2 - 2);
 
       // Clean tile edge
       ctx.strokeStyle = borderColor;

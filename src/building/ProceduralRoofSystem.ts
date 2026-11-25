@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { emitRoof, roofColliderTriangles, solveRoofShape } from './RoofGeometry';
 import type { RoofDormer } from './RoofDormers';
+import {
+  createBarkwoodShingleTexture, createSunriseShingleTexture, createMissionTileTexture,
+  createBlueSlateTexture, createScallopedRoofTexture, createStandingSeamRoofTexture, createStrawRoofTexture,
+} from './textures/RoofTextures';
 
 export type RoofType = 'gable' | 'hip' | 'shed' | 'gambrel' | 'mansard';
 
@@ -61,104 +65,6 @@ export interface RoofBuffers {
   uvs: Float32Array;
   indices: Uint32Array;
   groups: Array<{ start: number; count: number; materialIndex: number }>;
-}
-
-// =========================================================================
-// PROCEDURAL SIMS 4 SHINGLE TEXTURE GENERATORS
-// 100% SEAMLESS, TILEABLE SHINGLE COURSES (NO RIDGE STRIPES ON SLOPES!)
-// The ridge cap (коньок) is raised 3D geometry over the ridge, not painted into the tiles.
-// =========================================================================
-
-export function createSims4ShingleTexture(
-  primaryColor: string,
-  secondaryColor: string,
-  highlightColor: string,
-  shadowColor: string
-): THREE.CanvasTexture {
-  const canvas = document.createElement('canvas');
-  canvas.width = 128;
-  canvas.height = 128;
-  const ctx = canvas.getContext('2d')!;
-  ctx.scale(0.25, 0.25);
-
-  // Base background fill
-  ctx.fillStyle = secondaryColor;
-  ctx.fillRect(0, 0, 512, 512);
-
-  const rows = 8;
-  const cols = 8;
-  const rowH = 512 / rows; // exactly 64px per course for perfect power-of-2 tiling
-  const colW = 512 / cols; // exactly 64px per shingle
-
-  for (let r = 0; r < rows; r++) {
-    const y = r * rowH;
-    const isOdd = r % 2 === 1;
-    const xOffset = isOdd ? colW / 2 : 0;
-
-    for (let c = -1; c <= cols + 1; c++) {
-      const x = c * colW + xOffset;
-      const shingleW = colW - 2;
-      const shingleH = rowH + 2;
-
-      // Realistic shingle depth gradient (lip highlight to body shadow)
-      const grad = ctx.createLinearGradient(x, y, x, y + shingleH);
-      grad.addColorStop(0.0, highlightColor);
-      grad.addColorStop(0.15, primaryColor);
-      grad.addColorStop(0.82, secondaryColor);
-      grad.addColorStop(1.0, shadowColor);
-
-      ctx.fillStyle = grad;
-      ctx.fillRect(x + 1, y, shingleW, shingleH);
-
-      // Top fine bevel highlight
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
-      ctx.fillRect(x + 1, y, shingleW, 2);
-
-      // Bottom crisp horizontal overlap drop shadow
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-      ctx.fillRect(x, y + rowH - 3, colW, 4);
-
-      // Vertical separation groove between shingles
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-      ctx.fillRect(x, y, 1.5, rowH);
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-      ctx.fillRect(x + 1.5, y, 1.0, rowH);
-    }
-  }
-
-  // Subtle organic wood/slate noise for Sims 4 finish
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.035)';
-  for (let i = 0; i < 700; i++) {
-    const rx = Math.random() * 512;
-    const ry = Math.random() * 512;
-    ctx.fillRect(rx, ry, 1 + Math.random() * 2, 1);
-  }
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.RepeatWrapping;
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
-}
-
-// Sims 4 Barkwood: Deep rich dark chocolate brown wood shingles
-export function createBarkwoodShingleTexture(): THREE.CanvasTexture {
-  return createSims4ShingleTexture('#382519', '#291a11', '#4e3626', '#160d07');
-}
-
-// Sims 4 Sunrise: Warm golden chestnut/cedar wood shingles
-export function createSunriseShingleTexture(): THREE.CanvasTexture {
-  return createSims4ShingleTexture('#7c4825', '#5d3316', '#985b32', '#3a1c09');
-}
-
-// Sims 4 Mission: Mediterranean terracotta clay shingle tile
-export function createMissionTileTexture(): THREE.CanvasTexture {
-  return createSims4ShingleTexture('#8e3d20', '#6f2c14', '#ad4f2c', '#431508');
-}
-
-// Sims 4 Blue Slate: Elegant grey-blue architectural slate
-export function createBlueSlateTexture(): THREE.CanvasTexture {
-  return createSims4ShingleTexture('#3b4e60', '#273542', '#526b83', '#16212b');
 }
 
 // =========================================================================
@@ -237,7 +143,7 @@ export function createRoofLapSidingTexture(): THREE.CanvasTexture {
 // ROOF STYLES: one cached shingle material per style, chosen per roof
 // =========================================================================
 
-export const ROOF_STYLES = ['barkwood', 'sunrise', 'mission', 'blue_slate'] as const;
+export const ROOF_STYLES = ['barkwood', 'sunrise', 'mission', 'blue_slate', 'scalloped_clay', 'standing_seam', 'thatch'] as const;
 export type RoofStyle = (typeof ROOF_STYLES)[number];
 export const DEFAULT_ROOF_STYLE: RoofStyle = 'barkwood';
 
@@ -253,6 +159,9 @@ const SHINGLE_TEXTURES: Record<RoofStyle, () => THREE.CanvasTexture> = {
   sunrise: createSunriseShingleTexture,
   mission: createMissionTileTexture,
   blue_slate: createBlueSlateTexture,
+  scalloped_clay: createScallopedRoofTexture,
+  standing_seam: createStandingSeamRoofTexture,
+  thatch: createStrawRoofTexture,
 };
 
 const shingleMaterials = new Map<RoofStyle, THREE.MeshLambertMaterial>();

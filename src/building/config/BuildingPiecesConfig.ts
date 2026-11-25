@@ -11,6 +11,7 @@ import { createGlassMaterial } from '../../scene/GlassMatcap';
 import { BUILDING_MATERIALS, DORMER_GLASS, GREENHOUSE_GLASS_FAR, WINDOW_GLASS_FAR, addFarGlassTwins } from './BuildingMaterials';
 import { MODULE_SIZE, HALF_SIZE, WALL_THICKNESS, FLOOR_THICKNESS } from './BuildingConstants';
 import { applyDefaultWallFaces } from './DefaultWallMaterials';
+import { DEFAULT_FLOOR_FACES } from './DefaultFloorMaterials';
 import type { PieceMeshTemplate } from './meshes/PieceMeshTemplate';
 import { buildGreenhouseWallGeometry, GH_LEAF_W, GH_LEAF_H, GH_LEAF_Y, GH_HINGE_X, pushBox, greenhouseDoorLeafParts, greenhouseDoorFrameParts, mergeGreenhouseParts, buildGreenhouseDoorGeometry, buildGreenhouseDoorFrame, buildGreenhouseDoorLeaf } from './meshes/GreenhouseGeometry';
 import { buildBayWindowGeometry, buildWindowPieceGeometry, buildSingleHungWindowPieceGeometry, buildArchedWindowPieceGeometry, buildOuterDoorFrameGeometry, buildDoorwayWallGeometry, buildSingleDoorGeometry, buildDoubleDoorGeometry, buildGrandSideliteDoorFrameGeometry, buildGrandMahoganyDoorLeaf, buildWhite2PanelDoorFrameGeometry, buildWhite2PanelDoorLeaf, buildCottageWindowDoorFrameGeometry, buildCottageWindowDoorLeaf, buildColonial6PanelDoorFrameGeometry, buildColonial6PanelDoorLeaf } from './meshes/OpeningGeometry';
@@ -2290,11 +2291,10 @@ function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
       };
     }
     case BuildingPieceType.WOOD_FLOOR_2X2: {
-      // Clean, simple floor slab geometry with checker parquet texture
       const floorGeo = new THREE.BoxGeometry(MODULE_SIZE, FLOOR_THICKNESS, MODULE_SIZE);
       return {
         geometry: floorGeo,
-        materials: [BUILDING_MATERIALS.floorChecker],
+        materials: DEFAULT_FLOOR_FACES,
         boundingBox: new THREE.Box3(),
       };
     }
@@ -2303,7 +2303,7 @@ function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
       const floorGeo = new THREE.BoxGeometry(1.0, FLOOR_THICKNESS, 1.0);
       return {
         geometry: floorGeo,
-        materials: [BUILDING_MATERIALS.floorChecker],
+        materials: DEFAULT_FLOOR_FACES,
         boundingBox: new THREE.Box3(),
       };
     }

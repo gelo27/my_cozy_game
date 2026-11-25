@@ -6,6 +6,7 @@ import { CharacterController } from '../character/CharacterController';
 import { CharacterModel } from '../character/CharacterModel';
 import { loadWheatModel } from '../farming/WheatModel';
 import { loadCropModels } from '../farming/CropModels';
+import { loadCropBillboards } from '../farming/CropBillboards';
 import { FIELD_CELLS } from '../farming/FieldManager';
 import { hitchLog } from './HitchLog';
 import { onUserSettingsChange, userSettings } from '../config/userSettings';
@@ -88,13 +89,10 @@ function floorSurface(wallpaperId: string): FootSurface {
   return 'wood';
 }
 import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
-import { GridNavigator } from '../navigation/GridNavigator';
-import { CompanionNPC } from '../npc/CompanionNPC';
 import { NPCAgent } from '../npc/NPCAgent';
-import { npcWaterPathHeight } from '../npc/NPCWater';
-import { MAX_WORKERS, WorkerManager } from '../npc/WorkerManager';
-import { TaskBoard, WorkerRole } from '../npc/TaskBoard';
-import { FarmStorage, STORAGE_CHEST } from '../npc/FarmStorage';
+import { MAX_WORKERS } from '../npc/WorkerManager';
+import type { WorkerRole } from '../npc/TaskBoard';
+import { createFarmSettlement } from '../npc/FarmSettlement';
 import { t } from '../i18n/i18n';
 import { PropTreeField } from '../gathering/PropTreeField';
 import { AppleOrchard } from '../gathering/AppleOrchard';
@@ -279,6 +277,7 @@ export class GameEngine {
   private readonly resizeObserver: ResizeObserver;
   private animationFrameId = 0;
   private isDisposed = false;
+  private isReady = false;
   /** Cancels asynchronous startup work when the React host unmounts the engine. */
   private readonly initAbortController = new AbortController();
   private keyG = false;
@@ -429,9 +428,9 @@ export class GameEngine {
 
   public dispose(): void {
     if (this.isDisposed) return;
+    this.saveProgress();
     this.isDisposed = true;
     this.initAbortController.abort();
-    if (this.world && this.mode === 'play') this.world.saves.save(AUTOSAVE_SLOT);
     cancelAnimationFrame(this.animationFrameId);
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('keyup', this.handleKeyUp);
@@ -501,9 +500,14 @@ export class GameEngine {
     if (paused === this.paused) return;
     this.paused = paused;
     audioEngine.setPaused(paused);
-    if (paused && this.world) this.world.saves.save(AUTOSAVE_SLOT);
+    if (paused) this.saveProgress();
     // Do not let the paused time arrive as one big step
     this.clock.getDelta();
+  }
+
+  public saveProgress(): boolean {
+    return this.isReady && !this.isDisposed && this.mode === 'play'
+      && (this.world?.saves.save(AUTOSAVE_SLOT) ?? false);
   }
 
   public setMode(mode: EngineMode): void {
@@ -699,81 +703,20 @@ export class GameEngine {
         orchard.fastForward(seconds);
         nursery.fastForward(seconds);
       };
-      gameplay.onWake = () => this.world?.saves.save(AUTOSAVE_SLOT);
+      gameplay.onWake = () => this.scheduleAutosave();
       gameplay.onFaint = () => this.respawnPlayer();
       // Stations, the NPC, finds and a faced pet take E from the shovel
       character.farmingAbility.activityProbe = (pos) => gameplay.hasActivityForShovel(pos);
       gameplay.flowers = flowerBeds;
 
-      // Villager companion: paths come from a physics-sampled grid that resets when anything is built
-      // Props changing one at a time (a felled tree, a placed lamp) only forget the cells around them
-      const nav = new GridNavigator(physics, () =>
-        `${buildingManager.revision}|${props.solidRevision}|${terrain.revision}|${riverWorld.revision}|${worldSettings.waterLevel}`, {
-        cell: 0.5,
-        radius: 0.28,
-        height: 1.5, // the character capsule is 1.5 m tall
-        maxStepUp: 0.45,
-        maxDrop: 1.2,
-        minFloorY: () => worldSettings.waterLevel - 0.25,
-        waterPathHeight: npcWaterPathHeight,
-        doors: () => buildingManager.getDoorOpenings(),
-        stairs: () => buildingManager.getStairs(),
-        edits: () => props.drainNavEdits(),
+      const settlement = createFarmSettlement({
+        physics, scene, buildingManager, terrain, props, farmingManager,
+        propTrees, rocks, orchard, giveResources,
+        onWarning: (message) => callbacks.onNotify(message, 'warning'),
       });
-      buildingManager.onDoorToggled = (piece) => nav.doorToggled(piece.position);
-      const npcSpawn = new THREE.Vector3(-4, 0, 7);
-      npcSpawn.y = terrain.getHeight(npcSpawn.x, npcSpawn.z);
-      const doorControl = {
-        isOpen: (id: string) => !!buildingManager.getPiece(id)?.isOpen,
-        toggle: (id: string, from: THREE.Vector3) => buildingManager.toggleDoor(id, from),
-      };
-      gameplay.companion = new CompanionNPC(physics, scene, nav, npcSpawn, t('npc.name'), doorControl);
-      // Farm storage: every storage chest opens onto one shared stock (chest spots cached per prop revision)
-      let chestRev = -1;
-      let chestAt = -Infinity;
-      let chestSpots: THREE.Vector3[] = [];
-      const storage = new FarmStorage(() => {
-        // Props change often (felled trees, webs): look again at most every 2 s
-        const now = performance.now();
-        if (props.revision !== chestRev && now - chestAt > 2000) {
-          chestRev = props.revision;
-          chestAt = now;
-          chestSpots = props.list().filter((p) => p.type === STORAGE_CHEST).map((p) => p.position.clone());
-        }
-        return chestSpots;
-      });
-      gameplay.storage = storage;
-      // Farmhands with energy, hunger and a daily routine; in work hours they take jobs from the
-      // fields, the forest and the quarry, with seeds and meals from the storage chests
-      const taskBoard = new TaskBoard(
-        farmingManager,
-        {
-          count: (id) => storage.count(id),
-          take: (id, n) => storage.take(id, n),
-          put: (items) => {
-            if (!storage.hasChest) {
-              giveResources(items);
-              return;
-            }
-            // A full stack spills into the backpack rather than vanishing
-            const spill = items.map(({ itemId, amount }) => ({ itemId, amount: amount - storage.put(itemId, amount) })).filter((i) => i.amount > 0);
-            if (spill.length) giveResources(spill);
-          },
-          get hasChest() {
-            return storage.hasChest;
-          },
-        },
-        () => farmingManager.rainIntensity > 0.35,
-        () => workers.workCenter
-      );
-      taskBoard.trees = propTrees;
-      taskBoard.rocks = rocks;
-      taskBoard.orchard = orchard;
-      const workers = new WorkerManager(physics, scene, nav, doorControl, () => buildingManager.getAllPieces(), (x, z) => terrain.getHeight(x, z), taskBoard, new THREE.Vector3(npcSpawn.x + 6, npcSpawn.y, npcSpawn.z + 5));
-      workers.findChest = (from) => storage.nearestChest(from);
-      workers.onNotify = (text) => callbacks.onNotify(text, 'warning');
-      for (let i = 0; i < 3; i++) workers.spawn(new THREE.Vector3(npcSpawn.x + 2 + i * 1.6, 0, npcSpawn.z + 2.5));
-      gameplay.workers = workers;
+      gameplay.companion = settlement.companion;
+      gameplay.storage = settlement.storage;
+      gameplay.workers = settlement.workers;
       exploration = new ExplorationManager(scene, physics, terrain, props, rocks, inventoryManager, gameplay, weather, nightLighting, particleManager);
       character.gatheringAbility.caveNetwork = exploration.caveNetwork;
       character.gatheringAbility.onNuggetCollected = (itemId) => callbacks.onResourcesGathered([{ itemId, amount: 1 }]);
@@ -900,12 +843,15 @@ export class GameEngine {
       };
 
       // Resume the last session, else start in the shipped default world, else dress a fresh one
-      if (this.world.saves.load(AUTOSAVE_SLOT)) {
+      const resumed = this.world.saves.load(AUTOSAVE_SLOT);
+      if (this.world.saves.needsRecovery) throw new Error(t('pause.saveRecoveryFailed'));
+      if (resumed) {
         callbacks.onLog('info', 'Відновлено останнє автозбереження.');
       } else {
         const loadedDefaultWorld = await this.world.saves.loadDefaultWorld(this.initAbortController.signal);
         // Do not continue startup (or create fallback entities) after the host disposed this engine.
         if (this.isDisposed || this.initAbortController.signal.aborted) return;
+        if (this.world.saves.needsRecovery) throw new Error(t('pause.saveRecoveryFailed'));
         if (loadedDefaultWorld) {
           callbacks.onLog('info', 'Завантажено стандартний світ.');
         } else {
@@ -929,10 +875,13 @@ export class GameEngine {
       this.clock.start();
       this.lastFpsUpdate = performance.now();
       this.animate();
+      this.isReady = true;
       callbacks.onReady();
     } catch (err: any) {
       // Startup may reject because dispose() aborted a pending resource load.
       if (this.isDisposed || this.initAbortController.signal.aborted) return;
+      this.isReady = false;
+      cancelAnimationFrame(this.animationFrameId);
       console.error('Failed to initialize 3D scene / Rapier physics:', err);
       this.callbacks.onError(err?.message || 'Error loading physics engine');
     }
@@ -952,7 +901,8 @@ export class GameEngine {
     try {
       // The player / NPC model and the wheat load asynchronously: wait for them (capped) so their
       // shaders are compiled here too instead of hitching the first frames of play
-      const assets = Promise.allSettled([CharacterModel.preload(), loadWheatModel(), loadCropModels(), loadTreeModels(), loadAppleModels()]);
+      const assets = Promise.allSettled([CharacterModel.preload(), loadWheatModel(), loadCropModels(),
+        loadCropBillboards(), loadTreeModels(), loadAppleModels()]);
       await Promise.race([assets, new Promise((r) => setTimeout(r, 6000))]);
       if (this.isDisposed) return;
       // Let the models' own load callbacks attach their meshes to the scene first
@@ -1052,8 +1002,8 @@ export class GameEngine {
     hitchLog.mark(0);
 
     const w = this.world;
-    const { character, farmingManager, forest, rocks, particleManager, debugRenderer, vehicle, moped, terrain, editor } = w;
-    const { input: inputManager, camera: tpCamera, physics, callbacks } = this;
+    const { character, farmingManager, forest, rocks, vehicle, moped, terrain, editor } = w;
+    const { input: inputManager, camera: tpCamera, physics } = this;
     const editing = this.mode === 'editor';
 
     const rawDt = Math.min(this.clock.getDelta(), 0.05);
@@ -1360,7 +1310,7 @@ export class GameEngine {
     grass.update(dt, tpCamera.camera, w.weather.sound.wind, editing ? this.camera.camera.position : ride ? ride.getPosition() : character.getPosition());
     hitchLog.mark(5);
     farmingManager.update(dt);
-    farmingManager.fields.updateVisibility(this.camera.camera.position);
+    farmingManager.fields.updateVisibility(this.camera.camera.position, dt);
     hitchLog.mark(6);
     forest.update(dt);
     w.propTrees.update(dt);
@@ -1381,6 +1331,30 @@ export class GameEngine {
     else interactionFocus.resolve(character.getPosition(), character.getFacingDirection());
     tpCamera.drawZoom = editing ? 0 : w.gameplay.slingshot.isDrawing ? w.gameplay.slingshot.power : 0;
 
+    this.publishInteractionPrompts(w);
+
+    this.renderFrame(w, dt, isDriving, editing);
+
+    this.publishGameplayHud(w, rawDt);
+
+    this.autosaveTimer -= rawDt;
+    if (this.autosaveTimer <= 0 && !editing) {
+      this.autosaveTimer = 60;
+      this.scheduleAutosave();
+    }
+
+    const frameMs = performance.now() - frameStart;
+    this.frameMsAccum += frameMs;
+    this.frameSamples[this.frameSampleCursor] = frameMs;
+    this.frameSampleCursor = (this.frameSampleCursor + 1) % this.frameSamples.length;
+    this.frameSampleCount = Math.min(this.frameSampleCount + 1, this.frameSamples.length);
+    this.updateDiagnostics(stepTime);
+    hitchLog.mark(9);
+  };
+
+  private publishInteractionPrompts(w: GameWorld): void {
+    const { character } = w;
+    const { callbacks } = this;
     // Push prompts to React only when they actually change (each push re-renders the HUD tree)
     if (this.frameCount % 4 === 0 && character.farmingAbility) {
       // Only the focused target shows its E prompt; a prompt with nothing to do (a growing crop, "need
@@ -1412,23 +1386,30 @@ export class GameEngine {
         callbacks.onGatherPrompt(copy);
       }
     }
+  }
 
-    particleManager.update(dt);
-    debugRenderer.update(character);
+  private renderFrame(w: GameWorld, dt: number, isDriving: boolean, editing: boolean): void {
+    const { character } = w;
+    const { camera } = this.camera;
+    w.particleManager.update(dt);
+    w.debugRenderer.update(character);
 
-    w.terrain.updateLod(tpCamera.camera.position);
+    w.terrain.updateLod(camera.position);
     updatePlayerShadow(
-      character.model.group.position, tpCamera.camera,
+      character.model.group.position, camera,
       character.model.group.visible && !isDriving && !character.isRagdoll && (editing || !character.swimAbility.isSwimming)
     );
     hitchLog.mark(7);
     if (this.gpuWarmupPending) {
       this.gpuWarmupPending = false;
-      this.warmUpGpuUploads(tpCamera.camera);
+      this.warmUpGpuUploads(camera);
     }
-    this.renderer.render(this.scene, tpCamera.camera);
+    this.renderer.render(this.scene, camera);
     hitchLog.mark(8);
+  }
 
+  private publishGameplayHud(w: GameWorld, rawDt: number): void {
+    const { callbacks } = this;
     // Throttled UI pushes
     this.hudTimer -= rawDt;
     const hudKey = w.gameplay.hudKey;
@@ -1445,25 +1426,11 @@ export class GameEngine {
       this.lastHudKey = hudKey;
       this.hudTimer = 0.5;
     }
-    if (editor.revision !== this.lastEditorRevision) {
-      this.lastEditorRevision = editor.revision;
+    if (w.editor.revision !== this.lastEditorRevision) {
+      this.lastEditorRevision = w.editor.revision;
       callbacks.onEditorChanged();
     }
-
-    this.autosaveTimer -= rawDt;
-    if (this.autosaveTimer <= 0 && !editing) {
-      this.autosaveTimer = 60;
-      this.scheduleAutosave();
-    }
-
-    const frameMs = performance.now() - frameStart;
-    this.frameMsAccum += frameMs;
-    this.frameSamples[this.frameSampleCursor] = frameMs;
-    this.frameSampleCursor = (this.frameSampleCursor + 1) % this.frameSamples.length;
-    this.frameSampleCount = Math.min(this.frameSampleCount + 1, this.frameSamples.length);
-    this.updateDiagnostics(stepTime);
-    hitchLog.mark(9);
-  };
+  }
 
   /**
    * The periodic autosave (capture + JSON + localStorage, several ms) runs in the browser's idle time
@@ -1471,14 +1438,19 @@ export class GameEngine {
    * Leaving the page still saves synchronously (pagehide).
    */
   private autosavePending = false;
+  private autosaveFailed = false;
   private scheduleAutosave(): void {
-    if (this.autosavePending) return;
+    if (this.autosavePending || !this.isReady || this.mode !== 'play') return;
     this.autosavePending = true;
     // The HUD badge ("Saving game") listens for this event
     window.dispatchEvent(new Event('autosave-start'));
     const run = () => {
       this.autosavePending = false;
-      if (!this.isDisposed && this.world && this.mode === 'play') this.world.saves.save(AUTOSAVE_SLOT);
+      if (!this.isDisposed && this.mode === 'play') {
+        const failed = !this.saveProgress();
+        if (failed && !this.autosaveFailed) this.callbacks.onNotify(t('pause.saveFailed'), 'warning');
+        this.autosaveFailed = failed;
+      }
       window.dispatchEvent(new Event('autosave-end'));
     };
     if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(run, { timeout: 5000 });
@@ -1913,7 +1885,7 @@ export class GameEngine {
   private handleKeyUp = (): void => {};
 
   private handlePageHide = (): void => {
-    if (this.world && this.mode === 'play') this.world.saves.save(AUTOSAVE_SLOT);
+    this.saveProgress();
   };
 
   private handleResize = (): void => {

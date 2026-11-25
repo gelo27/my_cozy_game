@@ -1,7 +1,10 @@
 import * as THREE from 'three';
-import { createNorseWoodTexture, createChiseledStoneTexture, createThatchRoofTexture, createCheckerWallTexture, createCheckerFloorTexture, createCheckerWindowTexture, createCheckerPillarTexture, createRusticatedQuoinTexture, createWhitePaintedWoodTexture, createMahoganyWoodTexture, createCharcoalWoodTexture, createCreamWoodTexture } from './BuildingTextures';
+import { createNorseWoodTexture, createChiseledStoneTexture, createCheckerWallTexture, createCheckerWindowTexture, createCheckerPillarTexture, createRusticatedQuoinTexture, createWhitePaintedWoodTexture, createMahoganyWoodTexture, createCharcoalWoodTexture, createCreamWoodTexture } from './BuildingTextures';
 import { createGlassMaterial } from '../../scene/GlassMatcap';
-import { createRoofSurfaceMaterial, PROCEDURAL_ROOF_MATERIALS } from '../ProceduralRoofSystem';
+import { createRoofSurfaceMaterial, getRoofShingleMaterial, PROCEDURAL_ROOF_MATERIALS } from '../ProceduralRoofSystem';
+
+const thatchPanelTexture = getRoofShingleMaterial('thatch').map!.clone();
+thatchPanelTexture.repeat.set(2, 2);
 
 // Cached shared materials
 export const BUILDING_MATERIALS = {
@@ -44,9 +47,6 @@ export const BUILDING_MATERIALS = {
   wallChecker: new THREE.MeshLambertMaterial({
     map: createCheckerWallTexture(),
     }),
-  floorChecker: new THREE.MeshLambertMaterial({
-    map: createCheckerFloorTexture(),
-    }),
   windowChecker: new THREE.MeshLambertMaterial({
     map: createCheckerWindowTexture(),
     }),
@@ -62,7 +62,7 @@ export const BUILDING_MATERIALS = {
     map: createChiseledStoneTexture(),
     }),
   roof: createRoofSurfaceMaterial({
-    map: createThatchRoofTexture(),
+    map: thatchPanelTexture,
     }),
   thatchRoofTrim: createRoofSurfaceMaterial({ color: 0x4a2e18 }),
   // Greenhouse: oak glazing frame + clear glass (double-sided so it reads from inside)

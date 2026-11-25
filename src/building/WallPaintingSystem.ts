@@ -6,12 +6,13 @@ import { WALL_THICKNESS } from './config/BuildingPiecesConfig';
 import {
   createHerringboneParquetTexture,
   createDarkWalnutFloorTexture,
-  createLightPineFloorTexture,
   createCheckerMarbleFloorTexture,
   createTerracottaCottoFloorTexture,
   createRoyalCarpetFloorTexture,
   createFlagstonePaversFloorTexture,
   createMoroccanMosaicFloorTexture,
+} from './textures/FloorTextures';
+import {
   createDarkWoodCofferedCeilingTexture,
   createWhiteCofferedCeilingTexture,
   createRusticOakBeamsCeilingTexture,
@@ -33,6 +34,14 @@ import {
   WHITE_WAINSCOT_TILE,
   WALL_EDGE_MATERIAL,
 } from './config/DefaultWallMaterials';
+import {
+  DEFAULT_FLOOR_MATERIAL,
+  DEFAULT_FLOOR_THUMBNAIL,
+  DEFAULT_FLOOR_TILE_SIZE,
+  DEFAULT_FLOOR_WALLPAPER_ID,
+  FLOOR_TRIM_MATERIAL,
+  FLOOR_TRIM_WALLPAPER_ID,
+} from './config/DefaultFloorMaterials';
 
 const WALL_EDGE_WALLPAPER_ID = 'wall_edge';
 const LEGACY_SIDING_IDS = new Map([
@@ -583,125 +592,33 @@ export class WallPaintingSystem {
     // FLOOR TEXTURES REGISTRATION (ТЕКСТУРИ ПІДЛОГИ)
     // =========================================================================
 
-    // Floor 1: Herringbone Parquet
-    const herringbone = createHerringboneParquetTexture();
-    this.registerWallpaper({
-      id: 'floor_herringbone_parquet',
-      name: 'Herringbone Parquet',
-      ukrainianName: 'Паркет ялинка',
-      category: 'floor',
-      previewColor: '#b6834d',
-      description: 'Класичний паркет ялинкою з натурального золотистого дуба з виразними фасками',
-      material: new THREE.MeshLambertMaterial({
-        map: herringbone.texture,
-        }),
-      thumbnailUrl: herringbone.dataUrl,
-    });
-
-    // Floor 2: Dark Walnut Floor Planks
-    const darkWalnutFloor = createDarkWalnutFloorTexture();
-    this.registerWallpaper({
-      id: 'floor_dark_walnut',
-      name: 'Dark Walnut Planks',
-      ukrainianName: 'Темний горіх (дошки)',
-      category: 'floor',
-      previewColor: '#301f14',
-      description: 'Широкі масивні дошки темного шляхетного горіха з латунними цвяхами',
-      material: new THREE.MeshLambertMaterial({
-        map: darkWalnutFloor.texture,
-        }),
-      thumbnailUrl: darkWalnutFloor.dataUrl,
-    });
-
-    // Floor 3: Light Nordic Pine Floor
-    const lightPine = createLightPineFloorTexture();
-    this.registerWallpaper({
-      id: 'floor_light_pine',
-      name: 'Light Nordic Pine',
-      ukrainianName: 'Скандинавська сосна',
-      category: 'floor',
-      previewColor: '#ecdac3',
-      description: 'Світлі скандинавські соснові мостини з м’яким теплим візерунком волокон',
-      material: new THREE.MeshLambertMaterial({
-        map: lightPine.texture,
-        }),
-      thumbnailUrl: lightPine.dataUrl,
-    });
-
-    // Floor 4: Marble Checker Floor Tiles
-    const marbleChecker = createCheckerMarbleFloorTexture();
-    this.registerWallpaper({
-      id: 'floor_checker_marble',
-      name: 'Carrara & Marquina Marble',
-      ukrainianName: 'Мармурова шахова плитка',
-      category: 'floor',
-      previewColor: '#1e1e24',
-      description: 'Розкішна чорно-біла шахова мармурова підлога з делікатними прожилками',
-      material: new THREE.MeshLambertMaterial({
-        map: marbleChecker.texture,
-        }),
-      thumbnailUrl: marbleChecker.dataUrl,
-    });
-
-    // Floor 5: Terracotta Cotto Tiles
-    const terracottaCotto = createTerracottaCottoFloorTexture();
-    this.registerWallpaper({
-      id: 'floor_terracotta_cotto',
-      name: 'Terracotta Cotto Tiles',
-      ukrainianName: 'Теракотова котто плитка',
-      category: 'floor',
-      previewColor: '#b25332',
-      description: 'Тепла середземноморська теракота ручної роботи зі світлими швами',
-      material: new THREE.MeshLambertMaterial({
-        map: terracottaCotto.texture,
-        }),
-      thumbnailUrl: terracottaCotto.dataUrl,
-    });
-
-    // Floor 6: Royal Baroque Carpet
-    const royalCarpet = createRoyalCarpetFloorTexture();
-    this.registerWallpaper({
-      id: 'floor_royal_carpet',
-      name: 'Royal Baroque Carpet',
-      ukrainianName: 'Палацовий килим',
-      category: 'floor',
-      previewColor: '#6b1124',
-      description: 'Оксамитовий бордово-золотий палацовий килим із центральним медальйоном',
-      material: new THREE.MeshLambertMaterial({
-        map: royalCarpet.texture,
-        }),
-      thumbnailUrl: royalCarpet.dataUrl,
-    });
-
-    // Floor 7: Flagstone Pavers
-    const flagstone = createFlagstonePaversFloorTexture();
-    this.registerWallpaper({
-      id: 'floor_rustic_flagstone',
-      name: 'Rustic Flagstone',
-      ukrainianName: 'Кам’яні плити',
-      category: 'floor',
-      previewColor: '#52525b',
-      description: 'Натуральні кам’яні плити для тераси, передпокою або саду',
-      material: new THREE.MeshLambertMaterial({
-        map: flagstone.texture,
-        }),
-      thumbnailUrl: flagstone.dataUrl,
-    });
-
-    // Floor 8: Moroccan Mosaic
-    const moroccanMosaic = createMoroccanMosaicFloorTexture();
-    this.registerWallpaper({
-      id: 'floor_moroccan_mosaic',
-      name: 'Moroccan Mosaic',
-      ukrainianName: 'Марокканська мозаїка',
-      category: 'floor',
-      previewColor: '#0284c7',
-      description: 'Яскравий східний мозаїчний візерунок у бірюзових та теракотових тонах',
-      material: new THREE.MeshLambertMaterial({
-        map: moroccanMosaic.texture,
-        }),
-      thumbnailUrl: moroccanMosaic.dataUrl,
-    });
+    const floorStyles = [
+      ['floor_herringbone_parquet', 1.6, createHerringboneParquetTexture],
+      ['floor_dark_walnut', 1.8, createDarkWalnutFloorTexture],
+      [DEFAULT_FLOOR_WALLPAPER_ID, DEFAULT_FLOOR_TILE_SIZE, null],
+      ['floor_checker_marble', 1.6, createCheckerMarbleFloorTexture],
+      ['floor_terracotta_cotto', 1.6, createTerracottaCottoFloorTexture],
+      ['floor_royal_carpet', 1.8, createRoyalCarpetFloorTexture],
+      ['floor_rustic_flagstone', 2.0, createFlagstonePaversFloorTexture],
+      ['floor_moroccan_mosaic', 1.2, createMoroccanMosaicFloorTexture],
+    ] as const;
+    for (const [id, tileSize, createTexture] of floorStyles) {
+      const details = WALLPAPER_UI_CATALOG.find((item) => item.id === id)!;
+      const finish = createTexture?.();
+      this.registerWallpaper({
+        ...details,
+        tileWidth: tileSize,
+        tileHeight: tileSize,
+        material: finish ? new THREE.MeshLambertMaterial({
+          map: finish.texture,
+          normalMap: finish.normalMap,
+          normalScale: new THREE.Vector2(0.7, 0.7),
+        }) : DEFAULT_FLOOR_MATERIAL,
+        thumbnailUrl: finish?.dataUrl ?? DEFAULT_FLOOR_THUMBNAIL,
+      });
+    }
+    this.materialList.push(FLOOR_TRIM_MATERIAL);
+    this.floorTrimMaterialIndex = this.materialList.length - 1;
 
     // =========================================================================
     // CEILING TEXTURES REGISTRATION (ТЕКСТУРИ СТЕЛІ)
@@ -844,7 +761,10 @@ export class WallPaintingSystem {
     return this.getMaterialIndex(WALL_EDGE_WALLPAPER_ID);
   }
 
+  private floorTrimMaterialIndex = 0;
+
   public getMaterialIndex(wallpaperId?: string): number {
+    if (wallpaperId === FLOOR_TRIM_WALLPAPER_ID) return this.floorTrimMaterialIndex;
     if (!wallpaperId) return 0;
     const def = this.wallpaperMap.get(wallpaperId);
     return def ? def.materialIndex : 0;
@@ -856,7 +776,11 @@ export class WallPaintingSystem {
 
   /** Wallpaper shown on one face (its default when unpainted) */
   public getFaceWallpaper(pieceId: string, faceSide: WallFaceSide): string {
-    return this.paintedCells.get(`${pieceId}:${faceSide}`) ?? this.defaultWallpaperFor(pieceId, faceSide);
+    const paintedId = this.paintedCells.get(this.getCellKey(pieceId, faceSide));
+    if ((faceSide === 'top' || faceSide === 'bottom') && (paintedId === 'default' || !this.wallpaperMap.has(paintedId ?? ''))) {
+      return this.defaultWallpaperFor(pieceId, faceSide);
+    }
+    return paintedId ?? this.defaultWallpaperFor(pieceId, faceSide);
   }
 
   /**
@@ -879,9 +803,10 @@ export class WallPaintingSystem {
     return (faceSide === 'left') !== this.flippedWalls.has(pieceId);
   }
 
-  /** What an unpainted face shows: siding outside, white wainscoting inside, the base texture on floors */
+  /** The finish shown when a face has no custom paint. */
   private defaultWallpaperFor(pieceId: string, faceSide: WallFaceSide): string {
-    if (faceSide !== 'left' && faceSide !== 'right') return 'default';
+    if (faceSide === 'top') return DEFAULT_FLOOR_WALLPAPER_ID;
+    if (faceSide === 'bottom') return FLOOR_TRIM_WALLPAPER_ID;
     return this.isOuterFace(pieceId, faceSide) ? DEFAULT_OUTER_WALLPAPER_ID : DEFAULT_INNER_WALLPAPER_ID;
   }
 

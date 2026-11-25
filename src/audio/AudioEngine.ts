@@ -1059,6 +1059,26 @@ class AudioEngine {
     osc.stop(t + 0.15);
   }
 
+  /** A short swell of frying/bubbling using the shared effects mixer and cached noise. */
+  public playCookingSizzle(strength: number): void {
+    const sound = this.begin();
+    if (!sound) return;
+    const { ctx, out, t } = sound;
+    const noise = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const envelope = ctx.createGain();
+    noise.buffer = this.noiseBuffer(0.65);
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(2200, t);
+    filter.frequency.exponentialRampToValueAtTime(1100, t + 0.6);
+    filter.Q.value = 0.65;
+    envelope.gain.setValueAtTime(0.0001, t);
+    envelope.gain.linearRampToValueAtTime(0.19 * strength, t + 0.035);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, t + 0.62);
+    noise.connect(filter).connect(envelope).connect(out);
+    noise.start(t);
+  }
+
   public playHarvest() {
     if (!this.ctx) this.init();
     if (!this.ctx) return;

@@ -102,7 +102,8 @@ export function acquireInstancedDither(base: THREE.Material): THREE.Material {
           if (vLodFade > 0.0 ? b >= vLodFade : b < -vLodFade) discard;
         }`);
   };
-  m.customProgramCacheKey = () => `lod-dither-inst-${base.uuid}`;
+  const key = base.customProgramCacheKey();
+  m.customProgramCacheKey = () => `lod-dither-inst-${key}`;
   inheritVertexLightingQuality(base, m);
   instanced.set(base, m);
   return m;
@@ -118,6 +119,39 @@ export const TREE_FADE_RANGE: FadeRange = { value: new THREE.Vector2(200, 240) }
 export const BUSH_FADE_RANGE: FadeRange = { value: new THREE.Vector2(112, 130) };
 
 const distanceTwins = new Map<THREE.Material, THREE.Material>();
+const chunkTwins = new Map<THREE.Material, THREE.Material>();
+
+function injectDistanceMask(shader: THREE.WebGLProgramParametersWithUniforms): void {
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      varying float vDistFade;
+      float distBayer(vec2 p) {
+        ivec2 i = ivec2(mod(p, 4.0));
+        const float m[16] = float[16](0., 8., 2., 10., 12., 4., 14., 6., 3., 11., 1., 9., 15., 7., 13., 5.);
+        return (m[i.x + i.y * 4] + 0.5) / 16.0;
+      }`)
+    .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+      if (distBayer(gl_FragCoord.xy) < vDistFade) discard;`);
+}
+
+/** The same screen-door mask, with CPU-driven coverage shared by a whole chunk. */
+export function acquireChunkDither(base: THREE.Material): THREE.Material {
+  let m = chunkTwins.get(base);
+  if (m) return m;
+  m = base.clone();
+  m.onBeforeCompile = (shader, renderer) => {
+    base.onBeforeCompile.call(base, shader, renderer);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aChunkCoverage;\nvarying float vDistFade;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvDistFade = 1.0 - aChunkCoverage;');
+    injectDistanceMask(shader);
+  };
+  const key = base.customProgramCacheKey();
+  m.customProgramCacheKey = () => `chunk-dither-${key}`;
+  inheritVertexLightingQuality(base, m);
+  chunkTwins.set(base, m);
+  return m;
+}
 
 /**
  * Dithering twin of an instanced `base` that dissolves each instance by its distance from the
@@ -140,25 +174,16 @@ export function acquireDistanceDither(base: THREE.Material, range: FadeRange): T
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         {
           #ifdef USE_INSTANCING
-            vec3 io = (modelMatrix * instanceMatrix[3]).xyz;
+            vec2 io = (modelMatrix * instanceMatrix[3]).xz;
           #else
-            vec3 io = modelMatrix[3].xyz;
+            vec2 io = modelMatrix[3].xz;
           #endif
-          // A little per-instance jitter so neighbours don't dissolve in lockstep
-          float jit = fract(dot(floor(io.xz * 3.0), vec2(0.06711056, 0.00583715)) * 52.9829189) - 0.5;
-          float d = distance(io.xz, cameraPosition.xz) + jit * (uFadeRange.y - uFadeRange.x) * 0.3;
+          // Stagger neighbouring trees so they don't dissolve in lockstep.
+          float jit = fract(dot(floor(io * 3.0), vec2(0.06711056, 0.00583715)) * 52.9829189) - 0.5;
+          float d = distance(io, cameraPosition.xz) + jit * (uFadeRange.y - uFadeRange.x) * 0.3;
           vDistFade = clamp((d - uFadeRange.x) / max(uFadeRange.y - uFadeRange.x, 0.001), 0.0, 1.0);
         }`);
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>
-        varying float vDistFade;
-        float distBayer(vec2 p) {
-          ivec2 i = ivec2(mod(p, 4.0));
-          const float m[16] = float[16](0., 8., 2., 10., 12., 4., 14., 6., 3., 11., 1., 9., 15., 7., 13., 5.);
-          return (m[i.x + i.y * 4] + 0.5) / 16.0;
-        }`)
-      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
-        if (distBayer(gl_FragCoord.xy) < vDistFade) discard;`);
+    injectDistanceMask(shader);
   };
   const key = base.customProgramCacheKey();
   m.customProgramCacheKey = () => `dist-dither-${key}`;

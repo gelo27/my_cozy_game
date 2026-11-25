@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { CrownLeafOptions, addCrownLeaves } from './CrownLeaves';
+import { crownLeafTexture } from './CrownLeafTexture';
+import { loadTreeBillboards } from './TreeBillboards';
 import { addRingScallops } from './RingScallops';
 import { loadPineCrown, trunkWithCrown } from './PineCrownModel';
 import { injectNightLights, FOLIAGE_NIGHT_LIGHTS } from './NightLighting';
@@ -57,7 +59,7 @@ export const uHedgeBendCount = (bendStore.__hedgeBendCount ??= { value: 0 });
  * looking up from below the trunk showed straight through them) and leaf wind. The bush variant
  * also leans the few bushes something is pushing through; trees never pay for that loop.
  */
-function foliageMaterial(bend?: 'bush' | 'hedge'): THREE.MeshLambertMaterial {
+function foliageMaterial(bend?: 'bush' | 'hedge', texturedCrown = false): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
   mat.onBeforeCompile = (shader) => {
     injectNightLights(shader, FOLIAGE_NIGHT_LIGHTS);
@@ -115,14 +117,24 @@ uniform int uBushBendCount;`;
       }
       #endif`;
     }
+    if (texturedCrown) {
+      shader.uniforms.tCrownLeaves = { value: crownLeafTexture() };
+      head += '\nattribute vec3 crownUv;\nvarying vec3 vCrownUv;';
+      body += '\nvCrownUv = crownUv;';
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform sampler2D tCrownLeaves;\nvarying vec3 vCrownUv;')
+        .replace('#include <map_fragment>', `#include <map_fragment>
+          if (vCrownUv.z > 0.5) diffuseColor.rgb *= 0.30 + 0.92 * texture2D(tCrownLeaves, vCrownUv.xy).r;`);
+    }
     shader.vertexShader = shader.vertexShader.replace('#include <common>', head).replace('#include <begin_vertex>', body);
     injectSnowCover(shader);
   };
-  mat.customProgramCacheKey = () => bend ? `${bend}-wind-bend` : 'tree-wind';
+  mat.customProgramCacheKey = () => texturedCrown ? 'tree-wind-crown-map' : bend ? `${bend}-wind-bend` : 'tree-wind';
   return withVertexLightingQuality(mat);
 }
 
 export const TREE_MATERIAL = foliageMaterial();
+export const CROWN_LOD_MATERIAL = foliageMaterial(undefined, true);
 export const BUSH_MATERIAL = foliageMaterial('bush');
 const HEDGE_MATERIAL = foliageMaterial('hedge');
 /** The material a model type draws with. */
@@ -173,7 +185,7 @@ export function getTreeLods(): TreeLods | null {
 /** Loads the oak and pine (3 LODs each) from the trees pack once; the bush (2 LODs) is built here. */
 export function loadTreeModels(): Promise<TreeLods | null> {
   if (loading) return loading;
-  loading = Promise.all([new GLTFLoader().loadAsync(TREES_URL), loadPineCrown()])
+  loading = Promise.all([new GLTFLoader().loadAsync(TREES_URL), loadPineCrown(), loadTreeBillboards()])
     .then(([gltf, crown]) => {
       pineCrown = crown;
       const out: Record<string, THREE.BufferGeometry[]> = {};
@@ -184,7 +196,8 @@ export function loadTreeModels(): Promise<TreeLods | null> {
         const m = /^(pine|pin|oak)_tree_lod(\d)$/i.exec(mesh.name);
         if (!m) return;
         const type = TYPE_OF[m[1].toLowerCase()];
-        (out[type] ??= [])[Number(m[2]) - 1] = prepare(mesh, type);
+        const level = Number(m[2]) - 1;
+        (out[type] ??= [])[level] = prepare(mesh, type, level);
       });
       for (const [type, list] of Object.entries(out)) {
         if (list.length !== 3 || list.some((g) => !g)) throw new Error(`trees_pack.glb: ${type} needs lod1..lod3`);
@@ -221,8 +234,7 @@ export function rebuildTreeLeaves(): TreeLods | null {
 
 /**
  * Near oaks get leaf scales, near pines needle blades and near bushes small scales, over a
- * darkened crown; the farther LODs keep the plain crown. The pine's crown shade applies to all
- * its LODs.
+ * darkened crown. Farther oak-derived LODs use baked leaf relief and a few scales for the silhouette.
  */
 function buildLods(src: TreeLods): TreeLods {
   const out: TreeLods = {};
@@ -238,6 +250,7 @@ function buildLods(src: TreeLods): TreeLods {
     const list = src[type].map((g) => shadeCrown(g, shade));
     if (on) {
       const near = list[0];
+      const leafOptions = opts();
       // The pine: the hand-made crown on the pack's trunk, or generated rows of paws around it
       list[0] =
         type === 'tree_pine' && veg.pineModelCrown && pineCrown
@@ -247,8 +260,35 @@ function buildLods(src: TreeLods): TreeLods {
               pawsPerRow: veg.pineCount, width: veg.pineWidth, droop: veg.pineLength, overhang: veg.pineOffset,
               rowStep: veg.pineSpacing, innerShade: veg.pineInnerShade, keepCrown: veg.pineKeepCrown, seed: 4242,
             })
-          : addCrownLeaves(near, opts());
+          : addCrownLeaves(near, leafOptions);
       if (list[0] !== near) near.dispose();
+      for (let level = 1; level < list.length; level++) {
+        const base = list[level];
+        const uv = base.getAttribute('crownUv') as THREE.BufferAttribute | undefined;
+        if (!uv) continue;
+        const far = level === list.length - 1;
+        const smallCrown = type === 'tree_birch';
+        const detailed = addCrownLeaves(base, {
+          ...leafOptions,
+          count: Math.min(leafOptions.count, far ? 18 : 72),
+          spacing: (far ? 1.0 : 0.57) * (smallCrown ? 0.78 : 1),
+          size: (far ? 1.08 : 0.91) * (smallCrown ? 0.74 : 1),
+          offset: 0.09,
+          // Darken the inner crown like the near LOD. The scales keep their own tip lighting.
+          innerShade: Math.min(0.9, leafOptions.innerShade + 0.04),
+          shape: 'scale',
+        });
+        if (detailed === base) continue;
+        // addCrownLeaves keeps the base vertices first and appends the scales. Their zero mask
+        // leaves their vertex shading intact, while retaining the texture on the underlying crown.
+        const crownUv = new Float32Array(detailed.getAttribute('position').count * 3);
+        crownUv.set(uv.array);
+        detailed.setAttribute('crownUv', new THREE.BufferAttribute(crownUv, 3));
+        list[level] = detailed;
+        base.dispose();
+      }
+    } else {
+      for (const g of list) g.deleteAttribute('crownUv');
     }
     const paint = PAINT[type];
     if (paint) for (const g of list) paintTree(g, paint, oakCrownBrightness);
@@ -290,7 +330,7 @@ function bushSphere(detail: number): THREE.BufferGeometry {
  * Bakes the node transform in, keeps position / normal / RGB vertex colour (the pack has no
  * textures) and adds the single material group the props' material array expects.
  */
-function prepare(mesh: THREE.Mesh, type: string): THREE.BufferGeometry {
+function prepare(mesh: THREE.Mesh, type: string, level: number): THREE.BufferGeometry {
   const src = mesh.geometry;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', src.getAttribute('position').clone());
@@ -304,6 +344,17 @@ function prepare(mesh: THREE.Mesh, type: string): THREE.BufferGeometry {
     rgb[i * 3 + 2] = c ? c.getZ(i) : 1;
   }
   g.setAttribute('color', new THREE.BufferAttribute(rgb, 3));
+  const uv = src.getAttribute('uv');
+  if (type === 'tree_round' && level > 0 && c && uv) {
+    // The pack already unwraps the crown at its seam. Store the mask before maple and birch repaint it.
+    const crownUv = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      crownUv[i * 3] = uv.getX(i) * 4;
+      crownUv[i * 3 + 1] = uv.getY(i) * 2;
+      crownUv[i * 3 + 2] = c.getY(i) > c.getX(i) && c.getY(i) > c.getZ(i) ? 1 : 0;
+    }
+    g.setAttribute('crownUv', new THREE.BufferAttribute(crownUv, 3));
+  }
   if (src.index) g.setIndex(src.index.clone());
   const s = MODEL_SCALE[type] ?? 1;
   g.applyMatrix4(new THREE.Matrix4().makeScale(s, s, s).multiply(mesh.matrixWorld));

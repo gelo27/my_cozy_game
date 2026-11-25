@@ -19,7 +19,7 @@ export interface FaceGroup {
   vCount: number;
   /** Painted face this group belongs to, or null for fixed trim (edges, jambs, caps) */
   key: string | null;
-  /** UVs follow the wallpaper's tile size (walls); floors keep their fixed checker UVs */
+  /** UVs follow the wallpaper's tile size on walls and floor tops. */
   tiled: boolean;
   materialIndex: number;
 }

@@ -37,7 +37,7 @@ import {
 import { BuildingPieceType, BuildingTelemetry, DormerAction, HouseRoofKind, PieceCategory } from '../building/types/BuildingTypes';
 import { DORMER_STYLES } from '../building/RoofDormers';
 import { BUILDING_PIECES } from '../building/config/BuildingPiecesConfig';
-import { DEFAULT_ROOF_STYLE, RoofStyle } from '../building/ProceduralRoofSystem';
+import { DEFAULT_ROOF_STYLE, ROOF_STYLES, RoofStyle } from '../building/ProceduralRoofSystem';
 import { InputManager } from '../input/InputManager';
 import { AimStatus, Chip, Crosshair, ModeBar, PrimaryAction, Shelf, ShelfCard, ShelfSection, ToolButton, ToolColumn } from './buildui/BuildUI';
 
@@ -89,12 +89,10 @@ interface PieceItemConfig {
   dimBadge: string;
 }
 
-const ROOF_STYLE_BUTTONS: Array<{ style: RoofStyle; label: string; active: string }> = [
-  { style: 'barkwood', label: '🌲 Barkwood', active: 'bg-amber-900 text-white border-amber-400 ring-1 ring-amber-500 shadow-sm' },
-  { style: 'sunrise', label: '🌅 Sunrise', active: 'bg-amber-700 text-white border-amber-300 ring-1 ring-amber-400 shadow-sm' },
-  { style: 'mission', label: '🏮 Mission', active: 'bg-rose-700 text-white border-rose-300 ring-1 ring-rose-400 shadow-sm' },
-  { style: 'blue_slate', label: '🔷 Slate', active: 'bg-sky-600 text-white border-sky-300 ring-1 ring-sky-400 shadow-sm' },
-];
+const ROOF_SWATCHES: Record<RoofStyle, string> = {
+  barkwood: '#543929', sunrise: '#96623a', mission: '#a04d2f', blue_slate: '#4f6270',
+  scalloped_clay: '#587662', standing_seam: '#445e5e', thatch: '#9f7c44',
+};
 
 const PIECE_ITEMS: PieceItemConfig[] = [
   // Floors
@@ -485,9 +483,10 @@ export const BuildingHUD: React.FC<BuildingHUDProps> = ({
         <ShelfSection>
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className={sectionTitle}>{t('build.roofTexture')}</span>
-            {ROOF_STYLE_BUTTONS.map((b) => (
-              <Chip key={b.style} active={roofStyle === b.style} onClick={() => onSetRoofStyle(b.style)}>
-                {b.label}
+            {ROOF_STYLES.map((style) => (
+              <Chip key={style} active={roofStyle === style} onClick={() => onSetRoofStyle(style)}>
+                <span className="inline-block h-2.5 w-2.5 mr-1.5 rounded-sm" style={{ backgroundColor: ROOF_SWATCHES[style] }} aria-hidden="true" />
+                {t(`build.roofStyle.${style}`)}
               </Chip>
             ))}
           </div>

@@ -1,0 +1,125 @@
+.cook-ui {
+  --cook-ink: #53352a;
+  --cook-paper: #fff7e5;
+  --cook-action: #934626;
+  display: grid;
+  gap: 9px;
+  color: var(--cook-ink);
+}
+.cook-recipes, .cook-action { display: flex; align-items: center; gap: 8px; }
+.cook-recipes { font-size: .8rem; font-weight: 750; }
+.cook-recipes select {
+  flex: 1; min-width: 0; min-height: 40px; padding: 5px 9px;
+  background: var(--cook-paper); border: 1px solid #e3ccab; border-radius: 10px; color: inherit;
+}
+.cook-requirements { display: flex; flex-wrap: wrap; gap: 5px; font-size: .72rem; }
+.cook-requirements span { background: #f1e3c9; padding: 3px 8px; border-radius: 8px; }
+.cook-board {
+  --doneness: 0;
+  position: relative; isolation: isolate; overflow: hidden; border-radius: 14px;
+  height: clamp(116px, 27vh, 162px);
+  background: repeating-linear-gradient(0deg, #d89e69 0 24px, #dfa875 25px 26px, #c88c59 27px 28px);
+  box-shadow: inset 0 0 0 1px #bd8154, inset 0 -8px 16px #61331d22;
+}
+.cook-vessel {
+  position: absolute; inset: 8% 0 13%; width: min(58%, 232px); margin: auto;
+  border-radius: 50%; padding: 7px; background: #502f28;
+  box-shadow: 0 8px 0 #653c2e, 0 12px 12px #67371972;
+}
+.cook-vessel-inner {
+  width: 100%; height: 100%; border-radius: inherit;
+  background: radial-gradient(ellipse at 45% 35%, #74625a, #383037);
+  box-shadow: inset 0 0 0 3px #ffffff29;
+}
+.cook-board[data-method="mix"] .cook-vessel { background: #e4e4bf; box-shadow: 0 7px 0 #6d8061, 0 12px 12px #67371965; }
+.cook-board[data-method="mix"] .cook-vessel-inner { background: radial-gradient(ellipse at 45% 35%, #dbe7c6, #a4be98); }
+.cook-board[data-method="pot"] .cook-vessel-inner { background: radial-gradient(ellipse at 45% 35%, #e0a766, #ae683b); }
+.cook-board[data-method="pan"] .cook-vessel::after {
+  content: ''; position: absolute; height: 13px; width: 36%; background: #52352f;
+  top: 32%; left: 93%; transform: rotate(-14deg); transform-origin: left; border-radius: 8px;
+}
+.cook-board[data-method="oven"] .cook-vessel { border-radius: 20px; }
+.cook-board[data-hot="true"] .cook-vessel-inner { filter: brightness(calc(1 + var(--doneness) * .24)); }
+.cook-board[data-golden="true"] .cook-vessel { outline: 3px solid #ffe38a; }
+.cook-contents {
+  position: absolute; inset: 16% 12% 24%; display: flex; justify-content: center; align-items: center; gap: 3px;
+}
+.cook-contents button, .cook-plated { font-size: clamp(25px, 5.6vw, 38px); filter: drop-shadow(0 4px 2px #46291961); }
+.cook-contents button { line-height: 1.1; min-width: 36px; min-height: 40px; }
+.cook-contents button:disabled { pointer-events: none; }
+.cook-board[data-hot="true"] .cook-contents button {
+  filter: sepia(calc(var(--doneness) * .7)) saturate(calc(1 + var(--doneness) * .35)) drop-shadow(0 4px 2px #46291961);
+}
+.cook-board:has(.cook-plated) .cook-vessel {
+  border-radius: 50%; background: #f7e9cb; box-shadow: 0 5px 0 #a39683, 0 9px 12px #67371965;
+}
+.cook-board:has(.cook-plated) .cook-vessel-inner { background: radial-gradient(ellipse, #fffaf0 60%, #d9b999 62%, #f4e6ca 67%); }
+.cook-board:has(.cook-plated) .cook-vessel::after { display: none; }
+.cook-portion, .cook-plated { animation: cook-drop .35s cubic-bezier(.15,.85,.38,1.24) both; }
+.cook-stirred { animation: cook-stir .38s ease both; }
+.cook-empty { font-size: .75rem; color: #344e36; font-weight: 750; text-align: center; }
+.cook-board:not([data-method="mix"]) .cook-empty { color: #fff6d7; }
+.cook-steam { position: absolute; inset: 0; display: flex; justify-content: center; gap: 16px; pointer-events: none; }
+.cook-steam i {
+  margin-top: 16%; width: 8px; height: 26px; background: #fff4d696; border-radius: 50%;
+  filter: blur(3px); animation: cook-steam 1.2s infinite ease-out;
+}
+.cook-steam i:nth-child(2) { animation-delay: .33s; }
+.cook-steam i:nth-child(3) { animation-delay: .74s; }
+.cook-heat { position: absolute; bottom: 7px; height: 7px; inset-inline: 16%; border-radius: 8px; background: #482c2c; }
+.cook-heat i { position: absolute; z-index: 1; left: 65%; width: 22%; height: 100%; background: #ffdf7d; }
+.cook-heat b {
+  position: absolute; z-index: 2; top: -3px; left: calc(var(--doneness) * 100%); width: 5px; height: 13px;
+  background: white; border-radius: 3px; box-shadow: 0 1px 3px #4f302c; transform: translateX(-50%);
+}
+.cook-hint { flex: 1; font-size: .75rem; font-weight: 650; min-width: 0; }
+.cook-main, .cook-clear, .cook-dishes button { min-height: 42px; border-radius: 10px; padding: 6px 12px; font-size: .82rem; font-weight: 750; }
+.cook-main { background: var(--cook-action); color: white; }
+.cook-main[data-ready="true"] { background: #426448; }
+.cook-clear, .cook-dishes button { background: #f0e0c5; }
+.cook-main:disabled, .cook-clear:disabled { opacity: .5; }
+.cook-stock { display: flex; flex-wrap: wrap; gap: 6px; }
+.cook-ingredient {
+  display: flex; align-items: center; gap: 4px; min-height: 42px; padding: 4px 8px;
+  border: 1px solid #e4d0b1; border-radius: 10px; background: var(--cook-paper);
+  font-size: .72rem; font-weight: 700; touch-action: none; user-select: none; cursor: grab;
+}
+.cook-ingredient:disabled { opacity: .5; cursor: default; }
+.cook-ingredient span:first-child { font-size: 1.15rem; }
+.cook-ingredient b { color: #7b5540; }
+.cook-drag { z-index: 100; position: fixed; transform: translate(-50%, -50%); pointer-events: none; font-size: 32px; }
+.cook-dishes { border-top: 1px solid #e9dcc3; padding-top: 8px; font-size: .78rem; }
+.cook-dishes summary { cursor: pointer; font-weight: 750; }
+.cook-dishes > div { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; gap: 5px; }
+.cook-dishes small { display: block; }
+@keyframes cook-drop {
+  from { transform: translateY(-35px) scale(.8) rotate(-12deg); opacity: .15; }
+  72% { transform: translateY(3px) scale(1.1,.85) rotate(7deg); }
+  to { transform: none; opacity: 1; }
+}
+@keyframes cook-stir {
+  40% { transform: translate(14px, -5px) rotate(18deg); }
+  75% { transform: translate(-7px, 3px) rotate(-8deg); }
+}
+@keyframes cook-steam {
+  from { opacity: 0; transform: none; }
+  25% { opacity: .8; }
+  to { opacity: 0; transform: translate(7px,-40px) scale(1.9); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cook-portion, .cook-plated, .cook-stirred, .cook-steam i { animation: none; }
+}
+
+@media (orientation: landscape) and (max-height: 470px) {
+  .cook-ui {
+    grid-template-columns: minmax(130px, 1fr) minmax(175px, 1fr);
+    align-items: start;
+    column-gap: 12px;
+  }
+  .cook-recipes, .cook-requirements, .cook-dishes { grid-column: 1 / -1; }
+  .cook-board { grid-column: 1; grid-row: 3 / span 2; }
+  .cook-action { grid-column: 2; grid-row: 3; flex-wrap: wrap; }
+  .cook-action .cook-hint { flex-basis: 100%; }
+  .cook-stock { grid-column: 2; grid-row: 4; }
+  .cook-board { height: clamp(112px, 34vh, 150px); }
+}

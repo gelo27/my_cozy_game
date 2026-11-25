@@ -1,12 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { X, Coins, ChefHat, Store } from 'lucide-react';
+import { X, Coins, Store } from 'lucide-react';
 import { GameplayManager, GameplayHudState } from '../../gameplay/GameplayManager';
-import { RECIPES, DISH_BUFF } from '../../gameplay/Recipes';
 import { InventoryManager } from '../../inventory/InventoryManager';
 import { getItemEmoji } from '../../inventory/types/InventoryTypes';
 import { t, useLang, dataName } from '../../i18n/i18n';
 
-const recipeName = (id: string) => dataName('recipe', id, RECIPES.find((r) => r.id === id)?.name ?? id);
 
 const sheet = 'bg-[#fffaf0] text-[#4a3b2a] border border-[#e9dcc3] shadow-[0_12px_40px_rgba(60,40,10,0.3)]';
 
@@ -43,84 +41,6 @@ export const Shell: React.FC<{ title: string; icon: React.ReactNode; onClose(): 
     </div>
   </div>
 );
-
-export const CookingPanel: React.FC<PanelProps> = ({ hud, gameplay, inventory, onClose }) => {
-  useInventoryTick(inventory);
-  const dishes = inventory.getItems().filter((i) => i.id.startsWith('dish_') && i.count > 0);
-  return (
-    <Shell title={t('cook.title')} icon={<ChefHat className="w-5 h-5 text-orange-600" />} onClose={onClose}>
-      {hud.cooking && (
-        <div className="rounded-2xl bg-orange-50 border border-orange-200 p-3">
-          <div className="text-sm font-semibold mb-1.5">
-            {t('cook.cooking', { name: recipeName(hud.cooking.recipeId) })}
-          </div>
-          <div className="h-2.5 rounded-full bg-orange-100 overflow-hidden">
-            <div className="h-full bg-orange-400 transition-[width] duration-300" style={{ width: `${hud.cooking.progress * 100}%` }} />
-          </div>
-        </div>
-      )}
-      {RECIPES.filter((r) => gameplay.isRecipeKnown(r)).map((r) => {
-        const ok = gameplay.canCook(r);
-        const dish = inventory.getItem(r.dishId);
-        return (
-          <div key={r.id} className="rounded-2xl bg-white/80 border border-[#efe4cf] p-3 flex items-center gap-3">
-            <span className="text-2xl">{getItemEmoji(dish)}</span>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-bold">{recipeName(r.id)}</div>
-              <div className="flex flex-wrap gap-1.5 mt-1">
-                {r.ingredients.map((ing) => {
-                  const have = gameplay.countIngredient(ing.itemId);
-                  const name = ing.itemId === 'fish_any' ? t('cook.anyFish') : ing.itemId === 'fish_sea_any' ? t('cook.anySeaFish') : dataName('item', ing.itemId, inventory.getItem(ing.itemId)?.name ?? ing.itemId);
-                  return (
-                    <span
-                      key={ing.itemId}
-                      className={`text-[11px] px-2 py-0.5 rounded-full ${
-                        have >= ing.count ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-700'
-                      }`}
-                    >
-                      {name} {have}/{ing.count}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-            <button
-              disabled={!ok}
-              onClick={() => gameplay.cook(r.id)}
-              className="px-4 py-2 rounded-xl text-sm font-bold bg-orange-500 text-white disabled:bg-[#e9dcc3] disabled:text-[#a08a68] active:scale-95 transition"
-            >
-              {t('cook.cook')}
-            </button>
-          </div>
-        );
-      })}
-      {RECIPES.some((r) => !gameplay.isRecipeKnown(r)) && (
-        <div className="text-[11px] text-[#8a7556] text-center italic">
-          {t('cook.moreRecipes', { n: RECIPES.filter((r) => !gameplay.isRecipeKnown(r)).length })}
-        </div>
-      )}
-      {dishes.length > 0 && (
-        <>
-          <div className="text-xs font-bold text-[#8a7556] mt-2">{t('cook.yourDishes')}</div>
-          {dishes.map((d) => (
-            <div key={d.id} className="rounded-2xl bg-white/80 border border-[#efe4cf] p-2.5 flex items-center gap-3">
-              <span className="text-xl">{getItemEmoji(d)}</span>
-              <span className="flex-1 text-sm font-semibold">
-                {dataName('item', d.id, d.name)} ×{d.count}
-                <span className="text-[11px] text-[#8a7556] ml-2">
-                  {t('cook.buff', { pct: Math.round((DISH_BUFF[d.id].speed - 1) * 100), s: DISH_BUFF[d.id].seconds })}
-                </span>
-              </span>
-              <button onClick={() => gameplay.eat(d.id)} className="px-3 py-1.5 rounded-xl text-sm font-bold bg-emerald-500 text-white active:scale-95">
-                {t('cook.eat')}
-              </button>
-            </div>
-          ))}
-        </>
-      )}
-    </Shell>
-  );
-};
 
 export const ShopPanel: React.FC<PanelProps> = ({ gameplay, inventory, onClose }) => {
   useInventoryTick(inventory);

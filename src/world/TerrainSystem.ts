@@ -6,6 +6,8 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { COLLISION_GROUPS } from '../config/constants';
 import { GRASSY_TILES, TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/types/TerrainTypes';
+import { paintCurbTexture, paintPavingTexture } from '../terrain/PavingTextures';
+import { PAVING_FLAG, PAVING_TYPES, writeTerrainTileRules } from '../terrain/PavingRules';
 import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
 import { coastRadius, islandHeight } from './IslandGenerator';
 import { riverWorld, unionRect, GridRect } from './rivers/RiverWorld';
@@ -104,7 +106,7 @@ export interface TerrainSaveData {
  *
  * - Heights: (N+1)^2 grid, 1 m spacing, rendered as 64 m chunk meshes sharing one index buffer;
  *   chunks outside the camera frustum (and beyond the far plane) are skipped by three.js.
- * - Surface types: one byte per cell (`tiles`), uploaded as is to an R8 id texture (N x N). The
+ * - Surface types: one byte per cell (`tiles`), packed with curb rules into an RG8 texture. The
  *   shader reads the 4 cells around each pixel, weights them bilinearly itself (soft borders) and
  *   samples each surface from one texture array (one layer per type, one texture unit for all),
  *   so any number of surface types costs the same: a pixel fetches only the 1-4 surfaces it
@@ -130,8 +132,9 @@ export class TerrainSystem {
   /** Triangles in the chunk meshes' current LODs (all chunks, before frustum culling). */
   public lodTriangles = 0;
   private readonly dirtyChunks = new Set<number>();
-  /** Surface type per cell: `tiles` itself as an R8 texture (nearest; the shader blends). */
+  private readonly tileData = new Uint8Array(N * N * 2);
   private readonly tileTex: THREE.DataTexture;
+  private tileFullPending = true;
   private readonly splatB: THREE.DataTexture;
   /** CPU-built basin mask (R8, one texel per terrain cell); refreshed only when heights change. */
   private readonly puddleMaskData = new Uint8Array(N * N);
@@ -185,11 +188,12 @@ export class TerrainSystem {
     this.group.name = 'Terrain';
     scene.add(this.group);
 
-    this.tileTex = new THREE.DataTexture(this.tiles, N, N, THREE.RedFormat, THREE.UnsignedByteType);
+    this.tileTex = new THREE.DataTexture(this.tileData, N, N, THREE.RGFormat, THREE.UnsignedByteType);
     this.tileTex.magFilter = THREE.NearestFilter;
     this.tileTex.minFilter = THREE.NearestFilter;
     this.tileTex.generateMipmaps = false;
     this.tileTex.unpackAlignment = 1;
+    this.tileTex.onUpdate = () => { this.tileFullPending = false; };
     this.splatB = new THREE.DataTexture(new Uint8Array(N * N * 4), N, N, THREE.RGBAFormat);
     this.splatB.magFilter = THREE.LinearFilter;
     this.splatB.minFilter = THREE.LinearFilter;
@@ -330,6 +334,7 @@ export class TerrainSystem {
     if (from === type) return;
     const stack = [sz * N + sx];
     let count = 0;
+    let x0 = sx, x1 = sx, z0 = sz, z1 = sz;
     while (stack.length && count < maxCells) {
       const i = stack.pop()!;
       if (this.tiles[i] !== from) continue;
@@ -337,12 +342,14 @@ export class TerrainSystem {
       count++;
       const cx = i % N;
       const cz = (i - cx) / N;
+      x0 = Math.min(x0, cx); x1 = Math.max(x1, cx);
+      z0 = Math.min(z0, cz); z1 = Math.max(z1, cz);
       if (cx > 0) stack.push(i - 1);
       if (cx < N - 1) stack.push(i + 1);
       if (cz > 0) stack.push(i - N);
       if (cz < N - 1) stack.push(i + N);
     }
-    this.markSplatDirty(0, 0, N - 1, N - 1);
+    this.markSplatDirty(x0, z0, x1, z1);
   }
 
   private markSplatDirty(x0: number, z0: number, x1: number, z1: number): void {
@@ -715,24 +722,28 @@ export class TerrainSystem {
   }
 
   private uploadSplat(): void {
-    // The id texture's data *is* `tiles`: only the changed rows go to the GPU (a brush stroke is a
-    // few rows, not the whole 256 KB); a big rectangle (load, world reset) goes in one full upload
     const r = this.splatRect;
     // Snow-tile mask for the snow caps on trees, bushes and rocks (SnowCover)
     updateSnowMask(this.tiles, r.x0, r.z0, r.x1, r.z1);
-    const rows = r.z1 - r.z0 + 1;
-    if (this.splatFullPending || rows * (r.x1 - r.x0 + 1) > (N * N) / 4) {
-      this.tileTex.clearUpdateRanges();
+    // A changed tile can alter the curb of any of its eight neighbours.
+    const x0 = Math.max(0, r.x0 - 1), z0 = Math.max(0, r.z0 - 1);
+    const x1 = Math.min(N - 1, r.x1 + 1), z1 = Math.min(N - 1, r.z1 + 1);
+    writeTerrainTileRules(this.tileData, this.tiles, N, x0, z0, x1, z1);
+    if (this.splatFullPending || (r.z1 - r.z0 + 1) * (r.x1 - r.x0 + 1) > (N * N) / 4) {
       if (!this.splatFullPending) {
         this.splatB.clearUpdateRanges();
         this.splatB.needsUpdate = true;
       }
       this.splatFullPending = true;
+    }
+    if (this.tileFullPending || (z1 - z0 + 1) * (x1 - x0 + 1) > (N * N) / 4) {
+      this.tileTex.clearUpdateRanges();
+      this.tileFullPending = true;
     } else {
       // three.js reads update ranges as RGBA components (stride hard-coded to 4) even for this
-      // one-byte R8 texture: ranges are given x4 so they map back to texels
-      const count = (r.x1 - r.x0 + 1) * 4;
-      for (let z = r.z0; z <= r.z1; z++) this.tileTex.addUpdateRange((z * N + r.x0) * 4, count);
+      // RG8 texture: ranges are given x4 so they map back to texels.
+      const count = (x1 - x0 + 1) * 4;
+      for (let z = z0; z <= z1; z++) this.tileTex.addUpdateRange((z * N + x0) * 4, count);
     }
     this.tileTex.needsUpdate = true;
   }
@@ -996,10 +1007,24 @@ vec3 terrainColor() {
   ivec4 sIds = ivec4(0);
   vec4 sW = vec4(0.0);
   int sN = 0;
-  terrAddTile(terrTileAt(t0, tMax), (1.0 - tf.x) * (1.0 - tf.y), sIds, sW, sN);
-  terrAddTile(terrTileAt(t0 + ivec2(1, 0), tMax), tf.x * (1.0 - tf.y), sIds, sW, sN);
-  terrAddTile(terrTileAt(t0 + ivec2(0, 1), tMax), (1.0 - tf.x) * tf.y, sIds, sW, sN);
-  terrAddTile(terrTileAt(t0 + ivec2(1, 1), tMax), tf.x * tf.y, sIds, sW, sN);
+  ivec2 a = terrTileAt(t0, tMax);
+  ivec2 b = terrTileAt(t0 + ivec2(1, 0), tMax);
+  ivec2 cTile = terrTileAt(t0 + ivec2(0, 1), tMax);
+  ivec2 d = terrTileAt(t0 + ivec2(1, 1), tMax);
+  ivec2 cell = tf.y < 0.5 ? (tf.x < 0.5 ? a : b) : (tf.x < 0.5 ? cTile : d);
+  int cellId = cell.x & ${PAVING_FLAG - 1};
+  if (terrIsPaving(cell.x)) {
+    // The curb and paving meet the cell boundary exactly.
+    sIds.x = cellId;
+    sW.x = 1.0;
+    sN = 1;
+  } else {
+    // Give the nearest unpaved surface any paving weight crossing its edge.
+    terrAddTile(terrIsPaving(a.x) ? cellId : a.x, (1.0 - tf.x) * (1.0 - tf.y), sIds, sW, sN);
+    terrAddTile(terrIsPaving(b.x) ? cellId : b.x, tf.x * (1.0 - tf.y), sIds, sW, sN);
+    terrAddTile(terrIsPaving(cTile.x) ? cellId : cTile.x, (1.0 - tf.x) * tf.y, sIds, sW, sN);
+    terrAddTile(terrIsPaving(d.x) ? cellId : d.x, tf.x * tf.y, sIds, sW, sN);
+  }
   vec3 paintedColor = vec3(0.0);
   float paintedCover = 0.0;
   vec3 sandColor = vec3(0.0);
@@ -1044,6 +1069,9 @@ vec3 terrainColor() {
         continue;
       }
       vec3 layerColor = terrSurfaceColor(uv, duvX, duvY, id);
+      if (cell.y != 0) {
+        layerColor = terrCurb(layerColor, id, cell.y, fract(tp + 0.5), uv, duvX, duvY);
+      }
       if (id == ${TerrainTileType.SAND_BEACH}) {
         sandColor = layerColor;
         hasSandColor = true;
@@ -1486,6 +1514,7 @@ const SURFACE_TRAITS: Partial<Record<TerrainTileType, { jitter?: number; earth?:
 };
 
 const SNOW_LAYER = SURFACE_TILES.indexOf(TerrainTileType.SNOW);
+const CURB_LAYER = SURFACE_TILES.length;
 
 /** GLSL lookup tables indexed by tile id (layer, jitter, traits) and the tile fetch helpers. */
 const SURFACE_GLSL = (() => {
@@ -1498,6 +1527,8 @@ const SURFACE_GLSL = (() => {
   const mud: number[] = new Array(count).fill(0);
   const puddle: number[] = new Array(count).fill(0);
   const hex: number[] = new Array(count).fill(0);
+  const curbLayer: number[] = new Array(count).fill(-1);
+  PAVING_TYPES.forEach((type, i) => { curbLayer[type] = CURB_LAYER + i; });
   const cycle = [0.45, -0.45, 0.3, -0.3];
   SURFACE_TILES.forEach((t, i) => {
     const tr = SURFACE_TRAITS[t] ?? {};
@@ -1520,11 +1551,58 @@ const float T_OVERLAY[${count}] = float[${count}](${f(overlay)});
 const float T_ICE[${count}] = float[${count}](${f(ice)});
 const float T_MUD[${count}] = float[${count}](${f(mud)});
 const float T_PUDDLE[${count}] = float[${count}](${f(puddle)});
+const int T_CURB_LAYER[${count}] = int[${count}](${curbLayer.join(', ')});
 #ifndef TERRAIN_LITE
 const float T_HEX[${count}] = float[${count}](${f(hex)});
 #endif
-int terrTileAt(ivec2 p, ivec2 tMax) {
-  return int(texelFetch(tTiles, clamp(p, ivec2(0), tMax), 0).r * 255.0 + 0.5);
+ivec2 terrTileAt(ivec2 p, ivec2 tMax) {
+  return ivec2(texelFetch(tTiles, clamp(p, ivec2(0), tMax), 0).rg * 255.0 + 0.5);
+}
+bool terrIsPaving(int tileCode) {
+  return (tileCode & ${PAVING_FLAG}) != 0;
+}
+vec3 terrCurb(vec3 base, int id, int mask, vec2 p, vec2 stoneUv, vec2 dx, vec2 dy) {
+  const float width = 0.17;
+  const float shadowReach = 0.055;
+  bool west = p.x < 0.5;
+  bool north = p.y < 0.5;
+  vec2 q = vec2(west ? p.x : 1.0 - p.x, north ? p.y : 1.0 - p.y);
+  bool sideX = (mask & (west ? 8 : 2)) != 0;
+  bool sideZ = (mask & (north ? 1 : 4)) != 0;
+  int insideCorner = north ? (west ? 16 : 32) : (west ? 128 : 64);
+  bool concave = (mask & insideCorner) != 0;
+  float ex = sideX ? q.x : 1.0;
+  float ez = sideZ ? q.y : 1.0;
+  float faceDist = concave ? length(q) : min(ex, ez);
+  float dist = faceDist;
+  // The texture repeats every two metres; convert its gradients back to cell units for AA.
+  float aa = clamp(max(length(dx), length(dy)) * 1.10, 0.002, width * 0.45);
+
+  bool convex = sideX && sideZ;
+  const float block = 1.0 / 3.0;
+  if (convex && max(q.x, q.y) < block) {
+    // A single rounded corner block, tangent to the two straight runs.
+    dist = block - length(max(vec2(block) - q, vec2(0.0)));
+  }
+  if (dist >= width + max(aa, shadowReach)) return base;
+  // Reuse the curb contour so the falloff follows both kinds of corner.
+  float contactShade = 1.0 - smoothstep(0.0, shadowReach, dist - width);
+  base *= 1.0 - 0.24 * contactShade;
+  if (dist >= width + aa) return base;
+  float alpha = 1.0 - smoothstep(width - aa, width + aa, dist);
+  float along = sideX ? p.y : p.x;
+  float jointDist = abs(fract(along * 3.0 + 0.5) - 0.5) * block;
+  if (convex) jointDist = abs(max(q.x, q.y) - block);
+  if (concave) jointDist = min(q.x, q.y);
+  float joint = 1.0 - smoothstep(0.003, 0.010 + aa * 0.45, jointDist);
+  joint *= 1.0 - smoothstep(0.030, 0.095, aa);
+  float outerShade = 1.0 - smoothstep(0.0, 0.023, faceDist);
+  float innerShade = smoothstep(width - 0.032, width, dist);
+  float rim = smoothstep(0.008, 0.030, faceDist) * (1.0 - smoothstep(0.030, 0.062, faceDist));
+  // World-space UVs never flip or rotate on the corner diagonal.
+  vec3 stone = textureGrad(tLayers, vec3(stoneUv, float(T_CURB_LAYER[id])), dx, dy).rgb;
+  stone *= 1.0 + 0.11 * rim - 0.13 * outerShade - 0.17 * innerShade - 0.30 * joint;
+  return mix(base, stone, alpha);
 }
 // Accumulates a cell's bilinear weight per distinct surface (grass and unknown ids are skipped)
 void terrAddTile(int id, float w, inout ivec4 ids, inout vec4 ws, inout int cnt) {
@@ -1549,14 +1627,22 @@ void terrAddTile(int id, float w, inout ivec4 ids, inout vec4 ws, inout int cnt)
 function createSurfaceArray(): THREE.DataArrayTexture {
   const size = 128;
   const layerBytes = size * size * 4;
-  const data = new Uint8Array(layerBytes * SURFACE_TILES.length);
+  const layerCount = CURB_LAYER + PAVING_TYPES.length;
+  const data = new Uint8Array(layerBytes * layerCount);
   SURFACE_TILES.forEach((t, i) => {
     const tex = createLayerTexture(t);
     const canvas = tex.image as HTMLCanvasElement;
     data.set(canvas.getContext('2d')!.getImageData(0, 0, size, size).data, i * layerBytes);
     tex.dispose();
   });
-  const arr = new THREE.DataArrayTexture(data, size, size, SURFACE_TILES.length);
+  const curbCanvas = document.createElement('canvas');
+  curbCanvas.width = curbCanvas.height = size;
+  const curb = curbCanvas.getContext('2d')!;
+  PAVING_TYPES.forEach((type, i) => {
+    paintCurbTexture(curb, size, type);
+    data.set(curb.getImageData(0, 0, size, size).data, (CURB_LAYER + i) * layerBytes);
+  });
+  const arr = new THREE.DataArrayTexture(data, size, size, layerCount);
   arr.format = THREE.RGBAFormat;
   arr.type = THREE.UnsignedByteType;
   arr.colorSpace = THREE.SRGBColorSpace;
@@ -1598,31 +1684,6 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
     ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2);
     ctx.fill();
   };
-  /** Small reusable beveled paver. Shapes are repeated over texture borders for seamless tiling. */
-  const drawPaver = (x: number, y: number, w: number, h: number, tone: string, angle = 0) => {
-    wrapShape(x, y, () => {
-      ctx.rotate(angle);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = def.borderColor;
-      ctx.fillRect(-w / 2, -h / 2, w, h);
-      const pad = Math.max(1.5, Math.min(w, h) * 0.08);
-      const grad = ctx.createLinearGradient(0, -h / 2, 0, h / 2);
-      grad.addColorStop(0, def.accentColor);
-      grad.addColorStop(0.16, tone);
-      grad.addColorStop(0.86, tone);
-      grad.addColorStop(1, def.secondaryColor);
-      ctx.fillStyle = grad;
-      ctx.fillRect(-w / 2 + pad, -h / 2 + pad, w - pad * 2, h - pad * 2);
-      ctx.globalAlpha = 0.22;
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(-w / 2 + pad + 1, -h / 2 + pad + 1);
-      ctx.lineTo(w / 2 - pad - 1, -h / 2 + pad + 1);
-      ctx.stroke();
-    });
-  };
-
   switch (type) {
     case TerrainTileType.GRASS:
     case TerrainTileType.FLOWER_GRASS: {
@@ -1663,203 +1724,14 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
       break;
     }
     case TerrainTileType.STONE_COBBLE:
-      for (let y = 0; y < 8; y++) {
-        for (let x = 0; x < 8; x++) {
-          ctx.fillStyle = rnd() < 0.5 ? def.secondaryColor : def.accentColor;
-          ctx.globalAlpha = 1;
-          const off = y % 2 ? 16 : 0;
-          wrapRect(x * 32 + off + 2, y * 32 + 2, 28, 28);
-        }
-      }
+    case TerrainTileType.SIDEWALK_PAVERS:
+    case TerrainTileType.CLINKER_HERRINGBONE:
+    case TerrainTileType.GRANITE_SETTS:
+    case TerrainTileType.SANDSTONE_FLAGSTONE:
+    case TerrainTileType.LIMESTONE_PAVERS:
+      paintPavingTexture(ctx, size, type);
       break;
 
-    case TerrainTileType.SIDEWALK_PAVERS: {
-      // Mid-sized rectangular concrete slabs in a staggered running bond.
-      const tones = ['#92989e', '#7d848b', '#a1a7ad', '#858c93', '#737b82'];
-      for (let row = -1; row < 9; row++) {
-        const y = row * 32 + 16;
-        const offset = (row & 1) ? 32 : 0;
-        for (let col = -1; col < 6; col++) {
-          const x = col * 64 + offset + 32;
-          drawPaver(x, y, 61, 29, tones[(((row & 7) * 3 + (col & 3) * 2) % tones.length)]);
-        }
-      }
-      break;
-    }
-
-    case TerrainTileType.CLINKER_HERRINGBONE: {
-      // True 90-degree herringbone: 2:1 bricks occupy pairs of 16 px cells.
-      // This 4x4 domino motif repeats every 64 px in both axes.
-      const tones = ['#bd674b', '#a95139', '#c87859', '#91422f', '#b45a40', '#d0805e'];
-      const motif: { x: number; y: number; vertical: boolean }[] = [
-        { x: 16, y: 8, vertical: false },
-        { x: 40, y: 16, vertical: true },
-        { x: 56, y: 16, vertical: true },
-        { x: 8, y: 32, vertical: true },
-        { x: 24, y: 32, vertical: true },
-        { x: 48, y: 40, vertical: false },
-        { x: 16, y: 56, vertical: false },
-        { x: 48, y: 56, vertical: false },
-      ];
-      for (let row = -1; row < 5; row++) {
-        for (let col = -1; col < 5; col++) {
-          motif.forEach((brick, i) => {
-            const x = col * 64 + brick.x;
-            const y = row * 64 + brick.y;
-            const tone = tones[(((row & 3) * 5 + (col & 3) * 3 + i) % tones.length)];
-            drawPaver(x, y, brick.vertical ? 13 : 29, brick.vertical ? 29 : 13, tone);
-          });
-        }
-      }
-      // Fine clay flecks keep large painted areas from reading as a flat checkerboard.
-      for (let i = 0; i < 240; i++) {
-        ctx.globalAlpha = 0.12 + rnd() * 0.18;
-        ctx.fillStyle = rnd() < 0.5 ? '#f0ad86' : '#4d281f';
-        wrapRect(rnd() * size, rnd() * size, 1 + rnd() * 2, 1);
-      }
-      break;
-    }
-
-    case TerrainTileType.GRANITE_SETTS: {
-      // Dense, slightly irregular split-granite setts with dark joints and chipped corners.
-      const tones = ['#70767c', '#555b62', '#858b91', '#646a71', '#4f555c', '#777d83'];
-      ctx.fillStyle = def.borderColor;
-      ctx.fillRect(0, 0, size, size);
-      for (let row = 0; row < 8; row++) {
-        for (let col = 0; col < 8; col++) {
-          // Stones on the repeat seam are duplicated by wrapShape for perfect tiling.
-          const cx = col * 32;
-          const cy = row * 32;
-          const w = 27 + rnd() * 3;
-          const h = 27 + rnd() * 3;
-          const cut = 3 + rnd() * 3;
-          const tone = tones[(rnd() * tones.length) | 0];
-          wrapShape(cx, cy, () => {
-            ctx.globalAlpha = 1;
-            ctx.fillStyle = '#24282d';
-            ctx.beginPath();
-            ctx.moveTo(-w / 2 + cut, -h / 2);
-            ctx.lineTo(w / 2 - cut * 0.7, -h / 2 + 1);
-            ctx.lineTo(w / 2, -h / 2 + cut);
-            ctx.lineTo(w / 2 - 1, h / 2 - cut);
-            ctx.lineTo(w / 2 - cut, h / 2);
-            ctx.lineTo(-w / 2 + cut * 0.5, h / 2 - 1);
-            ctx.lineTo(-w / 2, h / 2 - cut);
-            ctx.lineTo(-w / 2 + 1, -h / 2 + cut);
-            ctx.closePath();
-            ctx.fill();
-            ctx.fillStyle = tone;
-            ctx.globalAlpha = 0.96;
-            ctx.beginPath();
-            ctx.moveTo(-w / 2 + cut + 1, -h / 2 + 2);
-            ctx.lineTo(w / 2 - cut, -h / 2 + 2);
-            ctx.lineTo(w / 2 - 2, -h / 2 + cut + 1);
-            ctx.lineTo(w / 2 - 2, h / 2 - cut);
-            ctx.lineTo(w / 2 - cut, h / 2 - 2);
-            ctx.lineTo(-w / 2 + cut + 1, h / 2 - 2);
-            ctx.lineTo(-w / 2 + 2, h / 2 - cut);
-            ctx.lineTo(-w / 2 + 2, -h / 2 + cut + 1);
-            ctx.closePath();
-            ctx.fill();
-            ctx.globalAlpha = 0.25;
-            ctx.strokeStyle = '#e0e4e7';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(-w / 2 + cut + 4, -h / 2 + 3);
-            ctx.lineTo(w / 2 - cut - 3, -h / 2 + 3);
-            ctx.stroke();
-          });
-        }
-      }
-      break;
-    }
-
-    case TerrainTileType.SANDSTONE_FLAGSTONE: {
-      // Large organic sandstone slabs with softly fractured edges and sandy joints.
-      const tones = ['#c0a77e', '#aa906a', '#d0b68d', '#9e8663', '#b79c73', '#d7c198'];
-      ctx.fillStyle = '#746047';
-      ctx.fillRect(0, 0, size, size);
-      for (let row = 0; row < 4; row++) {
-        for (let col = 0; col < 4; col++) {
-          const cx = col * 64;
-          const cy = row * 64;
-          const tone = tones[(rnd() * tones.length) | 0];
-          const points: [number, number][] = [];
-          const radius = 27 + rnd() * 3;
-          for (let i = 0; i < 8; i++) {
-            const angle = (i / 8) * Math.PI * 2 + (rnd() - 0.5) * 0.22;
-            const r = radius * (0.86 + rnd() * 0.14);
-            points.push([Math.cos(angle) * r, Math.sin(angle) * r]);
-          }
-          wrapShape(cx, cy, () => {
-            ctx.globalAlpha = 1;
-            ctx.fillStyle = '#5c4a36';
-            ctx.beginPath();
-            points.forEach(([x, y], i) => i ? ctx.lineTo(x + 1, y + 1) : ctx.moveTo(x + 1, y + 1));
-            ctx.closePath();
-            ctx.fill();
-            const grad = ctx.createLinearGradient(-30, -28, 28, 28);
-            grad.addColorStop(0, def.accentColor);
-            grad.addColorStop(0.38, tone);
-            grad.addColorStop(1, def.secondaryColor);
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            points.forEach(([x, y]) => ctx.lineTo(x, y));
-            ctx.closePath();
-            ctx.fill();
-            ctx.globalAlpha = 0.2;
-            ctx.strokeStyle = '#fff0d6';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(-14, -15);
-            ctx.lineTo(-4, -20);
-            ctx.stroke();
-          });
-        }
-      }
-      break;
-    }
-
-    case TerrainTileType.LIMESTONE_PAVERS: {
-      // Clean large square slabs for patios, with restrained stone grain and light bevels.
-      const tones = ['#ded5c4', '#cfc5b2', '#e7decd', '#d4c9b5', '#c7bda9'];
-      for (let row = 0; row < 4; row++) {
-        for (let col = 0; col < 4; col++) {
-          const cx = col * 64 + 32;
-          const cy = row * 64 + 32;
-          const tone = tones[(rnd() * tones.length) | 0];
-          wrapShape(cx, cy, () => {
-            ctx.globalAlpha = 1;
-            ctx.fillStyle = def.borderColor;
-            ctx.fillRect(-31, -31, 62, 62);
-            const grad = ctx.createLinearGradient(-28, -28, 28, 28);
-            grad.addColorStop(0, def.accentColor);
-            grad.addColorStop(0.42, tone);
-            grad.addColorStop(1, def.secondaryColor);
-            ctx.fillStyle = grad;
-            ctx.fillRect(-28, -28, 56, 56);
-            ctx.globalAlpha = 0.22;
-            ctx.strokeStyle = '#fffdf5';
-            ctx.lineWidth = 1.2;
-            ctx.strokeRect(-27, -27, 54, 54);
-            ctx.globalAlpha = 0.12;
-            ctx.strokeStyle = '#8a806e';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(-18, -5 + rnd() * 7);
-            ctx.bezierCurveTo(-4, -10, 5, 8, 18, 4);
-            ctx.stroke();
-          });
-        }
-      }
-      // Low-contrast mineral specks, sparse enough to keep the slabs calm.
-      for (let i = 0; i < 150; i++) {
-        ctx.globalAlpha = 0.1 + rnd() * 0.1;
-        ctx.fillStyle = rnd() < 0.5 ? '#ffffff' : '#827866';
-        wrapRect(rnd() * size, rnd() * size, 1 + rnd() * 2, 1 + rnd() * 2);
-      }
-      break;
-    }
     case TerrainTileType.SNOW:
       // Soft wind-blown ripples and fine crystals; the shader adds drifts, blue shade and glints
       for (let i = 0; i < 90; i++) {

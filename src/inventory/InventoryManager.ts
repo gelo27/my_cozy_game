@@ -170,6 +170,28 @@ export class InventoryManager {
     return true;
   }
 
+  /** Commit the dish and its ingredients before notifying inventory or save listeners. */
+  public cookDish(dishId: string, ingredients: readonly string[]): boolean {
+    const dish = this.items.get(dishId);
+    if (!dish || dish.count >= dish.maxStack) return false;
+    const amounts = new Map<string, number>();
+    for (const id of ingredients) amounts.set(id, (amounts.get(id) ?? 0) + 1);
+    const portions: { item: InventoryItem; amount: number }[] = [];
+    for (const [id, amount] of amounts) {
+      const item = this.items.get(id);
+      if (!item || item.count < amount) return false;
+      portions.push({ item, amount });
+    }
+    for (const { item, amount } of portions) {
+      item.count -= amount;
+      if (item.count === 0 && this.equippedItemId === item.id) this.equippedItemId = null;
+    }
+    dish.count += 1;
+    this.pruneHotbar();
+    this.notify();
+    return true;
+  }
+
   public equipItem(id: string | null): void {
     if (id === this.equippedItemId) {
       // Toggle off / unequip

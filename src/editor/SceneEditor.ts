@@ -4,6 +4,7 @@ import type { GameWorld } from '../engine/GameEngine';
 import { BUILDING_PIECES } from '../building/config/BuildingPiecesConfig';
 import { ROOF_STYLES, type RoofStyle } from '../building/ProceduralRoofSystem';
 import type { BuildingPieceType } from '../building/types/BuildingTypes';
+import { t } from '../i18n/i18n';
 import { WORKER_ROLES, type WorkerRole } from '../npc/TaskBoard';
 import { PROP_DEF_MAP, PROP_DEFS } from '../world/PropSystem';
 import { ROCK_TYPES, type RockKind } from '../gathering/GatheringConfig';
@@ -154,7 +155,7 @@ export class SceneEditor {
           const properties: SceneProperty[] = [{ label: 'Тип деталі', value: type }, { label: 'Міцність', value: current.health }];
           if (current.roofStyle) properties.push({
             label: 'Покриття даху', value: current.roofStyle,
-            options: ROOF_STYLES.map((style) => [style, style] as const),
+            options: ROOF_STYLES.map((style) => [style, t(`build.roofStyle.${style}`)] as const),
             set: (style) => {
               const next = style as RoofStyle;
               if (!ROOF_STYLES.includes(next) || next === current.roofStyle) return;

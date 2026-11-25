@@ -9,8 +9,8 @@ import { MeshBuffers } from './MeshBuffers';
  * only on exposed edges. Top and bottom (ceiling) faces are keyed `pieceId:top` / `pieceId:bottom`.
  */
 
-/** Floor checker tile size, m */
-const CHECKER_TILE_SIZE = 0.5;
+/** Legacy ceiling paint scale, metres per repeat. */
+const CEILING_REPEAT_METRES = 0.5;
 const CELL = 0.5;
 
 /** A wall's footprint, as a convex polygon, standing from yBase to yTop */
@@ -346,11 +346,11 @@ export function emitFloor(b: MeshBuffers, piece: BuiltPiece, neighbourFloors: Bu
   }
 
   b.beginGroup();
-  for (const poly of topPolys) b.polygon(poly, yTop, true, CHECKER_TILE_SIZE);
-  b.endGroup(style.faceKey(piece.id, 'top'), 0);
+  for (const poly of topPolys) b.polygon(poly, yTop, true, 1);
+  b.endGroup(style.faceKey(piece.id, 'top'), 0, true);
 
   b.beginGroup();
-  for (const poly of bottomPolys) b.polygon(poly, yBase, false, CHECKER_TILE_SIZE);
+  for (const poly of bottomPolys) b.polygon(poly, yBase, false, CEILING_REPEAT_METRES);
   b.endGroup(style.faceKey(piece.id, 'bottom'), 0);
 
   // Side faces only on exposed edges (not against another slab, not inside a wall). Edges over a
@@ -368,14 +368,12 @@ export function emitFloor(b: MeshBuffers, piece: BuiltPiece, neighbourFloors: Bu
       const probe = pA.clone().add(pB).multiplyScalar(0.5).addScaledVector(n, 0.02);
       if (isPointInAnyFloor(probe, piece.position.y, neighbourFloors, walls)) continue;
       if (covered.some((w) => insideObstacle(probe, w))) continue;
-      const v = FLOOR_THICKNESS / CHECKER_TILE_SIZE;
-      const u = len / CHECKER_TILE_SIZE;
       b.quad(
         new THREE.Vector3(pA.x, yBase, pA.y),
         new THREE.Vector3(pA.x, yTop, pA.y),
         new THREE.Vector3(pB.x, yTop, pB.y),
         new THREE.Vector3(pB.x, yBase, pB.y),
-        [0, 0, 0, v, u, v, u, 0],
+        [0, 0, 0, FLOOR_THICKNESS, len, FLOOR_THICKNESS, len, 0],
         new THREE.Vector3(n.x, 0, n.y)
       );
     }

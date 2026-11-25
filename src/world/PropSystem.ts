@@ -8,7 +8,8 @@ import { WORLD_HALF, isMobileDevice, worldSettings } from './WorldSettings';
 import { riverWorld } from './rivers/RiverWorld';
 import { coastRadius, fbm } from './IslandGenerator';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
-import { BUSH_MATERIAL, TREE_MATERIAL, TreeLods, foliageMaterialOf, getTreeLods, loadTreeModels, rebuildTreeLeaves, stepTreeWind } from './TreeModels';
+import { BUSH_MATERIAL, CROWN_LOD_MATERIAL, TREE_MATERIAL, TreeLods, foliageMaterialOf, getTreeLods, loadTreeModels, rebuildTreeLeaves, stepTreeWind } from './TreeModels';
+import { getTreeBillboard, TREE_BILLBOARD_MATERIAL } from './TreeBillboards';
 import { HEDGE_HEIGHT, HEDGE_TILE, HEDGE_TYPE } from './Hedge';
 import { HEDGE_CORNERS, HEDGE_DIRECTIONS, hedgeLods, loadHedgeShapes, resetHedgeLeaves } from './HedgeModels';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
@@ -711,6 +712,24 @@ export class PropSystem {
     warm3.visible = false;
     warm3.name = 'LodDitherPrewarm3';
     this.group.add(warm3);
+    const crownWarm = new THREE.InstancedMesh(warm.geometry, [
+      CROWN_LOD_MATERIAL, acquireInstancedDither(CROWN_LOD_MATERIAL), acquireDistanceDither(CROWN_LOD_MATERIAL, TREE_FADE_RANGE),
+    ], 1);
+    crownWarm.visible = false;
+    crownWarm.name = 'CrownLodPrewarm';
+    this.group.add(crownWarm);
+    const billboard = getTreeBillboard('tree_round');
+    if (billboard) {
+      const geometry = billboard.clone();
+      geometry.setAttribute('aLodFade', new THREE.InstancedBufferAttribute(new Float32Array(1), 1));
+      const warmBillboard = new THREE.InstancedMesh(geometry, [
+        TREE_BILLBOARD_MATERIAL, acquireInstancedDither(TREE_BILLBOARD_MATERIAL),
+        acquireDistanceDither(TREE_BILLBOARD_MATERIAL, TREE_FADE_RANGE),
+      ], 1);
+      warmBillboard.visible = false;
+      warmBillboard.name = 'TreeBillboardPrewarm';
+      this.group.add(warmBillboard);
+    }
   }
 
   private applyHedgeModels(): void {
@@ -804,11 +823,19 @@ export class PropSystem {
   private makeLods(b: PropBatch): LodInstances | null {
     if (!b.lod) return null;
     const materials = b.hedgeMask !== undefined ? [foliageMaterialOf(HEDGE_TYPE)] : this.geometries.get(b.def.id)?.materials ?? (b.mesh.material as THREE.Material[]);
-    const lods = new LodInstances(this.group, b.lod, materials, b.mesh.boundingSphere!, b.mesh.name);
+    const distant = b.lod[1]?.hasAttribute('crownUv') ? [CROWN_LOD_MATERIAL] : undefined;
+    const billboard = this.treeBillboard(b);
+    const geometries = billboard ? [...b.lod.slice(0, -1), billboard] : b.lod;
+    const lods = new LodInstances(this.group, geometries, materials, b.mesh.boundingSphere!, b.mesh.name,
+      distant, billboard ? [TREE_BILLBOARD_MATERIAL] : undefined);
     for (const id of b.ids) lods.add(id, this.matrixOf(id, PropSystem._m2), this.levelFor(b, this.props.get(id)!, -1));
     // The master mesh keeps the instances (picking, chop poses) but the lists draw them
     b.mesh.visible = false;
     return lods;
+  }
+
+  private treeBillboard(b: PropBatch): THREE.BufferGeometry | null {
+    return b.lod?.[1]?.hasAttribute('crownUv') ? getTreeBillboard(b.def.id) : null;
   }
 
   /** The LOD a prop wants from the last camera spot (`current` adds the hysteresis, -1 none). */
@@ -1042,7 +1069,9 @@ export class PropSystem {
     const fading = Math.hypot(fx, fz) > view - band - band * 0.15 - 1;
     if (fading === b.fading) return;
     b.fading = fading;
-    const solid = b.hedgeMask !== undefined ? [foliageMaterialOf(HEDGE_TYPE)] : this.geometries.get(b.def.id)?.materials;
+    const solid = this.treeBillboard(b) ? [TREE_BILLBOARD_MATERIAL]
+      : b.lod?.at(-1)?.hasAttribute('crownUv') ? [CROWN_LOD_MATERIAL]
+      : b.hedgeMask !== undefined ? [foliageMaterialOf(HEDGE_TYPE)] : this.geometries.get(b.def.id)?.materials;
     if (!solid) return;
     const range = lodFadeRange(b.def.id);
     b.lods!.setFarMaterials(fading ? solid.map((m) => acquireDistanceDither(m, range)) : null);

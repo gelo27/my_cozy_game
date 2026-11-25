@@ -15,6 +15,7 @@ import { FaceStyle, MeshBuffers, PaintableMesh } from './continuous/MeshBuffers'
 import { describeWallSeg, solveWall, summarizeWall, SolvedSegmentCorners, WallSeg } from './continuous/WallJoints';
 import { emitWall, findWallOpenings } from './continuous/WallGeometry';
 import { boxObstacle, createWallObstacle, emitFloor, floorObstacle, slabCoversWallTop, WallObstacle } from './continuous/FloorGeometry';
+import { FLOOR_TRIM_WALLPAPER_ID } from './config/DefaultFloorMaterials';
 import { emitFoundation, foundationLookup } from './continuous/FoundationGeometry';
 
 export type { SolvedSegmentCorners } from './continuous/WallJoints';
@@ -325,7 +326,10 @@ export class ContinuousWallSystem {
       return;
     }
     const b = new MeshBuffers();
-    const style = { edge: 0, faceKey: (id: string, side: 'top' | 'bottom') => this.paint.getCellKey(id, side) };
+    const style = {
+      edge: this.paint.getMaterialIndex(FLOOR_TRIM_WALLPAPER_ID),
+      faceKey: (id: string, side: 'top' | 'bottom') => this.paint.getCellKey(id, side),
+    };
     for (const floor of floors) {
       const around = this.source.near(floor.position, DIRTY_RADIUS + 0.5);
       const walls: WallObstacle[] = [];

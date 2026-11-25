@@ -336,9 +336,15 @@ function isWorldSaveData(value: unknown): value is WorldSaveData {
  * files can be exported/imported as JSON for sharing levels between developers.
  */
 export class SaveSystem {
+  private recoveryRequired = false;
+
   constructor(private readonly world: GameWorld) {}
 
   public capture(): WorldSaveData {
+    return this.captureWorld();
+  }
+
+  private captureWorld(forRollback = false): WorldSaveData {
     const w = this.world;
     const items: Record<string, number> = {};
     for (const item of w.inventoryManager.getItems()) items[item.id] = item.count;
@@ -346,7 +352,7 @@ export class SaveSystem {
     const ride = w.vehicle.isPlayerInside ? w.vehicle : w.moped.isPlayerInside ? w.moped : null;
     // A save made in the caves resumes outside the nearest cave mouth;
     // a save made at sea resumes on the pier
-    const p = w.boat.isPlayerInside
+    const p = forRollback ? w.character.getPosition() : w.boat.isPlayerInside
       ? w.boat.dock.clone().add(new THREE.Vector3(0, 1.2, 0))
       : ride
       ? ride.getPosition().add(new THREE.Vector3(1.5, 1.2, 0))
@@ -379,9 +385,9 @@ export class SaveSystem {
         capacity: w.inventoryManager.getCapacity(),
         dynamiteStackGifted: true,
       },
-      player: [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
-      vehicle: { p: [vt.x, vt.y + 0.3, vt.z], yaw: Math.atan2(fwd.x, fwd.z) },
-      moped: { p: w.moped.getPosition().add(new THREE.Vector3(0, 0.2, 0)).toArray() as [number, number, number], yaw: w.moped.getYaw() },
+      player: forRollback ? [p.x, p.y, p.z] : [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)],
+      vehicle: { p: [vt.x, vt.y + (forRollback ? 0 : 0.3), vt.z], yaw: Math.atan2(fwd.x, fwd.z) },
+      moped: { p: w.moped.getPosition().add(new THREE.Vector3(0, forRollback ? 0 : 0.2, 0)).toArray(), yaw: w.moped.getYaw() },
       boat: { p: w.boat.getPosition().toArray() as [number, number, number], yaw: w.boat.getYaw() },
       pets: w.gameplay.pets.serialize(),
       workers: w.gameplay.workers?.serialize(),
@@ -398,8 +404,7 @@ export class SaveSystem {
     };
   }
 
-  public apply(data: WorldSaveData): void {
-    if (!isWorldSaveData(data)) throw new Error('Invalid or unsupported world save data');
+  private apply(data: WorldSaveData, restoring = false): void {
     const w = this.world;
     worldSettings.waterLevel = data.waterLevel;
     worldSettings.timeOfDay = data.timeOfDay;
@@ -414,9 +419,9 @@ export class SaveSystem {
     duckweed.deserialize(data.duckweed);
     w.props.deserialize(data.props);
     // Saves from before the millstone existed get one at its usual spot
-    w.props.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);
+    if (!restoring) w.props.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);
     // ...and a storage chest for the farmhands
-    w.props.ensureStation(STORAGE_CHEST, STORAGE_CHEST_SPOT.x, STORAGE_CHEST_SPOT.z, Math.PI);
+    if (!restoring) w.props.ensureStation(STORAGE_CHEST, STORAGE_CHEST_SPOT.x, STORAGE_CHEST_SPOT.z, Math.PI);
     // A save from the old 128 m world now sits in the island's centre: grow nature around it
     w.props.forestVersion = data.forest ?? 0;
     if (w.terrain.expandedFromLegacy) {
@@ -424,7 +429,7 @@ export class SaveSystem {
       w.props.forestVersion = 0;
     }
     // Worlds from before the denser forests get the extra trees once (after buildings load)
-    if (w.props.forestVersion < FOREST_VERSION) w.props.queueForestUpgrade();
+    if (!restoring && w.props.forestVersion < FOREST_VERSION) w.props.queueForestUpgrade();
     w.exploration.clearSiteProps();
     w.exploration.deserialize(data.exploration);
 
@@ -449,7 +454,6 @@ export class SaveSystem {
     // One-time grant for existing saves: raise the starter dynamite stack to 99 without refilling it on later loads.
     if (!data.inventory.dynamiteStackGifted) {
       inv.addItem('dynamite', Math.max(0, 99 - inv.getItemCount('dynamite')));
-      data.inventory.dynamiteStackGifted = true;
     }
     const equipped = data.inventory.equipped === null ? null : migrateOreId(data.inventory.equipped);
     if (equipped !== inv.getEquippedItemId()) inv.equipItem(equipped);
@@ -461,7 +465,8 @@ export class SaveSystem {
     if (data.inventory.items.dynamite === undefined && !inv.isOnHotbar('dynamite')) inv.addToHotbar('dynamite');
     if (data.inventory.capacity) inv.setCapacity(data.inventory.capacity);
 
-    w.character.respawn(new THREE.Vector3(...data.player).add(new THREE.Vector3(0, 0.3, 0)));
+    const [px, py, pz] = data.player;
+    w.character.respawn(new THREE.Vector3(px, py + (restoring ? 0 : 0.3), pz));
     if (data.vehicle) {
       const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), data.vehicle.yaw);
       w.vehicle.body.setTranslation({ x: data.vehicle.p[0], y: data.vehicle.p[1], z: data.vehicle.p[2] }, true);
@@ -470,7 +475,7 @@ export class SaveSystem {
     }
     if (data.moped) w.moped.place(new THREE.Vector3(...data.moped.p), data.moped.yaw);
     if (data.boat) w.boat.place(new THREE.Vector3(...data.boat.p), data.boat.yaw);
-    if (data.pets?.length) w.gameplay.pets.deserialize(data.pets);
+    if (data.pets?.length || (restoring && data.pets)) w.gameplay.pets.deserialize(data.pets);
     w.gameplay.storage?.deserialize(data.storage && mergeOreStacks(data.storage));
     if (data.workers && w.gameplay.workers) {
       w.gameplay.workers.deserialize(data.workers.map(worker => ({
@@ -481,11 +486,54 @@ export class SaveSystem {
     // Older worlds still carry enemy placements made before the map was cleared.
     if (data.version === LEGACY_SAVE_VERSION) w.gameplay.pests.clear();
     else w.gameplay.pests.restoreAuthored(data.authoredPests ?? []);
-    this.onApplied?.();
   }
 
   /** Called after a save was applied (the engine then uploads the new world to the GPU in one go). */
   public onApplied: (() => void) | null = null;
+
+  public get needsRecovery(): boolean {
+    return this.recoveryRequired;
+  }
+
+  private restoreWorld(data: WorldSaveData): boolean {
+    const { exploration, gameplay } = this.world;
+    const previousCave = exploration.inCave;
+    const previousAnchor = gameplay.anchorOverride;
+    let previous: WorldSaveData;
+    try {
+      previous = this.captureWorld(true);
+    } catch (error) {
+      console.warn('[SaveSystem] could not snapshot the current world', error);
+      return false;
+    }
+
+    try {
+      this.apply(data);
+      this.recoveryRequired = false;
+    } catch (error) {
+      console.warn('[SaveSystem] load failed; restoring the previous world', error);
+      try {
+        this.apply(previous, true);
+        exploration.inCave = previousCave;
+        gameplay.anchorOverride = previousAnchor;
+        this.notifyApplied();
+      } catch (restoreError) {
+        this.recoveryRequired = true;
+        console.error('[SaveSystem] failed to restore the previous world', restoreError);
+      }
+      return false;
+    }
+    this.notifyApplied();
+    return true;
+  }
+
+  private notifyApplied(): void {
+    try {
+      this.onApplied?.();
+    } catch (error) {
+      console.error('[SaveSystem] post-load notification failed', error);
+    }
+  }
 
   // ---------------------------------------------------------------- slots
 
@@ -514,6 +562,7 @@ export class SaveSystem {
   }
 
   public save(slot: string): boolean {
+    if (this.recoveryRequired) return false;
     try {
       localStorage.setItem(KEY_PREFIX + slot, this.serializeCapture());
       return true;
@@ -525,14 +574,7 @@ export class SaveSystem {
 
   public load(slot: string): boolean {
     const data = SaveSystem.read(slot);
-    if (!data) return false;
-    try {
-      this.apply(data);
-      return true;
-    } catch (err) {
-      console.warn('[SaveSystem] load failed; current world was kept where possible', err);
-      return false;
-    }
+    return data !== null && this.restoreWorld(data);
   }
 
   public static read(slot: string): WorldSaveData | null {
@@ -594,8 +636,7 @@ export class SaveSystem {
       if (!res.ok || signal?.aborted) return false;
       const data: unknown = await res.json();
       if (signal?.aborted || !isWorldSaveData(data)) return false;
-      this.apply(data);
-      return true;
+      return this.restoreWorld(data);
     } catch {
       return false;
     }
@@ -614,27 +655,7 @@ export class SaveSystem {
       }
       if (!isWorldSaveData(parsed)) return false;
 
-      // Keep a rollback snapshot so a runtime failure during rebuild cannot leave a half-imported world.
-      let previous: WorldSaveData;
-      try {
-        previous = this.capture();
-      } catch (err) {
-        console.warn('[SaveSystem] could not snapshot the current world before import', err);
-        return false;
-      }
-
-      try {
-        this.apply(parsed);
-        return true;
-      } catch (err) {
-        console.warn('[SaveSystem] import failed; restoring the previous world', err);
-        try {
-          this.apply(previous);
-        } catch (restoreError) {
-          console.error('[SaveSystem] failed to restore the previous world after import failure', restoreError);
-        }
-        return false;
-      }
+      return this.restoreWorld(parsed);
     }).catch((err) => {
       console.warn('[SaveSystem] could not read import file', err);
       return false;

@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BuildingTelemetry } from './building/types/BuildingTypes';
 import { GameEngine, DevStats, EngineMode, DEV_TOOLS_ENABLED } from './engine/GameEngine';
-import { AUTOSAVE_SLOT } from './world/SaveSystem';
 import { GameplayHudState } from './gameplay/GameplayManager';
 import { useConsoleLog } from './hooks/useConsoleLog';
 import { useToast } from './hooks/useToast';
@@ -17,7 +16,8 @@ import { HeartopiaInventoryHUD } from './components/HeartopiaInventoryHUD';
 import { InteractionPrompts } from './components/InteractionPrompts';
 import { promptStore } from './components/promptStore';
 import { GameHUD } from './components/game/GameHUD';
-import { CookingPanel, ShopPanel } from './components/game/ActivityPanels';
+import { ShopPanel } from './components/game/ActivityPanels';
+import { CookingPanel } from './components/game/CookingPanel';
 import { WorkersPanel } from './components/game/WorkersPanel';
 import { WorkerRadialMenu } from './components/game/WorkerRadialMenu';
 import { StoragePanel } from './components/game/StoragePanel';
@@ -316,8 +316,8 @@ export default function App() {
                   <PauseMenu
                     onResume={() => setPaused(false)}
                     onSave={() => {
-                      world.saves.save(AUTOSAVE_SLOT);
-                      showToast({ text: t('pause.saved'), type: 'success' });
+                      const saved = engine?.saveProgress();
+                      showToast({ text: t(saved ? 'pause.saved' : 'pause.saveFailed'), type: saved ? 'success' : 'warn' });
                     }}
                     respawnAt={hud?.respawnAt ?? 'spawn'}
                     onRespawn={() => {
@@ -327,7 +327,7 @@ export default function App() {
                   />
                 )}
 
-                {hud?.panel === 'cook' && <CookingPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
+                {hud?.panel === 'cook' && <CookingPanel gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'shop' && <ShopPanel hud={hud} gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'workers' && <WorkersPanel gameplay={world.gameplay} inventory={world.inventoryManager} onClose={closePanel} />}
                 {hud?.panel === 'workerMenu' && <WorkerRadialMenu gameplay={world.gameplay} />}

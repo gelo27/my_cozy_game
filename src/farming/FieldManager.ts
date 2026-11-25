@@ -7,7 +7,8 @@ import { waterLevelAt } from '../world/rivers/RiverWorld';
 import { CropStage, CropState, CropType } from './types/FarmingTypes';
 import { FIELD_CROP_MATERIAL, getWheatStageGeometries, loadWheatModel } from './WheatModel';
 import { getCropModel, loadCropModels } from './CropModels';
-import { FadeRange, acquireDistanceDither } from '../world/LodDither';
+import { CROP_BILLBOARD_MATERIAL, getCropBillboard, loadCropBillboards } from './CropBillboards';
+import { acquireChunkDither, acquireInstancedDither } from '../world/LodDither';
 import { isMobileDevice } from '../world/WorldSettings';
 
 /** Field side in terrain cells (1 m each). */
@@ -26,13 +27,19 @@ const HALF = FIELD_CELLS / 2;
 const WHEAT_LAYOUT = { rows: WHEAT_ROWS, spacing: WHEAT_SPACING, scale: 1.2, interleave: true };
 /**
  * Crops are batched per CROP_CELL x CROP_CELL m cell, so fields out of view or out of range cost
- * nothing. Plants dissolve (dithered) between the fade start and end (m from the camera); phones
- * stop drawing them sooner.
+ * nothing. Crossing the visibility boundary starts a timed dither for the whole chunk.
  */
 const CROP_CELL = 32;
 /** Darkest the damp soil overlay gets. */
 const WET_OPACITY = 0.55;
-const CROP_FADE: FadeRange = { value: isMobileDevice() ? new THREE.Vector2(42, 55) : new THREE.Vector2(68, 85) };
+const CROP_VISIBILITY_DISTANCE = isMobileDevice() ? 42 : 68;
+const CROP_VISIBILITY_HYSTERESIS = 1;
+const CROP_VISIBILITY_SECONDS = 0.2;
+const CROP_LOD_DISTANCE = isMobileDevice() ? 18 : 27;
+const CROP_LOD_HYSTERESIS = 2;
+const CROP_LOD_SECONDS = 0.2;
+const MAX_CROP_LOD_TRANSITIONS = isMobileDevice() ? 4 : 8;
+const CROP_LOD_STARTS_PER_FRAME = isMobileDevice() ? 1 : 2;
 
 export interface FarmField {
   id: string;
@@ -67,6 +74,7 @@ export interface FieldSaveData {
 
 interface CropPart {
   geometry: THREE.BufferGeometry;
+  billboard: THREE.BufferGeometry | null;
   material: THREE.Material;
   matrix: THREE.Matrix4;
   /** Tip offset (m) at full push when this part's plants spring away from bodies; 0 = rigid. */
@@ -97,17 +105,37 @@ interface CropVisual {
 
 interface Batch {
   mesh: THREE.InstancedMesh;
+  billboardMesh: THREE.InstancedMesh | null;
   capacity: number;
   /** Per-plant springs (single-plant springy batches only). */
   springs: SpringSet | null;
   part: CropPart;
-  /** The batch's own copy of the geometry (springy batches carry their aBend on it). */
-  ownsGeometry: boolean;
-  /** Cell (CROP_CELL m) the batch's fields stand in. */
-  cx: number;
-  cz: number;
-  /** Wearing the distance-dither twin (the cell reaches into the fade band). */
+  matrices: THREE.Matrix4[];
+  fields: CropLodSlot[];
+  transitions: number;
+  visible: boolean;
+  chunk: CropChunk;
+  /** The chunk is currently switching visibility. */
   fading: boolean;
+}
+
+interface CropChunk {
+  x: number;
+  z: number;
+  targetVisible: boolean | null;
+  coverage: number;
+  batches: Set<Batch>;
+}
+
+/** Plant indices stay stable for gameplay. Draw slots are repacked only when this field changes LOD. */
+interface CropLodSlot {
+  field: FarmField;
+  start: number;
+  count: number;
+  far: boolean;
+  progress: number;
+  nearDraw: number;
+  farDraw: number;
 }
 
 /**
@@ -117,6 +145,7 @@ interface Batch {
  */
 interface SpringSet {
   attr: THREE.InstancedBufferAttribute;
+  drawSlots: Int32Array;
   bend: Float32Array;
   vel: Float32Array;
   target: Float32Array;
@@ -245,6 +274,13 @@ export class FieldManager {
     };
     void loadWheatModel().then(refresh);
     void loadCropModels().then(refresh);
+    void loadCropBillboards().then(() => {
+      const probe = getCropBillboard('wheat', 3);
+      if (probe) {
+        this.addLodShaderWarmers(probe.clone(), CROP_BILLBOARD_MATERIAL);
+      }
+      refresh();
+    });
   }
 
   /**
@@ -259,16 +295,25 @@ export class FieldManager {
     wheatProbe.setAttribute('normal', new THREE.BufferAttribute(new Float32Array([0, 1, 0, 0, 1, 0, 0, 1, 0]), 3));
     wheatProbe.setAttribute('color', new THREE.BufferAttribute(new Float32Array(9), 3));
     wheatProbe.setAttribute('aBend', new THREE.InstancedBufferAttribute(new Float32Array(2), 2));
-    const warm = (geometry: THREE.BufferGeometry, material: THREE.Material) => {
-      const mesh = new THREE.InstancedMesh(geometry, material, 1);
-      mesh.name = 'FieldShaderWarmer';
-      mesh.visible = false;
-      mesh.frustumCulled = false;
-      this.group.add(mesh);
-    };
-    warm(wheatProbe, FIELD_CROP_MATERIAL);
-    // ...and its distance-dither twin, which every crop's far fields share
-    warm(wheatProbe, acquireDistanceDither(FIELD_CROP_MATERIAL, CROP_FADE));
+    this.addLodShaderWarmers(wheatProbe, FIELD_CROP_MATERIAL);
+  }
+
+  private addLodShaderWarmers(geometry: THREE.BufferGeometry, material: THREE.Material): void {
+    geometry.setAttribute('aLodFade', new THREE.InstancedBufferAttribute(new Float32Array(1), 1));
+    this.setChunkCoverageAttribute(geometry, 1, 1);
+    const visibility = acquireChunkDither(material);
+    this.addShaderWarmer(geometry, material);
+    this.addShaderWarmer(geometry, visibility);
+    this.addShaderWarmer(geometry, acquireInstancedDither(material));
+    this.addShaderWarmer(geometry, acquireInstancedDither(visibility));
+  }
+
+  private addShaderWarmer(geometry: THREE.BufferGeometry, material: THREE.Material): void {
+    const mesh = new THREE.InstancedMesh(geometry, material, 1);
+    mesh.name = 'FieldShaderWarmer';
+    mesh.visible = false;
+    mesh.frustumCulled = false;
+    this.group.add(mesh);
   }
 
   public setWorld(terrain: TerrainSystem, physics: PhysicsWorld): void {
@@ -604,7 +649,8 @@ export class FieldManager {
     if (this.dirty) {
       this.dirty = false;
       this.rebuildInstances();
-      this.visibilityAt.set(Infinity, Infinity);
+      this.visibilityAt.set(Infinity, Infinity, Infinity);
+      this.chunkVisibilityAt.set(Infinity, Infinity);
     }
     this.updateSprings(dt);
     if (this.ghost.visible) {
@@ -756,8 +802,6 @@ export class FieldManager {
           // Nearer stalks louder; |vx| + |vz| is close enough to the speed and needs no sqrt
           if (e2 < earR2) energy += (Math.abs(s.vel[ix]) + Math.abs(s.vel[ix + 1])) * (1 - e2 / earR2);
         }
-        lo = Math.min(lo, i);
-        hi = Math.max(hi, i);
         const settled =
           tl === 0 &&
           Math.abs(s.bend[ix]) + Math.abs(s.bend[ix + 1]) < 0.002 &&
@@ -768,6 +812,12 @@ export class FieldManager {
           s.active[a] = s.active[s.active.length - 1];
           s.active.pop();
         }
+        const draw = s.drawSlots[i];
+        if (draw >= 0) {
+          s.attr.setXY(draw, s.bend[ix], s.bend[ix + 1]);
+          lo = Math.min(lo, draw);
+          hi = Math.max(hi, draw);
+        }
       }
       if (energy > 0) {
         energy *= s.rustleGain;
@@ -775,7 +825,6 @@ export class FieldManager {
         dryW += energy * s.rustleDry;
       }
       if (hi >= 0) {
-        s.attr.clearUpdateRanges();
         s.attr.addUpdateRange(lo * 2, (hi - lo + 1) * 2);
         s.attr.needsUpdate = true;
       }
@@ -791,12 +840,13 @@ export class FieldManager {
   private createSprings(geometry: THREE.BufferGeometry, capacity: number, previous: SpringSet | null, maxBend: number, rustle?: { gain: number; dry: number }): SpringSet {
     if (previous) this.springSets = this.springSets.filter((s) => s !== previous);
     const bend = new Float32Array(capacity * 2);
-    const attr = new THREE.InstancedBufferAttribute(bend, 2);
+    const attr = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 2), 2);
     attr.setUsage(THREE.DynamicDrawUsage);
     geometry.dispose();
     geometry.setAttribute('aBend', attr);
     const s: SpringSet = {
       attr,
+      drawSlots: new Int32Array(capacity).fill(-1),
       bend,
       vel: new Float32Array(capacity * 2),
       target: new Float32Array(capacity * 2),
@@ -818,8 +868,7 @@ export class FieldManager {
     s.target.fill(0);
     s.isActive.fill(0);
     s.active.length = 0;
-    s.attr.clearUpdateRanges();
-    s.attr.needsUpdate = true;
+    s.drawSlots.fill(-1);
   }
 
   // ---------------------------------------------------------------- instancing
@@ -834,13 +883,13 @@ export class FieldManager {
     if (wheat) {
       visual = {
         single: WHEAT_LAYOUT,
-        parts: [{ geometry: wheat[stage], material: FIELD_CROP_MATERIAL, matrix: new THREE.Matrix4(), maxBend: WHEAT_MAX_BEND, rustle: WHEAT_RUSTLE[stage] }],
+        parts: [{ geometry: wheat[stage], billboard: getCropBillboard(type, stage), material: FIELD_CROP_MATERIAL, matrix: new THREE.Matrix4(), maxBend: WHEAT_MAX_BEND, rustle: WHEAT_RUSTLE[stage] }],
       };
     } else if (model) {
       // Plant pack: one instance per plant (springy batches copy the geometry for their aBend)
       visual = {
         single: model.field,
-        parts: [{ geometry: model.stages[stage], material: model.material, matrix: new THREE.Matrix4(), maxBend: model.push?.maxBend ?? 0 }],
+        parts: [{ geometry: model.stages[stage], billboard: getCropBillboard(type, stage), material: model.material, matrix: new THREE.Matrix4(), maxBend: model.push?.maxBend ?? 0 }],
       };
     } else {
       // Model still loading: nothing to draw yet (the load clears this cache)
@@ -852,43 +901,250 @@ export class FieldManager {
 
   /** Frees a batch: its instance buffers, its own geometry copy and its springs. */
   private disposeBatch(batch: Batch): void {
+    batch.chunk.batches.delete(batch);
     this.group.remove(batch.mesh);
     batch.mesh.dispose();
-    if (batch.ownsGeometry) batch.mesh.geometry.dispose();
+    batch.mesh.geometry.dispose();
+    if (batch.billboardMesh) {
+      this.group.remove(batch.billboardMesh);
+      batch.billboardMesh.geometry.dispose();
+      batch.billboardMesh.dispose();
+    }
     if (batch.springs) this.springSets = this.springSets.filter((s) => s !== batch.springs);
   }
 
-  /** Camera spot (XZ) of the last visibility pass; reset to force one. */
-  private readonly visibilityAt = new THREE.Vector2(Infinity, Infinity);
+  /** Camera position of the last visibility pass; reset to force one. */
+  private readonly visibilityAt = new THREE.Vector3(Infinity, Infinity, Infinity);
+  private readonly chunkVisibilityAt = new THREE.Vector2(Infinity, Infinity);
+  private readonly cropChunks = new Map<string, CropChunk>();
+  private readonly fadingChunks = new Set<CropChunk>();
+  private readonly cropLodLevels = new WeakMap<FarmField, boolean>();
+  private readonly activeLodTransitions = new Map<CropLodSlot, Batch>();
+  private readonly lodRepack = new Set<Batch>();
+  private pendingLodTransitions = false;
 
   /**
-   * Per frame, from the camera: cells past the fade end are skipped, cells reaching into the fade
-   * band dissolve their far plants (dither twin), nearer cells draw solid (no discard, so mobile
-   * GPUs keep early-z). Re-checked only once the camera has moved a bit.
+   * Camera movement selects visibility and LOD targets. Active fades advance every frame,
+   * including when the camera stops on either side of the visibility boundary.
    */
-  public updateVisibility(camera: THREE.Vector3): void {
-    if (Math.abs(camera.x - this.visibilityAt.x) + Math.abs(camera.z - this.visibilityAt.y) < 0.5) return;
-    this.visibilityAt.set(camera.x, camera.z);
-    const start = CROP_FADE.value.x;
-    const end = CROP_FADE.value.y;
-    // Fields poke a little past their cell (a field's centre picks the cell)
-    const pad = 2;
-    for (const b of this.batches.values()) {
-      const x0 = b.cx * CROP_CELL - pad;
-      const z0 = b.cz * CROP_CELL - pad;
-      const x1 = x0 + CROP_CELL + 2 * pad;
-      const z1 = z0 + CROP_CELL + 2 * pad;
-      const near = Math.hypot(Math.max(x0 - camera.x, 0, camera.x - x1), Math.max(z0 - camera.z, 0, camera.z - z1));
-      const far = Math.hypot(Math.max(Math.abs(camera.x - x0), Math.abs(camera.x - x1)), Math.max(Math.abs(camera.z - z0), Math.abs(camera.z - z1)));
-      // The shader's per-plant jitter moves the band by up to 15% of its width either way
-      const slack = (end - start) * 0.15;
-      b.mesh.visible = b.mesh.count > 0 && near < end + slack;
-      const fading = b.mesh.visible && far > start - slack;
-      if (fading !== b.fading) {
-        b.fading = fading;
-        b.mesh.material = fading ? acquireDistanceDither(b.part.material, CROP_FADE) : b.part.material;
+  public updateVisibility(camera: THREE.Vector3, dt: number): void {
+    const moving = camera.distanceToSquared(this.visibilityAt) >= 0.25;
+    if (moving) this.visibilityAt.copy(camera);
+    let chunkStarted = false;
+    if (camera.x !== this.chunkVisibilityAt.x || camera.z !== this.chunkVisibilityAt.y) {
+      this.chunkVisibilityAt.set(camera.x, camera.z);
+      chunkStarted = this.selectChunkVisibility(camera);
+    }
+    const chunkFinished = this.advanceChunkVisibility(dt);
+    const repack = this.lodRepack;
+    for (const [slot, batch] of this.activeLodTransitions) {
+      slot.progress += dt / CROP_LOD_SECONDS;
+      if (slot.progress >= 1) {
+        this.activeLodTransitions.delete(slot);
+        slot.progress = -1;
+        slot.far = !slot.far;
+        this.cropLodLevels.set(slot.field, slot.far);
+        batch.transitions--;
+        repack.add(batch);
+      } else if (batch.visible) {
+        const fade = slot.far ? slot.progress : -slot.progress;
+        this.writeCropFade(batch.mesh, slot.nearDraw, slot.count, fade);
+        this.writeCropFade(batch.billboardMesh!, slot.farDraw, slot.count, -fade);
       }
     }
+    const canStartQueued = this.pendingLodTransitions && this.activeLodTransitions.size < MAX_CROP_LOD_TRANSITIONS;
+    if (repack.size || canStartQueued || moving || chunkStarted || chunkFinished) {
+      this.updateCropLodSelection(camera);
+    }
+    for (const batch of repack) if (batch.visible) this.repackCropLods(batch);
+    repack.clear();
+  }
+
+  private selectChunkVisibility(camera: THREE.Vector3): boolean {
+    let changed = false;
+    for (const chunk of this.cropChunks.values()) {
+      const dx = chunk.x - camera.x, dz = chunk.z - camera.z;
+      const margin = chunk.targetVisible === null ? 0 : chunk.targetVisible ? CROP_VISIBILITY_HYSTERESIS : -CROP_VISIBILITY_HYSTERESIS;
+      const threshold = CROP_VISIBILITY_DISTANCE + margin;
+      const visible = dx * dx + dz * dz < threshold * threshold;
+      if (chunk.targetVisible === visible) continue;
+      // Loading a save should draw already nearby chunks immediately.
+      if (chunk.targetVisible === null) chunk.coverage = Number(visible);
+      else this.fadingChunks.add(chunk);
+      chunk.targetVisible = visible;
+      changed = true;
+    }
+    return changed;
+  }
+
+  private advanceChunkVisibility(dt: number): boolean {
+    let finished = false;
+    const step = dt / CROP_VISIBILITY_SECONDS;
+    for (const chunk of this.fadingChunks) {
+      const target = Number(chunk.targetVisible);
+      const remaining = target - chunk.coverage;
+      if (Math.abs(remaining) <= step + 1e-6) {
+        chunk.coverage = target;
+        this.fadingChunks.delete(chunk);
+        finished = true;
+      } else {
+        chunk.coverage += Math.sign(remaining) * step;
+      }
+      for (const batch of chunk.batches) {
+        this.writeChunkCoverage(batch.mesh, chunk.coverage);
+        if (batch.billboardMesh) this.writeChunkCoverage(batch.billboardMesh, chunk.coverage);
+      }
+    }
+    return finished;
+  }
+
+  private updateCropLodSelection(camera: THREE.Vector3): void {
+    this.pendingLodTransitions = false;
+    let starts = 0;
+    for (const b of this.batches.values()) {
+      const wasVisible = b.visible;
+      b.visible = b.chunk.targetVisible === true || b.chunk.coverage > 0;
+      if (!b.visible) {
+        b.mesh.visible = false;
+        if (b.billboardMesh) b.billboardMesh.visible = false;
+        continue;
+      }
+      const fading = this.fadingChunks.has(b.chunk);
+      if (fading !== b.fading) {
+        b.fading = fading;
+        this.updateCropMaterials(b);
+      }
+      if (!wasVisible) this.lodRepack.add(b);
+      if (!b.part.billboard || (wasVisible && !b.chunk.targetVisible)) continue;
+      for (const slot of b.fields) {
+        const dxz = this.distanceTo(slot.field, camera.x, camera.z);
+        const height = camera.y - slot.field.center.y;
+        const threshold = CROP_LOD_DISTANCE + (slot.far ? -CROP_LOD_HYSTERESIS : CROP_LOD_HYSTERESIS);
+        const wantFar = dxz * dxz + height * height > threshold * threshold;
+        if (!wasVisible) {
+          if (slot.progress >= 0) {
+            this.activeLodTransitions.delete(slot);
+            b.transitions--;
+            slot.progress = -1;
+            this.lodRepack.add(b);
+          }
+          if (slot.far !== wantFar) this.lodRepack.add(b);
+          slot.far = wantFar;
+          this.cropLodLevels.set(slot.field, wantFar);
+          continue;
+        }
+        if (slot.progress >= 0 || wantFar === slot.far) continue;
+        if (starts >= CROP_LOD_STARTS_PER_FRAME || this.activeLodTransitions.size >= MAX_CROP_LOD_TRANSITIONS) {
+          this.pendingLodTransitions = true;
+          continue;
+        }
+        starts++;
+        slot.progress = 0.0001;
+        b.transitions++;
+        this.activeLodTransitions.set(slot, b);
+        this.lodRepack.add(b);
+      }
+    }
+  }
+
+  private updateCropMaterials(batch: Batch): void {
+    const material = (base: THREE.Material) => {
+      const visible = batch.fading ? acquireChunkDither(base) : base;
+      return batch.transitions > 0 ? acquireInstancedDither(visible) : visible;
+    };
+    batch.mesh.material = material(batch.part.material);
+    if (batch.billboardMesh) batch.billboardMesh.material = material(CROP_BILLBOARD_MATERIAL);
+  }
+
+  private writeCropFade(mesh: THREE.InstancedMesh, start: number, count: number, fade: number): void {
+    const attr = mesh.geometry.getAttribute('aLodFade') as THREE.InstancedBufferAttribute;
+    attr.array.fill(fade, start, start + count);
+    attr.addUpdateRange(start, count);
+    attr.needsUpdate = true;
+  }
+
+  private repackCropLods(batch: Batch): void {
+    const near = batch.mesh;
+    near.count = 0;
+    if (batch.billboardMesh) batch.billboardMesh.count = 0;
+    const spring = batch.springs;
+    spring?.drawSlots.fill(-1);
+    const nearFade = near.geometry.getAttribute('aLodFade') as THREE.InstancedBufferAttribute | undefined;
+
+    for (const slot of batch.fields) {
+      const crossing = slot.progress >= 0;
+      const fade = crossing ? (slot.far ? slot.progress : -slot.progress) : 0;
+      if (!slot.far || crossing) {
+        slot.nearDraw = near.count;
+        for (let i = slot.start; i < slot.start + slot.count; i++) {
+          const draw = near.count++;
+          near.setMatrixAt(draw, batch.matrices[i]);
+          if (spring) {
+            spring.drawSlots[i] = draw;
+            spring.attr.setXY(draw, spring.bend[i * 2], spring.bend[i * 2 + 1]);
+          }
+        }
+        nearFade?.array.fill(fade, slot.nearDraw, near.count);
+      }
+      if (slot.far || crossing) {
+        const far = batch.billboardMesh ??= this.createCropBillboardBatch(batch);
+        slot.farDraw = far.count;
+        for (let i = slot.start; i < slot.start + slot.count; i++) far.setMatrixAt(far.count++, batch.matrices[i]);
+        const attr = far.geometry.getAttribute('aLodFade') as THREE.InstancedBufferAttribute;
+        attr.array.fill(-fade, slot.farDraw, far.count);
+      }
+    }
+    this.uploadCropBatch(near);
+    if (batch.billboardMesh) this.uploadCropBatch(batch.billboardMesh);
+    this.writeChunkCoverage(near, batch.chunk.coverage);
+    if (batch.billboardMesh) this.writeChunkCoverage(batch.billboardMesh, batch.chunk.coverage);
+    if (spring && near.count) {
+      spring.attr.clearUpdateRanges();
+      spring.attr.addUpdateRange(0, near.count * 2);
+      spring.attr.needsUpdate = true;
+    }
+    this.updateCropMaterials(batch);
+  }
+
+  private uploadCropBatch(mesh: THREE.InstancedMesh): void {
+    mesh.visible = mesh.count > 0;
+    if (!mesh.count) return;
+    mesh.instanceMatrix.clearUpdateRanges();
+    mesh.instanceMatrix.addUpdateRange(0, mesh.count * 16);
+    mesh.instanceMatrix.needsUpdate = true;
+    const fade = mesh.geometry.getAttribute('aLodFade') as THREE.InstancedBufferAttribute | undefined;
+    if (fade) {
+      fade.clearUpdateRanges();
+      fade.addUpdateRange(0, mesh.count);
+      fade.needsUpdate = true;
+    }
+  }
+
+  private createCropBillboardBatch(batch: Batch): THREE.InstancedMesh {
+    const geometry = batch.part.billboard!.clone();
+    geometry.setAttribute('aLodFade', new THREE.InstancedBufferAttribute(new Float32Array(batch.capacity), 1).setUsage(THREE.DynamicDrawUsage));
+    this.setChunkCoverageAttribute(geometry, batch.chunk.coverage, batch.capacity);
+    const mesh = new THREE.InstancedMesh(geometry, CROP_BILLBOARD_MATERIAL, batch.capacity);
+    mesh.name = `${batch.mesh.name}_lod1`;
+    mesh.matrixAutoUpdate = false;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.boundingSphere = batch.mesh.boundingSphere;
+    mesh.count = 0;
+    this.group.add(mesh);
+    return mesh;
+  }
+
+  private setChunkCoverageAttribute(geometry: THREE.BufferGeometry, coverage: number, capacity: number): void {
+    // One attribute element serves every plant in this batch, including after a LOD repack.
+    geometry.setAttribute('aChunkCoverage', new THREE.InstancedBufferAttribute(
+      new Float32Array([coverage]), 1, false, capacity,
+    ).setUsage(THREE.DynamicDrawUsage));
+  }
+
+  private writeChunkCoverage(mesh: THREE.InstancedMesh, coverage: number): void {
+    const attribute = mesh.geometry.getAttribute('aChunkCoverage');
+    attribute.setX(0, coverage);
+    attribute.needsUpdate = true;
   }
 
   private rebuildInstances(): void {
@@ -915,6 +1171,8 @@ export class FieldManager {
     }
 
     this.wheatSlots = [];
+    this.activeLodTransitions.clear();
+    this.pendingLodTransitions = false;
 
     // Cells whose fields were all harvested or filled in let go of their batch entirely
     for (const [key, batch] of this.batches) {
@@ -931,17 +1189,34 @@ export class FieldManager {
         if (batch) this.disposeBatch(batch);
         // Small cells hold few plants: start small, grow in powers of two
         const capacity = Math.max(16, THREE.MathUtils.ceilPowerOfTwo(matrices.length));
-        // A springy batch carries its aBend on the geometry, so it gets its own copy
-        const geometry = springy ? part.geometry.clone() : part.geometry;
+        // Per-instance bend and fade attributes belong to this batch.
+        const geometry = part.geometry.clone();
+        if (part.billboard) geometry.setAttribute('aLodFade', new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1).setUsage(THREE.DynamicDrawUsage));
+        const chunkKey = `${cx}|${cz}`;
+        let chunk = this.cropChunks.get(chunkKey);
+        if (!chunk) {
+          chunk = { x: (cx + 0.5) * CROP_CELL, z: (cz + 0.5) * CROP_CELL,
+            targetVisible: null, coverage: 0, batches: new Set() };
+          this.cropChunks.set(chunkKey, chunk);
+        }
+        this.setChunkCoverageAttribute(geometry, chunk.coverage, capacity);
         const mesh = new THREE.InstancedMesh(geometry, part.material, capacity);
         mesh.name = `FieldCrops_${key}`;
         mesh.matrixAutoUpdate = false;
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         this.group.add(mesh);
         const springs = springy ? this.createSprings(geometry, capacity, null, part.maxBend, part.rustle) : null;
-        batch = { mesh, capacity, springs, part, ownsGeometry: springy, cx, cz, fading: false };
+        batch = { mesh, billboardMesh: null, capacity, springs, part, matrices, fields: [],
+          transitions: 0, visible: false, chunk, fading: false };
+        chunk.batches.add(batch);
         this.batches.set(key, batch);
       }
       const mesh = batch.mesh;
+      batch.matrices = matrices;
+      batch.fields = owners.map((o) => ({ ...o, far: this.cropLodLevels.get(o.field) ?? false,
+        progress: -1, nearDraw: 0, farDraw: 0 }));
+      batch.transitions = 0;
+      batch.visible = false;
       for (let i = 0; i < matrices.length; i++) mesh.setMatrixAt(i, matrices[i]);
       const springs = batch.springs;
       if (springs) {
@@ -953,11 +1228,25 @@ export class FieldManager {
         for (const o of owners) this.wheatSlots.push({ field: o.field, springs, start: o.start, count: o.count });
       }
       mesh.count = matrices.length;
-      mesh.visible = matrices.length > 0;
-      batch.fading = false;
-      mesh.material = part.material;
-      mesh.instanceMatrix.needsUpdate = true;
+      mesh.visible = false;
       mesh.computeBoundingSphere();
+      if (part.billboard && matrices.length > 0) {
+        const bounds = mesh.boundingSphere!.clone();
+        const model = mesh.geometry;
+        mesh.geometry = part.billboard;
+        mesh.computeBoundingSphere();
+        mesh.boundingSphere!.union(bounds);
+        mesh.geometry = model;
+      }
+      if (batch.billboardMesh) {
+        batch.billboardMesh.visible = false;
+        batch.billboardMesh.boundingSphere = mesh.boundingSphere;
+      }
+    }
+    for (const [key, chunk] of this.cropChunks) {
+      if (chunk.batches.size) continue;
+      this.fadingChunks.delete(chunk);
+      this.cropChunks.delete(key);
     }
   }
 
