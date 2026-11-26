@@ -18,6 +18,9 @@ import { BUSH_FADE_RANGE, FadeRange, TREE_FADE_RANGE, acquireDistanceDither, acq
 import { LodInstances } from './LodInstances';
 import { withSnowCover } from './SnowCover';
 import { buildDecorRockLods } from './RockModels';
+import { createGeneratedRockMaterial } from './GeneratedRockMaterial';
+import { buildGeneratedRock, isGeneratedRockType, MAX_GENERATED_ROCKS, setGeneratedRockSurface, type GeneratedRockModel, type GeneratedRockParams, type GeneratedRockSave, type GeneratedRockSurface } from './GeneratedRocks';
+import { COLLISION_GROUPS } from '../config/constants';
 import { FLOWER_MATERIAL, loadFlowerModels } from './FlowerModels';
 import { COUCH_GRASS_MATERIAL, loadCouchGrassModel } from './CouchGrassModel';
 import { withVertexLightingQuality } from './VertexLightingQuality';
@@ -69,7 +72,7 @@ const LOD_DISTS = isMobileDevice() ? [30, 75] : [40, 100];
  * panel (VegetationSettings).
  */
 const lodDists = (type: string, out: number[]): number[] => {
-  const rock = ROCK_LOD_DISTS[type];
+  const rock = ROCK_LOD_DISTS[isGeneratedRockType(type) ? 'rock_big' : type];
   if (rock) return rock;
   if (type === 'tree_round' || type === 'tree_maple' || type === 'tree_birch') out[0] = veg.oakNearDist;
   else if (type === 'tree_pine') out[0] = veg.pineNearDist;
@@ -88,7 +91,7 @@ const MOBILE = isMobileDevice();
 const ROCK_LOD_DISTS: Record<string, number[]> = MOBILE
   ? { rock_small: [24], rock_big: [22, 56] }
   : { rock_small: [14, 35], rock_big: [28, 75] };
-const isDecorRock = (type: string): boolean => type === 'rock_small' || type === 'rock_big';
+const isDecorRock = (type: string): boolean => type === 'rock_small' || type === 'rock_big' || isGeneratedRockType(type);
 /** How often (s) trees re-pick their LOD, and how far (m) the camera must move for it. */
 const LOD_PASS_SECONDS = 0.15;
 const LOD_PASS_MOVE = 0.5;
@@ -147,7 +150,7 @@ export interface PropInstance {
   web?: WebParams;
   /** Frameless spider web: where its radials anchor (local x, y, z per radial), found once. */
   webAnchors?: number[];
-  /** Spider web: tilt about its own right (x) and normal (z) axes, applied after the yaw. */
+  /** Rock or spider web tilt about X and Z, in YXZ Euler order. */
   tilt?: [number, number];
 }
 
@@ -167,7 +170,7 @@ export interface PropSaveData {
   w?: WebParams;
   /** Frameless spider web anchors. */
   wa?: number[];
-  /** Spider web tilt (x, z). */
+  /** Rock or spider web tilt (x, z). */
   t?: [number, number];
 }
 
@@ -517,6 +520,7 @@ export const PROP_DEFS: PropDef[] = [
 ];
 
 export const PROP_DEF_MAP = new Map(PROP_DEFS.map((d) => [d.id, d]));
+export const canTiltProp = (type: string): boolean => isDecorRock(type) || !!PROP_DEF_MAP.get(type)?.web;
 
 /** Far versions of the trees (same baked material, ~1/3 of the triangles for the round tree). */
 const LOD_BUILDS: Record<string, (b: PropBuilder) => void> = {
@@ -624,6 +628,7 @@ export class PropSystem {
 
   private static readonly _m = new THREE.Matrix4();
   private static readonly _q = new THREE.Quaternion();
+  private static readonly _euler = new THREE.Euler();
   private static readonly _tilt = new THREE.Quaternion();
   private static readonly _s = new THREE.Vector3();
   private static readonly _up = new THREE.Vector3(0, 1, 0);
@@ -749,6 +754,85 @@ export class PropSystem {
 
   private readonly geometries = new Map<string, { geometry: THREE.BufferGeometry; materials: THREE.Material[] }>();
   private readonly lodGeometries = new Map<string, THREE.BufferGeometry>();
+  private readonly generatedRocks = new Map<string, { data: GeneratedRockSave; def: PropDef; model?: GeneratedRockModel }>();
+
+  public getDefinition(type: string): PropDef | undefined {
+    return PROP_DEF_MAP.get(type) ?? this.generatedRocks.get(type)?.def;
+  }
+
+  public serializeGeneratedRocks(): GeneratedRockSave[] {
+    return Array.from(this.generatedRocks.values(), ({ data }) => ({ ...data }));
+  }
+
+  public addGeneratedRock(name: string, params: GeneratedRockParams): GeneratedRockSave | null {
+    if (this.generatedRocks.size >= MAX_GENERATED_ROCKS) return null;
+    let index = 1;
+    while (this.generatedRocks.has(`generated_rock_${index}`)) index++;
+    const data = { ...params, name, id: `generated_rock_${index}` };
+    this.restoreGeneratedRock(data.id, data);
+    return data;
+  }
+
+  public captureGeneratedRock(id: string): GeneratedRockSave | null {
+    const entry = this.generatedRocks.get(id);
+    return entry ? { ...entry.data } : null;
+  }
+
+  public setRockSurface(id: string, surface: GeneratedRockSurface | undefined): void {
+    const entry = this.generatedRocks.get(id);
+    if (!entry) return;
+    entry.data.surface = surface ? { ...surface } : undefined;
+    if (entry.model) setGeneratedRockSurface(entry.model, surface);
+  }
+
+  public canRemoveGeneratedRock(id: string): boolean {
+    return this.generatedRocks.has(id) && !Array.from(this.batches.values()).some((batch) => batch.def.id === id && batch.ids.length);
+  }
+
+  public restoreGeneratedRock(id: string, data: GeneratedRockSave | null): void {
+    const old = this.generatedRocks.get(id);
+    if (old && data && JSON.stringify(old.data) === JSON.stringify(data)) return;
+    if (old) {
+      // Placement edits are undone before the variant they use. Loading clears placements first.
+      if (!this.canRemoveGeneratedRock(id)) return;
+      for (const [key, batch] of this.batches) {
+        if (batch.def.id !== id) continue;
+        batch.lods?.dispose();
+        this.group.remove(batch.mesh);
+        batch.mesh.dispose();
+        this.batches.delete(key);
+      }
+      old.model?.lods.forEach((geometry) => geometry.dispose());
+      this.geometries.delete(id);
+      this.generatedRocks.delete(id);
+    }
+    if (!data) return;
+    this.generatedRocks.set(id, {
+      data: { ...data },
+      def: { id, name: data.name, icon: 'Mountain', category: 'nature', build: () => {} },
+    });
+  }
+
+  private generatedRockModel(type: string): GeneratedRockModel | undefined {
+    const entry = this.generatedRocks.get(type);
+    if (entry) return entry.model ??= buildGeneratedRock(entry.data);
+  }
+
+  public getGeneratedRockRadius(type: string): number | undefined {
+    return this.generatedRockModel(type)?.radius;
+  }
+
+  private generatedRockMaterial?: THREE.MeshLambertMaterial;
+
+  public disposeGeneratedRocks(): void {
+    if (this.generatedRocks.size) {
+      for (const prop of this.props.values()) if (this.generatedRocks.has(prop.type)) this.remove(prop.id);
+      for (const id of this.generatedRocks.keys()) this.restoreGeneratedRock(id, null);
+    }
+    this.generatedRockMaterial?.dispose();
+    this.generatedRockMaterial = undefined;
+    this.terrain.disposeRockContactMaps();
+  }
   /** Frames left before an old save's forests get densified (waits for buildings' colliders). */
   private densifyIn = -1;
   /** Forest generation the current world has (saved with the world). */
@@ -763,7 +847,7 @@ export class PropSystem {
   }
 
   private getLod(type: string, near: THREE.BufferGeometry): PropBatch['lod'] {
-    const models = getTreeLods()?.[type] ?? getDecorRockLods(type);
+    const models = getTreeLods()?.[type] ?? getDecorRockLods(type) ?? this.generatedRockModel(type)?.lods;
     if (models) return models;
     const build = LOD_BUILDS[type];
     if (!build) return null;
@@ -785,7 +869,7 @@ export class PropSystem {
     const key = `${type}|${cx}|${cz}` + (type === HEDGE_TYPE ? `|${hedgeMask}` : '');
     let batch = this.batches.get(key);
     if (batch) return batch;
-    const def = PROP_DEF_MAP.get(type);
+    const def = this.getDefinition(type);
     if (!def) return null;
     const hedge = type === HEDGE_TYPE ? hedgeLods(hedgeMask) : null;
     let shared = hedge ? { geometry: hedge[0], materials: [foliageMaterialOf(type)] } : this.geometries.get(type);
@@ -1134,6 +1218,8 @@ export class PropSystem {
       rotationY,
       scale,
       grounded,
+      tilt: isDecorRock(type) && tilt?.length === 2 && tilt.every(Number.isFinite) && (tilt[0] || tilt[1])
+        ? [tilt[0], tilt[1]] : undefined,
     };
     this.props.set(id, prop);
     this.editorTopologyRevision++;
@@ -1194,7 +1280,7 @@ export class PropSystem {
       if (body) this.physics.removeRigidBody(body);
       this.bodies.delete(id);
     } else if (!body) {
-      const def = PROP_DEF_MAP.get(prop.type);
+      const def = this.getDefinition(prop.type);
       if (def) this.createBody(prop, def);
     }
     this.noteSolid(prop);
@@ -1203,14 +1289,15 @@ export class PropSystem {
   /** A solid prop changed at its spot: the navigator re-checks the ground around it. */
   private noteSolid(prop: PropInstance): void {
     const c = PROP_DEF_MAP.get(prop.type)?.collider;
-    if (!c) return;
+    const generated = this.generatedRocks.get(prop.type);
+    if (!c && !generated?.data.solid) return;
     // Bulk changes (loading, clearing): cheaper to drop the whole navigation cache
     if (this.navEdits.length >= 64) {
       this.navEdits.length = 0;
       this.solidRevision++;
       return;
     }
-    const size = c.kind === 'cyl' ? c.r : Math.hypot(c.w, c.d) / 2;
+    const size = c ? (c.kind === 'cyl' ? c.r : Math.hypot(c.w, c.d) / 2) : this.generatedRockModel(prop.type)!.radius;
     this.navEdits.push({ x: prop.position.x, y: prop.position.y, z: prop.position.z, r: size * prop.scale + 0.8 });
   }
 
@@ -1271,6 +1358,7 @@ export class PropSystem {
     prop.position.copy(position);
     prop.rotationY = rotationY;
     prop.scale = scale;
+    if (tilt && canTiltProp(prop.type)) prop.tilt = tilt[0] || tilt[1] ? [tilt[0], tilt[1]] : undefined;
     const kind = PROP_DEF_MAP.get(prop.type)?.chain;
     if (kind) {
       this.chainField(kind).refresh(prop);
@@ -1279,7 +1367,6 @@ export class PropSystem {
     }
     if (PROP_DEF_MAP.get(prop.type)?.web) {
       // Moved: its threads look for new anchors
-      if (tilt) prop.tilt = tilt[0] || tilt[1] ? [tilt[0], tilt[1]] : undefined;
       prop.webAnchors = undefined;
       this.webs.refresh(prop);
       this.revision++;
@@ -1356,7 +1443,7 @@ export class PropSystem {
   public previewGeometry(type: string, length?: number, web?: Partial<WebParams> | null, head?: number, hedgeMask = 0): THREE.BufferGeometry | null {
     const hedge = type === HEDGE_TYPE ? hedgeLods(hedgeMask) : null;
     if (hedge) return hedge[0];
-    const def = PROP_DEF_MAP.get(type);
+    const def = this.getDefinition(type);
     if (!def) return null;
     if (def.chain) return CHAIN_SPECIES[def.chain].geometry(length ?? CHAIN_SPECIES[def.chain].cfg.defaultLinks, head);
     if (def.web) return webPreviewGeometry(clampWeb(web));
@@ -1377,9 +1464,11 @@ export class PropSystem {
 
   /** A decorative rock type's near geometry and material (registered as the type's shared one). */
   private decorRockShared(type: string): { geometry: THREE.BufferGeometry; materials: THREE.Material[] } | undefined {
-    const lods = getDecorRockLods(type);
+    const generated = this.generatedRockModel(type);
+    const lods = generated?.lods ?? getDecorRockLods(type);
     if (!lods) return undefined;
-    const shared = { geometry: lods[0], materials: [ROCK_MATERIAL] };
+    const material = generated ? this.generatedRockMaterial ??= createGeneratedRockMaterial(this.terrain.getRockContactMaps()) : ROCK_MATERIAL;
+    const shared = { geometry: lods[0], materials: [material] };
     this.geometries.set(type, shared);
     return shared;
   }
@@ -1455,6 +1544,7 @@ export class PropSystem {
       if (!prop.grounded) continue;
       const y = this.terrain.getHeight(prop.position.x, prop.position.z);
       if (Math.abs(y - prop.position.y) > 0.01) {
+        const delta = y - prop.position.y;
         prop.position.y = y;
         if (prop.type === HEDGE_TYPE) movedHedges.push(prop);
         const batch = this.batchOf.get(prop.id);
@@ -1471,18 +1561,21 @@ export class PropSystem {
         }
         this.writeMatrix(batch, this.slotOf.get(prop.id)!, prop);
         const body = this.bodies.get(prop.id);
-        if (body) body.setTranslation({ x: prop.position.x, y: y + this.colliderOffset(batch.def), z: prop.position.z }, false);
+        if (body) {
+          const at = body.translation();
+          body.setTranslation({ x: at.x, y: at.y + delta, z: at.z }, false);
+        }
       }
     }
     for (const hedge of movedHedges) this.refreshHedges(hedge.position.x, hedge.position.z, hedge.scale);
   }
 
-  private colliderOffset(def: PropDef): number {
-    return def.collider ? def.collider.h / 2 : 0;
-  }
-
   private writeMatrix(batch: PropBatch, slot: number, prop: PropInstance): void {
-    PropSystem._q.setFromAxisAngle(PropSystem._up, batch.hedgeMask ? 0 : prop.rotationY);
+    if (prop.tilt) {
+      PropSystem._q.setFromEuler(PropSystem._euler.set(prop.tilt[0], prop.rotationY, prop.tilt[1], 'YXZ'));
+    } else {
+      PropSystem._q.setFromAxisAngle(PropSystem._up, batch.hedgeMask ? 0 : prop.rotationY);
+    }
     const pose = this.poses.get(prop.id);
     if (pose) PropSystem._q.premultiply(PropSystem._tilt.setFromAxisAngle(pose.axis, pose.angle));
     PropSystem._s.setScalar(this.editorHidden.has(prop.id) ? 0 : prop.scale * (pose ? Math.max(pose.scale, 1e-4) : 1));
@@ -1493,11 +1586,16 @@ export class PropSystem {
   }
 
   private createBody(prop: PropInstance, def: PropDef): void {
+    const generated = this.generatedRocks.get(def.id);
+    if (generated) {
+      if (generated.data.solid) this.createGeneratedRockBody(prop, this.generatedRockModel(def.id)!);
+      return;
+    }
     const c = def.collider;
     if (!c) return;
     const s = prop.scale;
-    const pos = new THREE.Vector3(prop.position.x, prop.position.y + (c.h * s) / 2, prop.position.z);
-    const rot = new THREE.Euler(0, prop.rotationY, 0);
+    const rot = new THREE.Euler(prop.tilt?.[0] ?? 0, prop.rotationY, prop.tilt?.[1] ?? 0, 'YXZ');
+    const pos = new THREE.Vector3(0, (c.h * s) / 2, 0).applyEuler(rot).add(prop.position);
     const res =
       c.kind === 'cyl'
         ? this.physics.createStaticCylinder(pos, c.r * s, c.h * s, rot)
@@ -1506,6 +1604,23 @@ export class PropSystem {
     const stone = /rock|stone|mill|quern|campfire|well/.test(def.id);
     (res.collider as unknown as { userData: unknown }).userData = { surface: stone ? 'stone' : 'wood' };
     this.bodies.set(prop.id, res.body);
+  }
+
+  private createGeneratedRockBody(prop: PropInstance, model: GeneratedRockModel): void {
+    const { world, rapier } = this.physics;
+    const colliders = model.hulls.flatMap((points) => {
+      const shape = rapier.ColliderDesc.convexHull(points.map((n) => n * prop.scale));
+      return shape ? [shape.setFriction(0.6).setCollisionGroups(this.physics.packCollisionGroups(COLLISION_GROUPS.ENVIRONMENT, 0xffff))] : [];
+    });
+    if (!colliders.length) return;
+    const { x, y, z } = prop.position;
+    const rotation = PropSystem._q.setFromEuler(PropSystem._euler.set(prop.tilt?.[0] ?? 0, prop.rotationY, prop.tilt?.[1] ?? 0, 'YXZ'));
+    const body = world.createRigidBody(rapier.RigidBodyDesc.fixed().setTranslation(x, y, z).setRotation(rotation));
+    for (const desc of colliders) {
+      const collider = world.createCollider(desc, body);
+      (collider as unknown as { userData: unknown }).userData = { surface: 'stone' };
+    }
+    this.bodies.set(prop.id, body);
   }
 
   private saveCache: { key: string; data: PropSaveData[] } | null = null;
@@ -1567,8 +1682,11 @@ export class PropSystem {
     }
   }
 
-  public deserialize(data: PropSaveData[]): void {
+  public deserialize(data: PropSaveData[], generatedRocks: readonly GeneratedRockSave[] = []): void {
     this.clear();
+    const incoming = new Set(generatedRocks.map((variant) => variant.id));
+    for (const id of this.generatedRocks.keys()) if (!incoming.has(id)) this.restoreGeneratedRock(id, null);
+    for (const variant of generatedRocks) this.restoreGeneratedRock(variant.id, variant);
     // Grounded props follow the current heightmap on load; this also repairs older saves after
     // terrain generation changes such as the expanded, deeper coastline.
     for (const d of data) this.add(d.type, d.p[0], d.p[2], d.r, d.s, d.g === false ? d.p[1] : undefined, d.g !== false, d.n, Array.isArray(d.c) && d.c.length === 2 ? d.c : null, d.w, d.wa, d.t, d.hd);

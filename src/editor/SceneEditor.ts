@@ -6,7 +6,7 @@ import { ROOF_STYLES, type RoofStyle } from '../building/ProceduralRoofSystem';
 import type { BuildingPieceType } from '../building/types/BuildingTypes';
 import { t } from '../i18n/i18n';
 import { WORKER_ROLES, type WorkerRole } from '../npc/TaskBoard';
-import { PROP_DEF_MAP, PROP_DEFS } from '../world/PropSystem';
+import { PROP_DEFS } from '../world/PropSystem';
 import { ROCK_TYPES, type RockKind } from '../gathering/GatheringConfig';
 import { worldSettings } from '../world/WorldSettings';
 import { WEATHER_LABELS, type WeatherType } from '../world/WeatherSystem';
@@ -121,7 +121,7 @@ export class SceneEditor {
 
     for (const prop of props.list()) {
       const { id, type } = prop;
-      const def = PROP_DEF_MAP.get(type);
+      const def = props.getDefinition(type);
       entries.push({
         id: `prop:${id}`, name: def?.name ?? type, category: def?.category === 'nature' ? 'Рослинність' : 'Декор',
         propId: props.isEditorProp(id) ? id : undefined,

@@ -4,7 +4,7 @@ import { riverWorld } from './rivers/RiverWorld';
 import { causticsUniforms } from '../scene/WaterEffects';
 import { waterSurfaceUniforms } from './WaterSurface';
 import { duckweed } from './Duckweed';
-import { SEA_FLOOR_Y, WORLD_SIZE } from './WorldSettings';
+import { WORLD_SIZE } from './WorldSettings';
 
 /**
  * Fake underwater god rays: a handful of long, thin, additive ribbons that slant down from the
@@ -96,6 +96,7 @@ export interface ShaftLight {
   /** Unit vector toward the sun. */
   sunDir: THREE.Vector3;
   sunColor: THREE.Color;
+  fog: THREE.FogExp2 | null;
   /** 0..1: 1 = camera fully under water. */
   underwater: number;
   night: number;
@@ -115,7 +116,9 @@ export class LightShafts {
     uLsDir: { value: new THREE.Vector3(0, -1, 0) },
     uLsColor: { value: new THREE.Color() },
     uLsFlicker: { value: 1 },
+    uLsFogFalloff: { value: 0 },
   };
+  private readonly fogTint = new THREE.Color();
   private static readonly _v = new THREE.Vector3();
   private static readonly _f = new THREE.Vector3();
 
@@ -141,6 +144,7 @@ export class LightShafts {
         uCausticsTime: causticsUniforms.uCausticsTime,
         uCausticsParams: causticsUniforms.uCausticsParams,
         uWsBed: waterSurfaceUniforms.uWsBed,
+        uWsSeaFloorY: waterSurfaceUniforms.uWsSeaFloorY,
       },
       vertexShader: /* glsl */ `
         attribute vec4 aTop;
@@ -150,6 +154,7 @@ export class LightShafts {
         varying vec3 vW;
         varying vec4 vTop;
         varying float vAlpha;
+        varying float vFogDepth;
         void main() {
           // Along the refracted sun; across: perpendicular to both the axis and the view
           float along = -position.y * aSize.y;
@@ -165,19 +170,24 @@ export class LightShafts {
           vW = w;
           vTop = aTop;
           vAlpha = aSize.z;
-          gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+          vec4 viewPos = viewMatrix * vec4(w, 1.0);
+          vFogDepth = -viewPos.z;
+          gl_Position = projectionMatrix * viewPos;
         }`,
       fragmentShader: /* glsl */ `
         uniform vec3 uLsColor;
         uniform float uLsFlicker;
+        uniform float uLsFogFalloff;
         uniform sampler2D uCausticsMap;
         uniform sampler2D uWsBed;
+        uniform float uWsSeaFloorY;
         uniform float uCausticsTime;
         uniform vec4 uCausticsParams;
         varying vec2 vUv;
         varying vec3 vW;
         varying vec4 vTop;
         varying float vAlpha;
+        varying float vFogDepth;
         void main() {
           // Soft across (no hard ribbon edges), fading in just under the surface and out with length
           // (a soft hump, no bright core: light in water, not a neon tube)
@@ -187,7 +197,7 @@ export class LightShafts {
           // Gone into the bed: fade over the last metre above it
           vec2 bedUv = (vW.xz + ${(HALF + 0.5).toFixed(1)}) / ${V.toFixed(1)};
           float inIsland = step(abs(vW.x), ${HALF.toFixed(1)}) * step(abs(vW.z), ${HALF.toFixed(1)});
-          float bedY = mix(${SEA_FLOOR_Y.toFixed(2)}, texture2D(uWsBed, bedUv).r, inIsland);
+          float bedY = mix(uWsSeaFloorY, texture2D(uWsBed, bedUv).r, inIsland);
           float bed = smoothstep(bedY, bedY + 1.2, vW.y);
           // Close to the eye a ribbon would fill the screen: fade it out there
           float dc = distance(vW, cameraPosition);
@@ -198,7 +208,9 @@ export class LightShafts {
           float fl = 0.45 + 1.1 * texture2D(uCausticsMap, cuv, 2.0).g;
           // A slow, uneven beat along each ribbon so it does not read as a flat stripe
           fl *= 0.75 + 0.25 * sin(vUv.y * 5.0 - t * 1.3 + vTop.w * 6.28);
-          float a = across * along * bed * near * fl * vAlpha;
+          // Additive light uses the fog's transmittance without adding the fog colour again.
+          float fog = exp2(-uLsFogFalloff * vFogDepth * vFogDepth);
+          float a = across * along * bed * near * fl * vAlpha * fog;
           if (a < 0.002) discard;
           gl_FragColor = vec4(uLsColor * a, 1.0);
         }`,
@@ -243,7 +255,14 @@ export class LightShafts {
     // t = eta * i + (eta * cos - sqrt(k)) * up, i = -sun: the horizontal part shrinks by eta
     this.uniforms.uLsDir.value.set(-sun.x * eta, -Math.sqrt(Math.max(k, 0)), -sun.z * eta).normalize();
     // Watery blue-green, a little of the sun's own tint, dimmer when the sun is low
-    this.uniforms.uLsColor.value.setRGB(0.55, 0.85, 0.9).lerp(light.sunColor, 0.25).multiplyScalar(amount);
+    const color = this.uniforms.uLsColor.value.setRGB(0.55, 0.85, 0.9).lerp(light.sunColor, 0.25);
+    const fog = light.fog;
+    if (fog) {
+      const peak = Math.max(fog.color.r, fog.color.g, fog.color.b);
+      if (peak > 1e-4) color.lerp(this.fogTint.copy(fog.color).multiplyScalar(0.9 / peak), 0.55);
+    }
+    color.multiplyScalar(amount);
+    this.uniforms.uLsFogFalloff.value = Math.LOG2E * (fog?.density ?? 0) ** 2;
     this.uniforms.uLsFlicker.value = s.flicker;
 
     // Spawn / age the ribbons

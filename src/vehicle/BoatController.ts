@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { interactionFocus } from '../gameplay/InteractionFocus';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
-import { BoatModel, BOAT_HALF_LENGTH, BOAT_HALF_WIDTH } from './BoatModel';
+import { BoatModel, BOAT_CHINE_Y, BOAT_HALF_LENGTH, BOAT_HALF_WIDTH, BOAT_HULL_SECTIONS } from './BoatModel';
 import { InputManager } from '../input/InputManager';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera';
 import { CharacterController } from '../character/CharacterController';
@@ -23,13 +23,14 @@ export const BOAT_CONFIG = {
   MIN_TURN_SPEED: 0.6, // m/s for full steering authority at low speed
   STEER_SPEED: 4,
   MIN_DEPTH: 0.45, // keel clearance: shallower water counts as land
+  FLOAT_OFFSET: 0.17, // hull origin above the resting waterline
   MAX_STEP_UP: 0.35, // waterfalls cannot be climbed
   INTERACT_RADIUS: 3.3,
   CAMERA_FOLLOW_DELAY: 1.0,
 } as const;
 
 /**
- * Rideable motorboat. A kinematic box follows the local water surface (`riverWorld.waterLevelAt`,
+ * Rideable motorboat. A kinematic hull follows the local water surface (`riverWorld.waterLevelAt`,
  * so it floats on the sea, lakes and rivers alike, river currents push it, and it drops down
  * waterfalls but never climbs them). It can only move where the water under its bow, stern and
  * middle is deep enough, so it never drives onto land; colliders (the pier, rocks) block it.
@@ -64,6 +65,7 @@ export class BoatController {
   private readonly flow = { x: 0, z: 0 };
 
   private static readonly _v = new THREE.Vector3();
+  private static readonly _hullOrigin = new THREE.Vector3();
   private static readonly _d = new THREE.Vector3();
   private static readonly _down = new THREE.Vector3(0, -1, 0);
   private static readonly _q = new THREE.Quaternion();
@@ -84,11 +86,17 @@ export class BoatController {
     this.surfaceY = riverWorld.waterLevelAt(spawn.x, spawn.z);
     scene.add(this.model.group);
     const { rapier, world } = physics;
-    this.body = world.createRigidBody(rapier.RigidBodyDesc.kinematicPositionBased().setTranslation(spawn.x, this.surfaceY, spawn.z));
+    const hullPoints = BOAT_HULL_SECTIONS.filter((_, i) => i % 2 === 0).flatMap(({ width, z, keel, sheer }) => [
+      -width, sheer, z, -width * 0.9, BOAT_CHINE_Y, z,
+      0, keel, z, width * 0.9, BOAT_CHINE_Y, z, width, sheer, z,
+    ]);
+    const hull = rapier.ColliderDesc.convexHull(new Float32Array(hullPoints));
+    if (!hull) throw new Error('Invalid motorboat hull profile');
+    this.body = world.createRigidBody(rapier.RigidBodyDesc.kinematicPositionBased()
+      .setTranslation(spawn.x, this.surfaceY + BOAT_CONFIG.FLOAT_OFFSET, spawn.z));
     this.body.userData = { isVehicle: true, type: 'boat' };
     this.collider = world.createCollider(
-      rapier.ColliderDesc.cuboid(BOAT_HALF_WIDTH, 0.3, BOAT_HALF_LENGTH * 0.95)
-        .setTranslation(0, 0.15, 0)
+      hull
         .setFriction(0.8)
         .setCollisionGroups(
           physics.packCollisionGroups(COLLISION_GROUPS.DYNAMIC_PROPS, COLLISION_GROUPS.DYNAMIC_PROPS | COLLISION_GROUPS.CHARACTER)
@@ -120,6 +128,7 @@ export class BoatController {
     this.pos.set(at.x, 0, at.z);
     this.surfaceY = riverWorld.waterLevelAt(at.x, at.z);
     this.writeBody(true);
+    this.syncVisuals(0);
   }
 
   /** Back to the pier (used by the reset key, or when stranded). */
@@ -177,20 +186,28 @@ export class BoatController {
     return w - this.terrain.getHeight(px, pz) >= BOAT_CONFIG.MIN_DEPTH && w <= level + BOAT_CONFIG.MAX_STEP_UP;
   }
 
-  /** Something solid (pier post, rock, building) within `dist` along `dir` at hull height? */
-  private blocked(dirX: number, dirZ: number, dist: number): boolean {
-    const d = BoatController._d.set(dirX, 0, dirZ);
-    if (d.lengthSq() < 1e-6) return false;
-    d.normalize();
-    const side = BoatController._v;
-    // Two heights: posts and rocks at the waterline, a pier deck just above the gunwale
-    for (const h of [0.25, 0.7]) {
-      for (const off of [-BOAT_HALF_WIDTH * 0.8, 0, BOAT_HALF_WIDTH * 0.8]) {
-        side.set(this.pos.x + d.z * off, this.surfaceY + h, this.pos.z - d.x * off);
-        if (this.physics.castRay(side, d, dist, true, undefined, undefined, this.collider)) return true;
-      }
-    }
-    return false;
+  /** Sweep the actual hull through this frame's movement, allowing it to leave an overlap. */
+  private blocked(dx: number, dz: number): boolean {
+    if (dx === 0 && dz === 0) return true;
+    const origin = BoatController._hullOrigin.set(this.pos.x, this.surfaceY + BOAT_CONFIG.FLOAT_OFFSET, this.pos.z);
+    const rotation = BoatController._q.setFromAxisAngle(BoatController._up, this.yaw);
+    const travel = BoatController._d.set(dx, 0, dz);
+    return !!this.physics.world.castShape(
+      origin, rotation, travel, this.collider.shape, 0.02, 1, false,
+      this.physics.rapier.QueryFilterFlags.EXCLUDE_SENSORS, undefined, this.collider, this.body, this.isBoatObstacle,
+    );
+  }
+
+  private readonly isBoatObstacle = (collider: RAPIER.Collider): boolean =>
+    !this.character || collider.parent()?.handle !== this.character.body.handle;
+
+  private canTurn(yaw: number): boolean {
+    const origin = BoatController._hullOrigin.set(this.pos.x, this.surfaceY + BOAT_CONFIG.FLOAT_OFFSET, this.pos.z);
+    const rotation = BoatController._q.setFromAxisAngle(BoatController._up, yaw);
+    return !this.physics.world.intersectionWithShape(
+      origin, rotation, this.collider.shape, this.physics.rapier.QueryFilterFlags.EXCLUDE_SENSORS,
+      undefined, this.collider, this.body, this.isBoatObstacle,
+    );
   }
 
   private drive(dt: number, throttle: number, steerInput: number, brake: boolean, boost: boolean, driven: boolean): void {
@@ -219,7 +236,8 @@ export class BoatController {
     const targetRate = -this.steer * C.TURN_RATE * authority * Math.sign(this.speed || throttle || 1);
     this.yawRate += (targetRate - this.yawRate) * (1 - Math.exp(-3 * dt));
     const newYaw = this.yaw + this.yawRate * dt;
-    if (this.navigable(this.pos.x, this.pos.z, newYaw, this.surfaceY)) this.yaw = newYaw;
+    if (Math.abs(newYaw - this.yaw) < 1e-5 ||
+        (this.navigable(this.pos.x, this.pos.z, newYaw, this.surfaceY) && this.canTurn(newYaw))) this.yaw = newYaw;
     else this.yawRate = 0;
 
     // Motion: heading speed plus the river current (moored boats stay put)
@@ -229,17 +247,15 @@ export class BoatController {
     const mx = (fx * this.speed + this.flow.x * 0.8) * dt;
     const mz = (fz * this.speed + this.flow.z * 0.8) * dt;
     if (mx !== 0 || mz !== 0) {
-      const lead = BOAT_HALF_LENGTH + 0.15;
-      const stepLen = Math.hypot(mx, mz);
       const tryMove = (ax: number, az: number) =>
-        this.navigable(this.pos.x + ax, this.pos.z + az, this.yaw, this.surfaceY) && !this.blocked(ax, az, lead + Math.hypot(ax, az));
-      if (stepLen > 0 && tryMove(mx, mz)) {
+        this.navigable(this.pos.x + ax, this.pos.z + az, this.yaw, this.surfaceY) && !this.blocked(ax, az);
+      if (tryMove(mx, mz)) {
         this.pos.x += mx;
         this.pos.z += mz;
-      } else if (stepLen > 0 && tryMove(mx, 0)) {
+      } else if (mx !== 0 && mz !== 0 && tryMove(mx, 0)) {
         this.pos.x += mx;
         this.speed *= 0.97;
-      } else if (stepLen > 0 && tryMove(0, mz)) {
+      } else if (mx !== 0 && mz !== 0 && tryMove(0, mz)) {
         this.pos.z += mz;
         this.speed *= 0.97;
       } else {
@@ -257,11 +273,12 @@ export class BoatController {
 
   private writeBody(teleport: boolean): void {
     const q = BoatController._q.setFromAxisAngle(BoatController._up, this.yaw);
+    const y = this.surfaceY + BOAT_CONFIG.FLOAT_OFFSET;
     if (teleport) {
-      this.body.setTranslation({ x: this.pos.x, y: this.surfaceY, z: this.pos.z }, true);
+      this.body.setTranslation({ x: this.pos.x, y, z: this.pos.z }, true);
       this.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
     } else {
-      this.body.setNextKinematicTranslation({ x: this.pos.x, y: this.surfaceY, z: this.pos.z });
+      this.body.setNextKinematicTranslation({ x: this.pos.x, y, z: this.pos.z });
       this.body.setNextKinematicRotation({ x: q.x, y: q.y, z: q.z, w: q.w });
     }
   }
@@ -286,7 +303,7 @@ export class BoatController {
     const bob = Math.sin(t * 1.9) * 0.05 + Math.sin(t * 3.1 + 0.7) * 0.02 - speedT * 0.04;
 
     const g = this.model.group;
-    g.position.set(this.pos.x, this.surfaceY, this.pos.z);
+    g.position.set(this.pos.x, this.surfaceY + BOAT_CONFIG.FLOAT_OFFSET, this.pos.z);
     g.rotation.set(0, this.yaw, 0);
     this.model.hull.position.y = bob;
     this.model.hull.quaternion.setFromEuler(BoatController._e.set(this.pitch, 0, this.roll));

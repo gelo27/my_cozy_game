@@ -3,7 +3,9 @@ import { riverWorld } from './rivers/RiverWorld';
 import { SEA_FLOOR_Y, WORLD_SIZE } from './WorldSettings';
 import { waterSettings } from './WaterSettings';
 import { DUCKWEED_GLSL, duckweedUniforms } from './Duckweed';
+import { pondTint } from './PondTint';
 import { onUserSettingsChange, userSettings } from '../config/userSettings';
+import { BOAT_CHINE_Y, BOAT_HALF_LENGTH, BOAT_HALF_WIDTH, BOAT_HULL_SECTIONS } from '../vehicle/BoatModel';
 
 /**
  * The one water look, shared by the sea (WaterSystem) and the rivers / lakes (RiverSystem):
@@ -28,18 +30,27 @@ const V = WORLD_SIZE + 1;
 const SHORE_RANGE = 8;
 const LITE_WAVE_START = 24;
 const LITE_WAVE_END = 42;
+const BOAT_MASK_RADIUS = Math.hypot(BOAT_HALF_LENGTH, BOAT_HALF_WIDTH, 0.65);
 
 export const waterSurfaceUniforms = {
+  uWsBoatBounds: { value: new THREE.Vector3() },
+  uWsBoatInverse: { value: new THREE.Matrix4() },
+  uWsBoatSections: { value: BOAT_HULL_SECTIONS.map(({ width, keel, sheer }) => new THREE.Vector3(width, keel, sheer)) },
   uWsLite: { value: Number(userSettings.graphicsQuality === 'performance') },
   uWsTime: { value: 0 },
   uEstuary: { value: riverWorld.estuary },
   uWsNormals: { value: null as THREE.Texture | null },
   /** Terrain heights (m, half float), one texel per terrain vertex. */
   uWsBed: { value: null as THREE.Texture | null },
+  uWsSeaFloorY: { value: SEA_FLOOR_Y },
   /** Distance to the nearest shore (0..1 = 0..SHORE_RANGE m), for the sea's shore lines. */
   uWsShore: { value: null as THREE.Texture | null },
   uWsShallow: { value: new THREE.Color() },
   uWsDeep: { value: new THREE.Color() },
+  uWsPondMask: { value: pondTint.texture },
+  uWsPondBounds: { value: pondTint.bounds },
+  uWsPondShallow: { value: new THREE.Color() },
+  uWsPondDeep: { value: new THREE.Color() },
   uWsFoamCol: { value: new THREE.Color() },
   /** x depthFalloff, y waveNear, z waveFar, w waveSpeed */
   uWsWaveA: { value: new THREE.Vector4() },
@@ -58,6 +69,19 @@ export const waterSurfaceUniforms = {
   ...duckweedUniforms,
 };
 
+/** Track the rendered hull, including its bob, pitch and roll. */
+export function setWaterBoatHull(hull: THREE.Object3D | null): void {
+  const { uWsBoatBounds, uWsBoatInverse } = waterSurfaceUniforms;
+  if (!hull?.visible || !hull.parent?.visible) {
+    uWsBoatBounds.value.z = 0;
+    return;
+  }
+  hull.updateWorldMatrix(true, false);
+  const { elements } = hull.matrixWorld;
+  uWsBoatBounds.value.set(elements[12], elements[14], BOAT_MASK_RADIUS);
+  uWsBoatInverse.value.copy(hull.matrixWorld).invert();
+}
+
 onUserSettingsChange(() => {
   waterSurfaceUniforms.uWsLite.value = Number(userSettings.graphicsQuality === 'performance');
 });
@@ -74,6 +98,8 @@ export function updateWaterSurface(dt: number): void {
   const ws = waterSettings;
   u.uWsTime.value += dt;
   u.uWsShallow.value.set(ws.shallowColor);
+  u.uWsPondShallow.value.set(ws.pondShallowColor);
+  u.uWsPondDeep.value.set(ws.pondDeepColor);
   u.uWsDeep.value.set(ws.deepColor);
   u.uWsFoamCol.value.set(ws.foamColor);
   u.uWsWaveA.value.set(ws.depthFalloff, ws.waveNear, ws.waveFar, ws.waveSpeed);
@@ -94,7 +120,7 @@ export const WATER_SHARED_GLSL = /* glsl */ `
 vec2 wsBedUv(vec2 xz) { return (xz + ${(HALF + 0.5).toFixed(1)}) / ${V.toFixed(1)}; }
 float wsInIsland(vec2 xz) { return step(abs(xz.x), ${HALF.toFixed(1)}) * step(abs(xz.y), ${HALF.toFixed(1)}); }
 /** Height of the bed under a point (outside the island: the flat sea floor). */
-float wsBedY(vec2 xz) { return mix(${SEA_FLOOR_Y.toFixed(2)}, texture2D(uWsBed, wsBedUv(xz)).r, wsInIsland(xz)); }
+float wsBedY(vec2 xz) { return mix(uWsSeaFloorY, texture2D(uWsBed, wsBedUv(xz)).r, wsInIsland(xz)); }
 /**
  * Wave slope at p (in the frame p is measured in), calmer with camera distance; shade = a little
  * light / dark from the waves, wob = a small wobble for edges.
@@ -139,18 +165,60 @@ float wsSparkleFacet(vec2 id, vec2 need, float density, float spread, float rate
 }
 `;
 
+/** Shared by the water surfaces and the sea's sparkle sprites. */
+export const WATER_BOAT_GLSL = /* glsl */ `
+uniform vec3 uWsBoatBounds; // world xz and enclosing radius (0 = disabled)
+uniform mat4 uWsBoatInverse;
+uniform vec3 uWsBoatSections[${BOAT_HULL_SECTIONS.length}];
+
+float wsBoatPanelWidth(float y, float t, vec2 lowerA, vec2 upperA, vec2 lowerB, vec2 upperB) {
+  vec2 lower = mix(lowerA, lowerB, t);
+  vec2 upper = mix(upperA, upperB, t);
+  vec2 diagonal = mix(upperA, lowerB, t);
+  // Match the two triangles of the model panel. Each pair holds height and half-width.
+  if (y <= diagonal.x) return mix(lower.y, diagonal.y, (y - lower.x) / max(diagonal.x - lower.x, 0.00001));
+  return mix(diagonal.y, upper.y, (y - diagonal.x) / max(upper.x - diagonal.x, 0.00001));
+}
+
+bool wsInsideBoat(vec3 worldPosition) {
+  vec2 offset = abs(worldPosition.xz - uWsBoatBounds.xy);
+  if (max(offset.x, offset.y) >= uWsBoatBounds.z) return false;
+  vec3 p = (uWsBoatInverse * vec4(worldPosition, 1.0)).xyz;
+  const float hullHalfLength = ${BOAT_HALF_LENGTH.toFixed(3)};
+  if (abs(p.z) >= hullHalfLength || abs(p.x) >= ${BOAT_HALF_WIDTH.toFixed(3)}) return false;
+  float station = (p.z + hullHalfLength) * ${((BOAT_HULL_SECTIONS.length - 1) / (2 * BOAT_HALF_LENGTH)).toFixed(9)};
+  int i = min(int(station), ${BOAT_HULL_SECTIONS.length - 2});
+  float t = station - float(i);
+  vec3 a = uWsBoatSections[i], b = uWsBoatSections[i + 1];
+  vec2 yLimits = mix(a.yz, b.yz, t);
+  if (p.y <= yLimits.x || p.y >= yLimits.y) return false;
+  const float chineY = ${BOAT_CHINE_Y.toFixed(3)};
+  vec2 chineA = vec2(chineY, a.x * 0.9), chineB = vec2(chineY, b.x * 0.9);
+  float width = p.y < chineY
+    ? wsBoatPanelWidth(p.y, t, vec2(a.y, 0.0), chineA, vec2(b.y, 0.0), chineB)
+    : wsBoatPanelWidth(p.y, t, chineA, vec2(a.z, a.x), chineB, vec2(b.z, b.x));
+  return abs(p.x) < width;
+}
+`;
+
 /**
  * Declarations and helpers (fragment shader, after #include <common>; needs WATER_DETAIL_GLSL
  * for wdNoise). Globals wsN / wsFoam are filled in map_fragment and read by the lighting.
  */
 export const WATER_SURFACE_GLSL = /* glsl */ `
+${WATER_BOAT_GLSL}
 uniform float uWsLite;
 uniform float uWsTime;
 uniform sampler2D uWsNormals;
 uniform sampler2D uWsBed;
+uniform float uWsSeaFloorY;
 uniform sampler2D uWsShore;
 uniform vec3 uWsShallow;
 uniform vec3 uWsDeep;
+uniform sampler2D uWsPondMask;
+uniform vec4 uWsPondBounds;
+uniform vec3 uWsPondShallow;
+uniform vec3 uWsPondDeep;
 uniform vec3 uWsFoamCol;
 uniform vec4 uWsWaveA;
 uniform vec4 uWsWaveB;
@@ -182,9 +250,13 @@ if (dot(current, current) > 0.000001) {
 }
   return slope;
 }
-/** Shallow turquoise -> deep blue (linear colours). */
-vec3 wsColour(float depth, float shade) {
-  return mix(uWsShallow, uWsDeep, 1.0 - exp(-depth * uWsWaveA.x)) * shade;
+float wsPondTint(vec2 xz) {
+  if (any(lessThan(xz, uWsPondBounds.xy)) || any(greaterThan(xz, uWsPondBounds.zw))) return 0.0;
+  return textureLod(uWsPondMask, xz / ${WORLD_SIZE.toFixed(1)} + 0.5, 0.0).r;
+}
+
+vec3 wsColour(float depth, float shade, vec3 shallow, float pond) {
+  return mix(shallow, mix(uWsDeep, uWsPondDeep, pond), 1.0 - exp(-depth * uWsWaveA.x)) * shade;
 }
 /**
  * Shore lines at d metres from the shore. dashP = where along the shore (world xz, or metres
@@ -226,7 +298,7 @@ ${DUCKWEED_GLSL}
 
 /** Shared shading on both sides of the mesh boundary in a tidal mouth. */
 export const SEA_SURFACE_GLSL = /* glsl */ `
-vec4 wsSeaSurface(vec3 vSeaW, vec2 current, float opacity) {
+vec4 wsSeaSurface(vec3 vSeaW, vec2 current, float opacity, float pond) {
 // Depth to the bed under this pixel (outside the island: the flat sea bed)
 float inIsland = wsInIsland(vSeaW.xz);
 float seaDepth = max(vSeaW.y - wsBedY(vSeaW.xz), 0.0);
@@ -239,13 +311,14 @@ vec2 simG;
 wdSimSample(vSeaW.xz, simH, simG);
 slope += simG * uWdSimLook.y;
 wsN = normalize(vec3(slope.x, 1.0, slope.y));
-vec3 seaCol = wsColour(seaDepth, shade);
+vec3 shallow = mix(uWsShallow, uWsPondShallow, pond);
+vec3 seaCol = wsColour(seaDepth, shade, shallow, pond);
 
 // Shore: distance to the nearest land (m) from the shore field; a light band along the shore,
 // and the thin dashed lines that drift in toward it
 float shoreD = mix(${SHORE_RANGE.toFixed(1)}, texture2D(uWsShore, wsBedUv(vSeaW.xz)).r * ${SHORE_RANGE.toFixed(1)}, inIsland);
 float shoreAa = fwidth(shoreD);
-seaCol = mix(seaCol, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, shoreD)) * 0.3 * inIsland);
+seaCol = mix(seaCol, shallow * 1.25, (1.0 - smoothstep(0.0, 1.6, shoreD)) * 0.3 * inIsland);
 wsFoam = wsShoreLines(shoreD, vSeaW.xz, shoreAa, 0.0, 99.0) * (1.0 - smoothstep(60.0, 140.0, seaDist));
 wsFoam = max(wsFoam, wsWaterline(seaDepth));
 wsFoam *= inIsland * uWsShine.w;

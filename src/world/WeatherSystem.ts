@@ -6,6 +6,8 @@ import { SkyDome, SkyParams } from './SkyDome';
 import { riverWorld } from './rivers/RiverWorld';
 import { WeatherDirector } from './WeatherDirector';
 import { currentSeason } from './Seasons';
+import { pondTint } from './PondTint';
+import { waterSettings } from './WaterSettings';
 
 export type WeatherType = 'clear' | 'cloudy' | 'rain' | 'storm' | 'fog' | 'snow' | 'blizzard';
 
@@ -214,6 +216,7 @@ export class WeatherSystem {
   private skyFlat = 0;
   /** 0..1, how far the camera is under the sea, a river or a lake (fog and sky turn to water). */
   public underwater = 0;
+  private readonly pondFog = new THREE.Color();
   /** Depth of the water above the camera (m), 0 above water. */
   private underDepth = 0;
   public readonly sunDir = new THREE.Vector3(0, 1, 0);
@@ -535,13 +538,16 @@ export class WeatherSystem {
     // it turns the same colour, so nothing above the surface shows through the water
     const surface = riverWorld.waterLevelAt3(cameraPos.x, cameraPos.y, cameraPos.z);
     const below = surface - cameraPos.y;
+    const camInCave = this.isCaveAt?.(cameraPos) ? 1 : 0;
     this.underDepth = Math.max(0, below);
     this.underwater += ((below > 0.02 ? 1 : 0) - this.underwater) * (1 - Math.exp(-dt * 25));
-    if (this.underwater > 0.001) this.applyUnderwater(this.underwater, daylight);
+    if (this.underwater > 0.001) {
+      const pond = camInCave || this.caveFactor > 0.5 ? 0 : pondTint.sample(cameraPos.x, cameraPos.z);
+      this.applyUnderwater(this.underwater, daylight, pond);
+    }
     this.skyDome.mesh.visible = this.underwater < 0.5;
     // In a cave the sky seen down a long tunnel is just the fog: no sky gradient, sun or clouds
     // (also when only the camera is down there: the editor's fly camera, the doorway fade)
-    const camInCave = this.isCaveAt?.(cameraPos) ? 1 : 0;
     this.skyFlat += (Math.max(camInCave, this.caveFactor) - this.skyFlat) * (1 - Math.exp(-dt * 4));
     const flat = Math.max(camInCave, Math.min(1, this.skyFlat * 1.25));
     this.skyDome.setFlat(this.fog.color, flat > 0.001 ? flat : 0);
@@ -562,10 +568,12 @@ export class WeatherSystem {
     }
   }
 
-  private applyUnderwater(k: number, daylight: number): void {
+  private applyUnderwater(k: number, daylight: number, pond: number): void {
     const deep = Math.min(1, this.underDepth / 12);
     const light = (0.25 + daylight * 0.75) * (1 - deep * 0.55) * (1 - this.caveMix);
-    const c = WeatherSystem._c.setRGB(0.06, 0.32, 0.38).multiplyScalar(light);
+    const c = WeatherSystem._c.setRGB(0.06, 0.32, 0.38);
+    if (pond > 0) c.lerp(this.pondFog.setHex(waterSettings.pondFogColor), pond);
+    c.multiplyScalar(light);
     this.fog.color.lerp(c, k);
     this.fog.density += (0.075 + deep * 0.03 - this.fog.density) * k;
     this.sky.lerp(c, k);

@@ -107,7 +107,7 @@ interface PatchableShader {
 }
 
 /** Adds the snow cap to a lit built-in shader (after any other vertex patches). Safe to call twice. */
-export function injectSnowCover(shader: PatchableShader): void {
+export function injectSnowCover(shader: PatchableShader, strength = '1.0'): void {
   if (shader.vertexShader.includes('uSnowCover')) return;
   if (!shader.vertexShader.includes('#include <project_vertex>') || !shader.fragmentShader.includes('#include <color_fragment>')) return;
   shader.uniforms.uSnowCover = snow.cover;
@@ -144,15 +144,15 @@ export function injectSnowCover(shader: PatchableShader): void {
     );
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', '#include <common>\nvarying float vSnowK;')
-    .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.82, 0.87, 0.95), vSnowK * 0.92);');
+    .replace('#include <color_fragment>', `#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.82, 0.87, 0.95), vSnowK * 0.92 * (${strength}));`);
 }
 
 /** For a plain material with no onBeforeCompile of its own: night lights, waterline and snow. */
-export function withSnowCover<T extends THREE.Material>(mat: T): T {
+export function withSnowCover<T extends THREE.Material>(mat: T, strength?: string): T {
   mat.onBeforeCompile = (shader) => {
     injectNightLights(shader, { playerShadow: true });
     injectWaterline(shader);
-    injectSnowCover(shader);
+    injectSnowCover(shader, strength);
   };
   return mat;
 }

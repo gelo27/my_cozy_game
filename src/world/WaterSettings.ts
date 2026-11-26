@@ -15,6 +15,9 @@ export interface WaterSettings {
   opacity: number;
   shallowColor: number;
   deepColor: number;
+  pondShallowColor: number;
+  pondDeepColor: number;
+  pondFogColor: number;
   /** Exponent of the depth -> colour blend: higher = deep colour appears sooner. */
   depthFalloff: number;
   /** Normal-map slope strength near the camera / far away. */
@@ -87,6 +90,9 @@ export const WATER_DEFAULTS: Readonly<WaterSettings> = {
   opacity: 0.75,
   shallowColor: fromLinear(0.05, 0.5, 0.47),
   deepColor: fromLinear(0.006, 0.11, 0.25),
+  pondShallowColor: 0x8eab66,
+  pondDeepColor: 0x446b46,
+  pondFogColor: 0x729663,
   depthFalloff: 0.35,
   waveNear: 0.35,
   waveFar: 0.08,

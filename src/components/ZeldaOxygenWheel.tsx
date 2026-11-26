@@ -10,7 +10,7 @@ interface ZeldaOxygenWheelProps {
 }
 
 const SIZE = 34;
-const STROKE = 5;
+const STROKE = 7;
 const RADIUS = (SIZE - STROKE) / 2;
 const CIRC = 2 * Math.PI * RADIUS;
 

@@ -165,6 +165,13 @@ export class StaticShadows {
       this.bucketRange(d.x - d.r, d.z - d.r, d.x + d.r, d.z + d.r, (c) => this.buckets[c].discs.push(d));
     };
     for (const p of this.props.list()) {
+      const rockRadius = this.props.getGeneratedRockRadius(p.type);
+      if (rockRadius !== undefined) {
+        const r = rockRadius * p.scale * 1.25;
+        // Small casters need to reach the 1 m terrain grid, with less shade for smaller rocks.
+        addDisc({ x: p.position.x, z: p.position.z, r: Math.max(1, r), k: 0.45 * Math.min(1, r) });
+        continue;
+      }
       const def = PROP_CASTERS[p.type];
       if (!def) continue;
       if (TREE_TYPES.has(p.type) && this.propTrees.isDown(p.id)) continue;

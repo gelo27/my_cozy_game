@@ -8,12 +8,17 @@ import { COLLISION_GROUPS } from '../config/constants';
 import { GRASSY_TILES, TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/types/TerrainTypes';
 import { paintCurbTexture, paintPavingTexture } from '../terrain/PavingTextures';
 import { PAVING_FLAG, PAVING_TYPES, writeTerrainTileRules } from '../terrain/PavingRules';
-import { SEA_BED_TOP, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
+import { MAX_SEA_FLOOR_DEPTH, MIN_SEA_FLOOR_DEPTH, SEA_BED_COLLIDER_OFFSET, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
 import { coastRadius, islandHeight } from './IslandGenerator';
 import { riverWorld, unionRect, GridRect } from './rivers/RiverWorld';
 import { causticsUniforms, CAUSTICS_GLSL } from '../scene/WaterEffects';
 import { rippleSimUniforms } from '../scene/WaterRippleSim';
 import { TRAIL_HALF, TRAIL_SIZE } from './GrassTrail';
+import { paintGroundSurface } from './TerrainSurfaceTextures';
+import { getRockSurfaceTexture, ROCK_SURFACE_TONE_GLSL } from './RockSurfaceTexture';
+import { ROCK_PALETTES } from './GeneratedRocks';
+import { periodicNoise } from './SurfacePatterns';
+import type { RockContactMaps } from './GeneratedRockMaterial';
 
 const N = WORLD_SIZE; // cells per side (1 m cells)
 const V = N + 1; // vertices per side
@@ -102,6 +107,7 @@ export interface TerrainSaveData {
   heights: string;
   tiles: string;
   enc?: 'd1' | 'd2';
+  seaFloorDepth?: number;
 }
 
 /**
@@ -139,6 +145,7 @@ export class TerrainSystem {
   private readonly dirtyChunks = new Set<number>();
   private readonly tileData = new Uint8Array(N * N * 2);
   private readonly tileTex: THREE.DataTexture;
+  private rockHeightMap?: { texture: THREE.DataTexture; data: Uint16Array };
   private tileFullPending = true;
   private readonly splatB: THREE.DataTexture;
   /** CPU-built basin mask (R8, one texel per terrain cell); refreshed only when heights change. */
@@ -159,6 +166,11 @@ export class TerrainSystem {
   private physicsTimer = 0;
   private readonly chunkColliders: (RAPIER.Collider | null)[] = new Array(CHUNKS * CHUNKS).fill(null);
   private body: RAPIER.RigidBody | null = null;
+  private readonly seaBedBodies: RAPIER.RigidBody[] = [];
+  private seaFloorDepth = MAX_SEA_FLOOR_DEPTH;
+
+  public get seaFloorY(): number { return -this.seaFloorDepth; }
+
   private readonly uniforms = { uWaterLevel: { value: worldSettings.waterLevel }, uRainWet: { value: 0 },
     // Rain falling right now (ripples in puddles), puddle water level (0 dried out .. 1 brimming)
     uRainFall: { value: 0 },
@@ -225,6 +237,33 @@ export class TerrainSystem {
 
   public getHeight(x: number, z: number): number {
     return this.sampleHeight(x, z, false);
+  }
+
+  public getRockContactMaps(): RockContactMaps {
+    if (!this.rockHeightMap) {
+      const data = new Uint16Array(V * V);
+      const texture = new THREE.DataTexture(data, V, V, THREE.RedFormat, THREE.HalfFloatType);
+      texture.name = 'Rock contact terrain heights';
+      texture.minFilter = texture.magFilter = THREE.LinearFilter;
+      this.rockHeightMap = { texture, data };
+      this.updateRockHeights(0, 0, N, N);
+    }
+    return { heights: this.rockHeightMap.texture, tiles: this.tileTex, waterLevel: this.uniforms.uWaterLevel };
+  }
+
+  public disposeRockContactMaps(): void {
+    this.rockHeightMap?.texture.dispose();
+    this.rockHeightMap = undefined;
+  }
+
+  private updateRockHeights(x0: number, z0: number, x1: number, z1: number): void {
+    const map = this.rockHeightMap;
+    if (!map) return;
+    for (let z = z0; z <= z1; z++) {
+      const row = z * V;
+      for (let x = x0; x <= x1; x++) map.data[row + x] = THREE.DataUtils.toHalfFloat(this.heights[row + x]);
+    }
+    map.texture.needsUpdate = true;
   }
 
   public getPlacementHeight(x: number, z: number): number {
@@ -422,6 +461,7 @@ export class TerrainSystem {
   }
 
   private markHeightsDirty(minX: number, minZ: number, maxX: number, maxZ: number): void {
+    this.updateRockHeights(minX, minZ, maxX, maxZ);
     this.rebuildPuddleMask(minX - 6, minZ - 6, maxX + 6, maxZ + 6);
     // A vertex on a chunk edge belongs to both neighbours; normals also read one cell further out
     const c0x = Math.max(0, Math.floor((minX - 1) / CHUNK));
@@ -498,6 +538,43 @@ export class TerrainSystem {
     this.puddleMaskTex.needsUpdate = true;
     this.puddleMaskFullPending = false;
     r.x0 = N; r.z0 = N; r.x1 = -1; r.z1 = -1;
+  }
+
+  /** Change the open-sea bed and blend the height change into the offshore terrain. */
+  public setSeaFloorDepth(depth: number): void {
+    if (!Number.isFinite(depth)) return;
+    depth = THREE.MathUtils.clamp(depth, MIN_SEA_FLOOR_DEPTH, MAX_SEA_FLOOR_DEPTH);
+    const rise = this.seaFloorDepth - depth;
+    if (rise === 0) return;
+
+    for (let z = 0; z <= N; z++) for (let x = 0; x <= N; x++) {
+      const wx = x - WORLD_HALF;
+      const wz = z - WORLD_HALF;
+      const axisDistance = Math.max(Math.abs(wx), Math.abs(wz));
+      if (axisDistance === WORLD_HALF) {
+        this.heights[z * V + x] += rise;
+        continue;
+      }
+      const distance = Math.hypot(wx, wz);
+      if (distance < 160) continue;
+      const start = coastRadius(wx, wz) + 4;
+      const edge = WORLD_HALF * distance / axisDistance;
+      this.heights[z * V + x] += rise * THREE.MathUtils.smoothstep(distance, start, edge);
+    }
+    this.updateSeaFloorDepth(depth);
+    this.recutTerrainRivers();
+    this.markHeightsDirty(0, 0, N, N);
+    this.commit();
+  }
+
+  private updateSeaFloorDepth(depth: number): void {
+    this.seaFloorDepth = depth;
+    const y = this.seaFloorY - SEA_BED_COLLIDER_OFFSET - 0.5;
+    for (const body of this.seaBedBodies) {
+      const { x, z } = body.translation();
+      body.setTranslation({ x, y, z }, false);
+    }
+    this.physics.world.propagateModifiedBodyPositionsToColliders();
   }
 
   /** Forces the physics heightfield to match immediately (e.g. on brush release). */
@@ -595,9 +672,11 @@ export class TerrainSystem {
     return this.heights.map((y, i) => y - this.riverCuts[i]);
   }
 
-  public restoreUncarvedHeights(heights: Float32Array): void {
+  public restoreUncarvedHeights(heights: Float32Array, seaFloorDepth: number): void {
+    this.updateSeaFloorDepth(seaFloorDepth);
     this.heights.set(heights);
     this.riverCuts.fill(0);
+    this.updateRockHeights(0, 0, N, N);
     this.invalidateSaveCache();
   }
 
@@ -610,6 +689,7 @@ export class TerrainSystem {
   }
 
   public resetFlat(): void {
+    this.updateSeaFloorDepth(MAX_SEA_FLOOR_DEPTH);
     this.heights.fill(0);
     this.riverCuts.fill(0);
     this.recutTerrainRivers();
@@ -904,11 +984,13 @@ export class TerrainSystem {
     const layers = {
       tGrass: createLayerTexture(TerrainTileType.GRASS),
       tLayers: createSurfaceArray(),
-      tRock: createRockTexture(),
+      tRock: getRockSurfaceTexture(),
     };
     this.grassLayer = layers.tGrass;
     // The sea bed past the map edge continues the sand (WaterSystem): its own 2D texture
     this.sandLayer = createLayerTexture(TerrainTileType.SAND_BEACH);
+    const [graniteShade, graniteBase] = ROCK_PALETTES.granite.colors;
+    const cliffTint = new THREE.Color(graniteShade).lerp(new THREE.Color(graniteBase), 0.55);
     mat.onBeforeCompile = (shader) => {
       injectNightLights(shader, { perVertex: lite, ground: true, playerShadow: true });
       Object.assign(shader.uniforms, this.uniforms, causticsUniforms, rippleSimUniforms, {
@@ -917,6 +999,7 @@ export class TerrainSystem {
         tSplatB: { value: this.splatB },
         tPuddleMask: { value: this.puddleMaskTex },
         uWorldSize: { value: WORLD_SIZE },
+        uCliffTint: { value: cliffTint },
       });
       for (const [k, v] of Object.entries(layers)) shader.uniforms[k] = { value: v };
 
@@ -938,6 +1021,8 @@ varying float vTerrUpY;
 varying vec3 vTerrN;
 varying float vShade;
 uniform sampler2D tGrass, tRock, tTiles, tSplatB, tRiver;
+uniform vec3 uCliffTint;
+${ROCK_SURFACE_TONE_GLSL}
 uniform highp sampler2DArray tLayers;
 ${SURFACE_GLSL}
 uniform float uWorldSize;
@@ -960,16 +1045,33 @@ float terrWaterY;
 ${CAUSTICS_GLSL}
 // Rock on steep slopes: triplanar, so it never smears down a cliff the way a top-down (XZ)
 // projection does. Side projections only fetch where they actually show.
-vec3 rockTriplanar(float scale) {
+vec3 rockCliffSample(vec2 uv, vec2 dx, vec2 dy, float variantMix) {
+  // Blend orientations of the same stone grain to soften repeats over broad cliffs.
+  const mat2 turn = mat2(0.85, 0.53, -0.53, 0.85) * 0.91;
+  if (variantMix >= 0.4) return textureGrad(tRock, turn * uv + vec2(0.57, 0.27), turn * dx, turn * dy).rgb;
+  vec3 a = textureGrad(tRock, uv, dx, dy).rgb;
+  if (variantMix <= -0.4) return a;
+  vec3 b = textureGrad(tRock, turn * uv + vec2(0.57, 0.27), turn * dx, turn * dy).rgb;
+  return mix(a, b, smoothstep(-0.4, 0.4, variantMix));
+}
+vec3 rockTriplanar(vec3 worldDX, vec3 worldDY) {
   vec3 w = abs(normalize(vTerrN));
   w = w * w * w * w;
   w /= w.x + w.y + w.z;
+  const float scale = 0.52;
   vec3 p = vTerrWorld * scale;
+  p += sin(vTerrWorld.zxy * 0.23 + vTerrWorld.yzx * 0.13 + sin(vTerrWorld.yzx * 0.091)) * vec3(0.13, 0.11, 0.15);
+  p += sin(vTerrWorld.yzx * 0.57 + vTerrWorld.zxy * 0.19) * 0.038;
+  float variantMix = sin(dot(vTerrWorld, vec3(0.21, 0.35, 0.17)) + sin(dot(vTerrWorld, vec3(0.09, -0.16, 0.27))))
+              + sin(dot(vTerrWorld, vec3(-0.35, 0.12, 0.23))) * 0.51;
+  vec3 dx = worldDX * scale;
+  vec3 dy = worldDY * scale;
   vec3 c = vec3(0.0);
-  if (w.y > 0.01) c += texture2D(tRock, p.xz).rgb * w.y;
-  if (w.x > 0.01) c += texture2D(tRock, p.zy + 0.37).rgb * w.x;
-  if (w.z > 0.01) c += texture2D(tRock, p.xy + 0.71).rgb * w.z;
-  return c;
+  float weight = 0.0;
+  if (w.y > 0.01) { c += rockCliffSample(p.xz, dx.xz, dy.xz, variantMix) * w.y; weight += w.y; }
+  if (w.x > 0.01) { c += rockCliffSample(p.zy + 0.37, dx.zy, dy.zy, variantMix) * w.x; weight += w.x; }
+  if (w.z > 0.01) { c += rockCliffSample(p.xy + 0.71, dx.xy, dy.xy, variantMix) * w.z; weight += w.z; }
+  return uCliffTint * rockSurfaceTone(c / weight);
 }
 #ifndef TERRAIN_LITE
 // Three neighbouring hex centres form a triangle. Each centre has a fixed transform:
@@ -1016,6 +1118,7 @@ vec3 terrainColor() {
   vec2 suv = (vTerrWorld.xz + uWorldSize * 0.5) / uWorldSize;
   vec2 uv = vTerrWorld.xz * 0.5;
   vec2 duvX = dFdx(uv), duvY = dFdy(uv);
+  vec3 worldDX = dFdx(vTerrWorld), worldDY = dFdy(vTerrWorld);
   // Local water: the sea, or a river's surface near its channel
   vec2 riverUv = (vTerrWorld.xz + uWorldSize * 0.5 + 0.5) / (uWorldSize + 1.0);
   vec3 river = texture2D(tRiver, riverUv).rgb;
@@ -1143,8 +1246,8 @@ vec3 terrainColor() {
   }
   // Painted sand is already part of the surface blend above; the shore adds sand on top
   if (beach > 0.001) c = mix(c, sandColor, beach);
-  float rock = smoothstep(0.8, 0.62, vTerrUpY);
-  if (rock > 0.001) c = mix(c, rockTriplanar(0.5), rock);
+  float rock = 1.0 - smoothstep(0.62, 0.8, vTerrUpY);
+  if (rock > 0.001) c = mix(c, rockTriplanar(worldDX, worldDY), rock);
   // Ice: a cold sky sheen, strongest at grazing angles (a cheap Fresnel instead of a reflection)
   if (iceW > 0.001) {
     float iceFres = 1.0 - max(dot(normalize(cameraPosition - vTerrWorld), normalize(vTerrN)), 0.0);
@@ -1332,7 +1435,15 @@ vec3 terrainColor() {
   /** Sea bed under the open sea, and invisible walls far out in it so nothing leaves the world. */
   private createWorldBounds(): void {
     const s = WORLD_LIMIT * 2;
-    this.physics.createStaticBox(new THREE.Vector3(0, SEA_BED_TOP - 0.5, 0), new THREE.Vector3(s, 1, s));
+    const width = WORLD_LIMIT - WORLD_HALF;
+    const center = WORLD_HALF + width / 2;
+    const bedY = this.seaFloorY - SEA_BED_COLLIDER_OFFSET - 0.5;
+    for (const side of [-1, 1]) {
+      this.seaBedBodies.push(
+        this.physics.createStaticBox(new THREE.Vector3(0, bedY, side * center), new THREE.Vector3(s, 1, width)).body,
+        this.physics.createStaticBox(new THREE.Vector3(side * center, bedY, 0), new THREE.Vector3(width, 1, WORLD_SIZE)).body,
+      );
+    }
     const h = 60;
     const t = 1;
     const walls: [number, number, number, number][] = [
@@ -1372,7 +1483,7 @@ vec3 terrainColor() {
     for (let i = 0; i < dh.length; i++) dh[i] = Math.round((this.heights[i] - this.riverCuts[i]) * 100) - base.heights[i];
     const dt = new Int16Array(N * N);
     for (let i = 0; i < dt.length; i++) dt[i] = this.tiles[i];
-    return { size: N, enc: 'd2', heights: rleEncode(dh), tiles: rleEncode(dt) };
+    return { size: N, enc: 'd2', heights: rleEncode(dh), tiles: rleEncode(dt), seaFloorDepth: this.seaFloorDepth };
   }
 
   /** True when the last load placed an older, smaller world in the island's centre. */
@@ -1415,6 +1526,7 @@ vec3 terrainColor() {
     } else {
       return;
     }
+    this.updateSeaFloorDepth(data.seaFloorDepth ?? MAX_SEA_FLOOR_DEPTH);
     this.riverCuts.fill(0);
     this.recutTerrainRivers();
     this.markHeightsDirty(0, 0, N, N);
@@ -1724,14 +1836,8 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
   switch (type) {
     case TerrainTileType.GRASS:
     case TerrainTileType.FLOWER_GRASS: {
-      // The flowered meadow repeats the base's blades stroke for stroke (same seed and colours),
-      // so its border against plain grass never shows: only the flowers differ
-      seed = TerrainTileType.GRASS * 9973 + 17;
-      for (let i = 0; i < 2200; i++) {
-        ctx.fillStyle = rnd() < 0.5 ? def.secondaryColor : def.accentColor;
-        ctx.globalAlpha = 0.35 + rnd() * 0.4;
-        wrapRect(rnd() * size, rnd() * size, 2, 4 + rnd() * 4);
-      }
+      // The flowered meadow uses the same base as grass so only the flowers differ.
+      paintGroundSurface(ctx, size, 'grass');
       if (type === TerrainTileType.FLOWER_GRASS) {
         // Small white five-petal flowers with a yellow eye, a few alone, most in loose clusters
         seed = type * 9973 + 17;
@@ -1760,6 +1866,12 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
       }
       break;
     }
+    case TerrainTileType.SAND_BEACH:
+      paintGroundSurface(ctx, size, 'sand');
+      break;
+    case TerrainTileType.DIRT_ROAD:
+      paintGroundSurface(ctx, size, 'dirt');
+      break;
     case TerrainTileType.STONE_COBBLE:
     case TerrainTileType.SIDEWALK_PAVERS:
     case TerrainTileType.CLINKER_HERRINGBONE:
@@ -1784,13 +1896,8 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
       break;
     case TerrainTileType.DRY_GRASS:
     case TerrainTileType.BIRCH_GRASS: {
-      // Blade strokes like the grass base (dry: a few pale straws and bare patches between)
       const dry = type === TerrainTileType.DRY_GRASS;
-      for (let i = 0; i < 2400; i++) {
-        ctx.fillStyle = rnd() < 0.5 ? def.secondaryColor : def.accentColor;
-        ctx.globalAlpha = 0.35 + rnd() * 0.4;
-        wrapRect(rnd() * size, rnd() * size, 2, 4 + rnd() * 5);
-      }
+      paintGroundSurface(ctx, size, dry ? 'dry' : 'birch');
       if (dry) {
         for (let i = 0; i < 40; i++) {
           ctx.fillStyle = '#7d6a3c';
@@ -1924,18 +2031,12 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
 
   if (type === TerrainTileType.GRASS) {
     // Macro variation noise in alpha for irregular surface edges and weather effects.
+    // Canvas storage premultiplies RGBA, so zero alpha would also erase the grass RGB.
     const img = ctx.getImageData(0, 0, size, size);
-    const blobs = Array.from({ length: 40 }, () => [rnd() * size, rnd() * size, 20 + rnd() * 50, rnd()]);
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
-        let v = 0.5;
-        for (const [bx, by, br, bv] of blobs) {
-          const dx = Math.min(Math.abs(x - bx), size - Math.abs(x - bx));
-          const dy = Math.min(Math.abs(y - by), size - Math.abs(y - by));
-          const d = Math.sqrt(dx * dx + dy * dy) / br;
-          if (d < 1) v += (bv - 0.5) * (1 - d) * 0.8;
-        }
-        img.data[(y * size + x) * 4 + 3] = Math.max(0, Math.min(255, v * 255));
+        const u = (x + 0.5) / size, v = (y + 0.5) / size;
+        img.data[(y * size + x) * 4 + 3] = Math.round((0.34 + 0.32 * periodicNoise(u, v, 5, 127)) * 255);
       }
     }
     ctx.putImageData(img, 0, 0);
@@ -1946,23 +2047,5 @@ function createLayerTexture(type: TerrainTileType): THREE.CanvasTexture {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
   if (type === TerrainTileType.GRASS) tex.premultiplyAlpha = false;
-  return tex;
-}
-
-function createRockTexture(): THREE.CanvasTexture {
-  const size = 128;
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = '#7b756c';
-  ctx.fillRect(0, 0, size, size);
-  for (let i = 0; i < 500; i++) {
-    ctx.fillStyle = Math.random() < 0.5 ? '#6a645b' : '#8d877d';
-    ctx.globalAlpha = 0.5;
-    ctx.fillRect(Math.random() * size, Math.random() * size, 3 + Math.random() * 6, 2 + Math.random() * 3);
-  }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }

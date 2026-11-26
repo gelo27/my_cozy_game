@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { TerrainSystem } from '../world/TerrainSystem';
 import { waterLevelAt } from '../world/rivers/RiverWorld';
 import { coastRadius } from '../world/IslandGenerator';
+import { FARM_POND_FISHING_RADIUS } from '../world/WorldSettings';
 import { emitWaterRipple } from '../scene/WaterDetails';
 import { waterRippleSim } from '../scene/WaterRippleSim';
 import { duckweedSim, DUCKWEED_BOBBER_SLOT } from '../scene/DuckweedSim';
@@ -72,7 +73,7 @@ export type FishingEvent =
 export function waterAt(x: number, z: number): FishingWater {
   const r = Math.hypot(x, z);
   if (r > coastRadius(x, z) - 32) return 'sea';
-  return r > 72 ? 'lake' : 'pond';
+  return r > FARM_POND_FISHING_RADIUS ? 'lake' : 'pond';
 }
 
 const MIN_DIST = 3;

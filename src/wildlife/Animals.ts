@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Agent, Species, SpeciesTuning, WildContext, angleTo, turnToward } from './Species';
 import { createAnimalMaterial } from './AnimalMaterial';
 import { butterflyGeometry, fishGeometry, gullGeometry, hareGeometry, turtleGeometry } from './AnimalGeometry';
+import { FARM_POND_FISHING_RADIUS } from '../world/WorldSettings';
 
 const TAU = Math.PI * 2;
 const dist2 = (ax: number, az: number, bx: number, bz: number) => (ax - bx) ** 2 + (az - bz) ** 2;
@@ -349,9 +350,11 @@ const FISH_PER_SCHOOL = 9;
  */
 export class FishSchools extends Species {
   public clock = 0;
+  private readonly pondClearanceSq: number;
 
   constructor(parent: THREE.Object3D, tune: SpeciesTuning) {
     super('fish', { ...tune, perAgent: FISH_PER_SCHOOL }, fishGeometry(), createAnimalMaterial('swim', 0.35, { flat: false }), parent);
+    this.pondClearanceSq = (FARM_POND_FISHING_RADIUS + tune.radius) ** 2;
   }
 
   private deep(ctx: WildContext, x: number, z: number, min = 1.3): { surface: number; bed: number } | null {
@@ -361,6 +364,8 @@ export class FishSchools extends Species {
   }
 
   protected spawn(a: Agent, x: number, z: number, ctx: WildContext): boolean {
+    // Only catchable fish belong in the farm pond. Leave room for the whole school.
+    if (x * x + z * z <= this.pondClearanceSq) return false;
     const w = this.deep(ctx, x, z, 1.6);
     if (!w) return false;
     // Big water only: a few metres around must be water too (skips puddles and narrow creeks)
@@ -393,6 +398,7 @@ export class FishSchools extends Species {
           const ang = a.yaw + (this.rnd() - 0.5) * 2.4;
           const r = 6 + this.rnd() * 10;
           const tx = a.x + Math.sin(ang) * r, tz = a.z + Math.cos(ang) * r;
+          if (tx * tx + tz * tz <= this.pondClearanceSq) continue;
           const w = this.deep(ctx, tx, tz, 1.4);
           if (w) {
             a.tx = tx;
@@ -407,7 +413,7 @@ export class FishSchools extends Species {
     }
     const nx = a.x + Math.sin(a.yaw) * a.speed * dt;
     const nz = a.z + Math.cos(a.yaw) * a.speed * dt;
-    const w = this.deep(ctx, nx, nz, 1.0);
+    const w = nx * nx + nz * nz > this.pondClearanceSq ? this.deep(ctx, nx, nz, 1.0) : null;
     if (w) {
       a.x = nx;
       a.z = nz;

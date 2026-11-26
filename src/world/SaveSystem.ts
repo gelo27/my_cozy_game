@@ -5,8 +5,9 @@ import { PropSaveData, MILLSTONE_SPOT, FOREST_VERSION } from './PropSystem';
 import { PetSaveData } from '../gameplay/PetSystem';
 import { WeatherType } from './WeatherSystem';
 import type { WeatherDirectorSave } from './WeatherDirector';
-import { WORLD_SIZE, worldSettings } from './WorldSettings';
+import { MAX_SEA_FLOOR_DEPTH, MIN_SEA_FLOOR_DEPTH, WORLD_SIZE, worldSettings } from './WorldSettings';
 import { duckweed } from './Duckweed';
+import { POND_TINT_RES, pondTint } from './PondTint';
 import { SEASONS, Season, legacySeasonOf } from './Seasons';
 import type { GameWorld } from '../engine/GameEngine';
 import type { FieldSaveData } from '../farming/FieldManager';
@@ -18,6 +19,7 @@ import { STORAGE_CHEST, STORAGE_CHEST_SPOT } from '../npc/FarmStorage';
 import { ROCK_TYPES } from '../gathering/GatheringConfig';
 import type { AuthoredRock } from '../gathering/RockField';
 import { PEST_KINDS, type AuthoredPest, type PestKind } from '../gameplay/Pests';
+import { isGeneratedRockSave, isGeneratedRockType, MAX_GENERATED_ROCKS, type GeneratedRockSave } from './GeneratedRocks';
 
 export const SAVE_VERSION = 3;
 const LEGACY_SAVE_VERSION = 2;
@@ -49,6 +51,7 @@ export interface WorldSaveData {
   /** Snow lying on the ground 0..1 (missing in older saves: none). */
   snowCover?: number;
   props: PropSaveData[];
+  generatedRocks?: GeneratedRockSave[];
   /** Forest generation the props came from (missing = before the denser forests). */
   forest?: number;
   buildings: BuildingSceneExportData | null;
@@ -79,6 +82,8 @@ export interface WorldSaveData {
   season?: Season;
   /** Duckweed painted on the water (Duckweed.ts RLE; missing: none). */
   duckweed?: string;
+  /** Painted weight of the pond palette, using the water mask's byte RLE. */
+  pondTint?: string;
   /** Sleep and respawn: the bed slept in last and that night's index. */
   sleep?: { bed: [number, number, number] | null; night: number };
 }
@@ -151,6 +156,8 @@ function isValidRleBase64(value: unknown, expectedValues: number): boolean {
 
 function isTerrainSave(value: unknown): value is TerrainSaveData {
   if (!isRecord(value) || !isIntegerInRange(value.size, 1, WORLD_SIZE)) return false;
+  const depth = value.seaFloorDepth;
+  if (depth !== undefined && (!isFiniteNumber(depth) || depth < MIN_SEA_FLOOR_DEPTH || depth > MAX_SEA_FLOOR_DEPTH)) return false;
   const size = value.size as number;
 
   if (value.enc === 'd1' || value.enc === 'd2') {
@@ -194,7 +201,7 @@ function isBuildingSave(value: unknown): boolean {
   return true;
 }
 
-function isPropSave(value: unknown): boolean {
+function isPropSave(value: unknown): value is PropSaveData {
   return isRecord(value) && typeof value.type === 'string' &&
     isNumberTuple(value.p, 3) && isFiniteNumber(value.r) &&
     isFiniteNumber(value.s) && value.s > 0 && value.s <= 100 &&
@@ -261,6 +268,16 @@ function isWorldSaveData(value: unknown): value is WorldSaveData {
       !Array.isArray(value.props) || value.props.length > 200_000 ||
       !value.props.every(isPropSave) || !isBuildingSave(value.buildings)) return false;
 
+  const rockTypes = new Set<string>();
+  if (value.generatedRocks !== undefined) {
+    if (!Array.isArray(value.generatedRocks) || value.generatedRocks.length > MAX_GENERATED_ROCKS) return false;
+    for (const rock of value.generatedRocks) {
+      if (!isGeneratedRockSave(rock) || rockTypes.has(rock.id)) return false;
+      rockTypes.add(rock.id);
+    }
+  }
+  if (value.props.some(({ type }) => isGeneratedRockType(type) && !rockTypes.has(type))) return false;
+
   if (!isRecord(value.inventory) || !isNumberRecord(value.inventory.items) ||
       !(value.inventory.equipped === null || typeof value.inventory.equipped === 'string') ||
       (value.inventory.hotbar !== undefined &&
@@ -323,6 +340,18 @@ function isWorldSaveData(value: unknown): value is WorldSaveData {
   if (value.day !== undefined && (!isFiniteNumber(value.day) || value.day < 0)) return false;
   if (value.season !== undefined && !['spring', 'summer', 'autumn', 'winter'].includes(String(value.season))) return false;
   if (value.duckweed !== undefined && decodeSaveBase64(value.duckweed) === null) return false;
+  if (value.pondTint !== undefined) {
+    const decoded = decodeSaveBase64(value.pondTint);
+    if (!decoded || decoded.length % 3 !== 0 || decoded.length > POND_TINT_RES ** 2 * 3) return false;
+    let cells = 0;
+    for (let i = 0; i < decoded.length; i += 3) {
+      const run = decoded.charCodeAt(i + 1) | (decoded.charCodeAt(i + 2) << 8);
+      if (run === 0) return false;
+      cells += run;
+      if (cells > POND_TINT_RES ** 2) return false;
+    }
+    if (cells !== POND_TINT_RES ** 2) return false;
+  }
   if (value.sleep !== undefined &&
       (!isRecord(value.sleep) ||
         !(value.sleep.bed === null || isNumberTuple(value.sleep.bed, 3)) ||
@@ -362,17 +391,20 @@ export class SaveSystem {
     const vt = w.vehicle.body.translation();
     const vr = w.vehicle.body.rotation();
     const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(new THREE.Quaternion(vr.x, vr.y, vr.z, vr.w));
+    const generatedRocks = w.props.serializeGeneratedRocks();
     return {
       version: SAVE_VERSION,
       savedAt: new Date().toISOString(),
       terrain: w.terrain.serialize(),
       waterLevel: worldSettings.waterLevel,
       duckweed: duckweed.serialize(),
+      pondTint: pondTint.serialize(),
       timeOfDay: worldSettings.timeOfDay,
       weather: w.weather.weather,
       weatherDirector: w.weather.director.serialize(),
       snowCover: +w.weather.snowCover.toFixed(3),
       props: w.props.serialize(),
+      generatedRocks: generatedRocks.length ? generatedRocks : undefined,
       forest: w.props.forestVersion,
       buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
       fields: w.farmingManager.serializeFields(),
@@ -417,7 +449,8 @@ export class SaveSystem {
     w.weather.snowCover = Math.min(1, Math.max(0, data.snowCover ?? 0));
     w.terrain.deserialize(data.terrain);
     duckweed.deserialize(data.duckweed);
-    w.props.deserialize(data.props);
+    pondTint.deserialize(data.pondTint);
+    w.props.deserialize(data.props, data.generatedRocks);
     // Saves from before the millstone existed get one at its usual spot
     if (!restoring) w.props.ensureStation('millstone', MILLSTONE_SPOT.x, MILLSTONE_SPOT.z);
     // ...and a storage chest for the farmhands

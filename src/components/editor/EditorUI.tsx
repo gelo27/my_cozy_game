@@ -15,14 +15,15 @@ import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool, isScatterable } from '../../editor/EditorController';
 import { PEST_KINDS, PestKind } from '../../gameplay/Pests';
 import { lockOnSettings } from '../../gameplay/LockOn';
-import { PROP_DEFS, PROP_DEF_MAP, PropCategory } from '../../world/PropSystem';
+import { PROP_DEFS, PROP_DEF_MAP, PropCategory, canTiltProp } from '../../world/PropSystem';
 import { WEB_LIMITS, WebParams, webSettings, setWebSetting, resetWebSettings } from '../../world/SpiderWebs';
 import { CHAIN_SPECIES, LILY_HEADS, algaeSettings, setAlgae, resetAlgaeSettings } from '../../world/AlgaeChains';
 import { TerrainTileType, TILE_DEFINITIONS } from '../../terrain/types/TerrainTypes';
 import { WeatherType, WEATHER_LABELS, WEATHER_PROFILES, WeatherProfiles, WeatherSound } from '../../world/WeatherSystem';
 import { SEASONS, SEASON_LABELS, currentSeason } from '../../world/Seasons';
-import { worldSettings } from '../../world/WorldSettings';
+import { MAX_SEA_FLOOR_DEPTH, MIN_SEA_FLOOR_DEPTH, worldSettings } from '../../world/WorldSettings';
 import { duckweed } from '../../world/Duckweed';
+import { pondTint } from '../../world/PondTint';
 import { BIRD_SPECIES, birdSpeciesEnabled, setBirdSpeciesEnabled } from '../../audio/AmbientAudio';
 import { SaveSystem } from '../../world/SaveSystem';
 import { waterSettings, WaterSettings, WATER_DEFAULTS, saveWaterSettings, resetWaterSettings } from '../../world/WaterSettings';
@@ -49,7 +50,8 @@ function readEditorList(key: string): string[] {
 
 const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції', objects: 'Об’єкти' };
 
-type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'veg' | 'music' | 'save' | 'debug';
+type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'veg' | 'rocks' | 'music' | 'save' | 'debug';
+const RockGeneratorPanel = React.lazy(() => import('./RockGeneratorPanel'));
 
 interface EditorUIProps {
   engine: GameEngine;
@@ -102,9 +104,11 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'cave', icon: Shell, label: 'Печери (6)' },
     { id: 'enemy', icon: Skull, label: 'Вороги (7)' },
     { id: 'duckweed', icon: Sprout, label: 'Ряска (8)' },
+    { id: 'pondTint', icon: Droplets, label: 'Колір ставка (0)' },
     { id: 'scatter', icon: SprayCan, label: 'Пензель об’єктів (9)' },
   ];
   const tabs: { id: Tab; icon: React.ElementType; label: string }[] = [
+    { id: 'rocks', icon: Gem, label: 'Генератор каменів' },
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
     { id: 'atmo', icon: Sun, label: 'Час, погода, вода' },
     { id: 'water', icon: Waves, label: 'Шейдер води' },
@@ -199,7 +203,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
       </div>
 
       {/* Left rail */}
-      <div className="absolute top-2 left-2 bottom-2 w-11 flex flex-col gap-1 bg-zinc-900/90 border border-white/10 rounded-xl p-1 shadow-xl pointer-events-auto">
+      <div className="absolute top-2 left-2 bottom-2 w-11 flex flex-col gap-1 overflow-y-auto bg-zinc-900/90 border border-white/10 rounded-xl p-1 shadow-xl pointer-events-auto [&>button]:shrink-0 [scrollbar-width:none]">
         {tools.map((t) => (
           <button
             key={t.id}
@@ -231,11 +235,17 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
         {recent.length > 0 && <Section title="Нещодавні інструменти">
           <div className="flex flex-wrap gap-1">{recent.map((key) => <button key={key} className={chip(false)} onClick={() => selectNav(key)}><Clock3 className="h-3 w-3 text-sky-300" />{navLabel(key)}</button>)}</div>
         </Section>}
-        {tab === 'world' && <ToolPanel engine={engine} />}
+        {tab === 'world' && <ToolPanel engine={engine} rerender={rerender} />}
         {tab === 'scene' && <ScenePanel engine={engine} notice={props.notify} openTool={setTool} inspectProp={<SelectedInspector engine={engine} detailsOnly />} />}
         {tab === 'atmo' && <AtmospherePanel engine={engine} rerender={rerender} />}
         {tab === 'water' && <WaterPanel rerender={rerender} />}
         {tab === 'veg' && <VegetationPanel rerender={rerender} />}
+        {tab === 'rocks' && <React.Suspense fallback={<p className="text-zinc-400">Завантаження генератора…</p>}>
+          <RockGeneratorPanel engine={engine} onPlace={(id) => {
+            editor.set('placeType', id);
+            setTool('place');
+          }} />
+        </React.Suspense>}
         {tab === 'music' && <MusicPanel />}
         {tab === 'save' && <SavePanel engine={engine} notify={props.notify} />}
         {tab === 'debug' && <DebugTab {...props} />}
@@ -251,8 +261,8 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
 
 // ------------------------------------------------------------------ panels
 
-const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
-  const editor = engine.world!.editor;
+const ToolPanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ engine, rerender }) => {
+  const { editor, props } = engine.world!;
   const s = editor.state;
   const [category, setCategory] = useState<PropCategory>('nature');
 
@@ -289,7 +299,8 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
         </Section>
         <Section title="Об’єкт">
           <div className="grid grid-cols-3 gap-1">
-            {PROP_DEFS.filter((d) => d.category === category).map((d) => {
+            {(category === 'nature' ? [...PROP_DEFS.filter((d) => d.category === category),
+              ...props.serializeGeneratedRocks().map(({ id }) => props.getDefinition(id)!)] : PROP_DEFS.filter((d) => d.category === category)).map((d) => {
               const Icon = ICONS[d.icon] ?? Box;
               return (
                 <button
@@ -357,6 +368,47 @@ const ToolPanel: React.FC<{ engine: GameEngine }> = ({ engine }) => {
   if (s.tool === 'cave') return <CavePanel engine={engine} />;
   if (s.tool === 'enemy') return <EnemyPanel engine={engine} />;
   if (s.tool === 'scatter') return <ScatterPanel engine={engine} />;
+
+  if (s.tool === 'pondTint') {
+    const colors = [
+      ['pondShallowColor', 'Мілина'],
+      ['pondDeepColor', 'Глибина'],
+      ['pondFogColor', 'Під водою'],
+    ] as const;
+    return (
+      <Section title="Колір ставка">
+        <div className="flex gap-1">
+          <button className={chip(!s.pondTintErase)} onClick={() => editor.set('pondTintErase', false)}>Фарбувати</button>
+          <button className={chip(s.pondTintErase)} onClick={() => editor.set('pondTintErase', true)}>Стерти</button>
+        </div>
+        <Slider label="Радіус" value={s.brushRadius} min={1} max={20} step={1} onChange={(v) => editor.set('brushRadius', v)} fmt={(v) => `${v} м`} />
+        <Slider label="Сила" value={s.pondTintRate} min={0.1} max={4} step={0.1} onChange={(v) => editor.set('pondTintRate', v)} fmt={(v) => v.toFixed(1)} />
+        <div className="grid grid-cols-3 gap-2">
+          {colors.map(([key, label]) => (
+            <label key={key} className="flex flex-col items-center gap-1 text-[10px] text-zinc-400">
+              <input type="color" value={hexOf(waterSettings[key])} className="w-full h-7 bg-transparent border border-white/10 rounded cursor-pointer"
+                onChange={(e) => {
+                  waterSettings[key] = parseInt(e.target.value.slice(1), 16);
+                  saveWaterSettings();
+                  rerender();
+                }}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+        <button className={`${btn} gap-1.5 py-1.5 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25`}
+          onClick={() => {
+            if (pondTint.bounds.x > pondTint.bounds.z) return;
+            editor.trackPondTint();
+            pondTint.clear();
+          }}
+        >
+          <Trash2 className="w-3.5 h-3.5" /> Очистити маску
+        </button>
+      </Section>
+    );
+  }
 
   if (s.tool === 'duckweed') {
     return (
@@ -603,7 +655,8 @@ const SelectedInspector: React.FC<{ engine: GameEngine; detailsOnly?: boolean }>
   const id = editor.state.selectedPropId;
   const prop = id !== null ? props.get(id) : undefined;
   if (!prop) return <p className="text-zinc-500">Нічого не вибрано.</p>;
-  const def = PROP_DEFS.find((d) => d.id === prop.type);
+  const def = props.getDefinition(prop.type);
+  const canTilt = canTiltProp(prop.type);
   const update = (patch: { x?: number; y?: number; z?: number; rot?: number; scale?: number; tx?: number; tz?: number }) => {
     editor.trackSelectedProp();
     const p = prop.position.clone();
@@ -611,7 +664,7 @@ const SelectedInspector: React.FC<{ engine: GameEngine; detailsOnly?: boolean }>
     if (patch.y !== undefined) p.y = patch.y;
     if (patch.z !== undefined) p.z = patch.z;
     if (patch.y !== undefined) prop.grounded = false;
-    const tilt: [number, number] | undefined = def?.web
+    const tilt: [number, number] | undefined = canTilt
       ? [
           patch.tx !== undefined ? THREE.MathUtils.degToRad(patch.tx) : prop.tilt?.[0] ?? 0,
           patch.tz !== undefined ? THREE.MathUtils.degToRad(patch.tz) : prop.tilt?.[1] ?? 0,
@@ -630,7 +683,7 @@ const SelectedInspector: React.FC<{ engine: GameEngine; detailsOnly?: boolean }>
         <NumberField label="Поворот°" value={THREE.MathUtils.radToDeg(prop.rotationY)} onCommit={(v) => update({ rot: v })} />
         <NumberField label="Масштаб" value={prop.scale} onCommit={(v) => update({ scale: Math.max(0.05, v) })} />
       </div>}
-      {def?.web && (
+      {canTilt && (
         <div className="grid grid-cols-2 gap-1">
           <NumberField label="Нахил X°" value={THREE.MathUtils.radToDeg(prop.tilt?.[0] ?? 0)} onCommit={(v) => update({ tx: v })} />
           <NumberField label="Нахил Z°" value={THREE.MathUtils.radToDeg(prop.tilt?.[1] ?? 0)} onCommit={(v) => update({ tz: v })} />
@@ -963,6 +1016,9 @@ const BirdVoices: React.FC<{ engine: GameEngine; rerender(): void }> = ({ engine
 
 const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ engine, rerender }) => {
   const w = engine.world!;
+  const appliedDepth = -w.terrain.seaFloorY;
+  const [seaFloorDepth, setSeaFloorDepth] = useState(appliedDepth);
+  useEffect(() => setSeaFloorDepth(appliedDepth), [appliedDepth]);
   const set = (fn: () => void) => {
     fn();
     rerender();
@@ -1054,6 +1110,26 @@ const AtmospherePanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ e
           onChange={(v) => set(() => (worldSettings.waterLevel = v))}
           fmt={(v) => `${v.toFixed(2)} м`}
         />
+        <Slider
+          label="Глибина морського дна від Y = 0"
+          value={seaFloorDepth}
+          min={MIN_SEA_FLOOR_DEPTH}
+          max={MAX_SEA_FLOOR_DEPTH}
+          step={1}
+          onChange={setSeaFloorDepth}
+          fmt={(depth) => `${depth} м`}
+        />
+        <button
+          type="button"
+          className={`${chip(false)} disabled:opacity-40`}
+          disabled={seaFloorDepth === appliedDepth}
+          onClick={() => set(() => {
+            w.editor.trackChange('Глибина морського дна', () => -w.terrain.seaFloorY, (depth) => w.terrain.setSeaFloorDepth(depth));
+            w.terrain.setSeaFloorDepth(seaFloorDepth);
+          })}
+        >
+          Застосувати глибину
+        </button>
       </Section>
       <CausticsTuner rerender={rerender} />
       <LightShaftTuner rerender={rerender} />

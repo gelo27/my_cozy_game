@@ -11,6 +11,7 @@ import {
   WATER_LIGHT_GLSL,
   WATER_NORMAL_GLSL,
   SEA_SURFACE_GLSL,
+  setWaterBoatHull,
   WATER_SURFACE_GLSL,
   setWaterTerrain,
   updateWaterSurface,
@@ -41,6 +42,7 @@ export class WaterSystem {
   private readonly material: THREE.MeshLambertMaterial;
   private readonly uOpacity = { value: 1 };
   private terrain: TerrainSystem | null = null;
+  private boatHull: THREE.Object3D | null = null;
   private terrainRevision = -1;
   private terrainLevel = NaN;
   private heightTimer = 0;
@@ -73,9 +75,10 @@ ${SEA_SURFACE_GLSL}`
         )
         .replace(
           '#include <map_fragment>',
-          `vec4 estuary = texture2D(uEstuary, wsBedUv(vSeaW.xz)) * wsInIsland(vSeaW.xz);
+          `if (wsInsideBoat(vSeaW)) discard;
+vec4 estuary = texture2D(uEstuary, wsBedUv(vSeaW.xz)) * wsInIsland(vSeaW.xz);
 if (estuary.a >= 0.5) discard;
-diffuseColor = wsSeaSurface(vSeaW, estuary.rg, uOpacity);`
+diffuseColor = wsSeaSurface(vSeaW, estuary.rg, uOpacity, wsPondTint(vSeaW.xz));`
         )
         .replace('#include <normal_fragment_maps>', WATER_NORMAL_GLSL)
         .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${WATER_LIGHT_GLSL}`);
@@ -124,6 +127,11 @@ diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
     this.bedSand.value = terrain.sandLayer;
   }
 
+  public setBoatHull(hull: THREE.Object3D | null): void {
+    this.boatHull = hull;
+    setWaterBoatHull(hull);
+  }
+
   /** The opaque sea can occlude land across it, as long as it also clears the camera's near plane. */
   public terrainOcclusionLevel(camera: THREE.PerspectiveCamera): number | null {
     if (!this.mesh.visible || this.material.transparent || waterSettings.transparent) return null;
@@ -142,6 +150,7 @@ diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
 
   public update(dt: number, camera?: THREE.Vector3): void {
     const ws = waterSettings;
+    setWaterBoatHull(this.boatHull);
     updateWaterSurface(dt);
     this.uOpacity.value = ws.opacity;
     if (this.material.transparent !== ws.transparent) {
@@ -151,6 +160,9 @@ diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
     }
     updateWaterDetails(dt);
     this.mesh.position.y = worldSettings.waterLevel;
+    const bedY = this.terrain?.seaFloorY ?? SEA_FLOOR_Y;
+    this.seabed.position.y = bedY + 0.03;
+    waterSurfaceUniforms.uWsSeaFloorY.value = bedY;
     if (camera) {
       this.mesh.position.x = this.seabed.position.x = camera.x;
       this.mesh.position.z = this.seabed.position.z = camera.z;

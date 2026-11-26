@@ -129,12 +129,29 @@ function devWorldDataPlugin(): Plugin {
   };
 }
 
+function reloadGameModules(): Plugin {
+  const source = path.resolve(__dirname, 'src');
+  return {
+    name: 'reload-game-modules',
+    apply: 'serve',
+    handleHotUpdate({ file, server }) {
+      const relative = path.relative(source, file);
+      if (!relative.endsWith('.ts') || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return;
+      // Keep one module graph for the engine and its shared state. React Fast Refresh can
+      // otherwise leave game systems reading different instances of the same module.
+      server.moduleGraph.invalidateAll();
+      server.ws.send({ type: 'full-reload', path: '*' });
+      return [];
+    },
+  };
+}
+
 export default defineConfig(({ command }) => {
   return {
     // Production builds use relative URLs so the game also works from a sub-path
     // (GitHub Pages serves it at https://<user>.github.io/<repo>/)
     base: command === 'build' ? './' : '/',
-    plugins: [react(), tailwindcss(), devWorldDataPlugin()],
+    plugins: [react(), tailwindcss(), devWorldDataPlugin(), reloadGameModules()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

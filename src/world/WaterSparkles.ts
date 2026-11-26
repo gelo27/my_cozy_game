@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { worldSettings } from './WorldSettings';
 import { waterSettings } from './WaterSettings';
-import { WATER_SHARED_GLSL, waterSurfaceUniforms } from './WaterSurface';
+import { WATER_BOAT_GLSL, WATER_SHARED_GLSL, waterSurfaceUniforms } from './WaterSurface';
 import { DUCKWEED_CORE_GLSL, duckweedCoreUniforms } from './Duckweed';
 import { CLOUD_SHADOW_GLSL, cloudShadowUniforms } from './CloudShadows';
 
@@ -40,10 +40,12 @@ const VERT = /* glsl */ `
 uniform float uWsTime;
 uniform sampler2D uWsNormals;
 uniform sampler2D uWsBed;
+uniform float uWsSeaFloorY;
 uniform sampler2D uEstuary;
 uniform vec4 uWsWaveA;
 uniform vec4 uWsWaveB;
 ${WATER_SHARED_GLSL}
+${WATER_BOAT_GLSL}
 ${DUCKWEED_CORE_GLSL}
 ${CLOUD_SHADOW_GLSL}
 uniform vec3 uSpOrigin;
@@ -67,7 +69,7 @@ void main() {
   // Only open water: deep enough, no duckweed, inside the sparkle field
   float depth = uSpOrigin.z - wsBedY(wp.xz);
   float inlandCover = wsInIsland(xz) * texture2D(uEstuary, wsBedUv(xz)).a;
-  if (inlandCover < 0.5 && depth > 0.05 && dist < reach && wsWeedMask(wp.xz) < 0.1) {
+  if (inlandCover < 0.5 && depth > 0.05 && dist < reach && wsWeedMask(wp.xz) < 0.1 && !wsInsideBoat(wp)) {
     float shade, wob;
     vec2 slope = wsWaves(wp.xz, dist, shade, wob);
     vec3 h = normalize(uSpLightDir + toCam / dist);

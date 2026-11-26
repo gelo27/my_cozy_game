@@ -707,7 +707,7 @@ export class FieldManager {
 
   /** A body at (x, y, z) pushing stalks within `radius` metres (y is its feet or centre). */
   public addPusher(x: number, y: number, z: number, radius: number): void {
-    if (this.pusherCount >= MAX_PUSHERS) return;
+    if (userSettings.graphicsQuality === 'performance' || this.pusherCount >= MAX_PUSHERS) return;
     const o = this.pusherCount++ * 4;
     this.pushers[o] = x;
     this.pushers[o + 1] = y;
@@ -722,7 +722,21 @@ export class FieldManager {
     this.ear.on = on;
   }
 
+  /** Drops contact bends immediately when switching quality, including while paused. */
+  public resetCropBending(): void {
+    this.clearPushers();
+    this.rustle.energy = this.rustle.hits = this.rustle.dry = 0;
+    for (const springs of this.springSets) {
+      if (springs.active.length === 0) continue;
+      this.resetSprings(springs);
+      springs.attr.array.fill(0);
+      springs.attr.clearUpdateRanges();
+      springs.attr.needsUpdate = true;
+    }
+  }
+
   private updateSprings(dt: number): void {
+    if (userSettings.graphicsQuality === 'performance') return;
     const rustle = this.rustle;
     rustle.energy = rustle.hits = 0;
     if (this.wheatSlots.length === 0) return;
@@ -862,14 +876,13 @@ export class FieldManager {
     return s;
   }
 
-  /** Plants moved (planted / harvested / re-laid out): everything stands upright again. */
+  /** Returns the simulation to its resting pose. */
   private resetSprings(s: SpringSet): void {
     s.bend.fill(0);
     s.vel.fill(0);
     s.target.fill(0);
     s.isActive.fill(0);
     s.active.length = 0;
-    s.drawSlots.fill(-1);
   }
 
   // ---------------------------------------------------------------- instancing
@@ -1231,6 +1244,7 @@ export class FieldManager {
       const springs = batch.springs;
       if (springs) {
         this.resetSprings(springs);
+        springs.drawSlots.fill(-1);
         for (let i = 0; i < matrices.length; i++) {
           springs.base[i * 2] = matrices[i].elements[12];
           springs.base[i * 2 + 1] = matrices[i].elements[14];

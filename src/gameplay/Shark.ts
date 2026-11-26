@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { TerrainSystem } from '../world/TerrainSystem';
-import { SEA_BED_TOP, WORLD_LIMIT, worldSettings } from '../world/WorldSettings';
+import { SEA_BED_COLLIDER_OFFSET, WORLD_LIMIT, worldSettings } from '../world/WorldSettings';
 import { waterLevelAt } from '../world/rivers/RiverWorld';
 import { ParticleManager } from '../particles/ParticleManager';
 import { critterSounds } from './CritterSounds';
@@ -13,7 +13,7 @@ export const SHARK_MIN_DEPTH = 2.4;
 
 /** Sea bed height: the heightmap over the island's square, the flat open-sea bed beyond it. */
 export function seaBedAt(terrain: TerrainSystem, x: number, z: number): number {
-  return terrain.isInside(x, z) ? terrain.getHeight(x, z) : SEA_BED_TOP;
+  return terrain.isInside(x, z) ? terrain.getHeight(x, z) : terrain.seaFloorY - SEA_BED_COLLIDER_OFFSET;
 }
 
 /** Depth of the sea at (x, z), or -1 where it is not the sea (dry land, a river, past the world's walls). */

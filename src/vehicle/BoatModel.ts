@@ -1,11 +1,23 @@
 import * as THREE from 'three';
 import { createGlassMaterial } from '../scene/GlassMatcap';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { createPromptSprite } from './VehicleModel';
 
-/** Hull size in model space (forward = +Z, origin on the waterline at mid-ship). */
+/** Hull size in model space (forward = +Z, origin near the chine at midship). */
 export const BOAT_HALF_LENGTH = 2.15;
 export const BOAT_HALF_WIDTH = 0.86;
+
+export const BOAT_CHINE_Y = -0.02;
+export const BOAT_HULL_SECTIONS = Array.from({ length: 13 }, (_, index) => {
+  const t = index / 12;
+  const bow = Math.max(0, (t - 0.45) / 0.55);
+  return {
+    z: BOAT_HALF_LENGTH * (2 * t - 1),
+    width: BOAT_HALF_WIDTH * (1 - 0.15 * Math.max(0, 1 - t * 5) ** 2) * (1 - bow ** 2.2),
+    keel: -0.34 + bow * bow * 0.20,
+    sheer: 0.41 + bow * bow * 0.20 + 0.025 * Math.max(0, 1 - t * 3),
+  };
+});
 
 type Bucket = 'hull' | 'stripe' | 'deck' | 'trim' | 'seat' | 'glass';
 
@@ -25,13 +37,13 @@ export class BoatModel {
   private readonly promptSprite: THREE.Sprite;
   private readonly navLight: THREE.MeshBasicMaterial;
 
-  constructor(color = 0x2f6f9f) {
+  constructor(color = 0x337f86) {
     this.group.name = 'Boat';
     const mats: Record<Bucket, THREE.Material> = {
-      hull: new THREE.MeshLambertMaterial({ color: 0xf4f1ea, flatShading: true, side: THREE.DoubleSide }),
-      stripe: new THREE.MeshLambertMaterial({ color, flatShading: true, side: THREE.DoubleSide }),
-      deck: new THREE.MeshLambertMaterial({ color: 0xa8774c }),
-      trim: new THREE.MeshLambertMaterial({ color: 0x30343a }),
+      hull: new THREE.MeshLambertMaterial({ color: 0xf3e8d0, side: THREE.DoubleSide }),
+      stripe: new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }),
+      deck: new THREE.MeshLambertMaterial({ color: 0xb38553 }),
+      trim: new THREE.MeshLambertMaterial({ color: 0x34474b }),
       seat: new THREE.MeshLambertMaterial({ color: 0xe9e1cf }),
       glass: createGlassMaterial({ color: 0xb4dcec, opacity: 0.4 }),
     };
@@ -39,62 +51,76 @@ export class BoatModel {
     const parts: Record<Bucket, THREE.BufferGeometry[]> = { hull: [], stripe: [], deck: [], trim: [], seat: [], glass: [] };
 
     // Lofted hull: stations along Z, each a V section; the bow pinches to a point
-    const stations = 9;
-    const section = (t: number) => {
-      // t: 0 = stern, 1 = bow
-      const z = -BOAT_HALF_LENGTH + t * BOAT_HALF_LENGTH * 2;
-      const bowT = Math.max(0, (t - 0.55) / 0.45);
-      const w = BOAT_HALF_WIDTH * (1 - bowT * bowT * 0.97) * (t < 0.08 ? 0.92 : 1);
-      const keel = -0.32 + bowT * 0.14; // the forefoot rises toward the bow
-      const sheer = 0.42 + bowT * bowT * 0.22; // the bow lifts
-      return [
-        new THREE.Vector3(-w, sheer, z),
-        new THREE.Vector3(-w * 0.9, -0.02, z),
-        new THREE.Vector3(0, keel, z),
-        new THREE.Vector3(w * 0.9, -0.02, z),
-        new THREE.Vector3(w, sheer, z),
-      ];
-    };
+    const sections = BOAT_HULL_SECTIONS.map(({ width, z, keel, sheer }) => [
+      new THREE.Vector3(-width, sheer, z),
+      new THREE.Vector3(-width * 0.9, BOAT_CHINE_Y, z),
+      new THREE.Vector3(0, keel, z),
+      new THREE.Vector3(width * 0.9, BOAT_CHINE_Y, z),
+      new THREE.Vector3(width, sheer, z),
+    ]);
     const outer: number[] = [];
     const stripe: number[] = [];
     const tri = (arr: number[], a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3) => arr.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
-    let prev = section(0);
-    for (let s = 1; s <= stations; s++) {
-      const cur = section(s / stations);
-      for (let k = 0; k < 4; k++) {
-        // Upper panels carry the painted stripe, the bottom stays white
-        const arr = k === 0 || k === 3 ? stripe : outer;
-        const [a, b2, c, d] = [prev[k], prev[k + 1], cur[k + 1], cur[k]];
-        // Outward winding: left side and right side mirror each other
-        if (k < 2) {
-          tri(arr, a, c, b2);
-          tri(arr, a, d, c);
-        } else {
-          tri(arr, a, b2, c);
-          tri(arr, a, c, d);
+    for (let station = 1; station < sections.length; station++) {
+      const prev = sections[station - 1];
+      const cur = sections[station];
+      for (let band = 0; band < 2; band++) {
+        const panel = band === 0 ? stripe : outer;
+        for (const side of [-1, 1]) {
+          const upper = side < 0 ? band : 4 - band;
+          const lower = upper - side;
+          const [a, b, c, d] = [prev[upper], prev[lower], cur[lower], cur[upper]];
+          // Both sides use the same diagonal in YZ, shared by the water cutout.
+          if (side > 0) {
+            tri(panel, a, c, b);
+            tri(panel, a, d, c);
+          } else {
+            tri(panel, a, b, c);
+            tri(panel, a, c, d);
+          }
         }
       }
-      prev = cur;
     }
-    // Transom (flat stern)
-    const st = section(0);
-    tri(outer, st[0], st[1], st[4]);
-    tri(outer, st[1], st[3], st[4]);
-    tri(outer, st[1], st[2], st[3]);
-    const hullGeo = (pos: number[]) => {
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-      g.computeVertexNormals();
-      return g;
+    const stern = sections[0];
+    const transom: number[] = [];
+    tri(transom, stern[0], stern[4], stern[1]);
+    tri(transom, stern[1], stern[4], stern[3]);
+    tri(transom, stern[1], stern[3], stern[2]);
+
+    const hullGeometry = (positions: number[]) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      const indexed = mergeVertices(geometry);
+      indexed.computeVertexNormals();
+      geometry.dispose();
+      return indexed;
     };
-    parts.hull.push(hullGeo(outer));
-    parts.stripe.push(hullGeo(stripe));
-    // Gunwale rails, floor, seats, console
-    parts.trim.push(box(0.06, 0.06, BOAT_HALF_LENGTH * 1.55, -BOAT_HALF_WIDTH + 0.02, 0.45, -0.25));
-    parts.trim.push(box(0.06, 0.06, BOAT_HALF_LENGTH * 1.55, BOAT_HALF_WIDTH - 0.02, 0.45, -0.25));
-    parts.deck.push(box(BOAT_HALF_WIDTH * 1.5, 0.05, BOAT_HALF_LENGTH * 1.55, 0, 0.02, -0.2));
-    parts.seat.push(box(BOAT_HALF_WIDTH * 1.7, 0.1, 0.42, 0, 0.3, -1.25));
-    parts.seat.push(box(BOAT_HALF_WIDTH * 1.65, 0.1, 0.36, 0, 0.3, 0.75));
+    parts.hull.push(hullGeometry(outer), hullGeometry(transom));
+    parts.stripe.push(hullGeometry(stripe));
+
+    // Rails trace the actual sheer, and the floor tapers inside the hull.
+    for (const side of [0, 4]) {
+      const rail = new THREE.CatmullRomCurve3(sections.map(section => section[side]));
+      parts.deck.push(new THREE.TubeGeometry(rail, 32, 0.045, 6, false));
+    }
+    parts.deck.push(box(stern[4].x * 2, 0.07, 0.08, 0, stern[4].y, stern[4].z));
+    const floor = new THREE.Shape();
+    const floorSections = BOAT_HULL_SECTIONS.slice(1, -1);
+    floor.moveTo(stern[0].x * 0.86, stern[0].z + 0.025);
+    for (const section of floorSections) floor.lineTo(-section.width * 0.86, section.z);
+    floor.lineTo(0, BOAT_HALF_LENGTH - 0.025);
+    for (const section of floorSections.reverse()) floor.lineTo(section.width * 0.86, section.z);
+    floor.lineTo(stern[4].x * 0.86, stern[4].z + 0.025);
+    floor.closePath();
+    const deck = new THREE.ExtrudeGeometry(floor, { depth: 0.045, bevelEnabled: false });
+    deck.rotateX(Math.PI / 2).translate(0, 0.05, 0);
+    parts.deck.push(deck);
+
+    parts.seat.push(box(1.36, 0.1, 0.42, 0, 0.3, -1.25));
+    parts.seat.push(box(1.14, 0.1, 0.36, 0, 0.3, 0.75));
+    parts.deck.push(box(1.43, 0.06, 0.46, 0, 0.235, -1.25));
+    parts.deck.push(box(1.2, 0.06, 0.41, 0, 0.235, 0.75));
+    for (const x of [-0.4, 0.4]) parts.deck.push(box(0.09, 0.16, 0.28, x, 0.13, 0.75));
     parts.deck.push(box(0.5, 0.3, 0.42, 0, 0.12, -1.25));
     parts.stripe.push(box(0.52, 0.62, 0.42, 0.2, 0.33, -0.1)); // console
     parts.trim.push(box(0.42, 0.06, 0.3, 0.2, 0.66, -0.05));
@@ -108,13 +134,15 @@ export class BoatModel {
     parts.glass.push(screen);
     // Bow cleat and fender bumpers along the sides
     parts.trim.push(box(0.16, 0.04, 0.05, 0, 0.66, BOAT_HALF_LENGTH - 0.12));
-    for (const x of [-1, 1]) {
+    for (const side of [-1, 1]) {
       for (const z of [-0.8, 0.5]) {
         const f = new THREE.CylinderGeometry(0.07, 0.07, 0.28, 6);
-        f.translate(x * (BOAT_HALF_WIDTH + 0.05), 0.2, z);
+        f.translate(side * BOAT_HALF_WIDTH, 0.22, z);
         parts.seat.push(f);
+        parts.trim.push(box(0.044, 0.115, 0.036, side * (BOAT_HALF_WIDTH - 0.018), 0.375, z));
       }
     }
+    parts.trim.push(box(0.23, 0.15, 0.23, 0, 0.39, stern[0].z - 0.065));
 
     for (const key of Object.keys(parts) as Bucket[]) {
       const geos = parts[key].map((g) => (g.index ? g.toNonIndexed() : g));

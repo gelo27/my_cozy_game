@@ -319,7 +319,8 @@ ${lake ? '' : SEA_SURFACE_GLSL}`
         )
         .replace(
           '#include <map_fragment>',
-          `// The same water as the sea (WaterSurface.ts): depth colour from the terrain heights (river
+          `if (wsInsideBoat(vRipW)) discard;
+// The same water as the sea (WaterSurface.ts): depth colour from the terrain heights (river
 // beds are carved into the same terrain), normal-map waves, glints and shore lines
 float rDepth = max(vRipW.y - wsBedY(vRipW.xz), 0.0);
 float rDist = distance(vRipW, cameraPosition);
@@ -354,7 +355,9 @@ wdSimSample(vRipW.xz, simH, simG);
 slope += simG * uWdSimLook.y;
 // Tilt the surface's own normal (flat water: up, like the sea; waterfall curtains lean out)
 wsN = normalize(vWN + vec3(slope.x, 0.0, slope.y));
-vec3 water = wsColour(rDepth, shade);
+float pond = wsPondTint(vRipW.xz);
+vec3 shallow = mix(uWsShallow, uWsPondShallow, pond);
+vec3 water = wsColour(rDepth, shade, shallow, pond);
 
 // White water: fast streaks down falls and rapids (only where foam is set)
 vec2 sp = vec2(vRiverUv.x * 2.6, vRiverUv.y * 0.35 - uTime * 3.2);
@@ -369,7 +372,7 @@ float bankAa = fwidth(bankD);
 ${lake
   ? 'vec2 dashP = vRiverUv;'
   : '// Dashes run along each bank and drift with the current\nvec2 dashP = vec2(vRiverUv.y - uTime * 0.25, vRiverUv.x > 0.0 ? 37.0 : 0.0);'}
-water = mix(water, uWsShallow * 1.25, (1.0 - smoothstep(0.0, 1.6, max(bankD, 0.0))) * 0.3 * (1.0 - channelOpening));
+water = mix(water, shallow * 1.25, (1.0 - smoothstep(0.0, 1.6, max(bankD, 0.0))) * 0.3 * (1.0 - channelOpening));
 float shore = wsShoreLines(bankD, dashP, bankAa, 0.0, ${lake ? '99.0' : 'halfW * 0.45 - 0.3'}) * (1.0 - smoothstep(60.0, 140.0, rDist));
 shore *= 1.0 - channelOpening;
 shore = max(shore, wsWaterline(rDepth));
@@ -394,7 +397,7 @@ ${lake ? '' : `if (vRiver.w > 0.0) {
   if (vRiver.w >= 0.82 && estuary.a < 0.5) discard;
   vec3 riverNormal = wsN;
   float riverFoam = wsFoam;
-  vec4 sea = wsSeaSurface(vRipW, estuary.rg, 1.0);
+  vec4 sea = wsSeaSurface(vRipW, estuary.rg, 1.0, pond);
   float blend = smoothstep(0.2, 0.8, vRiver.w);
   wsN = normalize(mix(riverNormal, wsN, blend));
   wsFoam = mix(riverFoam, wsFoam, blend);

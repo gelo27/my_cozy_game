@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { InputManager } from '../input/InputManager';
 import { TerrainSystem, TerrainBrushKind } from '../world/TerrainSystem';
-import { PropSystem, PROP_DEF_MAP } from '../world/PropSystem';
+import { PropSystem, PROP_DEF_MAP, canTiltProp } from '../world/PropSystem';
 import { HEDGE_TYPE, snapHedge } from '../world/Hedge';
 import { ALGAE_DEFAULT_LINKS, LILY } from '../world/AlgaeChains';
 import { WEB_DEFAULTS, WebParams, clampWeb } from '../world/SpiderWebs';
@@ -17,8 +17,9 @@ import type { PhysicsWorld } from '../physics/PhysicsWorld';
 import type { PestKind, PestSystem } from '../gameplay/Pests';
 import { worldSettings } from '../world/WorldSettings';
 import { duckweed } from '../world/Duckweed';
+import { pondTint } from '../world/PondTint';
 
-export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy' | 'duckweed' | 'scatter';
+export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy' | 'duckweed' | 'scatter' | 'pondTint';
 
 /** Where the object brush may put things: dry land, under water, or both. */
 export type ScatterWhere = 'land' | 'water' | 'any';
@@ -38,6 +39,8 @@ export interface EditorState {
   duckweedErase: boolean;
   /** Duckweed brush: how fast the centre fills to a full carpet (1 = in a second). */
   duckweedRate: number;
+  pondTintErase: boolean;
+  pondTintRate: number;
   placeType: string;
   placeScale: number;
   /** Links in a placed algae stalk (chain props). */
@@ -89,6 +92,7 @@ export interface EditorState {
 }
 
 interface Snapshot {
+  seaFloorDepth: number;
   heights: Float32Array;
   tiles: Uint8Array;
   props: ReturnType<PropSystem['captureEditorProps']>;
@@ -116,6 +120,8 @@ export class EditorController {
     paintFill: false,
     duckweedErase: false,
     duckweedRate: 1.5,
+    pondTintErase: false,
+    pondTintRate: 1.5,
     placeType: 'tree_pine',
     placeScale: 1,
     placeChainLength: ALGAE_DEFAULT_LINKS,
@@ -177,6 +183,7 @@ export class EditorController {
   private sceneTransform: ((position: THREE.Vector3, yaw: number, mode: 'translate' | 'rotate') => void) | null = null;
   private sceneCanRotate = false;
   private readonly hit = new THREE.Vector3();
+  private readonly waterBrushHit = new THREE.Vector3();
   private hasHit = false;
   /** The cursor is on the island's terrain (props placed there stay glued to it); false in the caves. */
   private hitOnTerrain = true;
@@ -315,6 +322,7 @@ export class EditorController {
   }
 
   private touch(): void {
+    if (!this.props.getDefinition(this.state.placeType)) this.state.placeType = 'rock_big';
     this.state.canUndo = this.undoStack.length > 0;
     this.state.canRedo = this.redoStack.length > 0;
     this.revision++;
@@ -363,17 +371,16 @@ export class EditorController {
     this.touch();
   }
 
-  /** Webs turn on all three axes; other props only about Y (moving still works on all three). */
+  /** Rocks and webs can rotate on all three axes. */
   private updateGizmoAxes(): void {
     const id = this.state.selectedPropId;
     const prop = id !== null ? this.props.get(id) : undefined;
-    const web = !!prop && !!PROP_DEF_MAP.get(prop.type)?.web;
+    const tilt = !!prop && canTiltProp(prop.type);
     const rotate = this.state.gizmoMode === 'rotate';
     if (this.sceneTransform) this.gizmo.enabled = !rotate || this.sceneCanRotate;
-    this.gizmo.showX = this.gizmo.showZ = !rotate || web;
+    this.gizmo.showX = this.gizmo.showZ = !rotate || tilt;
     this.gizmo.showY = true;
-    // Webs rotate about their own axes (the tilt is in the web's frame)
-    this.gizmo.setSpace(web && rotate ? 'local' : 'world');
+    this.gizmo.setSpace(tilt && rotate ? 'local' : 'world');
   }
 
   public deleteSelected(): void {
@@ -456,7 +463,7 @@ export class EditorController {
     prop.grounded = Math.abs(p.y - this.terrain.getHeight(p.x, p.z)) < 0.05 || prop.grounded && this.gizmo.axis !== 'Y';
     if (prop.grounded) p.y = this.terrain.getHeight(p.x, p.z);
     const r = this.gizmoTarget.rotation;
-    if (PROP_DEF_MAP.get(prop.type)?.web) {
+    if (canTiltProp(prop.type)) {
       r.reorder('YXZ');
       this.props.setTransform(prop.id, p, r.y, prop.scale, [r.x, r.z]);
     } else this.props.setTransform(prop.id, p, r.y, prop.scale);
@@ -467,6 +474,7 @@ export class EditorController {
 
   private snapshot(): Snapshot {
     return {
+      seaFloorDepth: -this.terrain.seaFloorY,
       heights: this.terrain.captureUncarvedHeights(),
       tiles: this.terrain.tiles.slice(),
       props: this.props.captureEditorProps(),
@@ -485,7 +493,7 @@ export class EditorController {
       else this.rivers.select(this.rivers.selectedRiver, -1);
     }
     if (s.caves && s.caves !== (this.caves.work ? JSON.stringify(this.caves.work) : '')) this.caves.setLayout(JSON.parse(s.caves));
-    this.terrain.restoreUncarvedHeights(s.heights);
+    this.terrain.restoreUncarvedHeights(s.heights, s.seaFloorDepth);
     this.terrain.tiles.set(s.tiles);
     const save = this.terrain.serialize();
     this.terrain.deserialize(save); // marks all chunks/splat/physics dirty
@@ -496,6 +504,10 @@ export class EditorController {
 
   public pushUndo(): void {
     this.trackChange(this.actionLabel(), () => this.snapshot(), (state) => this.restore(state));
+  }
+
+  public trackPondTint(): void {
+    this.trackChange('Зміна кольору ставка', () => pondTint.serialize(), (state) => pondTint.deserialize(state));
   }
 
   public trackSelectedProp(): void {
@@ -608,6 +620,13 @@ export class EditorController {
       this.stroking = true;
       this.lastPlaceAt.set(Infinity, 0, 0);
       this.placeAtHit();
+    } else if (tool === 'pondTint') {
+      this.updatePlacementHit(this.input.mouseNDC);
+      if (!this.hasHit) return;
+      this.trackPondTint();
+      this.stroking = true;
+      const { brushRadius, pondTintRate, pondTintErase } = this.state;
+      pondTint.paint(this.hit.x, this.hit.z, brushRadius, pondTintRate, 1 / 60, pondTintErase);
     } else if (this.hasHit) {
       this.pushUndo();
       this.stroking = true;
@@ -662,7 +681,7 @@ export class EditorController {
       if (this.state.tool === 'select' && this.sceneShortcut) this.sceneShortcut('delete');
       else this.deleteSelected();
     } else if (!e.ctrlKey && !this.looking) {
-      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave', Digit7: 'enemy', Digit8: 'duckweed', Digit9: 'scatter' };
+      const tools: Record<string, EditorTool> = { Digit1: 'select', Digit2: 'place', Digit3: 'sculpt', Digit4: 'paint', Digit5: 'river', Digit6: 'cave', Digit7: 'enemy', Digit8: 'duckweed', Digit9: 'scatter', Digit0: 'pondTint' };
       if (tools[e.code]) this.set('tool', tools[e.code]);
       if (e.code === 'KeyG') this.set('gizmoMode', 'translate');
       if (e.code === 'KeyR' && this.state.tool === 'select') this.set('gizmoMode', 'rotate');
@@ -691,10 +710,8 @@ export class EditorController {
     this.updatePlacementHit(this.input.mouseNDC);
     // Sharks go in the water: the sea surface under the cursor counts as the hit
     if (tool === 'enemy' && this.state.enemyKind === 'shark') this.castOntoSea();
-    // Duckweed is painted on the water surface (sea, lakes, rivers), not on the bottom under it
-    if (tool === 'duckweed') this.castOntoWater();
     this.sceneHover?.(tool === 'select' && this.hasHit && !this.looking ? this.hit : null);
-    const brushTool = tool === 'sculpt' || tool === 'paint' || tool === 'duckweed' || tool === 'scatter';
+    const brushTool = tool === 'sculpt' || tool === 'paint' || tool === 'duckweed' || tool === 'scatter' || tool === 'pondTint';
 
     this.updateCursor((brushTool || tool === 'enemy') && this.hasHit);
     this.updateGhost(tool === 'place' && this.hasHit);
@@ -707,6 +724,8 @@ export class EditorController {
       this.terrain.paintCircle(this.hit.x, this.hit.z, r * 0.5, this.state.paintTile);
     } else if (tool === 'duckweed') {
       duckweed.paint(this.hit.x, this.hit.z, r, this.state.duckweedRate, dt, this.state.duckweedErase);
+    } else if (tool === 'pondTint') {
+      pondTint.paint(this.hit.x, this.hit.z, r, this.state.pondTintRate, dt, this.state.pondTintErase);
     } else if (tool === 'scatter') {
       if (this.scatterErasing()) this.scatterErase(this.hit.x, this.hit.z, r);
       else this.scatterFill(this.hit.x, this.hit.z, r);
@@ -723,6 +742,8 @@ export class EditorController {
     const { tool } = this.state;
     if (tool === 'place' || tool === 'enemy') this.castIntoCaves();
     if (tool === 'place' && this.lilyOnSurface()) this.castOntoSea();
+    if (tool === 'duckweed') this.castOntoWater();
+    if (tool === 'pondTint') this.hasHit = this.castOntoWater();
   }
 
   private placeAtHit(): void {
@@ -922,15 +943,16 @@ export class EditorController {
   }
 
   /** The sea surface under the cursor, when the ray crosses it before the ground (or misses the island). */
-  private castOntoSea(): void {
+  private castOntoSea(): boolean {
     const ray = this.raycaster.ray;
-    if (ray.direction.y >= -1e-3) return;
+    if (ray.direction.y >= -1e-3) return false;
     const t = (worldSettings.waterLevel - ray.origin.y) / ray.direction.y;
-    if (t < 0 || t > 600) return;
-    if (this.hasHit && (!this.hitOnTerrain || ray.origin.distanceTo(this.hit) < t)) return;
+    if (t < 0 || t > 600) return false;
+    if (this.hasHit && (!this.hitOnTerrain || ray.origin.distanceTo(this.hit) < t)) return false;
     ray.at(t, this.hit);
     this.hasHit = true;
     this.hitOnTerrain = true;
+    return true;
   }
 
   /**
@@ -938,24 +960,24 @@ export class EditorController {
    * the surface height before the ground. A few fixed-point steps settle on the right surface
    * when its level changes along the ray (a lake above the sea).
    */
-  private castOntoWater(): void {
+  private castOntoWater(): boolean {
     const ray = this.raycaster.ray;
-    if (ray.direction.y >= -1e-3) return;
+    if (ray.direction.y >= -1e-3) return false;
     if (!this.hasHit || !this.hitOnTerrain) {
-      this.castOntoSea();
-      return;
+      return this.castOntoSea();
     }
     let level = riverWorld.waterLevelAt(this.hit.x, this.hit.z);
-    if (level <= this.hit.y) return; // dry ground: paint right there
-    const p = new THREE.Vector3();
+    if (level <= this.hit.y) return false;
+    const p = this.waterBrushHit;
     for (let i = 0; i < 4; i++) {
       const t = (level - ray.origin.y) / ray.direction.y;
-      if (t < 0) return;
+      if (t < 0) return false;
       ray.at(t, p);
       level = riverWorld.waterLevelAt(p.x, p.z);
     }
-    if (p.y < this.terrain.getHeight(p.x, p.z)) return;
+    if (p.y < this.terrain.getHeight(p.x, p.z)) return false;
     this.hit.copy(p);
+    return true;
   }
 
   /** Enemy tool click: the chosen kind at the cursor, or why it cannot live there. */
@@ -1036,6 +1058,7 @@ export class EditorController {
       return;
     }
     const weed = this.state.tool === 'duckweed';
+    const tint = this.state.tool === 'pondTint';
     const r = this.state.tool === 'paint' ? this.state.brushRadius * 0.5 : this.state.brushRadius;
     const attr = this.cursor.geometry.getAttribute('position') as THREE.BufferAttribute;
     const a = attr.array as Float32Array;
@@ -1044,13 +1067,15 @@ export class EditorController {
       const x = this.hit.x + Math.cos(t) * r;
       const z = this.hit.z + Math.sin(t) * r;
       a[i * 3] = x;
-      a[i * 3 + 1] = (weed ? Math.max(this.terrain.getHeight(x, z), riverWorld.waterLevelAt(x, z)) : this.terrain.getHeight(x, z)) + 0.08;
+      const ground = this.terrain.getHeight(x, z);
+      a[i * 3 + 1] = (weed || tint ? Math.max(ground, riverWorld.waterLevelAt(x, z)) : ground) + 0.08;
       a[i * 3 + 2] = z;
     }
     attr.needsUpdate = true;
     const colors: Record<string, number> = { raise: 0x22c55e, lower: 0xf97316, smooth: 0x38bdf8, flatten: 0xa855f7 };
     (this.cursor.material as THREE.LineBasicMaterial).color.setHex(
       weed ? (this.state.duckweedErase ? 0xf97316 : 0x84cc16)
+        : tint ? (this.state.pondTintErase ? 0xf97316 : 0x22d3aa)
         : this.state.tool === 'scatter' ? (this.scatterErasing() ? 0xef4444 : 0x22c55e)
         : this.state.tool === 'paint' ? 0xfacc15 : colors[this.state.sculptKind]
     );
@@ -1127,11 +1152,12 @@ export class EditorController {
     }
     const mask = hedge ? this.props.hedgeMaskAt(this.ghost.position) : 0;
     const geometry = this.props.previewGeometry(this.state.placeType, links, this.state.placeWeb, this.state.placeLilyHead, mask);
+    this.ghost.visible = geometry !== null;
     if (this.ghostType !== this.state.placeType || this.ghostGeometry !== geometry) {
       this.ghostType = this.state.placeType;
       this.ghostGeometry = geometry;
       this.ghost.clear();
-      if (geometry && PROP_DEF_MAP.has(this.state.placeType)) {
+      if (geometry) {
         const mesh = new THREE.Mesh(geometry, this.ghostMaterial);
         this.ghost.add(mesh);
       }

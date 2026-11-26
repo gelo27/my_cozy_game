@@ -89,6 +89,7 @@ function floorSurface(wallpaperId: string): FootSurface {
   return 'wood';
 }
 import { PrecipitationOcclusion } from '../world/PrecipitationOcclusion';
+import { IndoorProbe } from '../world/IndoorProbe';
 import { NPCAgent } from '../npc/NPCAgent';
 import { MAX_WORKERS } from '../npc/WorkerManager';
 import type { WorkerRole } from '../npc/TaskBoard';
@@ -323,6 +324,7 @@ export class GameEngine {
   private riverSound: { position: THREE.Vector3; loud: number } | null = null;
   private readonly fallSounds: import('../world/rivers/RiverSystem').FallSound[] = [];
   private readonly listenerPos = new THREE.Vector3();
+  private readonly indoorProbe = new IndoorProbe();
   private readonly npcFeet = new THREE.Vector3();
 
   // Adaptive resolution: drops the pixel ratio when frames run long, restores it when there is headroom
@@ -424,6 +426,7 @@ export class GameEngine {
       if (graphicsQuality === userSettings.graphicsQuality) return;
       graphicsQuality = userSettings.graphicsQuality;
       const world = this.world;
+      if (graphicsQuality === 'performance') world?.farmingManager.fields.resetCropBending();
       if (world && this.paused && graphicsQuality === 'standard') {
         world.grass.update(0, this.camera.camera, world.weather.sound.wind);
       } else {
@@ -450,6 +453,7 @@ export class GameEngine {
     this.stopWatchingGraphicsQuality();
     this.input.dispose();
     this.world?.editor.dispose();
+    this.world?.props.disposeGeneratedRocks();
     this.world?.debugRenderer.dispose();
     this.world?.character.swimAbility?.waterParticles?.dispose();
     this.underwaterParticles?.dispose();
@@ -771,6 +775,7 @@ export class GameEngine {
       const lighthouse = getIslandSites().find((s) => s.kind === 'lighthouse')!;
       const pier = buildLighthousePier(lighthouse, terrain, scene, physics);
       const boat = new BoatController(physics, scene, terrain, pier.boatSpawn, pier.boatYaw);
+      water.setBoatHull(boat.model.hull);
       boat.dock.copy(pier.end).lerp(pier.start, 0.25);
       const wildlife = new WildlifeSystem(scene, terrain, props, weather);
       const shadows = new StaticShadows(terrain, props, forest, rocks, propTrees, buildingManager);
@@ -1190,6 +1195,7 @@ export class GameEngine {
     this.lightShafts?.update(dt, this.camera.camera, {
       sunDir: w.weather.sunDir,
       sunColor: w.weather.sun.color,
+      fog: this.scene.fog instanceof THREE.FogExp2 ? this.scene.fog : null,
       underwater: w.weather.underwater,
       night: w.weather.nightFactor,
       cover: w.weather.cloudCover,
@@ -1730,7 +1736,7 @@ export class GameEngine {
     } else {
       this.riverSound = null;
     }
-    const underRoof = !outdoors || (!portal && weather.isSheltered(playerPos));
+    const underRoof = !outdoors || (!portal && this.indoorProbe.sample(w.physics.world, playerPos, dt));
     // One state object reused every frame (no per-frame garbage)
     const cs = (this.coastState ??= {
       listener: this.listenerPos,
