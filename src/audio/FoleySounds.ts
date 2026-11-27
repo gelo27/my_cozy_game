@@ -1,5 +1,5 @@
 /**
- * Door, watering-can, shovel and thunder sounds, synthesised ONCE into small mono buffers and then only
+ * Door, light switch, watering-can, shovel and thunder sounds, rendered once into small mono buffers and then only
  * replayed (one AudioBufferSourceNode + gain per play, like TreeSounds). A few variants of each are
  * rendered in idle slices; playback picks one with a slight pitch / level jitter.
  *
@@ -22,12 +22,12 @@
  */
 
 let SR = 22050;
-type Kind = 'doorOpen' | 'doorClose' | 'water' | 'rumble' | 'shovelDig' | 'shovelPat';
+type Kind = 'doorOpen' | 'doorClose' | 'lightSwitch' | 'water' | 'rumble' | 'shovelDig' | 'shovelPat';
 
-const RATE: Record<Kind, number> = { doorOpen: 22050, doorClose: 22050, water: 16000, rumble: 6000, shovelDig: 22050, shovelPat: 22050 };
-const VARIANTS: Record<Kind, number> = { doorOpen: 3, doorClose: 3, water: 3, rumble: 3, shovelDig: 4, shovelPat: 2 };
+const RATE: Record<Kind, number> = { doorOpen: 22050, doorClose: 22050, lightSwitch: 22050, water: 16000, rumble: 6000, shovelDig: 22050, shovelPat: 22050 };
+const VARIANTS: Record<Kind, number> = { doorOpen: 3, doorClose: 3, lightSwitch: 3, water: 3, rumble: 3, shovelDig: 4, shovelPat: 2 };
 /** Pre-render order: what the player hears most often first. */
-const WARM_ORDER: Kind[] = ['doorOpen', 'doorClose', 'shovelDig', 'shovelPat', 'water', 'rumble'];
+const WARM_ORDER: Kind[] = ['lightSwitch', 'doorOpen', 'doorClose', 'shovelDig', 'shovelPat', 'water', 'rumble'];
 
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -214,6 +214,19 @@ function doorClose(r: () => number): Float32Array {
   }
   // A short room tail
   noise(d, hit + 0.01, 0.4, (t) => Math.min(1, t / 0.01) * Math.exp(-t / 0.11), [biquad('lp', 700, 0.7)], 0.5, r);
+  return d;
+}
+
+/** A rocker travels, snaps against its stop, then the plastic faceplate settles. */
+function lightSwitch(r: () => number): Float32Array {
+  const d = new Float32Array(sec(0.095));
+  const snap = 0.015 + r() * 0.005;
+  const tone = 0.92 + r() * 0.16;
+  noise(d, 0.003, 0.012, exp(0.004), [biquad('bp', 1100 * tone, 0.85)], 0.14, r);
+  noise(d, snap, 0.009, exp(0.0011), [biquad('hp', 650, 0.7), biquad('lp', 5100 * tone, 0.7)], 1, r);
+  noise(d, snap, 0.031, exp(0.005), [biquad('bp', 740 * tone, 1.2)], 0.65, r);
+  noise(d, snap + 0.003 + r() * 0.002, 0.016, exp(0.0024), [biquad('bp', 2200 * tone, 1.4)], 0.26, r);
+  noise(d, snap + 0.012, 0.04, exp(0.009), [biquad('bp', 430 * tone, 1)], 0.12, r);
   return d;
 }
 
@@ -418,7 +431,7 @@ function rumble(r: () => number): Float32Array {
   return d;
 }
 
-const RECIPES: Record<Kind, (r: () => number) => Float32Array> = { doorOpen, doorClose, water, rumble, shovelDig, shovelPat };
+const RECIPES: Record<Kind, (r: () => number) => Float32Array> = { doorOpen, doorClose, lightSwitch, water, rumble, shovelDig, shovelPat };
 
 /**
  * Renders variant `index` of `kind` (pure: no audio context, so it also runs in the sound-render

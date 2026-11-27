@@ -6,7 +6,6 @@ import { injectCaustics } from '../scene/WaterEffects';
 import { WATER_DETAIL_GLSL, WATER_RIPPLE_GLSL, rippleUniforms, updateWaterDetails } from '../scene/WaterDetails';
 import { waterSettings } from './WaterSettings';
 import { riverWorld } from './rivers/RiverWorld';
-import { WaterSparkles } from './WaterSparkles';
 import {
   WATER_LIGHT_GLSL,
   WATER_NORMAL_GLSL,
@@ -36,8 +35,6 @@ const HEIGHT_REFRESH = 0.25;
  */
 export class WaterSystem {
   public readonly mesh: THREE.Mesh;
-  /** Star sprites over the sun's sparkles on the sea. */
-  public readonly sparkles: WaterSparkles;
   private readonly seabed: THREE.Mesh;
   private readonly material: THREE.MeshLambertMaterial;
   private readonly uOpacity = { value: 1 };
@@ -117,7 +114,6 @@ diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
     this.seabed.position.y = SEA_FLOOR_Y + 0.03;
     this.seabed.frustumCulled = false;
     scene.add(this.seabed);
-    this.sparkles = new WaterSparkles(scene);
   }
 
   /** The terrain whose heights give the water its depth colour and shore lines. */

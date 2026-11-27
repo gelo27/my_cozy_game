@@ -166,7 +166,7 @@ export class PhysicsWorld {
    * physics tick; the accumulator keeps the simulation rate independent of the display refresh.
    * Catch-up work is capped to MAX_SUB_STEPS to avoid a spiral of death after a long frame.
    */
-  public step(dt: number): void {
+  public step(dt: number, beforeStep?: (fixedDt: number) => void): void {
     if (!this.world || !this.initialized || !Number.isFinite(dt) || dt <= 0) return;
 
     const fixedStep = PHYSICS_CONFIG.FIXED_TIMESTEP;
@@ -192,6 +192,7 @@ export class PhysicsWorld {
         }
 
         this.world.timestep = fixedStep;
+        beforeStep?.(fixedStep);
         this.world.step();
 
         // Save the new completed pose. Large one-tick jumps are teleports (for example respawn),
@@ -290,21 +291,26 @@ export class PhysicsWorld {
     position: THREE.Vector3,
     vertices: Float32Array,
     indices: Uint32Array,
-    group: number = COLLISION_GROUPS.ENVIRONMENT
+    group: number = COLLISION_GROUPS.ENVIRONMENT,
+    flags?: RAPIER.TriMeshFlags,
   ): { body: RAPIER.RigidBody; collider: RAPIER.Collider } {
     // Safely copy Float32Array and Uint32Array to guarantee they are fresh, non-pooled views 
     // starting at byte offset 0 in WebAssembly memory.
     const cleanVertices = new Float32Array(vertices);
     const cleanIndices = new Uint32Array(indices);
 
-    const bodyDesc = this.rapier.RigidBodyDesc.fixed().setTranslation(position.x, position.y, position.z);
-    const body = this.world.createRigidBody(bodyDesc);
-    const colliderDesc = this.rapier.ColliderDesc.trimesh(cleanVertices, cleanIndices)
+    const colliderDesc = this.rapier.ColliderDesc.trimesh(cleanVertices, cleanIndices, flags)
       .setFriction(0.6)
       .setCollisionGroups(this.packCollisionGroups(group, 0xffff));
 
-    const collider = this.world.createCollider(colliderDesc, body);
-    return { body, collider };
+    const bodyDesc = this.rapier.RigidBodyDesc.fixed().setTranslation(position.x, position.y, position.z);
+    const body = this.world.createRigidBody(bodyDesc);
+    try {
+      return { body, collider: this.world.createCollider(colliderDesc, body) };
+    } catch (error) {
+      this.world.removeRigidBody(body);
+      throw error;
+    }
   }
 
   public createDynamicProp(

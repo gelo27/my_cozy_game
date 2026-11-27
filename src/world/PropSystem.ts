@@ -907,34 +907,38 @@ export class PropSystem {
   private makeLods(b: PropBatch): LodInstances | null {
     if (!b.lod) return null;
     const materials = b.hedgeMask !== undefined ? [foliageMaterialOf(HEDGE_TYPE)] : this.geometries.get(b.def.id)?.materials ?? (b.mesh.material as THREE.Material[]);
-    const distant = b.lod[1]?.hasAttribute('crownUv') ? [CROWN_LOD_MATERIAL] : undefined;
     const billboard = this.treeBillboard(b);
-    const geometries = billboard ? [...b.lod.slice(0, -1), billboard] : b.lod;
-    const lods = new LodInstances(this.group, geometries, materials, b.mesh.boundingSphere!, b.mesh.name,
-      distant, billboard ? [TREE_BILLBOARD_MATERIAL] : undefined);
-    for (const id of b.ids) lods.add(id, this.matrixOf(id, PropSystem._m2), this.levelFor(b, this.props.get(id)!, -1));
+    // With an impostor atlas, switch straight from the near mesh to the billboard.
+    const geometries = billboard ? [b.lod[0], billboard] : b.lod;
+    const farthest = billboard ? [TREE_BILLBOARD_MATERIAL]
+      : b.lod.at(-1)?.hasAttribute('crownUv') ? [CROWN_LOD_MATERIAL] : undefined;
+    const lods = new LodInstances(this.group, geometries, materials, b.mesh.boundingSphere!, b.mesh.name, farthest);
+    for (const id of b.ids) lods.add(id, this.matrixOf(id, PropSystem._m2), this.levelFor(b, this.props.get(id)!, -1, lods.levels));
     // The master mesh keeps the instances (picking, chop poses) but the lists draw them
     b.mesh.visible = false;
     return lods;
   }
 
   private treeBillboard(b: PropBatch): THREE.BufferGeometry | null {
-    return b.lod?.[1]?.hasAttribute('crownUv') ? getTreeBillboard(b.def.id) : null;
+    if (!b.lod || !TREE_TYPES.has(b.def.id)) return null;
+    const hasFoliage = b.def.id === 'tree_pine' ? b.lod[0].hasAttribute('sway') : b.lod.at(-1)?.hasAttribute('crownUv');
+    return hasFoliage ? getTreeBillboard(b.def.id) : null;
   }
 
   /** The LOD a prop wants from the last camera spot (`current` adds the hysteresis, -1 none). */
-  private levelFor(b: PropBatch, p: PropInstance, current: number): number {
+  private levelFor(b: PropBatch, p: PropInstance, current: number, levels = b.lods?.levels ?? 1): number {
     const dx = p.position.x - this.camX;
     const dz = p.position.z - this.camZ;
     const d2 = dx * dx + dz * dz;
     const dists = lodDists(b.def.id, DISTS_SCRATCH);
     let level = 0;
-    for (let i = 0; i < dists.length; i++) {
+    const thresholds = Math.min(dists.length, levels - 1);
+    for (let i = 0; i < thresholds; i++) {
       const edge = current > i ? dists[i] - veg.lodHysteresis : dists[i];
       if (d2 <= edge * edge) break;
       level = i + 1;
     }
-    return Math.min(level, (b.lod?.length ?? 1) - 1);
+    return level;
   }
 
   /** A prop's current instance matrix (from its cell's master mesh). */
@@ -1082,11 +1086,11 @@ export class PropSystem {
     const h = veg.lodHysteresis;
     let band = 0;
     let split = false;
-    for (let i = 0; i < dists.length; i++) {
+    const thresholds = Math.min(dists.length, lods.levels - 1);
+    for (let i = 0; i < thresholds; i++) {
       if (near > dists[i] + h) band = i + 1;
       else if (far >= dists[i] - h) split = true;
     }
-    band = Math.min(band, lods.levels - 1);
     if (!split && lods.uniform === band) {
       b.passX = camera.x;
       b.passZ = camera.z;

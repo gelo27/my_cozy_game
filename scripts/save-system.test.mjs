@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
-import { Quaternion, Ray, Vector3 } from 'three';
+import { DataUtils, Quaternion, Ray, Scene, Vector3 } from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { createServer } from 'vite';
 
@@ -10,6 +10,13 @@ const noop = () => {};
 let server;
 let SaveSystem;
 let generatedRockModule;
+let bridgeTypes;
+let buildBridge;
+let BridgeEditTool;
+let BridgeSystem;
+let StaticShadows;
+let terrainConstants;
+let waterSurfaceUniforms;
 
 before(async () => {
   server = await createServer({
@@ -20,6 +27,22 @@ before(async () => {
   });
   ({ SaveSystem } = await server.ssrLoadModule('/src/world/SaveSystem.ts'));
   generatedRockModule = await server.ssrLoadModule('/src/world/GeneratedRocks.ts');
+  bridgeTypes = await server.ssrLoadModule('/src/world/BridgeTypes.ts');
+  ({ buildBridge } = await server.ssrLoadModule('/src/world/BridgeGeometry.ts'));
+  ({ BridgeEditTool } = await server.ssrLoadModule('/src/editor/BridgeEditTool.ts'));
+  const context = { createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData: noop };
+  globalThis.document = {
+    createElement: () => ({ getContext: () => context, toDataURL: () => '' }),
+    createElementNS: () => ({ addEventListener: noop, removeEventListener: noop }),
+  };
+  try {
+    ({ BridgeSystem } = await server.ssrLoadModule('/src/world/BridgeSystem.ts'));
+    ({ StaticShadows } = await server.ssrLoadModule('/src/world/StaticShadows.ts'));
+    terrainConstants = await server.ssrLoadModule('/src/world/TerrainSystem.ts');
+    ({ waterSurfaceUniforms } = await server.ssrLoadModule('/src/world/WaterSurface.ts'));
+  } finally {
+    delete globalThis.document;
+  }
 });
 
 after(async () => {
@@ -46,11 +69,13 @@ function setup(t) {
   let player = new Vector3(10.1234, 2.5678, -6.4321);
   let props = starter.props;
   let generatedRocks = [];
+  let bridges = [];
   let pests = starter.authoredPests;
   let birdCount = 0;
   const storedItems = new Map([['coins', 13]]);
   const world = {
     terrain: { serialize: () => starter.terrain, deserialize: noop },
+    bridges: { serialize: () => bridges, deserialize: (value = []) => { bridges = value; } },
     weather: {
       weather: starter.weather,
       snowCover: 0,
@@ -221,6 +246,190 @@ test('round-trips generated rock recipes and placements, and rejects dangling an
   }
   slots.set('cozyfarm.save.old-rock', JSON.stringify({ ...data, generatedRocks: [rockVariant] }));
   assert.equal(saves.load('old-rock'), true);
+});
+
+function testBridge() {
+  return { ...bridgeTypes.BRIDGE_DEFAULTS, id: 'bridge_sample', a: { x: 3, y: 2, z: 4 }, b: { x: 7, y: 2.5, z: 10 } };
+}
+
+test('bridge swaps indexed geometry in a single mesh and keeps its collider while hidden', () => {
+  const scene = new Scene();
+  const body = {};
+  const removed = [];
+  const bridges = new BridgeSystem(scene, {
+    rapier: { TriMeshFlags: { FIX_INTERNAL_EDGES: 1 } },
+    createStaticTrimesh: () => ({ body, collider: {} }),
+    removeRigidBody: (value) => removed.push(value),
+  });
+  const def = { ...testBridge(), a: { x: 0, y: 0, z: 0 }, b: { x: 0, y: 0, z: 64 } };
+  bridges.set(def.id, def);
+  const [group] = scene.children;
+  const [mesh] = group.children;
+  const detail = mesh.geometry;
+  assert.equal(mesh.castShadow, false);
+  assert.equal(Array.isArray(mesh.material), false);
+  assert.equal(detail.groups.length, 0);
+
+  bridges.updateLod(new Vector3(0, 4, 65));
+  assert.equal(mesh.geometry, detail);
+  bridges.updateLod(new Vector3(70, 4, 32));
+  const coarse = mesh.geometry;
+  assert.equal(group.children.length, 1);
+  assert.ok(coarse.index.count < detail.index.count / 4);
+  assert.equal(coarse.groups.length, 0);
+  assert.equal(mesh.visible, true);
+
+  bridges.updateLod(new Vector3(200, 4, 32));
+  assert.equal(mesh.visible, false);
+  assert.deepEqual(removed, []);
+  bridges.setVisible(def.id, false);
+  bridges.updateLod(new Vector3(0, 4, 32));
+  assert.equal(mesh.visible, false);
+  bridges.setVisible(def.id, true);
+  bridges.updateLod(new Vector3(0, 4, 32));
+  assert.equal(mesh.visible, true);
+  assert.equal(mesh.geometry, detail);
+  bridges.dispose();
+  assert.deepEqual(removed, [body]);
+});
+
+test('diagonal bridge bakes a soft deck footprint into terrain chunks and clears it on removal', () => {
+  const { TERRAIN_CHUNK: size, TERRAIN_CHUNKS: chunks } = terrainConstants;
+  const def = { ...testBridge(), a: { x: -8, y: 2, z: -8 }, b: { x: 12, y: 2, z: 12 }, width: 2 };
+  const baked = new Map();
+  const terrain = { setChunkShade: (id, data) => baked.set(id, data.slice()) };
+  const bridges = { revision: 0, forEachBridge: (visit) => visit(def) };
+  const shadows = new StaticShadows(terrain, { revision: 0, list: () => [] },
+    { forEachStandingTree: noop }, { forEachIntact: noop }, {}, { revision: 0, getAllPieces: () => [] }, bridges);
+  const shade = (x, z) => {
+    const half = size * chunks / 2;
+    const gx = x + half, gz = z + half;
+    const chunk = Math.floor(gz / size) * chunks + Math.floor(gx / size);
+    return baked.get(chunk)[(gz % size) * (size + 1) + gx % size];
+  };
+  const focus = new Vector3(0, 0, 0);
+  const depthMap = waterSurfaceUniforms.uWsBed.value.image;
+  const sampleGrid = 4 + (depthMap.width - 1) / 2;
+  const waterIndex = 2 * (sampleGrid * depthMap.width + sampleGrid);
+  const bedHeight = depthMap.data[waterIndex];
+  for (let i = 0; i < Math.ceil(chunks * chunks / 2); i++) shadows.update(0.5, focus);
+  assert.equal(shade(-4, -4), 153);
+  assert.equal(shade(4, 4), 153);
+  assert.ok(shade(4, 6) > 0 && shade(4, 6) < 153);
+  assert.equal(shade(4, 8), 0);
+  assert.equal(depthMap.data[waterIndex + 1], DataUtils.toHalfFloat(0.6));
+  assert.equal(depthMap.data[waterIndex], bedHeight);
+
+  bridges.forEachBridge = noop;
+  bridges.revision++;
+  for (let i = 0; i < 4; i++) shadows.update(0.5, focus);
+  assert.equal(shade(-4, -4), 0);
+  assert.equal(shade(4, 4), 0);
+  assert.equal(depthMap.data[waterIndex + 1], 0);
+});
+
+test('bridge saves preserve the full recipe and reject duplicate IDs and invalid spans', (t) => {
+  const { slots, saves, world } = setup(t);
+  const bridge = { ...testBridge(), shape: 'eased', railings: false };
+  slots.set('cozyfarm.save.bridges', JSON.stringify({ ...starter, bridges: [bridge] }));
+  assert.equal(saves.load('bridges'), true);
+  assert.equal(saves.save('bridge-roundtrip'), true);
+  assert.deepEqual(JSON.parse(slots.get('cozyfarm.save.bridge-roundtrip')).bridges, [bridge]);
+
+  for (const bridges of [[bridge, bridge], [{ ...bridge, b: bridge.a }], [{ ...bridge, rise: 12 }]]) {
+    slots.set('cozyfarm.save.bad-bridges', JSON.stringify({ ...starter, bridges }));
+    assert.equal(saves.load('bad-bridges'), false);
+    assert.deepEqual(world.bridges.serialize(), [bridge]);
+  }
+  const legacySave = { ...starter };
+  delete legacySave.bridges;
+  slots.set('cozyfarm.save.no-bridges', JSON.stringify(legacySave));
+  assert.equal(saves.load('no-bridges'), true);
+  assert.deepEqual(world.bridges.serialize(), []);
+});
+
+test('bridge deck and rail collision follows its curved render mesh', async () => {
+  await RAPIER.init();
+  const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+  try {
+    for (const shape of ['round', 'eased']) {
+      for (const railings of [true, false]) {
+        const bridge = { ...testBridge(), shape, railings };
+        const built = buildBridge(bridge, true);
+        const { geometry, collisionVertices, collisionIndices } = built;
+        const span = bridgeTypes.bridgeSpan(bridge.a, bridge.b);
+        const segments = bridgeTypes.bridgeSegments(span);
+        const collider = world.createCollider(RAPIER.ColliderDesc.trimesh(
+          new Float32Array(collisionVertices), new Uint32Array(collisionIndices), RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES,
+        ));
+        const position = geometry.getAttribute('position');
+        const normal = geometry.getAttribute('normal');
+        const uv = geometry.getAttribute('uv');
+        assert.equal(geometry.groups.length, 0);
+        assert.equal(collisionVertices.length / 3, 4 * (segments + 1) * (railings ? 3 : 1));
+        for (let i = 0; i <= segments; i++) {
+          const t = i / segments;
+          const z = t * span;
+          const height = bridgeTypes.bridgeHeight(bridge, t);
+          assert.ok(Math.abs(position.getY(i * 2) - height) < 1e-6);
+          assert.ok(normal.getY(i * 2) > 0);
+          assert.ok(i === 0 || uv.getY(i * 2) > uv.getY((i - 1) * 2));
+          if (i === 0 || i === segments) continue;
+          const down = new RAPIER.Ray({ x: 0, y: 5, z }, { x: 0, y: -1, z: 0 });
+          const across = new RAPIER.Ray({ x: 0, y: height + 0.5, z }, { x: 1, y: 0, z: 0 });
+          assert.ok(Math.abs(collider.castRay(down, 8, true) - (5 - height)) < 1e-5);
+          assert.equal(collider.castRay(across, 3, true) > 0, railings);
+        }
+        const preview = buildBridge(bridge, false);
+        assert.deepEqual(preview.collisionIndices, []);
+        assert.deepEqual(preview.geometry.getAttribute('position').array, position.array);
+        for (const mesh of [geometry, preview.geometry]) mesh.dispose();
+        world.removeCollider(collider, false);
+      }
+    }
+  } finally {
+    world.free();
+  }
+});
+
+test('bridge editor commits a single change after preview and restores the previous recipe on undo', () => {
+  const placed = new Map();
+  const changes = [];
+  const bridges = {
+    serialize: () => [...placed.values()],
+    get: (id) => placed.get(id),
+    set: (id, def) => def ? placed.set(id, def) : placed.delete(id),
+  };
+  const tool = new BridgeEditTool(new Scene(), bridges, noop, (...change) => changes.push(change));
+  try {
+    tool.pointerDown(new Vector3(0, 2, 0));
+    assert.equal(tool.picking, 'b');
+    tool.pointerDown(new Vector3(0, 2, 0.2));
+    assert.equal(tool.canApply, false);
+    tool.beginPick('b');
+    tool.pointerDown(new Vector3(1, 2, 6));
+    tool.setSettings({ rise: 0.8 });
+    assert.equal(placed.size, 0);
+    assert.equal(tool.canApply, true);
+    tool.apply();
+    const id = tool.selected;
+    const first = placed.get(id);
+    assert.equal(changes.length, 1);
+
+    tool.setSettings({ railings: false });
+    tool.setHeight('b', 2.7);
+    tool.apply();
+    assert.equal(changes.length, 2);
+    assert.equal(placed.get(id).b.y, 2.7);
+    tool.restore(id, changes[1][2]);
+    assert.deepEqual(placed.get(id), first);
+    tool.deleteSelected();
+    assert.equal(placed.size, 0);
+    tool.restore(id, changes[2][2]);
+    assert.deepEqual(placed.get(id), first);
+  } finally {
+    tool.dispose();
+  }
 });
 
 test('generates reproducible rock LODs with decreasing triangle counts and valid Rapier hulls', async () => {

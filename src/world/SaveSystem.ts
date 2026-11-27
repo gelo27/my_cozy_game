@@ -20,6 +20,7 @@ import { ROCK_TYPES } from '../gathering/GatheringConfig';
 import type { AuthoredRock } from '../gathering/RockField';
 import { PEST_KINDS, type AuthoredPest, type PestKind } from '../gameplay/Pests';
 import { isGeneratedRockSave, isGeneratedRockType, MAX_GENERATED_ROCKS, type GeneratedRockSave } from './GeneratedRocks';
+import { isBridgeSave, type BridgeDef } from './BridgeTypes';
 
 export const SAVE_VERSION = 3;
 const LEGACY_SAVE_VERSION = 2;
@@ -55,6 +56,7 @@ export interface WorldSaveData {
   /** Forest generation the props came from (missing = before the denser forests). */
   forest?: number;
   buildings: BuildingSceneExportData | null;
+  bridges?: BridgeDef[];
   /** Garden-bed crops of old saves (beds were removed): ignored. */
   crops?: unknown;
   /** Shovel-dug fields (their soil tiles are part of the terrain save). */
@@ -267,6 +269,7 @@ function isWorldSaveData(value: unknown): value is WorldSaveData {
       !WEATHER_TYPES.includes(String(value.weather)) ||
       !Array.isArray(value.props) || value.props.length > 200_000 ||
       !value.props.every(isPropSave) || !isBuildingSave(value.buildings)) return false;
+  if (value.bridges !== undefined && !isBridgeSave(value.bridges)) return false;
 
   const rockTypes = new Set<string>();
   if (value.generatedRocks !== undefined) {
@@ -392,6 +395,7 @@ export class SaveSystem {
     const vr = w.vehicle.body.rotation();
     const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(new THREE.Quaternion(vr.x, vr.y, vr.z, vr.w));
     const generatedRocks = w.props.serializeGeneratedRocks();
+    const bridges = w.bridges.serialize();
     return {
       version: SAVE_VERSION,
       savedAt: new Date().toISOString(),
@@ -407,6 +411,7 @@ export class SaveSystem {
       generatedRocks: generatedRocks.length ? generatedRocks : undefined,
       forest: w.props.forestVersion,
       buildings: w.character.buildAbility?.buildingManager?.exportScene() ?? null,
+      bridges: bridges.length ? bridges : undefined,
       fields: w.farmingManager.serializeFields(),
       orchard: w.orchard.serialize(),
       nursery: w.nursery.serialize(),
@@ -448,6 +453,7 @@ export class SaveSystem {
     w.weather.director.deserialize(data.weather, data.weatherDirector);
     w.weather.snowCover = Math.min(1, Math.max(0, data.snowCover ?? 0));
     w.terrain.deserialize(data.terrain);
+    w.bridges.deserialize(data.bridges);
     duckweed.deserialize(data.duckweed);
     pondTint.deserialize(data.pondTint);
     w.props.deserialize(data.props, data.generatedRocks);

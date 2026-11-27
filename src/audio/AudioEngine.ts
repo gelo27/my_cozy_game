@@ -523,7 +523,7 @@ class AudioEngine {
 
   private foley: FoleySoundBank | null = null;
 
-  /** Door, watering, shovel and thunder buffers (null before the first user gesture). */
+  /** Cached foley buffers (null before the first user gesture). */
   public foleyBank(): FoleySoundBank | null {
     if (!this.ctx) return null;
     if (!this.foley) this.foley = new FoleySoundBank(this.ctx);
@@ -537,14 +537,14 @@ class AudioEngine {
   }
 
   /** One pre-rendered foley sound: a single buffer source and gain. */
-  private playFoley(kind: FoleySoundKind, gain: number, pitchJitter: number, delay = 0): void {
+  private playFoley(kind: FoleySoundKind, gain: number, pitchJitter: number, delay = 0, playbackRate = 1): void {
     const s = this.begin();
     if (!s) return;
     const { ctx, out, t } = s;
     const bank = this.foleyBank()!;
     const src = ctx.createBufferSource();
     src.buffer = bank.get(kind);
-    src.playbackRate.value = 1 + (Math.random() * 2 - 1) * pitchJitter;
+    src.playbackRate.value = playbackRate + (Math.random() * 2 - 1) * pitchJitter;
     const g = ctx.createGain();
     g.gain.value = gain * (0.85 + Math.random() * 0.15);
     src.connect(g).connect(out);
@@ -604,6 +604,10 @@ class AudioEngine {
    */
   public playDoorToggle(isOpen: boolean = true) {
     this.playFoley(isOpen ? 'doorOpen' : 'doorClose', isOpen ? 0.3 : 0.75, 0.05);
+  }
+
+  public playLightSwitch(on: boolean): void {
+    this.playFoley('lightSwitch', on ? 0.25 : 0.2, 0.025, 0, on ? 1 : 0.92);
   }
 
   /**

@@ -518,7 +518,8 @@ export class CharacterController {
       const slopeAngleRad = Math.acos(dotUp);
       const slopeAngleDeg = THREE.MathUtils.radToDeg(slopeAngleRad);
 
-      const isWalkable = slopeAngleDeg <= this.maxWalkableSlope;
+      // Rapier's float32 normals can round a slope at the limit slightly above it.
+      const isWalkable = slopeAngleDeg <= this.maxWalkableSlope + 1e-4;
 
       this.setGroundInfo(true, minDistance, avgNormal.x, avgNormal.y, avgNormal.z, slopeAngleDeg, isWalkable, closestPoint.x, closestPoint.y, closestPoint.z);
       this.groundCollider = closestCollider;

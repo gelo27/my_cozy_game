@@ -11,6 +11,9 @@ import { isGreenhousePiece } from '../building/types/BuildingTypes';
 import { houseRoofRects } from '../building/RoofFootprint';
 import type { GrassField } from './GrassField';
 import type { AppleOrchard } from '../gathering/AppleOrchard';
+import type { BridgeSystem } from './BridgeSystem';
+import { bridgeSpan } from './BridgeTypes';
+import { setWaterBridgeShade } from './WaterSurface';
 
 /** A round caster (canopy, bush, boulder) of radius `r`; its shadow lies straight below it. */
 interface Disc {
@@ -27,6 +30,15 @@ interface Box {
   x1: number;
   z1: number;
   k: number;
+}
+
+interface BridgeCaster extends Box {
+  x: number;
+  z: number;
+  alongX: number;
+  alongZ: number;
+  halfSpan: number;
+  halfWidth: number;
 }
 
 const S = TERRAIN_CHUNK + 1;
@@ -50,7 +62,7 @@ const PROP_CASTERS: Record<string, { r: number; k: number }> = {
  * Static shadows of static objects baked into the terrain's vertices (one byte per 1 m vertex).
  *
  * No shadow maps and no dependence on the sun: trees, bushes, boulders, ore rocks, the forest and
- * building pieces darken the ground straight below them (soft discs and boxes), uploaded as a
+ * building pieces and bridges darken the ground straight below them, uploaded as a
  * vertex attribute the terrain shader multiplies the direct light by. A chunk is rebaked only when
  * the casters over it change (a tree felled or regrown, a rock mined, a piece built), a couple of
  * chunks per frame; the rest of the time this costs nothing.
@@ -61,7 +73,8 @@ export class StaticShadows {
   public readonly stats = { casters: 0, chunksBaked: 0, ms: 0 };
 
   /** Discs / boxes cast shade; `blocks` are footprints the 3D grass must not poke through. */
-  private readonly buckets: { discs: Disc[]; boxes: Box[]; blocks: Box[] }[] = Array.from({ length: NCHUNKS }, () => ({ discs: [], boxes: [], blocks: [] }));
+  private readonly buckets: { discs: Disc[]; boxes: Box[]; bridges: BridgeCaster[]; blocks: Box[] }[] =
+    Array.from({ length: NCHUNKS }, () => ({ discs: [], boxes: [], bridges: [], blocks: [] }));
   /** Receives each baked chunk's shade and grass blockers. */
   public grass: GrassField | null = null;
   /** Player-planted apple trees (their canopies shade the ground like the oaks'). */
@@ -82,7 +95,8 @@ export class StaticShadows {
     private readonly forest: ForestZone,
     private readonly rocks: RockField,
     private readonly propTrees: PropTreeField,
-    private readonly buildings: BuildingManager
+    private readonly buildings: BuildingManager,
+    private readonly bridges: BridgeSystem
   ) {}
 
   /** Call once per frame with the player (or vehicle) position. */
@@ -116,16 +130,20 @@ export class StaticShadows {
     this.forest.forEachStandingTree(() => trees++);
     let rocks = 0;
     this.rocks.forEachIntact(() => rocks++);
-    return `${this.props.revision}|${trees}|${rocks}|${this.buildings.revision}|${this.orchard?.revision ?? 0}`;
+    return `${this.props.revision}|${trees}|${rocks}|${this.buildings.revision}|${this.orchard?.revision ?? 0}|${this.bridges.revision}`;
   }
 
   /** Order-independent fingerprint of a chunk's casters. */
   private fingerprint(c: number): number {
-    const { discs, boxes, blocks } = this.buckets[c];
-    let h = discs.length * 7919 + boxes.length * 104729 + blocks.length * 15485863;
+    const { discs, boxes, bridges, blocks } = this.buckets[c];
+    let h = discs.length * 7919 + boxes.length * 104729 + bridges.length * 65537 + blocks.length * 15485863;
     for (const b of blocks) h += Math.sin(b.x0 * 3.17 + b.z0 * 51.3 + b.x1 * 7.7 + b.z1 * 2.9) * 9871.31;
     for (const d of discs) h += Math.sin(d.x * 12.9898 + d.z * 78.233 + d.r * 37.719 + d.k * 3.1) * 43758.5453;
     for (const b of boxes) h += Math.sin(b.x0 * 12.9898 + b.z0 * 78.233 + b.x1 * 9.17 + b.z1 * 5.71) * 24634.6345;
+    for (const b of bridges) {
+      h += Math.sin(b.x * 12.99 + b.z * 78.23 + b.alongX * 9.17 + b.alongZ * 5.71 +
+        b.halfSpan * 37.72 + b.halfWidth * 3.1) * 31265.32;
+    }
     return h;
   }
 
@@ -156,6 +174,7 @@ export class StaticShadows {
     for (const b of this.buckets) {
       b.discs.length = 0;
       b.boxes.length = 0;
+      b.bridges.length = 0;
       b.blocks.length = 0;
     }
     const addBlock = (box: Box) => this.bucketRange(box.x0, box.z0, box.x1, box.z1, (c) => this.buckets[c].blocks.push(box));
@@ -190,6 +209,20 @@ export class StaticShadows {
       addBlock({ x0: x - b, z0: z - b, x1: x + b, z1: z + b, k: 1 });
     });
     this.rocks.forEachIntact((pos, radius) => addDisc({ x: pos.x, z: pos.z, r: radius * 1.1, k: 0.45 }));
+    this.bridges.forEachBridge(({ a, b, width }) => {
+      const span = bridgeSpan(a, b);
+      const alongX = (b.x - a.x) / span, alongZ = (b.z - a.z) / span;
+      const x = (a.x + b.x) / 2, z = (a.z + b.z) / 2;
+      const halfSpan = span / 2, halfWidth = width / 2;
+      const extentX = Math.abs(alongX) * halfSpan + Math.abs(alongZ) * halfWidth;
+      const extentZ = Math.abs(alongZ) * halfSpan + Math.abs(alongX) * halfWidth;
+      const caster: BridgeCaster = {
+        x, z, alongX, alongZ, halfSpan, halfWidth, k: 0.6,
+        x0: x - extentX, z0: z - extentZ, x1: x + extentX, z1: z + extentZ,
+      };
+      n++;
+      this.bucketRange(caster.x0, caster.z0, caster.x1, caster.z1, (c) => this.buckets[c].bridges.push(caster));
+    });
     for (const piece of this.buildings.getAllPieces()) {
       const bb = piece.worldBoundingBox;
       if (!bb) continue;
@@ -221,11 +254,28 @@ export class StaticShadows {
     const ox = cx * TERRAIN_CHUNK - WORLD_HALF, oz = cz * TERRAIN_CHUNK - WORLD_HALF;
     const f = this.fbuf;
     f.fill(0);
-    const { discs, boxes } = this.buckets[c];
+    const { discs, boxes, bridges } = this.buckets[c];
     const plot = (x: number, z: number, v: number) => {
       const i = (z - oz) * S + (x - ox);
       if (v > f[i]) f[i] = v;
     };
+
+    for (const b of bridges) {
+      const x0 = Math.max(Math.ceil(b.x0 - 1), ox), x1 = Math.min(Math.floor(b.x1 + 1), ox + TERRAIN_CHUNK);
+      const z0 = Math.max(Math.ceil(b.z0 - 1), oz), z1 = Math.min(Math.floor(b.z1 + 1), oz + TERRAIN_CHUNK);
+      for (let z = z0; z <= z1; z++) {
+        const dz = z - b.z;
+        for (let x = x0; x <= x1; x++) {
+          const dx = x - b.x;
+          const end = Math.abs(dx * b.alongX + dz * b.alongZ) - b.halfSpan;
+          const side = Math.abs(dx * b.alongZ - dz * b.alongX) - b.halfWidth;
+          if (end >= 1 || side >= 1) continue;
+          const edge = Math.hypot(Math.max(0, end), Math.max(0, side));
+          plot(x, z, b.k * (1 - edge));
+        }
+      }
+    }
+    setWaterBridgeShade(ox, oz, S, f);
 
     for (const d of discs) {
       const ext = d.r + 1;

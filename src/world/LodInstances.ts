@@ -169,10 +169,9 @@ export class LodInstances {
   private static readonly _m = new THREE.Matrix4();
 
   constructor(parent: THREE.Object3D, lods: THREE.BufferGeometry[], materials: THREE.Material[], bounds: THREE.Sphere, name: string,
-    distantMaterials?: THREE.Material[], farthestMaterials?: THREE.Material[],
+    farthestMaterials?: THREE.Material[],
   ) {
-    const materialsAt = (level: number) => level === lods.length - 1 && farthestMaterials
-      ? farthestMaterials : level > 0 ? distantMaterials ?? materials : materials;
+    const materialsAt = (level: number) => level === lods.length - 1 ? farthestMaterials ?? materials : materials;
     this.steady = lods.map((g, i) => new InstanceList(parent, g, materialsAt(i), bounds, `${name}_lod${i}`, false));
     this.fading = lods.map((g, i) => new InstanceList(parent, g, materialsAt(i), bounds, `${name}_lod${i}_fade`, true));
   }

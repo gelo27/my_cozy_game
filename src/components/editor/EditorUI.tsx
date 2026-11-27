@@ -4,12 +4,14 @@ import {
   TreePine, TreeDeciduous, Sprout, Gem, Mountain, Flower2, Cherry, Circle, Fence, Lamp, Armchair, Box, Wheat, Droplets,
   Flame, Mailbox, Package, MousePointer2, PaintBucket, Brush, Undo2, Redo2, Play, Save, FolderOpen, Download, Upload, Trash2,
   Copy, Crosshair, Activity, Layers, Sun, ArrowUpFromLine, ArrowDownToLine, Waves, Minus, Move3d, Rotate3d, Plus, Car,
-  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music, Skull, Fish, X, SprayCan, Eraser, Search, Star, Clock3,
+  PawPrint, User, Globe2, Terminal, Bug, Spline, Shell, Leaf, Music, Skull, Fish, X, SprayCan, Eraser, Search, Star, Clock3, Monitor, Construction,
 } from 'lucide-react';
 import { RiverPanel } from './RiverPanel';
+import { BridgePanel } from './BridgePanel';
 import { MusicPanel } from './MusicPanel';
 import { CavePanel } from './CavePanel';
 import { ScenePanel } from './ScenePanel';
+import { RenderPanel } from './RenderPanel';
 import { btn, chip, Section, Slider, NumberField } from './EditorWidgets';
 import { GameEngine, DevStats } from '../../engine/GameEngine';
 import { EditorTool, isScatterable } from '../../editor/EditorController';
@@ -50,7 +52,7 @@ function readEditorList(key: string): string[] {
 
 const CATEGORY_LABELS: Record<PropCategory, string> = { nature: 'Природа', decor: 'Декор', farm: 'Ферма', stations: 'Станції', objects: 'Об’єкти' };
 
-type Tab = 'world' | 'scene' | 'atmo' | 'water' | 'veg' | 'rocks' | 'music' | 'save' | 'debug';
+type Tab = 'world' | 'scene' | 'atmo' | 'render' | 'water' | 'veg' | 'rocks' | 'music' | 'save' | 'debug';
 const RockGeneratorPanel = React.lazy(() => import('./RockGeneratorPanel'));
 
 interface EditorUIProps {
@@ -106,11 +108,13 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
     { id: 'duckweed', icon: Sprout, label: 'Ряска (8)' },
     { id: 'pondTint', icon: Droplets, label: 'Колір ставка (0)' },
     { id: 'scatter', icon: SprayCan, label: 'Пензель об’єктів (9)' },
+    { id: 'bridge', icon: Construction, label: 'Мости' },
   ];
   const tabs: { id: Tab; icon: React.ElementType; label: string }[] = [
     { id: 'rocks', icon: Gem, label: 'Генератор каменів' },
     { id: 'scene', icon: Layers, label: 'Сцена та інспектор' },
     { id: 'atmo', icon: Sun, label: 'Час, погода, вода' },
+    { id: 'render', icon: Monitor, label: 'Рендер' },
     { id: 'water', icon: Waves, label: 'Шейдер води' },
     { id: 'veg', icon: Leaf, label: 'Рослинність' },
     { id: 'music', icon: Music, label: 'Музика' },
@@ -124,7 +128,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
       ['atmo', 'Час доби'], ['atmo', 'Пора року'], ['atmo', 'Погода'], ['atmo', 'Нічні джерела світла'],
       ['atmo', 'Голоси птахів'], ['atmo', 'Вода'], ['water', 'Параметри хвиль'], ['veg', 'Трава'],
       ['veg', 'Дерева'], ['scene', 'Швидкі перевірки'], ['scene', 'Ієрархія сцени'], ['save', 'Пресети середовища'],
-      ['debug', 'Продуктивність'], ['debug', 'Сценарії перевірки'],
+      ['render', 'Колір та експозиція'], ['debug', 'Продуктивність'], ['debug', 'Сценарії перевірки'],
     ].map(([tabId, label]) => ({ key: `section:${tabId}:${label}`, label, icon: Search })),
   ];
   const selectNav = (key: string) => {
@@ -238,6 +242,7 @@ export const EditorUI: React.FC<EditorUIProps> = (props) => {
         {tab === 'world' && <ToolPanel engine={engine} rerender={rerender} />}
         {tab === 'scene' && <ScenePanel engine={engine} notice={props.notify} openTool={setTool} inspectProp={<SelectedInspector engine={engine} detailsOnly />} />}
         {tab === 'atmo' && <AtmospherePanel engine={engine} rerender={rerender} />}
+        {tab === 'render' && <RenderPanel engine={engine} />}
         {tab === 'water' && <WaterPanel rerender={rerender} />}
         {tab === 'veg' && <VegetationPanel rerender={rerender} />}
         {tab === 'rocks' && <React.Suspense fallback={<p className="text-zinc-400">Завантаження генератора…</p>}>
@@ -365,6 +370,7 @@ const ToolPanel: React.FC<{ engine: GameEngine; rerender(): void }> = ({ engine,
   }
 
   if (s.tool === 'river') return <RiverPanel engine={engine} />;
+  if (s.tool === 'bridge') return <BridgePanel engine={engine} />;
   if (s.tool === 'cave') return <CavePanel engine={engine} />;
   if (s.tool === 'enemy') return <EnemyPanel engine={engine} />;
   if (s.tool === 'scatter') return <ScatterPanel engine={engine} />;
@@ -1366,18 +1372,6 @@ const WATER_GROUPS: { title: string; sliders: WaterSlider[] }[] = [
       { k: 'fresnel', label: 'Дзеркальність неба', min: 0, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
       { k: 'glint', label: 'Блик сонця', min: 0, max: 8, step: 0.1, fmt: (v) => v.toFixed(1) },
       { k: 'glintSharpness', label: 'Гострота блику', min: 8, max: 1000, step: 1, fmt: (v) => v.toFixed(0) },
-    ],
-  },
-  {
-    title: 'Іскри на воді',
-    sliders: [
-      { k: 'sparkle', label: 'Яскравість іскор', min: 0, max: 20, step: 0.1, fmt: (v) => (v > 0 ? v.toFixed(1) : 'вимк.') },
-      { k: 'sparkleDensity', label: 'Частота іскор', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
-      { k: 'sparkleSize', label: 'Розмір грані', min: 0.04, max: 0.6, step: 0.01, fmt: (v) => `${Math.round(v * 100)} см` },
-      { k: 'sparkleSpread', label: 'Ширина доріжки', min: 0.05, max: 1, step: 0.01, fmt: (v) => v.toFixed(2) },
-      { k: 'sparkleStars', label: 'Зірочки (яскравість)', min: 0, max: 15, step: 0.1, fmt: (v) => (v > 0 ? v.toFixed(1) : 'вимк.') },
-      { k: 'sparkleStarSize', label: 'Розмір зірочок', min: 4, max: 64, step: 1, fmt: (v) => `${v} px` },
-      { k: 'sparkleStarDensity', label: 'Частота зірочок', min: 0, max: 1, step: 0.01, fmt: (v) => `${Math.round(v * 100)}%` },
     ],
   },
   {

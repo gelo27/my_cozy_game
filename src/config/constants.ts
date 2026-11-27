@@ -180,6 +180,9 @@ export const WATER_PHYSICS_CONFIG = {
   WATER_DRAG_HORIZONTAL: 4.5,
   WATER_DRAG_VERTICAL: 3.8,
   ENTRY_SPLASH_VELOCITY_MIN: 1.8, // Minimum downward m/s to trigger splash
+  ENTRY_DIVE_MIN_SPEED: 9, // Downward impact speed (m/s) needed to dive past the surface
+  ENTRY_DIVE_END_SPEED: 0.65, // Resume regular swimming once the downward momentum fades
+  ENTRY_DIVE_DRAG: 7, // Exponential vertical braking after a hard entry (1/s)
   SWIM_STROKE_RIPPLE_INTERVAL: 0.32, // Seconds between swimming surface ripple pulses
   BUBBLE_EMIT_SPEED_THRESHOLD: 4.0, // Speed above which air bubbles spawn
 } as const;

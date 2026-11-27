@@ -6,6 +6,7 @@ import { TerrainSystem } from '../world/TerrainSystem';
 import { WORLD_SIZE, worldSettings } from '../world/WorldSettings';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { TREE_MATERIAL } from '../world/TreeModels';
+import { getTreeBillboard, loadTreeBillboards, TREE_BILLBOARD_MATERIAL } from '../world/TreeBillboards';
 import { vegetationSettings as veg } from '../world/VegetationSettings';
 import { AppleModels, FRUIT_PER_TREE, getAppleModels, loadAppleModels } from '../world/AppleTreeModel';
 import type { PropSystem } from '../world/PropSystem';
@@ -41,15 +42,23 @@ const GAP_TREE = 2.4;
 const GAP_BUSH = 1.0;
 /** Where the sapling goes: this far in front of the player. */
 const PLANT_AHEAD = 1.7;
-/** Lying apples: at most this many (the oldest go first), each for this long (s), then gone at once. */
+/** Dropped apples: at most this many (the oldest go first), each for this long (s). */
 const MAX_LOOSE = 90;
 const LOOSE_LIFETIME = 60;
+const APPLE_DENSITY = 750;
+const WATER_DENSITY = 1000;
+const AIR_ANGULAR_DAMPING = 2.2;
+const WATER_ANGULAR_DAMPING = 5;
+const WATER_HORIZONTAL_DRAG = 3;
+const WATER_VERTICAL_DRAG = 8;
+const FLOAT_SETTLE_RATE = 9;
+const FLOAT_SETTLE_EPSILON = 0.002;
 /** A dropped apple can be picked up this long after it left the tree (s): it is seen to fall. */
 const PICKUP_DELAY = 0.55;
 /** Pick-up reach around the player's body centre (horizontal m) and how long the hop takes (s). */
 const PICKUP_RADIUS = 0.95;
 const PICKUP_FLIGHT = 0.22;
-/** Trees farther than this from the camera draw the plain crown; blossom and fruit stop at these. */
+/** Trees farther than this from the camera draw a billboard; blossom and fruit stop at this distance. */
 const nearDist = (): number => veg.oakNearDist;
 /** Blossom and hanging apples are drawn only this close to the camera (m); hysteresis on top. */
 const DETAIL_VIEW = 45;
@@ -97,6 +106,7 @@ interface AppleTree {
 
 interface LooseApple {
   body: RAPIER.RigidBody | null;
+  inWater: boolean;
   pos: THREE.Vector3;
   quat: THREE.Quaternion;
   age: number;
@@ -173,6 +183,13 @@ export class AppleOrchard {
   private treesDirty = true;
   private fruitDirty = true;
   private looseDirty = true;
+  private readonly waterImpulse = { x: 0, y: 0, z: 0 };
+  private waterTerrainRevision = -1;
+  private waterRiverRevision = -1;
+  private seaLevel = NaN;
+  private floatTerrainRevision = -1;
+  private floatRiverRevision = -1;
+  private floatSeaLevel = NaN;
   private lodTimer = 0;
   private groundTimer = 0;
   private terrainRevision = -1;
@@ -218,7 +235,7 @@ export class AppleOrchard {
   ) {
     this.group.name = 'AppleOrchard';
     scene.add(this.group);
-    void loadAppleModels().then((m) => {
+    void Promise.all([loadAppleModels(), loadTreeBillboards()]).then(([m]) => {
       if (!m) return;
       this.models = m;
       this.ensureCapacity(Math.max(8, this.trees.length));
@@ -723,9 +740,10 @@ export class AppleOrchard {
       // Array materials draw by geometry group: give the LOD geometries one covering everything
       for (const g of [m.near, m.far]) if (!g.groups.length) g.addGroup(0, g.index ? g.index.count : g.getAttribute('position').count, 0);
       const bounds = new THREE.Sphere(new THREE.Vector3(), WORLD_SIZE);
-      this.lod = new LodInstances(this.group, [m.near, m.far], [TREE_MATERIAL], bounds, 'AppleTrees');
-      // Far crowns dissolve at the view's edge with the forest's distance dither, never pop
-      this.lod.setFarMaterials([acquireDistanceDither(TREE_MATERIAL, TREE_FADE_RANGE)]);
+      const billboard = m.near.hasAttribute('sway') ? getTreeBillboard('apple_tree') : null;
+      const farMaterial = billboard ? TREE_BILLBOARD_MATERIAL : TREE_MATERIAL;
+      this.lod = new LodInstances(this.group, [m.near, billboard ?? m.far], [TREE_MATERIAL], bounds, 'AppleTrees', [farMaterial]);
+      this.lod.setFarMaterials([acquireDistanceDither(farMaterial, TREE_FADE_RANGE)]);
     }
     for (const mesh of [this.blossomMesh, this.fruitMesh]) {
       if (mesh) {
@@ -883,14 +901,14 @@ export class AppleOrchard {
       .setLinvel(vx, vy, vz)
       .setAngvel({ x: (Math.random() - 0.5) * 6, y: (Math.random() - 0.5) * 6, z: (Math.random() - 0.5) * 6 })
       .setLinearDamping(0.25)
-      .setAngularDamping(2.2)
+      .setAngularDamping(AIR_ANGULAR_DAMPING)
       .setCcdEnabled(true);
-    if (sleeping) desc.setSleeping(true);
+    if (sleeping && this.submergedFraction(pos, m.appleRadius * 0.92) === 0) desc.setSleeping(true);
     const body = this.physics.world.createRigidBody(desc);
     body.userData = { noCarry: true };
     this.physics.world.createCollider(
       R.ColliderDesc.ball(m.appleRadius * 0.92)
-        .setDensity(750)
+        .setDensity(APPLE_DENSITY)
         .setFriction(0.85)
         .setRestitution(0.32)
         .setCollisionGroups(this.physics.packCollisionGroups(
@@ -899,9 +917,54 @@ export class AppleOrchard {
         )),
       body,
     );
-    this.loose.push({ body, pos: pos.clone(), quat: quat.clone(), age, prevVy: vy, fly: -1, from: new THREE.Vector3(), vis: false });
+    this.loose.push({ body, inWater: false, pos: pos.clone(), quat: quat.clone(), age, prevVy: vy, fly: -1, from: new THREE.Vector3(), vis: false });
     this.looseDirty = true;
   }
+
+  private submergedFraction(pos: { x: number; y: number; z: number }, radius: number): number {
+    const surface = riverWorld.waterLevelAt(pos.x, pos.z);
+    const immersed = (surface - pos.y + radius) / (2 * radius);
+    // The sea plane extends under dry terrain and river cells can overlap the banks.
+    if (immersed <= 0 || this.terrain.getHeight(pos.x, pos.z) >= surface - 0.01) return 0;
+    const h = Math.min(1, immersed);
+    // Volume fraction of the collision sphere below the waterline.
+    return h * h * (3 - 2 * h);
+  }
+
+  /** Apply buoyancy and drag before each fixed Rapier tick, preserving velocity and contacts. */
+  public readonly applyWaterPhysics = (dt: number): void => {
+    if (!this.loose.length || !this.models) return;
+    const changed = this.waterTerrainRevision !== this.terrain.revision
+      || this.waterRiverRevision !== riverWorld.revision || this.seaLevel !== worldSettings.waterLevel;
+    this.waterTerrainRevision = this.terrain.revision;
+    this.waterRiverRevision = riverWorld.revision;
+    this.seaLevel = worldSettings.waterLevel;
+    const radius = this.models.appleRadius * 0.92;
+    const buoyancy = -this.physics.getGravity() * WATER_DENSITY / APPLE_DENSITY;
+
+    for (const apple of this.loose) {
+      const body = apple.body;
+      if (!body) continue;
+      const sleeping = body.isSleeping();
+      if (sleeping && !changed) continue;
+      const fraction = this.submergedFraction(body.translation(), radius);
+      const inWater = fraction > 0;
+      if (sleeping && (inWater || apple.inWater)) body.wakeUp();
+      if (inWater !== apple.inWater) {
+        apple.inWater = inWater;
+        body.setAngularDamping(inWater ? WATER_ANGULAR_DAMPING : AIR_ANGULAR_DAMPING);
+      }
+      if (!inWater) continue;
+
+      const velocity = body.linvel();
+      const impulseScale = body.mass() * dt * fraction;
+      const impulse = this.waterImpulse;
+      impulse.x = -velocity.x * WATER_HORIZONTAL_DRAG * impulseScale;
+      impulse.y = (buoyancy - velocity.y * WATER_VERTICAL_DRAG) * impulseScale;
+      impulse.z = -velocity.z * WATER_HORIZONTAL_DRAG * impulseScale;
+      body.applyImpulse(impulse, false);
+    }
+  };
 
   private removeLoose(i: number): void {
     const a = this.loose[i];
@@ -952,7 +1015,7 @@ export class AppleOrchard {
         a.quat.set(r.x, r.y, r.z, r.w);
         const vy = body.linvel().y;
         // Bounced: the falling speed was knocked out of it this step
-        if (a.prevVy < -1.6 && vy > a.prevVy + 1.2 && this.thuds < 6) {
+        if (!a.inWater && a.prevVy < -1.6 && vy > a.prevVy + 1.2 && this.thuds < 6) {
           this.thuds++;
           audioEngine.at(a.pos, 3).playAppleThud(Math.min(1, -a.prevVy / 9));
         }

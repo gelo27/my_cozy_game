@@ -12,6 +12,8 @@ import type { RiverSystem } from '../world/rivers/RiverSystem';
 import { riverWorld, stringifyRivers } from '../world/rivers/RiverWorld';
 import type { RiverDef } from '../world/rivers/RiverTypes';
 import { CaveEditTool } from './CaveEditTool';
+import { BridgeEditTool } from './BridgeEditTool';
+import type { BridgeSystem } from '../world/BridgeSystem';
 import type { CaveNetwork } from '../explore/cave/CaveNetwork';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
 import type { PestKind, PestSystem } from '../gameplay/Pests';
@@ -19,7 +21,7 @@ import { worldSettings } from '../world/WorldSettings';
 import { duckweed } from '../world/Duckweed';
 import { pondTint } from '../world/PondTint';
 
-export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy' | 'duckweed' | 'scatter' | 'pondTint';
+export type EditorTool = 'select' | 'place' | 'sculpt' | 'paint' | 'river' | 'cave' | 'enemy' | 'duckweed' | 'scatter' | 'pondTint' | 'bridge';
 
 /** Where the object brush may put things: dry land, under water, or both. */
 export type ScatterWhere = 'land' | 'water' | 'any';
@@ -210,6 +212,7 @@ export class EditorController {
   public readonly rivers: RiverEditTool;
   /** Cave network authoring (tool 6). */
   public readonly caves: CaveEditTool;
+  public readonly bridges: BridgeEditTool;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -220,8 +223,12 @@ export class EditorController {
     private readonly props: PropSystem,
     riverSystem: RiverSystem,
     private readonly caveNetwork: CaveNetwork,
-    private readonly physics: PhysicsWorld
+    private readonly physics: PhysicsWorld,
+    bridges: BridgeSystem,
   ) {
+    this.bridges = new BridgeEditTool(scene, bridges, () => this.touch(), (label, id, before) => {
+      this.recordChange(label, () => bridges.get(id), (def) => this.bridges.restore(id, def), before);
+    });
     this.caves = new CaveEditTool(scene, camera, dom, caveNetwork, physics, {
       pushUndo: () => this.pushUndo(),
       touch: () => this.touch(),
@@ -275,6 +282,7 @@ export class EditorController {
   public dispose(): void {
     this.rivers.dispose();
     this.caves.dispose();
+    this.bridges.dispose();
     this.dom.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('pointermove', this.onPointerMove);
@@ -304,6 +312,7 @@ export class EditorController {
     }
     this.rivers.setVisible(active && this.state.tool === 'river');
     this.caves.setVisible(this.state.tool === 'cave', active);
+    this.bridges.setVisible(active && this.state.tool === 'bridge');
     this.touch();
   }
 
@@ -317,6 +326,7 @@ export class EditorController {
     if (key === 'tool') {
       this.rivers.setVisible(this.active && value === 'river');
       this.caves.setVisible(value === 'cave', this.active);
+      this.bridges.setVisible(this.active && value === 'bridge');
     }
     this.touch();
   }
@@ -333,6 +343,7 @@ export class EditorController {
     this.redoStack.length = 0;
     this.recentActions.length = 0;
     this.select(null);
+    this.bridges.reset();
     this.markSaved();
   }
 
@@ -588,7 +599,15 @@ export class EditorController {
     }
     if (e.button !== 0 || this.gizmo.dragging || (this.gizmo.axis && this.state.tool === 'select')) return;
     const { tool } = this.state;
-    if (tool === 'cave') {
+    if (tool === 'bridge') {
+      if (!this.bridges.picking) return;
+      const rect = this.dom.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const cursor = new THREE.Vector2((e.clientX - rect.left) / rect.width * 2 - 1, 1 - (e.clientY - rect.top) / rect.height * 2);
+      this.raycaster.setFromCamera(cursor, this.camera);
+      const hit = this.terrain.raycast(this.raycaster.ray, 300, this.hit);
+      if (hit && this.terrain.isInside(hit.x, hit.z)) this.bridges.pointerDown(hit);
+    } else if (tool === 'cave') {
       this.raycaster.setFromCamera(this.input.mouseNDC, this.camera);
       this.caves.pointerDown(this.raycaster, this.input.mouseNDC);
     } else if (tool === 'river') {
@@ -672,6 +691,10 @@ export class EditorController {
       else this.duplicateSelected();
     } else if (this.state.tool === 'river' && !e.ctrlKey && this.rivers.keyDown(e)) {
       // handled by the river tool
+    } else if (this.state.tool === 'bridge' && e.code === 'Escape') {
+      this.bridges.cancel();
+    } else if (this.state.tool === 'bridge' && (e.code === 'Delete' || e.code === 'Backspace')) {
+      this.bridges.deleteSelected();
     } else if (this.state.tool === 'cave' && (e.code === 'Delete' || e.code === 'Backspace')) {
       this.caves.deleteSelected();
     } else if (this.state.tool === 'cave' && e.code === 'Escape') {
@@ -707,6 +730,15 @@ export class EditorController {
     this.caves.update(dt);
 
     const { tool } = this.state;
+    if (tool === 'bridge') {
+      const aiming = !!this.bridges.picking && !this.looking;
+      if (aiming) this.updatePlacementHit(this.input.mouseNDC);
+      this.bridges.update(aiming && this.hasHit && this.terrain.isInside(this.hit.x, this.hit.z) ? this.hit : null);
+      this.sceneHover?.(null);
+      this.updateCursor(false);
+      this.updateGhost(false);
+      return;
+    }
     this.updatePlacementHit(this.input.mouseNDC);
     // Sharks go in the water: the sea surface under the cursor counts as the hit
     if (tool === 'enemy' && this.state.enemyKind === 'shark') this.castOntoSea();

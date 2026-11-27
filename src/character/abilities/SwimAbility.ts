@@ -14,6 +14,8 @@ import { setWaterBody, setWaterLimb } from '../../scene/WaterDetails';
 
 /** Within this distance (m) below the resting height the swimmer is caught by the surface. */
 const SURFACE_CAPTURE = 0.55;
+/** Maximum lift above the resting swim height while following a walkable bank. */
+const BANK_EXIT_LIFT = 0.36;
 const DOWN = new THREE.Vector3(0, -1, 0);
 /** Body centre to the soles (capsule half height + radius, m). */
 const CAPSULE_HALF_TOTAL = 0.75;
@@ -57,6 +59,7 @@ export class SwimAbility implements IAbility {
   private mantleCooldown = 0;
   /** Held at the surface (floating) rather than swimming free underwater. */
   private surfaced = false;
+  private impactDiving = false;
   private bobTime = 0;
   /** Extra height while gliding along the surface (eased in and out). */
   private glideLift = 0;
@@ -96,6 +99,7 @@ export class SwimAbility implements IAbility {
       }
       this.isSwimming = false;
       this.wasSwimming = false;
+      this.impactDiving = false;
       context.isSwimming = false;
       context.canMantle = false;
       context.isMantling = false;
@@ -155,13 +159,19 @@ export class SwimAbility implements IAbility {
     const depth = Math.max(0, this.waterMax.y - headY);
     context.swimDepth = depth;
 
-    // 2. Water Entry Impact Splash
+    // 2. Water entry: let a hard impact carry the capsule below the surface spring.
     if (this.isSwimming && !this.wasSwimming) {
       const impactSpeed = -vel.y;
+      this.impactDiving = !context.ground.isGrounded && impactSpeed >= WATER_PHYSICS_CONFIG.ENTRY_DIVE_MIN_SPEED;
       if (impactSpeed >= WATER_PHYSICS_CONFIG.ENTRY_SPLASH_VELOCITY_MIN) {
         this.waterParticles?.emitEntrySplash(this.splashOrigin.set(pos.x, level, pos.z), impactSpeed);
         if (!inCavePool) this.waterEffects?.emitRippleBurst(pos.x, pos.z, impactSpeed * 0.4);
       }
+    } else if (this.impactDiving && (
+      !this.isSwimming || context.ground.isGrounded || vel.y >= -WATER_PHYSICS_CONFIG.ENTRY_DIVE_END_SPEED ||
+      (context.input.jump && !context.input.crouch && depth > 0.1)
+    )) {
+      this.impactDiving = false;
     }
     this.wasSwimming = this.isSwimming;
 
@@ -180,7 +190,7 @@ export class SwimAbility implements IAbility {
     }
 
     // 4. Ledge Mantle Detection & Execution
-    if (this.isSwimming) {
+    if (this.isSwimming && !this.impactDiving) {
       const ledgeCheck = this.detectLedge(context);
       this.canMantle = ledgeCheck.canMantle && this.mantleCooldown <= 0;
       context.canMantle = this.canMantle;
@@ -247,10 +257,12 @@ export class SwimAbility implements IAbility {
       // most games: swimming forward never drifts the body under, and coming up from a dive the
       // body pops up and settles instead of sinking back.
       this.bobTime += dt;
-      if (context.input.crouch) this.surfaced = false;
+      if (this.impactDiving || context.input.crouch) this.surfaced = false;
       else if (pos.y > surfaceY - SURFACE_CAPTURE) this.surfaced = true;
 
-      if (context.input.crouch) {
+      if (this.impactDiving) {
+        vy *= Math.exp(-WATER_PHYSICS_CONFIG.ENTRY_DIVE_DRAG * dt);
+      } else if (context.input.crouch) {
         vy = THREE.MathUtils.lerp(vy, targetVy, 1 - Math.exp(-12 * dt));
       } else if (this.surfaced) {
         const bob = Math.sin(this.bobTime * 2.1) * 0.035;
@@ -260,7 +272,17 @@ export class SwimAbility implements IAbility {
         const glide = THREE.MathUtils.smoothstep(Math.hypot(vel.x, vel.z), 0.4, 2.5);
         this.glideLift += (glide * WATER_PHYSICS_CONFIG.SWIM_GLIDE_LIFT - this.glideLift) * (1 - Math.exp(-4 * dt));
         const lift = (context.input.jump ? 0.12 : 0) + this.glideLift;
-        const target = (err + lift) * 9;
+        let target = (err + lift) * 9;
+        const { ground } = context;
+        if (isMoving && ground.isGrounded && ground.isWalkableSlope) {
+          // Follow the slope under the capsule until the shallow-water check hands off to walking.
+          const normal = ground.normal;
+          const uphillSpeed = -(targetVel.x * normal.x + targetVel.z * normal.z) / normal.y;
+          if (uphillSpeed > 0.05) {
+            const bankTarget = Math.min(uphillSpeed, (surfaceY + BANK_EXIT_LIFT - pos.y) * 9);
+            target = Math.max(target, bankTarget);
+          }
+        }
         vy = THREE.MathUtils.lerp(vy, THREE.MathUtils.clamp(target, -3, 3), 1 - Math.exp(-10 * dt));
       } else if (hasVerticalInput) {
         vy = THREE.MathUtils.lerp(vy, targetVy, 1 - Math.exp(-12 * dt));

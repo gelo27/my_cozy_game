@@ -6,7 +6,7 @@ import type { PropSystem } from './PropSystem';
 import type { WeatherSystem } from './WeatherSystem';
 import { injectWaterline } from '../scene/WaterDetails';
 import { CLOUD_SHADOW_BEGIN, CLOUD_SHADOW_END, CLOUD_SHADOW_GLSL, cloudShadowUniforms } from './CloudShadows';
-import { injectInteriorShade } from './InteriorLighting';
+import { injectInteriorShade, type InteriorLighting, type InteriorRoom } from './InteriorLighting';
 import { GROUND_LIGHT_GLSL, GroundLightBaker, groundLightUniforms, type BakedLamp, type WindowSpill } from './GroundLight';
 
 /**
@@ -16,7 +16,7 @@ import { GROUND_LIGHT_GLSL, GroundLightBaker, groundLightUniforms, type BakedLam
  * number changes. Instead every lit built-in material gets a small loop over a fixed-size uniform
  * array of "fake" point lights (position + range, colour). The CPU picks the lights nearest to the
  * camera that can touch the view a few times per second and fades them in and out of the slots;
- * `uFakeLightCount` is 0 during the day so the loop is skipped.
+ * `uFakeLightCount` is 0 in daylight unless the player has activated a room's lamps.
  *
  * Positions are sent in VIEW space (transformed once per frame on the CPU), so the shader needs no
  * extra varying or per-light matrix multiply, and pixels outside a light's range skip it early.
@@ -360,6 +360,8 @@ export interface ExtraLight {
   flicker?: boolean;
   /** World box the light stays inside (its room), for the `room` mode. */
   box?: THREE.Box3 | null;
+  /** Furniture lamps can also light their house in daylight. */
+  furniture?: boolean;
   /** A visible animated flame at this light (torches): base height and flame height in metres. */
   flame?: { y: number; size: number };
 }
@@ -379,6 +381,7 @@ interface LightSource {
   flicker: number; // 0 = steady, 1 = campfire
   seed: number;
   box: THREE.Box3 | null;
+  furniture: boolean;
   /** Steady and outside any room: its light on the ground is baked (GroundLight). */
   baked: boolean;
 }
@@ -402,12 +405,16 @@ export class NightLighting {
   private readonly glowBulbs: THREE.MeshBasicMaterial[] = [];
   private readonly glowShades: THREE.MeshLambertMaterial[] = [];
   private selectTimer = 0;
+  private occupancyTimer = 0;
+  private occupiedRoom: InteriorRoom | null = null;
+  private missedRoomSample = false;
+  private readonly daySources = new Set<LightSource>();
   /** Wanted sources (nearest that can reach the view), refreshed a few times per second. */
   private readonly wanted: LightSource[] = [];
   private readonly cand: { s: LightSource; d: number }[] = [];
   private candPool: { s: LightSource; d: number }[] = [];
   /** Sources holding a uniform slot, with their fade weight (0..1). */
-  private readonly slots: { s: LightSource; w: number }[] = [];
+  private readonly slots: { s: LightSource; w: number; dayWeight: number }[] = [];
   /** Slot sources the light grid was last written for. */
   private readonly gridSlots: LightSource[] = [];
   private ground: {
@@ -440,7 +447,8 @@ export class NightLighting {
     scene: THREE.Scene,
     private readonly props: PropSystem,
     private readonly weather: WeatherSystem,
-    private readonly bulbMaterials: { lamp: THREE.MeshBasicMaterial; fire: THREE.MeshBasicMaterial }
+    private readonly bulbMaterials: { lamp: THREE.MeshBasicMaterial; fire: THREE.MeshBasicMaterial },
+    private readonly onDayLightSwitch?: (on: boolean) => void,
   ) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.haloPos, 3));
@@ -529,7 +537,7 @@ export class NightLighting {
   /**
    * Call after the camera has moved for this frame (light positions are sent in its view space).
    */
-  public update(dt: number, camera: THREE.Camera, playerPos: THREE.Vector3 | null): void {
+  public update(dt: number, camera: THREE.Camera, playerPos: THREE.Vector3 | null, interiors: InteriorLighting): void {
     this.time += dt;
     const night = Math.max(this.weather.nightFactor, this.forcedDark);
 
@@ -561,6 +569,9 @@ export class NightLighting {
     }
     if (rebuild) this.rebuildSources();
     else if (this.ground && this.ground.spillRevision() !== this.ground.seenSpills) this.rebakeGround();
+    const dayPlayer = night < 1 && this.forcedDark === 0 ? playerPos : null;
+    const daySwitch = this.updateDaySources(dt, dayPlayer, interiors, rebuild);
+    if (dayPlayer && night < 0.02 && daySwitch !== null) this.onDayLightSwitch?.(daySwitch);
 
     // Diving puts a burning player out
     if (this.weather.underwater > 0.5) fireFx.douse();
@@ -573,9 +584,10 @@ export class NightLighting {
 
     const u = nightLightUniforms;
     groundLightUniforms.uGroundLightNight.value = night < 0.02 ? 0 : night;
-    if (night < 0.02) {
+    if (night < 0.02 && this.daySources.size === 0 && !this.slots.some((slot) => slot.dayWeight > 0)) {
       u.uFakeLightCount.value = 0;
       this.slots.length = 0;
+      this.wanted.length = 0;
       this.selectTimer = 0;
       return;
     }
@@ -595,7 +607,7 @@ export class NightLighting {
       // Candidate records are pooled: this runs 4x a second all night
       const cand = this.cand;
       let n = 0;
-      for (const src of this.sources) {
+      for (const src of night < 0.02 ? this.daySources : this.sources) {
         // A room lamp's light stays inside its room: from afar only its windows show it (WindowGlow),
         // so it gets a slot only while the camera or the player is near enough to look in
         if (src.box && !(nearBox(src.box, cameraPos) || (playerPos !== null && nearBox(src.box, playerPos)))) continue;
@@ -620,24 +632,26 @@ export class NightLighting {
     for (let i = this.slots.length - 1; i >= 0; i--) {
       const slot = this.slots[i];
       slot.w = this.wanted.includes(slot.s) ? Math.min(1, slot.w + fade) : slot.w - fade;
+      slot.dayWeight = this.daySources.has(slot.s) ? Math.min(1, slot.dayWeight + fade) : Math.max(0, slot.dayWeight - fade);
       if (slot.w <= 0) this.slots.splice(i, 1);
     }
     for (const src of this.wanted) {
       if (this.slots.length >= maxFromProps) break;
       let has = false;
       for (let i = 0; i < this.slots.length; i++) if (this.slots[i].s === src) { has = true; break; }
-      if (!has) this.slots.push({ s: src, w: 0 });
+      if (!has) this.slots.push({ s: src, w: 0, dayWeight: 0 });
     }
 
     let n = 0;
     let baked = 0;
     const v = this.viewPos;
-    for (const { s, w } of this.slots) {
+    for (const { s, w, dayWeight } of this.slots) {
       if (s.baked && this.ground) baked |= 1 << n;
       const flicker = s.flicker ? 0.82 + 0.18 * Math.sin(this.time * (11 + s.seed * 5) + s.seed * 20) * Math.sin(this.time * 4.7) : 1;
       v.copy(s.pos).applyMatrix4(view);
       u.uFakeLightPos.value[n].set(v.x, v.y, v.z, s.range);
-      u.uFakeLightColor.value[n].copy(s.color).multiplyScalar(night * flicker * w * w * (3 - 2 * w));
+      const day = 0.7 * (1 - night) * dayWeight * dayWeight * (3 - 2 * dayWeight);
+      u.uFakeLightColor.value[n].copy(s.color).multiplyScalar((night + day) * flicker * w * w * (3 - 2 * w));
       if (s.box) {
         u.uFakeLightBoxMin.value[n].set(s.box.min.x, s.box.min.y, s.box.min.z, 1);
         u.uFakeLightBoxMax.value[n].copy(s.box.max);
@@ -657,6 +671,38 @@ export class NightLighting {
     // The player lantern (after the prop slots) lights wherever the player goes: not in the grid
     u.uFakeLightAlways.value = n > this.slots.length ? 1 << this.slots.length : 0;
     this.updateGrid();
+  }
+
+  private updateDaySources(dt: number, playerPos: THREE.Vector3 | null, interiors: InteriorLighting, rebuild: boolean): boolean | null {
+    let room = this.occupiedRoom;
+    if (!playerPos) {
+      room = null;
+      this.occupancyTimer = 0;
+      this.missedRoomSample = false;
+    } else {
+      this.occupancyTimer -= dt;
+      if (this.occupancyTimer <= 0) {
+        this.occupancyTimer = 0.1;
+        const sampled = interiors.roomAt(playerPos);
+        // Door frames can span an unoccupied grid cell. Wait for a second miss before dimming.
+        if (sampled !== null || this.missedRoomSample) room = sampled;
+        this.missedRoomSample = sampled === null;
+      }
+    }
+    const roomChanged = room !== this.occupiedRoom;
+    if (!roomChanged && !rebuild) return null;
+    const hadDayLights = this.daySources.size > 0;
+    this.occupiedRoom = room;
+    this.daySources.clear();
+    if (room) {
+      for (const source of this.sources) {
+        if (source.furniture && interiors.roomInHouseAt(room.houseKey, source.pos) === room) this.daySources.add(source);
+      }
+    }
+    this.selectTimer = 0;
+    const hasDayLights = this.daySources.size > 0;
+    if (hasDayLights !== hadDayLights || (roomChanged && hasDayLights)) return hasDayLights;
+    return null;
   }
 
   /** Rewrites the light grid when the slots (their sources or order) changed. */
@@ -716,6 +762,7 @@ export class NightLighting {
         flicker: isLamp ? 0 : 1,
         seed: Math.random(),
         box: null,
+        furniture: false,
         baked: isLamp,
       });
       if (h < MAX_HALOS) {
@@ -737,6 +784,7 @@ export class NightLighting {
         flicker: l.flicker ? 1 : 0,
         seed: Math.random(),
         box: l.box ?? null,
+        furniture: l.furniture ?? false,
         baked: !l.flicker && !l.box,
       });
       if (h < MAX_HALOS) {

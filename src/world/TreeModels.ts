@@ -234,7 +234,8 @@ export function rebuildTreeLeaves(): TreeLods | null {
 
 /**
  * Near oaks get leaf scales, near pines needle blades and near bushes small scales, over a
- * darkened crown. Farther oak-derived LODs use baked leaf relief and a few scales for the silhouette.
+ * darkened crown. The middle mesh LOD uses vertex colours.
+ * The far oak-derived mesh fallback uses baked leaf relief and a few silhouette scales.
  */
 function buildLods(src: TreeLods): TreeLods {
   const out: TreeLods = {};
@@ -262,30 +263,29 @@ function buildLods(src: TreeLods): TreeLods {
             })
           : addCrownLeaves(near, leafOptions);
       if (list[0] !== near) near.dispose();
-      for (let level = 1; level < list.length; level++) {
-        const base = list[level];
-        const uv = base.getAttribute('crownUv') as THREE.BufferAttribute | undefined;
-        if (!uv) continue;
-        const far = level === list.length - 1;
+      const farLevel = list.length - 1;
+      const base = list[farLevel];
+      const uv = base.getAttribute('crownUv') as THREE.BufferAttribute | undefined;
+      if (uv) {
         const smallCrown = type === 'tree_birch';
         const detailed = addCrownLeaves(base, {
           ...leafOptions,
-          count: Math.min(leafOptions.count, far ? 18 : 72),
-          spacing: (far ? 1.0 : 0.57) * (smallCrown ? 0.78 : 1),
-          size: (far ? 1.08 : 0.91) * (smallCrown ? 0.74 : 1),
+          count: Math.min(leafOptions.count, 18),
+          spacing: smallCrown ? 0.78 : 1,
+          size: 1.08 * (smallCrown ? 0.74 : 1),
           offset: 0.09,
           // Darken the inner crown like the near LOD. The scales keep their own tip lighting.
           innerShade: Math.min(0.9, leafOptions.innerShade + 0.04),
           shape: 'scale',
         });
-        if (detailed === base) continue;
-        // addCrownLeaves keeps the base vertices first and appends the scales. Their zero mask
-        // leaves their vertex shading intact, while retaining the texture on the underlying crown.
-        const crownUv = new Float32Array(detailed.getAttribute('position').count * 3);
-        crownUv.set(uv.array);
-        detailed.setAttribute('crownUv', new THREE.BufferAttribute(crownUv, 3));
-        list[level] = detailed;
-        base.dispose();
+        if (detailed !== base) {
+          // The added scales use their own vertex colours. The texture only covers the base.
+          const crownUv = new Float32Array(detailed.getAttribute('position').count * 3);
+          crownUv.set(uv.array);
+          detailed.setAttribute('crownUv', new THREE.BufferAttribute(crownUv, 3));
+          list[farLevel] = detailed;
+          base.dispose();
+        }
       }
     } else {
       for (const g of list) g.deleteAttribute('crownUv');
@@ -345,7 +345,7 @@ function prepare(mesh: THREE.Mesh, type: string, level: number): THREE.BufferGeo
   }
   g.setAttribute('color', new THREE.BufferAttribute(rgb, 3));
   const uv = src.getAttribute('uv');
-  if (type === 'tree_round' && level > 0 && c && uv) {
+  if (type === 'tree_round' && level === 2 && c && uv) {
     // The pack already unwraps the crown at its seam. Store the mask before maple and birch repaint it.
     const crownUv = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) {

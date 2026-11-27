@@ -221,8 +221,13 @@ interface StoreyMap {
   cells: number;
   /** Kept after the bake for re-summing the light when a door opens or closes */
   comp: Compose | null;
+  rooms: InteriorRoom[];
   /** Exterior texels that borrow darkness from a room texel for filtering. */
   edgeSources: Map<number, number>;
+}
+
+export interface InteriorRoom {
+  readonly houseKey: string;
 }
 
 interface Opening {
@@ -340,8 +345,8 @@ function composeDarkness(cp: Compose): Float32Array {
 interface Compose {
   W: number;
   H: number;
-  /** Cells inside the house (rooms and their walls) */
-  inside: Uint8Array;
+  /** 0 outdoors, 1 covered boundary, 2 open sky, 3 and above for covered rooms. */
+  inside: Uint16Array | Uint32Array;
   blocked: Uint8Array;
   mask: Uint8Array;
   ao: Float32Array;
@@ -450,17 +455,45 @@ export class InteriorLighting {
     this.checkTimer = 0;
   }
 
+  /** Find the baked room that contains this position, including its floor and ceiling. */
+  public roomAt(position: THREE.Vector3): InteriorRoom | null {
+    for (const key of this.current) {
+      const room = this.roomInHouseAt(key, position);
+      if (room) return room;
+    }
+    return null;
+  }
+
+  public roomInHouseAt(key: string, position: THREE.Vector3): InteriorRoom | null {
+    const house = this.clusters.get(key);
+    if (!house?.layers) return null;
+    const { rect } = house;
+    const x = Math.floor(position.x / CELL);
+    const z = Math.floor(position.z / CELL);
+    if (x < rect.x0 || x > rect.x1 || z < rect.z0 || z > rect.z1) return null;
+    const cell = (z - rect.z0) * (rect.x1 - rect.x0 + 1) + x - rect.x0;
+    for (const { comp, data, rooms } of house.layers) {
+      if (!comp) continue;
+      const room = rooms[comp.inside[cell] - 3];
+      if (!room) continue;
+      const floor = THREE.DataUtils.fromHalfFloat(data[cell * 4 + 3]);
+      const ceiling = THREE.DataUtils.fromHalfFloat(data[cell * 4 + 1]);
+      if (position.y >= floor && position.y < ceiling) return room;
+    }
+    return null;
+  }
+
   /** Call once per frame with the player (or camera, in the editor) position. */
-  public update(dt: number, focus: THREE.Vector3): void {
+  public update(dt: number, focus: THREE.Vector3, trackOccupancy: boolean): void {
     const u = interiorUniforms.uIntB.value;
     u.x = interiorSettings.ambient;
     u.y = interiorSettings.sun;
-    if (!interiorSettings.enabled || !this.physics.world) {
+    if ((!interiorSettings.enabled && !trackOccupancy) || !this.physics.world) {
       u.z = 0;
       return;
     }
     const box = interiorUniforms.uIntBox.value;
-    u.z = box.x < box.z ? 1 : 0;
+    u.z = interiorSettings.enabled && box.x < box.z ? 1 : 0;
 
     // 1. Window follows the player: only copies from the cache
     const moved = !(Math.abs(focus.x - this.winX * CELL) < RECENTER && Math.abs(focus.z - this.winZ * CELL) < RECENTER);
@@ -1055,7 +1088,7 @@ export class InteriorLighting {
       }
     }
     if (cells === 0) {
-      return { data: new Uint16Array(NN * 4), maxY: -Infinity, cells: 0, comp: null, edgeSources: new Map() };
+      return { data: new Uint16Array(NN * 4), maxY: -Infinity, cells: 0, comp: null, rooms: [], edgeSources: new Map() };
     }
     yield;
 
@@ -1278,7 +1311,7 @@ export class InteriorLighting {
     // Corners and the strips along walls get less of the window light (a 2D ambient occlusion:
     // the share of wall cells around)
     const ao = new Float32Array(NN);
-    const inside = new Uint8Array(NN);
+    const inside = NN <= 0xffff - 2 ? new Uint16Array(NN) : new Uint32Array(NN);
     // Summed-area tables make the AO wall ratio an O(1) rectangle query instead of counting the
     // same 7x7 neighbourhood for every interior cell.
     const prefixStride = W + 1;
@@ -1301,7 +1334,7 @@ export class InteriorLighting {
       for (let i = 0; i < W; i++) {
         const c = j * W + i;
         if (k[c] === 0) continue;
-        inside[c] = 1;
+        inside[c] = sky[c] ? 2 : 1;
         const x0 = Math.max(0, i - AO_R), x1 = Math.min(W - 1, i + AO_R);
         const z0 = Math.max(0, j - AO_R), z1 = Math.min(H - 1, j + AO_R);
         const a = (z1 + 1) * prefixStride + x1 + 1;
@@ -1329,6 +1362,30 @@ export class InteriorLighting {
             if (!blocked[cc] && inside[cc]) { mask[c] = 1; break; }
           }
         }
+      }
+    }
+
+    const rooms: InteriorRoom[] = [];
+    let roomId = 0;
+    let visited = 0;
+    const fillRoom = (c: number) => {
+      if (inside[c] !== 1 || blocked[c]) return;
+      inside[c] = roomId;
+      stack[sp++] = c;
+    };
+    for (let c = 0; c < NN; c++) {
+      if (inside[c] !== 1 || blocked[c]) continue;
+      roomId = rooms.length + 3;
+      rooms.push({ houseKey: cl.key });
+      fillRoom(c);
+      while (sp > 0) {
+        const next = stack[--sp];
+        const i = next % W;
+        if (i > 0) fillRoom(next - 1);
+        if (i < W - 1) fillRoom(next + 1);
+        if (next >= W) fillRoom(next - W);
+        if (next < NN - W) fillRoom(next + W);
+        if (++visited % 4096 === 0) yield;
       }
     }
 
@@ -1456,6 +1513,6 @@ export class InteriorLighting {
       out[c * 4 + 3] = baseY;
       if (coverage[c] > 0.5 - MASK_FEATHER && y > maxY) maxY = y;
     }
-    return { data: out, maxY, cells, comp, edgeSources };
+    return { data: out, maxY, cells, comp, rooms, edgeSources };
   }
 }

@@ -41,15 +41,18 @@ material.onBeforeCompile = (shader) => {
 material.customProgramCacheKey = () => 'tree-impostor';
 export const TREE_BILLBOARD_MATERIAL = withVertexLightingQuality(material);
 
-export async function loadTreeBillboards(): Promise<void> {
-  try {
-    const atlas = await new THREE.TextureLoader().loadAsync(atlasUrl);
-    atlas.colorSpace = THREE.SRGBColorSpace;
-    material.map = atlas;
-    material.needsUpdate = true;
-  } catch (err) {
-    console.warn('[Trees] Impostor atlas failed to load, keeping the distant mesh', err);
-  }
+let loading: Promise<void> | undefined;
+
+export function loadTreeBillboards(): Promise<void> {
+  return loading ??= new THREE.TextureLoader().loadAsync(atlasUrl)
+    .then((atlas) => {
+      atlas.colorSpace = THREE.SRGBColorSpace;
+      material.map = atlas;
+      material.needsUpdate = true;
+    })
+    .catch((err) => {
+      console.warn('[Trees] Impostor atlas failed to load, keeping the distant mesh', err);
+    });
 }
 
 /** Each frame is split into two fitted, coplanar quads with a common horizontal edge. */

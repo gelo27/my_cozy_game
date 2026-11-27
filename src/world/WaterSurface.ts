@@ -64,8 +64,6 @@ export const waterSurfaceUniforms = {
   uWsShoreA: { value: new THREE.Vector4() },
   /** x gap 0..1 */
   uWsShoreB: { value: new THREE.Vector4() },
-  /** Sparkles: x brightness (0 = off), y slope tolerance, z facets per metre, w slope spread */
-  uWsSparkle: { value: new THREE.Vector4() },
   ...duckweedUniforms,
 };
 
@@ -108,19 +106,20 @@ export function updateWaterSurface(dt: number): void {
   u.uWsFoam.value.set(ws.foamLine, ws.rippleFoam ? 1 : 0, ws.rippleSpeed);
   u.uWsShoreA.value.set(Math.round(ws.shoreLineCount), ws.shoreLineWidth, ws.shoreLineReach, ws.shoreLineDash);
   u.uWsShoreB.value.set(ws.shoreLineGap, 0, 0, 0);
-  u.uWsSparkle.value.set(ws.sparkle, Math.max(ws.sparkleDensity, 1e-3), 1 / Math.max(ws.sparkleSize, 0.02), Math.max(ws.sparkleSpread, 0.01));
 }
 
 /**
- * Bed height and wave slope (GLSL, safe in a vertex shader too: no derivatives). Needs uWsTime,
+ * Bed height and wave slope for the water fragment shader. Needs uWsTime,
  * uWsNormals, uWsBed, uWsWaveA, uWsWaveB declared before it.
  */
-export const WATER_SHARED_GLSL = /* glsl */ `
+const WATER_SHARED_GLSL = /* glsl */ `
 /** Terrain texture uv of a world point, and 1 inside the island / 0 outside. */
 vec2 wsBedUv(vec2 xz) { return (xz + ${(HALF + 0.5).toFixed(1)}) / ${V.toFixed(1)}; }
 float wsInIsland(vec2 xz) { return step(abs(xz.x), ${HALF.toFixed(1)}) * step(abs(xz.y), ${HALF.toFixed(1)}); }
-/** Height of the bed under a point (outside the island: the flat sea floor). */
-float wsBedY(vec2 xz) { return mix(uWsSeaFloorY, texture2D(uWsBed, wsBedUv(xz)).r, wsInIsland(xz)); }
+/** R is bed height, G is the baked bridge shadow on the water. */
+vec2 wsBed(vec2 xz, float inIsland) {
+  return mix(vec2(uWsSeaFloorY, 0.0), texture2D(uWsBed, wsBedUv(xz)).rg, inIsland);
+}
 /**
  * Wave slope at p (in the frame p is measured in), calmer with camera distance; shade = a little
  * light / dark from the waves, wob = a small wobble for edges.
@@ -129,44 +128,22 @@ vec2 wsWaves(vec2 p, float dist, out float shade, out float wob) {
   float detail = 1.0 - smoothstep(uWsWaveB.z, uWsWaveB.w, dist);
   vec3 n1 = texture2D(uWsNormals, p * uWsWaveB.x + uWsTime * uWsWaveA.w * vec2(0.011, 0.007)).xyz * 2.0 - 1.0;
   vec3 n2 = n1;
-  #ifdef WATER_SURFACE_FRAGMENT
   if (uWsLite > 0.5) {
     // Compute derivatives before branching so mip selection stays defined at the LOD boundary.
     vec2 uv = p * uWsWaveB.y + uWsTime * uWsWaveA.w * vec2(-0.015, 0.010);
     vec2 dx = dFdx(uv), dy = dFdy(uv);
     float layerMix = 1.0 - smoothstep(${LITE_WAVE_START.toFixed(1)}, ${LITE_WAVE_END.toFixed(1)}, dist);
     if (layerMix > 0.0) n2 = mix(n1, textureGrad(uWsNormals, uv, dx, dy).xyz * 2.0 - 1.0, layerMix);
-  } else
-  #endif
-  {
+  } else {
     n2 = texture2D(uWsNormals, p * uWsWaveB.y + uWsTime * uWsWaveA.w * vec2(-0.015, 0.010)).xyz * 2.0 - 1.0;
   }
   shade = 0.94 + (n1.z + n2.z) * 0.04;
   wob = (n1.x + n2.y) * 0.6;
   return (n1.xy * 0.6 + n2.xy * 0.4) * mix(uWsWaveA.z, uWsWaveA.y, detail);
 }
-float wsHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-/**
- * One sparkle facet of the cell id of a world grid. need = the extra slope the water there would
- * need to mirror the light into the eye: 0 in the middle of the glint, growing away from it.
- * Facets within spread of it can catch the light (a jittered edge, so the path is no hard
- * ellipse); a share of them (density, fewer toward the edge) flash at a time. Every facet
- * re-rolls a few times a second, each in its own rhythm, and flashes up and down within a roll.
- * Returns 0..1, and the facet's spot inside the cell (cell units) in spot.
- */
-float wsSparkleFacet(vec2 id, vec2 need, float density, float spread, float rate, out vec2 spot) {
-  float h = wsHash(id);
-  float c = uWsTime * rate * (0.6 + h * 0.8) + h * 9.0;
-  vec2 e = id + floor(c) * vec2(17.13, 31.71);
-  spot = (vec2(wsHash(e + 11.9), wsHash(e + 23.1)) - 0.5) * 0.6;
-  vec2 s = (vec2(wsHash(e + 41.7), wsHash(e + 57.3)) - 0.5) * spread * 0.6;
-  float k = max(0.0, 1.0 - length(need - s) / spread);
-  return step(wsHash(e), density * k) * k * sin(3.14159265 * fract(c));
-}
 `;
 
-/** Shared by the water surfaces and the sea's sparkle sprites. */
-export const WATER_BOAT_GLSL = /* glsl */ `
+const WATER_BOAT_GLSL = /* glsl */ `
 uniform vec3 uWsBoatBounds; // world xz and enclosing radius (0 = disabled)
 uniform mat4 uWsBoatInverse;
 uniform vec3 uWsBoatSections[${BOAT_HULL_SECTIONS.length}];
@@ -226,12 +203,9 @@ uniform vec4 uWsShine;
 uniform vec3 uWsFoam;
 uniform vec4 uWsShoreA;
 uniform vec4 uWsShoreB;
-uniform vec4 uWsSparkle;
 vec3 wsN;
 float wsFoam;
-#define WATER_SURFACE_FRAGMENT
 ${WATER_SHARED_GLSL}
-#undef WATER_SURFACE_FRAGMENT
 uniform sampler2D uEstuary;
 vec2 wsCurrentWaves(vec2 xz, vec2 current, float dist, out float shade, out float wobble) {
 // Two offset phases let the current bend without stretching the waves over time.
@@ -301,7 +275,8 @@ export const SEA_SURFACE_GLSL = /* glsl */ `
 vec4 wsSeaSurface(vec3 vSeaW, vec2 current, float opacity, float pond) {
 // Depth to the bed under this pixel (outside the island: the flat sea bed)
 float inIsland = wsInIsland(vSeaW.xz);
-float seaDepth = max(vSeaW.y - wsBedY(vSeaW.xz), 0.0);
+vec2 seaBed = wsBed(vSeaW.xz, inIsland);
+float seaDepth = max(vSeaW.y - seaBed.x, 0.0);
 float seaDist = distance(vSeaW, cameraPosition);
 float shade, wobble;
 vec2 slope = wsCurrentWaves(vSeaW.xz, current, seaDist, shade, wobble);
@@ -334,7 +309,7 @@ wsDuckweed(vSeaW.xz, seaDist, slope * 0.03);
 wsFoam *= 1.0 - wsWeed;
 seaCol = mix(seaCol, gl_FrontFacing ? wsWeedCol : wsWeedCol * 0.6, wsWeed);
 wsN = normalize(mix(wsN, vec3(0.0, 1.0, 0.0), wsWeed * 0.8));
-return vec4(mix(seaCol, uWsFoamCol, wsFoam), max(opacity, max(wsFoam, wsWeed)));
+return vec4(mix(seaCol, uWsFoamCol, wsFoam) * (1.0 - seaBed.y * 0.7), max(opacity, max(wsFoam, wsWeed)));
 }
 `;
 
@@ -349,29 +324,6 @@ float wsNV = clamp(dot(normal, wsV), 0.0, 1.0);
 vec3 wsSky = ambientLightColor;
 #if NUM_HEMI_LIGHTS > 0
 wsSky += hemisphereLights[0].skyColor;
-#endif
-#if NUM_DIR_LIGHTS > 0
-// Uniform branch keeps derivatives valid without evaluating the sparkle grid in Performance.
-if (uWsLite < 0.5 && uWsSparkle.x > 0.0) {
-  mat3 wsV2W = transpose(mat3(viewMatrix));
-  vec2 wsSpG = (cameraPosition + wsV2W * (-vViewPosition)).xz * uWsSparkle.z;
-  vec2 wsSpDx = dFdx(wsSpG);
-  vec2 wsSpDy = dFdy(wsSpG);
-  float wsSpPx = sqrt(abs(wsSpDx.x * wsSpDy.y - wsSpDx.y * wsSpDy.x));
-  float wsSpFade = 1.0 - smoothstep(0.5, 1.4, wsSpPx);
-  float wsBare = 1.0 - max(wsFoam, wsWeed);
-  if (gl_FrontFacing && wsSpFade > 0.0 && wsBare > 0.01) {
-    vec3 wsHw = wsV2W * normalize(directionalLights[0].direction + wsV);
-    if (wsHw.y > 0.05) {
-      vec2 need = wsHw.xz / wsHw.y - wsN.xz / max(wsN.y, 0.05);
-      vec2 spot;
-      float f = wsSparkleFacet(floor(wsSpG), need, uWsSparkle.y, uWsSparkle.w, 3.0, spot);
-      float r = clamp(wsSpPx * 2.2, 0.03, 0.45);
-      float m = 1.0 - smoothstep(r * 0.35, r, length(fract(wsSpG) - 0.5 - spot));
-      totalEmissiveRadiance += directionalLights[0].color * csSun * (f * m * wsSpFade * uWsSparkle.x * wsBare);
-    }
-  }
-}
 #endif
 if (gl_FrontFacing) {
   // Fresnel: grazing angles mirror the sky
@@ -401,14 +353,32 @@ if (gl_FrontFacing) {
 
 // ---------------------------------------------------------------- bed and shore textures
 
-const bedData = new Uint16Array(V * V);
-const bedTex = new THREE.DataTexture(bedData, V, V, THREE.RedFormat, THREE.HalfFloatType);
+const bedData = new Uint16Array(V * V * 2);
+const bedTex = new THREE.DataTexture(bedData, V, V, THREE.RGFormat, THREE.HalfFloatType);
 bedTex.magFilter = bedTex.minFilter = THREE.LinearFilter;
 bedTex.colorSpace = THREE.NoColorSpace;
 bedTex.unpackAlignment = 2;
-bedData.fill(THREE.DataUtils.toHalfFloat(SEA_FLOOR_Y));
+const flatBed = THREE.DataUtils.toHalfFloat(SEA_FLOOR_Y);
+for (let i = 0; i < bedData.length; i += 2) bedData[i] = flatBed;
 bedTex.needsUpdate = true;
 waterSurfaceUniforms.uWsBed.value = bedTex;
+
+/** Update the shadow channel of the existing depth map when a terrain chunk is rebaked. */
+export function setWaterBridgeShade(x: number, z: number, size: number, shade: Float32Array): void {
+  let changed = false;
+  for (let row = 0; row < size; row++) {
+    const start = 2 * ((z + HALF + row) * V + x + HALF) + 1;
+    for (let col = 0; col < size; col++) {
+      const value = shade[row * size + col];
+      const sample = value > 0 ? THREE.DataUtils.toHalfFloat(value) : 0;
+      const i = start + col * 2;
+      if (bedData[i] === sample) continue;
+      bedData[i] = sample;
+      changed = true;
+    }
+  }
+  if (changed) bedTex.needsUpdate = true;
+}
 
 const shoreData = new Uint8Array(V * V).fill(255);
 const shoreTex = new THREE.DataTexture(shoreData, V, V, THREE.RedFormat, THREE.UnsignedByteType);
@@ -464,7 +434,7 @@ function edt1d(f: Float64Array, d: Float64Array, n: number): void {
 export function setWaterTerrain(heights: Float32Array | number[], seaLevel: number): void {
   const n = V * V;
   for (let i = 0; i < n; i++) {
-    bedData[i] = THREE.DataUtils.toHalfFloat(heights[i]);
+    bedData[i * 2] = THREE.DataUtils.toHalfFloat(heights[i]);
     grid[i] = heights[i] >= seaLevel ? 0 : INF;
   }
   bedTex.needsUpdate = true;

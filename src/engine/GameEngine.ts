@@ -10,6 +10,10 @@ import { loadCropBillboards } from '../farming/CropBillboards';
 import { FIELD_CELLS } from '../farming/FieldManager';
 import { hitchLog } from './HitchLog';
 import { onUserSettingsChange, userSettings } from '../config/userSettings';
+import {
+  loadRenderSettings, normalizeRenderSettings, OUTPUT_COLOR_SPACE, saveRenderSettings, TONE_MAPPING,
+  type RenderSettings,
+} from '../config/renderSettings';
 import { loadTreeModels, setFoliageWeatherWind } from '../world/TreeModels';
 import { setSnowCover } from '../world/SnowCover';
 import type { Season } from '../world/Seasons';
@@ -128,6 +132,7 @@ import { updatePickGlow } from '../world/PickGlow';
 import { updateCloudShadows } from '../world/CloudShadows';
 import { LightShafts } from '../world/LightShafts';
 import { RiverSystem } from '../world/rivers/RiverSystem';
+import { BridgeSystem } from '../world/BridgeSystem';
 import { riverWorld } from '../world/rivers/RiverWorld';
 import { WeatherSystem } from '../world/WeatherSystem';
 import { HEDGE_TYPE } from '../world/Hedge';
@@ -215,6 +220,7 @@ export interface GameWorld {
   terrain: TerrainSystem;
   water: WaterSystem;
   rivers: RiverSystem;
+  bridges: BridgeSystem;
   weather: WeatherSystem;
   props: PropSystem;
   nightLighting: NightLighting;
@@ -305,6 +311,8 @@ export class GameEngine {
   /** Draw one frame while paused (after a resize the canvas is cleared). */
   private pausedRedraw = false;
   private readonly stopWatchingGraphicsQuality: () => void;
+  private renderSettings = loadRenderSettings();
+  private renderSettingsSaveTimer: number | undefined;
   /** 1 on land, fading to 0 when the player is far out at sea (no crickets there). */
   private landNear = 1;
   private portalId = '';
@@ -409,8 +417,7 @@ export class GameEngine {
     this.minPixelRatio = isMobile ? 0.6 : 0.75;
     this.renderer.setPixelRatio(this.maxPixelRatio);
     this.renderer.shadowMap.enabled = false;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.applyRenderSettings();
     container.appendChild(this.renderer.domElement);
 
     this.camera = new ThirdPersonCamera(width / height);
@@ -442,6 +449,7 @@ export class GameEngine {
   public dispose(): void {
     if (this.isDisposed) return;
     this.saveProgress();
+    this.flushRenderSettings();
     this.isDisposed = true;
     this.initAbortController.abort();
     cancelAnimationFrame(this.animationFrameId);
@@ -453,6 +461,7 @@ export class GameEngine {
     this.stopWatchingGraphicsQuality();
     this.input.dispose();
     this.world?.editor.dispose();
+    this.world?.bridges.dispose();
     this.world?.props.disposeGeneratedRocks();
     this.world?.debugRenderer.dispose();
     this.world?.character.swimAbility?.waterParticles?.dispose();
@@ -510,6 +519,40 @@ export class GameEngine {
   }
 
   /** Freezes the whole game (simulation, clock, rendering) and ducks the ambience. */
+  public getRenderSettings(): Readonly<RenderSettings> {
+    return this.renderSettings;
+  }
+
+  public setRenderSettings(patch: Partial<RenderSettings>): void {
+    const current = this.renderSettings;
+    const next = normalizeRenderSettings(patch, current);
+    if (current.toneMapping === next.toneMapping && current.exposure === next.exposure &&
+        current.outputColorSpace === next.outputColorSpace) return;
+
+    this.renderSettings = next;
+    this.applyRenderSettings();
+    if (this.paused) this.pausedRedraw = true;
+
+    // Keep synchronous storage writes out of slider drags.
+    window.clearTimeout(this.renderSettingsSaveTimer);
+    this.renderSettingsSaveTimer = window.setTimeout(this.flushRenderSettings, 250);
+  }
+
+  private applyRenderSettings(): void {
+    const { toneMapping, exposure, outputColorSpace } = this.renderSettings;
+    this.renderer.toneMapping = TONE_MAPPING[toneMapping];
+    this.renderer.toneMappingExposure = exposure;
+    const output = OUTPUT_COLOR_SPACE[outputColorSpace];
+    if (this.renderer.outputColorSpace !== output) this.renderer.outputColorSpace = output;
+  }
+
+  private flushRenderSettings = (): void => {
+    if (this.renderSettingsSaveTimer === undefined) return;
+    window.clearTimeout(this.renderSettingsSaveTimer);
+    this.renderSettingsSaveTimer = undefined;
+    saveRenderSettings(this.renderSettings);
+  };
+
   public setPaused(paused: boolean): void {
     if (paused === this.paused) return;
     this.paused = paused;
@@ -585,7 +628,7 @@ export class GameEngine {
       weather.onLightning = () => this.ambient.thunder(this.listenerPos, weather.sound.thunder);
       weather.setOcclusion(new PrecipitationOcclusion(physics, WeatherSystem.PRECIP_BOX));
       const props = new PropSystem(scene, physics, terrain);
-      const nightLighting = new NightLighting(scene, props, weather, PROP_GLOW_MATERIALS);
+      const nightLighting = new NightLighting(scene, props, weather, PROP_GLOW_MATERIALS, (on) => audioEngine.playLightSwitch(on));
 
       const waterEffects = new WaterEffects(scene);
       const waterParticles = new WaterParticleSystem(scene);
@@ -610,7 +653,7 @@ export class GameEngine {
             const pos = new THREE.Vector3(piece.position.x, piece.position.y + light.yOffset, piece.position.z);
             // Room box from the surrounding walls / floors, so the lamp does not light the yard
             const box = buildingManager.getLightVolume(pos, light.range);
-            out.push({ x: pos.x, y: pos.y, z: pos.z, range: light.range, halo: light.halo, intensity: light.intensity, box });
+            out.push({ x: pos.x, y: pos.y, z: pos.z, range: light.range, halo: light.halo, intensity: light.intensity, box, furniture: true });
           }
           return out;
         },
@@ -778,7 +821,8 @@ export class GameEngine {
       water.setBoatHull(boat.model.hull);
       boat.dock.copy(pier.end).lerp(pier.start, 0.25);
       const wildlife = new WildlifeSystem(scene, terrain, props, weather);
-      const shadows = new StaticShadows(terrain, props, forest, rocks, propTrees, buildingManager);
+      const bridges = new BridgeSystem(scene, physics);
+      const shadows = new StaticShadows(terrain, props, forest, rocks, propTrees, buildingManager, bridges);
       shadows.orchard = orchard;
       const interiors = new InteriorLighting(physics, buildingManager);
       const windowGlow = new WindowGlow(buildingManager);
@@ -811,7 +855,7 @@ export class GameEngine {
         }
         return false;
       };
-      const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers, exploration.caveNetwork, physics);
+      const editor = new EditorController(scene, this.camera.camera, this.renderer.domElement, this.input, terrain, props, rivers, exploration.caveNetwork, physics, bridges);
       editor.pests = gameplay.pests;
       editor.onNotify = (text, type) => callbacks.onNotify(text, type);
       const debugRenderer = new DebugRenderer(physics, scene);
@@ -823,6 +867,7 @@ export class GameEngine {
         terrain,
         water,
         rivers,
+        bridges,
         weather,
         props,
         nightLighting,
@@ -1007,6 +1052,7 @@ export class GameEngine {
         const w = this.world;
         const { camera } = this.camera;
         w.terrain.updateLod(camera.position, this.terrainSeaOcclusionLevel(w, camera));
+        w.bridges.updateLod(camera.position);
         this.renderer.render(this.scene, this.camera.camera);
       }
       return;
@@ -1083,7 +1129,7 @@ export class GameEngine {
 
     hitchLog.mark(1);
     const pStart = performance.now();
-    if (dt > 0) physics.step(dt);
+    if (dt > 0) physics.step(dt, w.orchard.applyWaterPhysics);
     const stepTime = performance.now() - pStart;
     this.lastStepMs = stepTime;
     hitchLog.mark(2);
@@ -1186,12 +1232,6 @@ export class GameEngine {
       this.renderer.domElement.height,
     );
     w.terrain.setPuddleSky(w.weather.puddleSky);
-    w.water.sparkles.update(
-      this.camera.camera.position,
-      w.weather.sun,
-      (this.scene.fog as THREE.FogExp2 | null)?.density ?? 0,
-      !w.exploration.inCave && w.weather.underwater < 0.5
-    );
     this.lightShafts?.update(dt, this.camera.camera, {
       sunDir: w.weather.sunDir,
       sunColor: w.weather.sun.color,
@@ -1203,7 +1243,9 @@ export class GameEngine {
     });
     w.nightLighting.setViewportHeight(this.renderer.domElement.height);
     w.lightning.update(dt, tpCamera.camera, this.renderer.domElement.height);
-    w.nightLighting.update(dt, tpCamera.camera, editing ? null : ride ? ride.getPosition() : character.getPosition());
+    const lightingPlayerPos = editing ? null : ride ? ride.getPosition() : character.getPosition();
+    w.interiors.update(dt, lightingPlayerPos ?? camPos, !editing && !inCave && w.weather.nightFactor < 1);
+    w.nightLighting.update(dt, tpCamera.camera, lightingPlayerPos, w.interiors);
     farmingManager.rainIntensity = w.weather.rainIntensity;
     farmingManager.meltWet = w.weather.melting && !w.exploration.inCave;
     this.updateAudio(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), ride);
@@ -1341,11 +1383,10 @@ export class GameEngine {
     rocks.update(dt, tpCamera.camera.position);
     w.exploration.update(dt, ride ? ride.getPosition() : character.getPosition(), !editing && !isDriving);
     w.wildlife.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition(), tpCamera.camera, !!w.exploration.inCave);
-    w.shadows.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
+    w.shadows.update(editing ? rawDt : dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
     w.windowGlow.update(dt);
     // Batched glass / furniture visibility by distance, from the camera this frame renders with
     buildings?.updateDrawDistance(this.camera.camera.position);
-    w.interiors.update(dt, editing ? tpCamera.camera.position : ride ? ride.getPosition() : character.getPosition());
     if (!editing) w.gameplay.update(dt, inputManager, isDriving, this.consumeKeyG());
     // One target for E next frame, out of everything offered this frame (doors, fields, trees, stations...)
     // ...and none while any screen (backpack, map, build mode, a panel) is open
@@ -1428,6 +1469,7 @@ export class GameEngine {
       this.warmUpGpuUploads(camera);
     }
     w.terrain.updateLod(camera.position, seaLevel);
+    w.bridges.updateLod(camera.position);
     this.renderer.render(this.scene, camera);
     hitchLog.mark(8);
   }
@@ -1940,6 +1982,7 @@ export class GameEngine {
   private handleKeyUp = (): void => {};
 
   private handlePageHide = (): void => {
+    this.flushRenderSettings();
     this.saveProgress();
   };
 

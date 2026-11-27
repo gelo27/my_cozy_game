@@ -322,7 +322,8 @@ ${lake ? '' : SEA_SURFACE_GLSL}`
           `if (wsInsideBoat(vRipW)) discard;
 // The same water as the sea (WaterSurface.ts): depth colour from the terrain heights (river
 // beds are carved into the same terrain), normal-map waves, glints and shore lines
-float rDepth = max(vRipW.y - wsBedY(vRipW.xz), 0.0);
+vec2 riverBed = wsBed(vRipW.xz, wsInIsland(vRipW.xz));
+float rDepth = max(vRipW.y - riverBed.x, 0.0);
 float rDist = distance(vRipW, cameraPosition);
 ${lake
   ? 'vec2 wp = vRiverUv; // lakes: world XZ, the waves just drift like the sea\'s'
@@ -390,7 +391,7 @@ foam *= 1.0 - wsWeed;
 water = mix(water, gl_FrontFacing ? wsWeedCol : wsWeedCol * 0.6, wsWeed);
 wsN = normalize(mix(wsN, vWN, wsWeed * 0.8));
 wsFoam = foam;
-diffuseColor.rgb = mix(water, uWsFoamCol, foam);
+diffuseColor.rgb = mix(water, uWsFoamCol, foam) * (1.0 - riverBed.y * 0.7);
 diffuseColor.a = mix(1.0, 0.96, foam) * vRiver.y;
 ${lake ? '' : `if (vRiver.w > 0.0) {
   vec4 estuary = texture2D(uEstuary, wsBedUv(vRipW.xz));

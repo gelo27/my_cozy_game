@@ -36,18 +36,6 @@ export interface WaterSettings {
   /** Sun glint brightness and tightness. */
   glint: number;
   glintSharpness: number;
-  /** Sparkles: tiny wave facets that flash the sun into the eye. Brightness (0 = off), share of
-   *  the facets in the glint path that flash at a time (0..1), facet size (m) and how far from
-   *  the glint the path reaches (in wave slope). */
-  sparkle: number;
-  sparkleDensity: number;
-  sparkleSize: number;
-  sparkleSpread: number;
-  /** Star sprites over the brightest sparkles (WaterSparkles.ts): brightness (0 = off),
-   *  size (px at 1080p) and share of the points in the path that flash at a time (0..1). */
-  sparkleStars: number;
-  sparkleStarSize: number;
-  sparkleStarDensity: number;
   /** Shore foam. */
   foamColor: number;
   foamAmount: number;
@@ -104,13 +92,6 @@ export const WATER_DEFAULTS: Readonly<WaterSettings> = {
   fresnel: 0.3,
   glint: 2.2,
   glintSharpness: 260,
-  sparkle: 6,
-  sparkleDensity: 0.4,
-  sparkleSize: 0.15,
-  sparkleSpread: 0.4,
-  sparkleStars: 4,
-  sparkleStarSize: 26,
-  sparkleStarDensity: 0.4,
   foamColor: fromLinear(0.85, 0.92, 0.95),
   foamAmount: 1,
   foamLine: 0.09,
