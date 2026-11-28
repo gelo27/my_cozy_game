@@ -233,6 +233,14 @@ export class FarmingManager {
     return true;
   }
 
+  /** Restore the underlying terrain and deliver the crop or seed immediately. */
+  public clearForGrading(field: FarmField, give: GiveItem): void {
+    const crop = field.crop;
+    if (crop && crop.stage >= 3) this.harvest(field.id, give, false);
+    if (!this.fields.removeField(field.id)) return;
+    if (crop && crop.stage < 3) give(CROP_DEFINITIONS[crop.cropType].seedItemId, FIELD_SEED_COST);
+  }
+
   private sendToPlayer(center: THREE.Vector3, pieces: FlightItem[], give: GiveItem, extra: FlightItem[] = []): void {
     if (!this.getCollector) {
       for (const it of [...pieces, ...extra]) if (it.amount > 0) give(it.itemId, it.amount);

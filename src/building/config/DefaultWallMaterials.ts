@@ -91,6 +91,28 @@ export function applyDefaultWallFaces(geo: THREE.BoxGeometry, width: number, hei
   return WALL_FACES_NORMAL;
 }
 
+/** Apply the same finish to the front/back caps of a non-indexed wall extrusion. */
+export function applyExtrudedWallFaces(geo: THREE.ExtrudeGeometry, width: number, height: number): THREE.Material[] {
+  const caps = geo.groups[0];
+  const sides = geo.groups[1];
+  const positions = geo.getAttribute('position');
+  const normals = geo.getAttribute('normal');
+  const uv = geo.getAttribute('uv');
+  geo.clearGroups();
+  for (let i = caps.start; i < caps.start + caps.count;) {
+    const side = normals.getZ(i) > 0 ? 4 : 5;
+    const start = i;
+    do {
+      uv.setXY(i, width / 2 + (side === 4 ? 1 : -1) * positions.getX(i), positions.getY(i) + height / 2);
+      i++;
+    } while (i < caps.start + caps.count && (normals.getZ(i) > 0 ? 4 : 5) === side);
+    geo.addGroup(start, i - start, side);
+  }
+  geo.addGroup(sides.start, sides.count, 0);
+  uv.needsUpdate = true;
+  return WALL_FACES_NORMAL;
+}
+
 /**
  * Swaps which side of a not-yet-confirmed wall piece shows siding, so the outer face follows the
  * building layout instead of the piece's rotation. No-op for meshes without the default wall faces.

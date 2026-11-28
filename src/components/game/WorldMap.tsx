@@ -3,8 +3,12 @@ import { X } from 'lucide-react';
 import type { GameWorld } from '../../engine/GameEngine';
 import type { MapMarkerIcon } from '../../explore/ExplorationManager';
 import { renderTerrainMap, EXPLORE_GRID } from '../../explore/MapRenderer';
+import { renderMapRoofs } from '../../explore/MapRoofs';
+import { renderMapTrees } from '../../explore/MapTrees';
+import { bindMapViewport, type MapViewport } from '../../explore/MapViewport';
 import type { SiteKind } from '../../world/IslandSites';
-import { WORLD_SIZE, WORLD_HALF } from '../../world/WorldSettings';
+import { WORLD_SIZE, WORLD_HALF, worldSettings } from '../../world/WorldSettings';
+import { riverWorld } from '../../world/rivers/RiverWorld';
 import { t } from '../../i18n/i18n';
 import { MARKER_ICON } from './mapMarkerIcons';
 
@@ -12,55 +16,101 @@ export const SITE_ICON: Record<SiteKind, string> = { lighthouse: '🗼', ruins: 
 
 const panel = 'bg-[#fffaf0]/95 text-[#4a3b2a] border border-[#e9dcc3] shadow-[0_6px_20px_rgba(60,40,10,0.18)]';
 
-/** Terrain map cached between openings; redrawn only when the terrain was edited. */
-let baseCache: { canvas: HTMLCanvasElement; revision: number } | null = null;
+interface MapLayers {
+  terrain?: { canvas: HTMLCanvasElement; heights: number; tiles: number; rivers: number; sea: number };
+  trees?: { canvas: HTMLCanvasElement; props: number; forest: number; orchard: number };
+  roofs?: { canvas: HTMLCanvasElement; buildings: GameWorld['character']['buildAbility']['buildingManager']; revision: number; heights: number };
+}
+
+/** Static map layers survive closing the map and are released with the world. */
+const mapCache = new WeakMap<GameWorld, MapLayers>();
+
+function drawMapLayers(ctx: CanvasRenderingContext2D, world: GameWorld, size: number, layers: MapLayers): void {
+  const { terrain, props, forest, orchard } = world;
+  const buildings = world.character.buildAbility?.buildingManager;
+  const sea = worldSettings.waterLevel;
+  const rivers = riverWorld.revision;
+  if (layers.terrain?.heights !== terrain.revision || layers.terrain.tiles !== terrain.tileRevision ||
+      layers.terrain.rivers !== rivers || layers.terrain.sea !== sea) {
+    layers.terrain = {
+      canvas: renderTerrainMap(terrain), heights: terrain.revision, tiles: terrain.tileRevision, rivers, sea,
+    };
+  }
+  if (layers.trees?.props !== props.treeMapRevision || layers.trees.forest !== forest.canopyRevision ||
+      layers.trees.orchard !== orchard.revision || layers.trees.canvas.width !== size) {
+    layers.trees = {
+      canvas: renderMapTrees(world, size, layers.trees?.canvas),
+      props: props.treeMapRevision, forest: forest.canopyRevision, orchard: orchard.revision,
+    };
+  }
+  if (buildings && (layers.roofs?.buildings !== buildings || layers.roofs.revision !== buildings.roofMapRevision ||
+      layers.roofs.heights !== terrain.revision || layers.roofs.canvas.width !== size)) {
+    layers.roofs = {
+      canvas: renderMapRoofs(buildings.pieces.values(), terrain, size, layers.roofs?.canvas),
+      buildings, revision: buildings.roofMapRevision, heights: terrain.revision,
+    };
+  }
+
+  ctx.drawImage(layers.terrain.canvas, 0, 0, size, size);
+  ctx.drawImage(layers.trees.canvas, 0, 0);
+  if (buildings && layers.roofs) ctx.drawImage(layers.roofs.canvas, 0, 0);
+}
 
 /** Parchment fog over unexplored land, painted from the 128x128 exploration mask. */
-function fogCanvas(explored: Uint8Array): HTMLCanvasElement {
+function renderFog(explored: Uint8Array): { canvas: HTMLCanvasElement; percent: number } {
   const c = document.createElement('canvas');
   c.width = c.height = EXPLORE_GRID;
   const ctx = c.getContext('2d')!;
   const img = ctx.createImageData(EXPLORE_GRID, EXPLORE_GRID);
+  let sum = 0;
   for (let i = 0; i < explored.length; i++) {
     const n = ((i * 2654435761) >>> 24) / 255; // paper grain
     img.data[i * 4] = 226 + n * 14;
     img.data[i * 4 + 1] = 212 + n * 12;
     img.data[i * 4 + 2] = 178 + n * 10;
     img.data[i * 4 + 3] = 255 - explored[i];
+    sum += explored[i];
   }
   ctx.putImageData(img, 0, 0);
-  return c;
+  return { canvas: c, percent: Math.round(sum / (explored.length * 255) * 100) };
 }
 
 /** `heading` is the camera's compass bearing in radians (0 = north, clockwise). */
 export const WorldMap: React.FC<{ world: GameWorld; heading(): number; onClose(): void }> = ({ world, heading, onClose }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const viewRef = useRef<MapViewport>({ zoom: 1, x: 0, y: 0 });
+  const iconRef = useRef<MapMarkerIcon>('pin');
   const [icon, setIcon] = useState<MapMarkerIcon>('pin');
   const [explored, setExplored] = useState(0);
   const ex = world.exploration;
 
   useEffect(() => {
-    if (!baseCache || baseCache.revision !== world.terrain.revision) {
-      baseCache = { canvas: renderTerrainMap(world.terrain), revision: world.terrain.revision };
-    }
-    let fog = fogCanvas(ex.explored);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d')!;
+    const view = viewRef.current;
+    const layers = mapCache.get(world) ?? {};
+    mapCache.set(world, layers);
+    let fog = renderFog(ex.explored);
     let fogRevision = ex.revision;
+    setExplored(fog.percent);
     const draw = () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext('2d')!;
       const S = canvas.width;
       const k = S / WORLD_SIZE;
+      const { zoom, x, y } = view;
       if (ex.revision !== fogRevision) {
-        fog = fogCanvas(ex.explored);
+        fog = renderFog(ex.explored);
         fogRevision = ex.revision;
+        setExplored(fog.percent);
       }
       ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(baseCache!.canvas, 0, 0, S, S);
-      ctx.drawImage(fog, 0, 0, S, S);
+      ctx.save();
+      ctx.transform(zoom, 0, 0, zoom, x * S, y * S);
+      drawMapLayers(ctx, world, S, layers);
+      ctx.drawImage(fog.canvas, 0, 0, S, S);
       // Grid every 64 m, like a surveyor's map
       ctx.strokeStyle = 'rgba(90,70,40,0.12)';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1 / zoom;
       for (let g = 64; g < WORLD_SIZE; g += 64) {
         ctx.beginPath();
         ctx.moveTo(g * k, 0);
@@ -69,7 +119,9 @@ export const WorldMap: React.FC<{ world: GameWorld; heading(): number; onClose()
         ctx.lineTo(S, g * k);
         ctx.stroke();
       }
-      const px = (x: number) => (x + WORLD_HALF) * k;
+      ctx.restore();
+      const px = (worldX: number) => (worldX + WORLD_HALF) * k * zoom + x * S;
+      const py = (worldZ: number) => (worldZ + WORLD_HALF) * k * zoom + y * S;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       const player = ex.surfacePosition(world.character.getPosition());
@@ -79,29 +131,29 @@ export const WorldMap: React.FC<{ world: GameWorld; heading(): number; onClose()
       for (const s of ex.getMapSites(player)) {
         ctx.globalAlpha = s.known && s.done ? 0.6 : 1;
         ctx.font = `${Math.round(S * 0.042)}px sans-serif`;
-        ctx.fillText(s.known ? SITE_ICON[s.kind] : '❓', px(s.x), px(s.z));
+        ctx.fillText(s.known ? SITE_ICON[s.kind] : '❓', px(s.x), py(s.z));
         if (s.known) {
           ctx.font = `bold ${Math.round(S * 0.022)}px sans-serif`;
           ctx.fillStyle = '#4a3b2a';
-          ctx.fillText(t(`site.${s.kind}`) + (s.done ? ` (${t('map.done')})` : ''), px(s.x), px(s.z) + S * 0.035);
+          ctx.fillText(t(`site.${s.kind}`) + (s.done ? ` (${t('map.done')})` : ''), px(s.x), py(s.z) + S * 0.035);
         }
       }
       ctx.globalAlpha = 1;
       ctx.font = `${Math.round(S * 0.036)}px sans-serif`;
-      for (const m of ex.markers) ctx.fillText(MARKER_ICON[m.icon], px(m.x), px(m.z) - S * 0.012);
+      for (const m of ex.markers) ctx.fillText(MARKER_ICON[m.icon], px(m.x), py(m.z) - S * 0.012);
 
       // The scooter, then the player arrow pointing where the camera looks
       const mp = world.moped.getPosition();
       if (!world.moped.isPlayerInside) {
         ctx.font = `${Math.round(S * 0.03)}px sans-serif`;
-        ctx.fillText('🛵', px(mp.x), px(mp.z));
+        ctx.fillText('🛵', px(mp.x), py(mp.z));
       }
       if (!world.boat.isPlayerInside) {
         const bp = world.boat.getPosition();
-        ctx.fillText('🚤', px(bp.x), px(bp.z));
+        ctx.fillText('🚤', px(bp.x), py(bp.z));
       }
       ctx.save();
-      ctx.translate(px(player.x), px(player.z));
+      ctx.translate(px(player.x), py(player.z));
       ctx.rotate(heading());
       ctx.beginPath();
       ctx.moveTo(0, -S * 0.022);
@@ -126,23 +178,30 @@ export const WorldMap: React.FC<{ world: GameWorld; heading(): number; onClose()
       ctx.strokeStyle = '#7a5c33';
       ctx.stroke();
 
-      let sum = 0;
-      for (let i = 0; i < ex.explored.length; i++) sum += ex.explored[i];
-      setExplored(Math.round((sum / (ex.explored.length * 255)) * 100));
     };
+    let frame = 0;
+    const redraw = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        draw();
+      });
+    };
+    const unbind = bindMapViewport(canvas, view, redraw, (point) => {
+      const x = point.x * WORLD_SIZE - WORLD_HALF;
+      const z = point.y * WORLD_SIZE - WORLD_HALF;
+      const hit = ex.markers.find((m) => Math.hypot(m.x - x, m.z - z) < 7 / view.zoom);
+      if (hit) ex.removeMarker(hit.id);
+      else ex.addMarker(x, z, iconRef.current);
+    });
     draw();
-    const id = window.setInterval(draw, 250);
-    return () => window.clearInterval(id);
+    const id = window.setInterval(redraw, 250);
+    return () => {
+      unbind();
+      window.clearInterval(id);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
   }, [world, ex, heading]);
-
-  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * WORLD_SIZE - WORLD_HALF;
-    const z = ((e.clientY - rect.top) / rect.height) * WORLD_SIZE - WORLD_HALF;
-    const hit = ex.markers.find((m) => Math.hypot(m.x - x, m.z - z) < 7);
-    if (hit) ex.removeMarker(hit.id);
-    else ex.addMarker(x, z, icon);
-  };
 
   return (
     <div className="absolute inset-0 z-40 bg-black/40 flex items-center justify-center pointer-events-auto p-3" onClick={onClose}>
@@ -158,8 +217,7 @@ export const WorldMap: React.FC<{ world: GameWorld; heading(): number; onClose()
           ref={canvasRef}
           width={1024}
           height={1024}
-          onClick={handleClick}
-          className="rounded-2xl border-2 border-[#d9c7a3] cursor-crosshair bg-[#e2d4b2]"
+          className="rounded-2xl border-2 border-[#d9c7a3] cursor-crosshair touch-none bg-[#e2d4b2]"
           style={{ width: 'min(78vh, 88vw)', height: 'min(78vh, 88vw)' }}
         />
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -167,7 +225,10 @@ export const WorldMap: React.FC<{ world: GameWorld; heading(): number; onClose()
             {(Object.keys(MARKER_ICON) as MapMarkerIcon[]).map((k) => (
               <button
                 key={k}
-                onClick={() => setIcon(k)}
+                onClick={() => {
+                  iconRef.current = k;
+                  setIcon(k);
+                }}
                 title={t(`map.icon.${k}`)}
                 className={`w-9 h-9 rounded-xl text-lg transition ${icon === k ? 'bg-amber-200 ring-2 ring-amber-500' : 'bg-white/70 hover:bg-amber-50'}`}
               >

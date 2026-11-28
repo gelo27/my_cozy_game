@@ -370,7 +370,7 @@ export class AppleOrchard {
     const h = 2.4 * s;
     const pos = new THREE.Vector3(t.pos.x, t.pos.y + h / 2, t.pos.z);
     const res = this.physics.createStaticCylinder(pos, this.models!.trunkRadius * 0.85 * s, h);
-    (res.collider as unknown as { userData: unknown }).userData = { surface: 'wood' };
+    (res.collider as unknown as { userData: unknown }).userData = { surface: 'wood', bladeClearable: true };
     t.body = res.body;
     t.bodyStage = want;
   }
@@ -545,6 +545,17 @@ export class AppleOrchard {
       this.treesDirty = this.fruitDirty = true;
     }
     return feller.hitExternal(t.extId, direction);
+  }
+
+  public clearForGrading(covers: (x: number, z: number) => boolean, give: (itemId: string, amount: number) => void): void {
+    for (let i = this.trees.length - 1; i >= 0; i--) {
+      const tree = this.trees[i];
+      if (tree.fall >= 0 || !covers(tree.pos.x, tree.pos.z)) continue;
+      this.removeTree(tree);
+      if (tree.stage === 0) give(APPLE_SAPLING_ID, 1);
+      else give('wood', WOOD[tree.stage]);
+      if (tree.phase === 'ripe' && tree.hanging > 0) give(APPLE_ID, tree.hanging);
+    }
   }
 
   private shake(t: AppleTree, direction: THREE.Vector3, amp: number): void {

@@ -1,15 +1,19 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { ArrowUp, ArrowDown, Move, Hand, Footprints, Sparkles } from 'lucide-react';
+import React, { useRef, useState, useEffect, useSyncExternalStore } from 'react';
+import { ArrowUp, ArrowDown, Move, Hand, Footprints, Sparkles, LogOut, Octagon } from 'lucide-react';
 import { InputManager } from '../input/InputManager';
 import { t } from '../i18n/i18n';
+import type { BulldozerController } from '../vehicle/BulldozerController';
 
 interface ControlsOverlayProps {
   inputManager: InputManager | null;
   /** The character's live telemetry (read a few times a second: the dive button shows while swimming). */
   telemetry?: { isSwimming?: boolean } | null;
+  bulldozer: BulldozerController;
 }
 
-export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, telemetry }) => {
+export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, telemetry, bulldozer }) => {
+  const dozer = useSyncExternalStore(bulldozer.subscribe, bulldozer.getControls);
+  const drivingDozer = dozer !== 'off';
   const [isTouchDevice, setIsTouchDevice] = useState(false);
   const joystickTouchIdRef = useRef<number | null>(null);
   const joystickOriginRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -130,9 +134,23 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, 
 
   const roundBtn =
     'rounded-full bg-[#fffaf0]/92 text-[#4a3b2a] border-2 border-[#e9dcc3] shadow-[0_4px_14px_rgba(60,40,10,0.28)] flex items-center justify-center active:scale-90 transition-transform touch-none';
+  const bladeAction = t(dozer === 'raised' ? 'dozer.lowerBlade' : 'dozer.raiseBlade');
 
   return (
     <div id="controls-overlay" className="absolute inset-0 pointer-events-none select-none z-25 overflow-hidden font-sans">
+      {drivingDozer && (
+        <div className="absolute bottom-28 short:bottom-20 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
+          {dozer === 'blocked' && <span role="status" className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-950 text-center">{t('dozer.blocked')}</span>}
+          {!isTouchDevice && (
+            <div className="flex items-center gap-3 whitespace-nowrap rounded-full bg-[#fffaf0]/95 px-4 py-2 text-xs font-semibold text-[#4a3b2a] shadow-md">
+              <span><kbd>WASD</kbd> {t('dozer.drive')}</span>
+              <span><kbd>{t('dozer.bladeMouse')}</kbd> {bladeAction}</span>
+              <span><kbd>Space</kbd> {t('dozer.brake')}</span>
+              <span><kbd>E</kbd> {t('dozer.exit')}</span>
+            </div>
+          )}
+        </div>
+      )}
       {isTouchDevice && (
         <>
           {/* Floating joystick: touch anywhere in the lower-left area */}
@@ -162,6 +180,25 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, 
           </div>
 
           {/* Action cluster, kept above the hotbar */}
+          {drivingDozer ? (
+            <div className="pointer-events-auto absolute bottom-20 right-3 short:bottom-3 short:right-2 grid grid-cols-2 gap-2 justify-items-end">
+              <button type="button" aria-label={t('dozer.exit')} onClick={() => {
+                if (inputManager) inputManager.touchState.interactJustPressed = true;
+              }} className={`${roundBtn} w-12 h-12`}>
+                <LogOut className="w-5 h-5" />
+              </button>
+              <button type="button" aria-label={t('dozer.brake')} onTouchStart={tap('jumpJustPressed')}
+                onTouchEnd={releaseJump} onTouchCancel={releaseJump} className={`${roundBtn} w-12 h-12`}>
+                <Octagon className="w-5 h-5" />
+              </button>
+              <button type="button" aria-pressed={dozer !== 'raised'} onClick={() => {
+                if (inputManager) inputManager.touchState.bladeToggleJustPressed = true;
+              }} className={`${roundBtn} col-span-2 min-h-12 gap-1.5 px-3 text-xs font-semibold ${dozer !== 'raised' ? '!bg-amber-100' : ''}`}>
+                {dozer === 'raised' ? <ArrowDown className="w-4 h-4" /> : <ArrowUp className="w-4 h-4" />}
+                {bladeAction}
+              </button>
+            </div>
+          ) : (
           <div className="pointer-events-auto absolute bottom-20 right-3 short:bottom-3 short:right-2 [html[data-fishing]_&]:hidden [html[data-building]_&]:hidden grid grid-cols-2 gap-2 items-end select-none">
             <button
               onTouchStart={tap('interactJustPressed')}
@@ -209,6 +246,7 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({ inputManager, 
               <ArrowUp className="w-7 h-7" />
             </button>
           </div>
+          )}
         </>
       )}
     </div>

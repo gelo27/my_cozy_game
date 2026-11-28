@@ -237,7 +237,7 @@ export default function App() {
                     <MapMarkerHUD world={world} camera={engine.camera.camera} />
                   )}
                 </ViewportHUD>
-                <ControlsOverlay inputManager={engine?.input ?? null} telemetry={character?.telemetry} />
+                <ControlsOverlay inputManager={engine?.input ?? null} telemetry={character?.telemetry} bulldozer={world.bulldozer} />
 
                 <GameHUD
                   hud={hud}

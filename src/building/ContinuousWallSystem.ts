@@ -13,7 +13,7 @@ import { FLOOR_THICKNESS, WALL_THICKNESS } from './config/BuildingConstants';
 import type { WallPaintingSystem, WallFaceSide } from './WallPaintingSystem';
 import { FaceStyle, MeshBuffers, PaintableMesh } from './continuous/MeshBuffers';
 import { describeWallSeg, solveWall, summarizeWall, SolvedSegmentCorners, WallSeg } from './continuous/WallJoints';
-import { emitWall, findWallOpenings } from './continuous/WallGeometry';
+import { emitWall, findWallOpenings, wallFootprintAtHeight, WALL_OPENING_NEIGHBOUR_MARGIN, type WallOpening } from './continuous/WallGeometry';
 import { boxObstacle, createWallObstacle, emitFloor, floorObstacle, slabCoversWallTop, WallObstacle } from './continuous/FloorGeometry';
 import { FLOOR_TRIM_WALLPAPER_ID } from './config/DefaultFloorMaterials';
 import { emitFoundation, foundationLookup } from './continuous/FoundationGeometry';
@@ -40,7 +40,7 @@ const CHUNK_SIZE = 16;
 /** A change reaches this far (m) from the piece's centre: neighbours' corners, holes, floor cuts */
 const DIRTY_RADIUS = 3;
 /** Neighbour search radius around a wall's centre, beyond its half width */
-const NEIGHBOUR_MARGIN = 2.5;
+const NEIGHBOUR_MARGIN = WALL_OPENING_NEIGHBOUR_MARGIN;
 
 export interface PieceSource {
   getPieces(): Map<string, BuiltPiece>;
@@ -130,6 +130,7 @@ export class ContinuousWallSystem {
     if (layer) {
       this.unconfirmed[layer].add(piece.id);
       piece.isConfirmed = false;
+      if (layer === 'walls') this.confirmWallWithOpenings(piece);
     } else if (isWindowOrDoorPiece(piece.type)) {
       piece.isConfirmed = true;
       piece.meshGroup.visible = true;
@@ -148,6 +149,7 @@ export class ContinuousWallSystem {
 
   /** A piece moved or turned. */
   public pieceChanged(piece: BuiltPiece): void {
+    if (isSolidWallPiece(piece.type)) this.confirmWallWithOpenings(piece);
     if (isWindowOrDoorPiece(piece.type)) {
       for (const wall of this.wallsCutBy(piece)) if (!wall.isConfirmed) this.confirmPiece(wall);
     }
@@ -237,6 +239,13 @@ export class ContinuousWallSystem {
       .filter((p) => isSolidWallPiece(p.type) && findWallOpenings(p, [opening]).length > 0);
   }
 
+  private confirmWallWithOpenings(wall: BuiltPiece): void {
+    if (wall.isConfirmed) return;
+    const [width] = getWallSize(wall.type);
+    const nearby = this.source.near(wall.position, width / 2 + WALL_OPENING_NEIGHBOUR_MARGIN);
+    if (findWallOpenings(wall, nearby.filter((p) => isWindowOrDoorPiece(p.type))).length) this.confirmPiece(wall);
+  }
+
   private markDirty(piece: BuiltPiece): void {
     const layers = layersAffectedBy(piece.type);
     if (layers.length === 0) return;
@@ -269,8 +278,9 @@ export class ContinuousWallSystem {
 
     // Walls first: floors are cut to the freshly solved wall corners
     const segCache = new Map<string, WallSeg>();
-    for (const [key, walls] of members.walls) this.rebuildWallChunk(key, walls, segCache);
-    for (const [key, floors] of members.floors) this.rebuildFloorChunk(key, floors);
+    const openingCache = new Map<string, WallOpening[]>();
+    for (const [key, walls] of members.walls) this.rebuildWallChunk(key, walls, segCache, openingCache);
+    for (const [key, floors] of members.floors) this.rebuildFloorChunk(key, floors, segCache, openingCache);
     for (const [key, blocks] of members.foundations) this.rebuildFoundationChunk(key, blocks);
   }
 
@@ -290,7 +300,7 @@ export class ContinuousWallSystem {
     return seg;
   }
 
-  private rebuildWallChunk(key: string, walls: BuiltPiece[], segCache: Map<string, WallSeg>): void {
+  private rebuildWallChunk(key: string, walls: BuiltPiece[], segCache: Map<string, WallSeg>, openingCache: Map<string, WallOpening[]>): void {
     for (const id of this.chunkWallIds.get(key) ?? []) this.lastSolvedCorners.delete(id);
     this.chunkWallIds.set(key, walls.map((w) => w.id));
     if (walls.length === 0) {
@@ -308,6 +318,7 @@ export class ContinuousWallSystem {
       const around = this.source.near(wall.position, seg.halfW + NEIGHBOUR_MARGIN);
       const neighbours = around.filter((p) => p.isConfirmed && isSolidWallPiece(p.type)).map((p) => this.segOf(p, segCache));
       const openings = findWallOpenings(wall, around.filter((p) => isWindowOrDoorPiece(p.type)));
+      openingCache.set(wall.id, openings);
       // Floor slabs lying over this wall's top hide it (the floor of the storey above runs on over it)
       const covers = around
         .filter((p) => isFloorPiece(p.type) && slabCoversWallTop(p.position.y - FLOOR_THICKNESS / 2, p.position.y + FLOOR_THICKNESS / 2, seg.yTop))
@@ -320,7 +331,7 @@ export class ContinuousWallSystem {
     this.replaceChunk('walls', key, b, this.paint.getAllMaterials(), true);
   }
 
-  private rebuildFloorChunk(key: string, floors: BuiltPiece[]): void {
+  private rebuildFloorChunk(key: string, floors: BuiltPiece[], segCache: Map<string, WallSeg>, openingCache: Map<string, WallOpening[]>): void {
     if (floors.length === 0) {
       this.replaceChunk('floors', key, null, [], true);
       return;
@@ -331,6 +342,8 @@ export class ContinuousWallSystem {
       faceKey: (id: string, side: 'top' | 'bottom') => this.paint.getCellKey(id, side),
     };
     for (const floor of floors) {
+      const yBase = floor.position.y - FLOOR_THICKNESS / 2;
+      const yTop = floor.position.y + FLOOR_THICKNESS / 2;
       const around = this.source.near(floor.position, DIRTY_RADIUS + 0.5);
       const walls: WallObstacle[] = [];
       const neighbourFloors: BuiltPiece[] = [];
@@ -339,14 +352,24 @@ export class ContinuousWallSystem {
           if (p.isConfirmed) neighbourFloors.push(p);
           continue;
         }
-        const solidWall = isSolidWallPiece(p.type);
-        if (!solidWall && !isWindowOrDoorPiece(p.type)) continue;
-        const solved = solidWall && p.isConfirmed ? this.lastSolvedCorners.get(p.id) : undefined;
-        if (solved) {
-          walls.push(createWallObstacle(solved.startLeft, solved.startRight, solved.endLeft, solved.endRight, solved.yBase, solved.yTop));
+        // Door/window inserts sit on the floor. Only the host wall's solid spans can trim it.
+        if (!isSolidWallPiece(p.type)) continue;
+        const seg = this.segOf(p, segCache);
+        const solved = p.isConfirmed ? this.lastSolvedCorners.get(p.id) : undefined;
+        const footprint = solved
+          ? createWallObstacle(solved.startLeft, solved.startRight, solved.endLeft, solved.endRight, solved.yBase, solved.yTop)
+          : boxObstacle(p, seg.halfW * 2, seg.yTop - seg.yBase, WALL_THICKNESS);
+        let openings = openingCache.get(p.id);
+        if (!openings) {
+          const openingPieces = this.source.near(p.position, seg.halfW + NEIGHBOUR_MARGIN).filter((piece) => isWindowOrDoorPiece(piece.type));
+          openings = findWallOpenings(p, openingPieces);
+          openingCache.set(p.id, openings);
+        }
+        if (openings.length) {
+          const contactY = slabCoversWallTop(yBase, yTop, footprint.yTop) ? yBase : yTop;
+          walls.push(...wallFootprintAtHeight(footprint, seg, openings, contactY));
         } else {
-          const [w, h] = getWallSize(p.type);
-          walls.push(boxObstacle(p, w, h, WALL_THICKNESS));
+          walls.push(footprint);
         }
       }
       emitFloor(b, floor, neighbourFloors, walls, style);

@@ -2,6 +2,13 @@ import type { TKey } from './en';
 
 /** Ukrainian UI strings. The type forces every English key to have a translation. */
 export const uk: Record<TKey, string> = {
+  'dozer.lowerBlade': 'Опустити відвал',
+  'dozer.bladeMouse': 'ЛКМ',
+  'dozer.raiseBlade': 'Підняти відвал',
+  'dozer.brake': 'Гальмо',
+  'dozer.exit': 'Вийти',
+  'dozer.blocked': 'Ділянка захищена або поза досяжністю',
+  'dozer.drive': 'Рух',
   'common.close': 'Закрити',
   'common.closeEsc': 'Закрити (Esc)',
   'common.actKeys': '[E / ЛКМ]',
@@ -528,7 +535,7 @@ export const uk: Record<TKey, string> = {
   'site.cave': "Печера",
   'site.unknown': "Щось цікаве",
   'map.title': "Мапа острова",
-  'map.hint': "Клік — поставити мітку • клік по мітці — прибрати • M / Esc — закрити",
+  'map.hint': "Коліщатко або два пальці — масштаб • перетягування — рух карти • клік або дотик — додати чи прибрати мітку • M / Esc — закрити",
   'map.you': "Ви",
   'map.explored': "Досліджено {pct}%",
   'map.icon.pin': "Мітка",

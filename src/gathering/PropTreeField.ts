@@ -269,6 +269,31 @@ export class PropTreeField {
     return prop.id < 0 ? this.external.get(prop.id)?.trunkRadius ?? 0.35 : trunkRadius(prop.type);
   }
 
+  /** Removes a standing tree or bush and collects its usual drops immediately. */
+  public clearForGrading(id: number, give: (itemId: string, amount: number) => void): void {
+    const prop = this.props.get(id);
+    if (!prop || !CHOPPABLE.has(prop.type)) return;
+    const state = this.states.get(id);
+    if (state && state.fall >= 0) return;
+    if (state) {
+      this.dropVisual(state);
+      this.states.delete(id);
+    }
+    this.sinks.delete(id);
+    this.bushHealth.delete(id);
+    const alreadyRewarded = this.dyingBushes.delete(id);
+    this.bushSway?.forget(id);
+    this.props.remove(id);
+    if (alreadyRewarded) return;
+    if (prop.type === HEDGE_TYPE) {
+      give(HEDGE_TYPE, 1);
+      return;
+    }
+    give('wood', prop.type === 'bush' ? BUSH_WOOD : GATHERING_CONFIG.TREE_WOOD_YIELD);
+    const seed = SEED_OF_TREE[prop.type];
+    if (seed) give(seed, 1);
+  }
+
   /** Nearest standing prop tree whose trunk surface is within `reach` of `point`. */
   public findNearest(point: THREE.Vector3, reach: number): PropTreeNode | null {
     let best: PropInstance | null = null;

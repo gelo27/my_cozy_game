@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { BAY_EAVE_Y, BAY_RIDGE_X, BAY_FOOTPRINT, MODULE_SIZE, WALL_THICKNESS } from '../BuildingConstants';
 import { BUILDING_MATERIALS } from '../BuildingMaterials';
-import { openingContour } from '../../OpeningContour';
+import { ARCH_DOOR_JAMB, ARCH_DOOR_LEAF_DEPTH, archedDoorContour, doorwayClearance, openingContour } from '../../OpeningContour';
 import type { PieceMeshTemplate } from './PieceMeshTemplate';
-import { WALL_EDGE_MATERIAL } from '../DefaultWallMaterials';
+import { applyExtrudedWallFaces } from '../DefaultWallMaterials';
 
 /**
  * Builds stylized separate window geometry with larger outer frame,
@@ -235,49 +235,135 @@ export function buildOuterDoorFrameGeometry(width: number, height: number): Piec
   };
 }
 
-export function buildDoorwayWallGeometry(width: number, height: number): PieceMeshTemplate {
-  const topHeaderH = 0.12;
-  const jambW = width === 2.0 ? 0.10 : 0.08;
-  const openingW = width - jambW * 2;
-  const openingH = height - topHeaderH;
+function extrudeOpening(shape: THREE.Shape, depth: number): THREE.ExtrudeGeometry {
+  return new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false }).translate(0, 0, -depth / 2);
+}
 
-  // 1. Main wall body lintel & posts (plain white, like the default wall edges)
-  const lintelGeo = new THREE.BoxGeometry(width, topHeaderH, WALL_THICKNESS);
-  lintelGeo.translate(0, height / 2 - topHeaderH / 2, 0);
+/** A single U-shaped solid, with no threshold or internal faces where the jambs meet the lintel. */
+function openBottomFrame(outer: THREE.Vector2[], inner: THREE.Vector2[], depth: number): THREE.ExtrudeGeometry {
+  const outline = [...outer.slice(1), outer[0], inner[0], ...inner.slice(1).reverse()];
+  return extrudeOpening(new THREE.Shape(outline), depth);
+}
 
-  const leftPostGeo = new THREE.BoxGeometry(jambW, openingH, WALL_THICKNESS);
-  leftPostGeo.translate(-width / 2 + jambW / 2, -height / 2 + openingH / 2, 0);
+export function buildDoorwayWallGeometry(width: number, height: number, arched = false): PieceMeshTemplate {
+  const { halfWidth, top } = doorwayClearance(width, height);
+  const bottom = -height / 2;
+  const outer = openingContour('rect', width, height);
+  const inner = openingContour(arched ? 'arch' : 'rect', halfWidth * 2, top - bottom, 0, Math.min(halfWidth, 0.42));
+  for (const point of inner) point.y += (top + bottom) / 2;
+  const geometry = openBottomFrame(outer, inner, WALL_THICKNESS);
+  return { geometry, materials: applyExtrudedWallFaces(geometry, width, height), boundingBox: new THREE.Box3() };
+}
 
-  const rightPostGeo = new THREE.BoxGeometry(jambW, openingH, WALL_THICKNESS);
-  rightPostGeo.translate(width / 2 - jambW / 2, -height / 2 + openingH / 2, 0);
+let archFrame: PieceMeshTemplate | undefined;
+let archLeaf: PieceMeshTemplate | undefined;
+let archPanelCollider: THREE.BufferGeometry | undefined;
 
-  const mergedWallBody = mergeGeometries([lintelGeo, leftPostGeo, rightPostGeo])!;
-  lintelGeo.dispose(); leftPostGeo.dispose(); rightPostGeo.dispose();
-
-  // 2. Door frame trim (зверху, зліва, справа) - woodDark material
-  const trimThickness = WALL_THICKNESS + 0.04;
-  const trimBorder = 0.05;
-
-  const topTrim = new THREE.BoxGeometry(openingW + trimBorder * 2, trimBorder, trimThickness);
-  topTrim.translate(0, -height / 2 + openingH - trimBorder / 2, 0);
-
-  const leftTrim = new THREE.BoxGeometry(trimBorder, openingH, trimThickness);
-  leftTrim.translate(-openingW / 2 - trimBorder / 2, -height / 2 + openingH / 2, 0);
-
-  const rightTrim = new THREE.BoxGeometry(trimBorder, openingH, trimThickness);
-  rightTrim.translate(openingW / 2 + trimBorder / 2, -height / 2 + openingH / 2, 0);
-
-  const mergedTrim = mergeGeometries([topTrim, leftTrim, rightTrim])!;
-  topTrim.dispose(); leftTrim.dispose(); rightTrim.dispose();
-
-  const finalGeo = mergeGeometries([mergedWallBody, mergedTrim], true)!;
-  mergedWallBody.dispose(); mergedTrim.dispose();
-
-  return {
-    geometry: finalGeo,
-    materials: [WALL_EDGE_MATERIAL, BUILDING_MATERIALS.woodDark],
+export function getArchedDoorFrame(): PieceMeshTemplate {
+  return archFrame ??= {
+    geometry: openBottomFrame(archedDoorContour(), archedDoorContour(ARCH_DOOR_JAMB), WALL_THICKNESS + 0.012),
+    materials: [BUILDING_MATERIALS.greenhouseFrame],
     boundingBox: new THREE.Box3(),
   };
+}
+
+export function getArchedDoorPanelCollider(): THREE.BufferGeometry {
+  return archPanelCollider ??= extrudeOpening(new THREE.Shape(archedDoorContour(ARCH_DOOR_JAMB + 0.004, -0.99)), ARCH_DOOR_LEAF_DEPTH);
+}
+
+export function getArchedDoorLeaf(): PieceMeshTemplate {
+  if (archLeaf) return archLeaf;
+  const panel = new THREE.Shape(archedDoorContour(ARCH_DOOR_JAMB + 0.004, -0.99));
+  const glazing = openingContour('arch', 0.52, 0.49);
+  for (const point of glazing) point.y += 0.435;
+  panel.holes.push(new THREE.Path(glazing.slice().reverse()));
+
+  const wood = extrudeOpening(panel, ARCH_DOOR_LEAF_DEPTH);
+  const bar = (width: number, height: number, y: number) => {
+    const box = new THREE.BoxGeometry(width, height, ARCH_DOOR_LEAF_DEPTH);
+    box.translate(0, y, 0);
+    const result = box.toNonIndexed();
+    box.dispose();
+    return result;
+  };
+  const woodParts = [wood, bar(0.52, 0.022, 0.43), bar(0.022, 0.488, 0.435)];
+  const panelWithBars = mergeGeometries(woodParts)!;
+  const glass = extrudeOpening(new THREE.Shape(glazing), 0.012);
+  const knob = new THREE.SphereGeometry(0.032, 10, 6);
+  const handles = [0.052, -0.052].map(z => {
+    const part = knob.toNonIndexed();
+    part.translate(0.31, -0.05, z);
+    return part;
+  });
+  const hardware = mergeGeometries(handles)!;
+  const geometry = mergeGeometries([panelWithBars, glass, hardware], true)!;
+  for (const part of [...woodParts, panelWithBars, glass, knob, ...handles, hardware]) part.dispose();
+  archLeaf = {
+    geometry,
+    materials: [BUILDING_MATERIALS.wood, BUILDING_MATERIALS.windowGlass, BUILDING_MATERIALS.brassHardware],
+    boundingBox: new THREE.Box3(),
+  };
+  return archLeaf;
+}
+
+let frenchFrame: PieceMeshTemplate | undefined;
+let frenchLeaves: [PieceMeshTemplate, PieceMeshTemplate] | undefined;
+
+export function getFrenchDoorFrame(): PieceMeshTemplate {
+  if (frenchFrame) return frenchFrame;
+  const width = MODULE_SIZE;
+  const height = MODULE_SIZE;
+  const { halfWidth, top } = doorwayClearance(width, height);
+  const bottom = -height / 2;
+  const inner = openingContour('rect', halfWidth * 2, top - bottom);
+  for (const point of inner) point.y += (top + bottom) / 2;
+  frenchFrame = {
+    geometry: openBottomFrame(openingContour('rect', width, height), inner, WALL_THICKNESS + 0.026),
+    materials: [BUILDING_MATERIALS.woodWhiteDoor],
+    boundingBox: new THREE.Box3(),
+  };
+  return frenchFrame;
+}
+
+export function getFrenchDoorLeaves(): [PieceMeshTemplate, PieceMeshTemplate] {
+  if (frenchLeaves) return frenchLeaves;
+  const width = 0.896;
+  const height = 1.874;
+  const thickness = 0.06;
+  const stile = 0.075;
+  const rail = 0.115;
+  const glassWidth = width - 2 * stile;
+  const glassHeight = height - 2 * rail;
+  const box = (w: number, h: number, d: number, x = 0, y = 0, z = 0) =>
+    new THREE.BoxGeometry(w, h, d).translate(x, y, z);
+  const wood = [
+    ...[-1, 1].map(side => box(stile, height, thickness, side * (width - stile) / 2)),
+    ...[-1, 1].map(side => box(glassWidth, rail, thickness, 0, side * (height - rail) / 2)),
+    box(0.025, glassHeight, thickness * 0.8),
+  ];
+  for (let row = 1; row < 5; row++) {
+    wood.push(box(glassWidth, 0.025, thickness * 0.8, 0, glassHeight * (row / 5 - 0.5)));
+  }
+  const grille = mergeGeometries(wood)!;
+  const glass = box(glassWidth, glassHeight, 0.012);
+  const makeLeaf = (side: number): PieceMeshTemplate => {
+    const x = side * (width / 2 - stile / 2);
+    const parts = [-1, 1].flatMap(face => [
+      box(0.033, 0.058, 0.025, x, 0, face * 0.034),
+      box(0.103, 0.02, 0.023, x - side * 0.043, 0, face * 0.055),
+    ]);
+    const handles = mergeGeometries(parts)!;
+    const geometry = mergeGeometries([grille, glass, handles], true)!;
+    for (const part of [...parts, handles]) part.dispose();
+    return {
+      geometry,
+      materials: [BUILDING_MATERIALS.woodWhiteDoor, BUILDING_MATERIALS.windowGlass, BUILDING_MATERIALS.fenceHardware],
+      boundingBox: new THREE.Box3(),
+    };
+  };
+  frenchLeaves = [makeLeaf(1), makeLeaf(-1)];
+  for (const part of [...wood, grille, glass]) part.dispose();
+  return frenchLeaves;
 }
 
 export function buildSingleDoorGeometry(): PieceMeshTemplate {

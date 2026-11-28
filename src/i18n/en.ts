@@ -17,6 +17,13 @@ export const en = {
 
   // Touch controls
   'touch.interact': 'Interact (E)',
+  'dozer.lowerBlade': 'Lower blade',
+  'dozer.bladeMouse': 'LMB',
+  'dozer.raiseBlade': 'Raise blade',
+  'dozer.brake': 'Brake',
+  'dozer.exit': 'Exit',
+  'dozer.blocked': 'Ground protected or out of reach',
+  'dozer.drive': 'Drive',
   'touch.sprint': 'Sprint',
   'touch.use': 'Use tool',
   'touch.jump': 'Jump',
@@ -541,7 +548,7 @@ export const en = {
   'site.cave': "Cave",
   'site.unknown': "Something interesting",
   'map.title': "Island map",
-  'map.hint': "Click to place a pin • click a pin to remove it • M / Esc to close",
+  'map.hint': "Scroll or pinch to zoom • drag to move • click or tap to add or remove a pin • M / Esc to close",
   'map.you': "You",
   'map.explored': "Explored {pct}%",
   'map.icon.pin': "Pin",

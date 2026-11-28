@@ -5,6 +5,42 @@ type Vertex = [x: number, y: number, z: number];
 type Ring = [Vertex, Vertex, Vertex, Vertex];
 
 const WOOD_REPEAT = 1.8;
+const SUPPORT_CAP_HEIGHT = 0.17;
+
+export interface BridgeSupport {
+  z: number;
+  offset: number;
+  halfWidth: number;
+  halfDepth: number;
+  bottoms: [number, number];
+}
+
+export function sampleBridgeSupports(bridge: BridgeDef, groundHeight: (x: number, z: number) => number): BridgeSupport[] {
+  const count = bridge.supportCount ?? 0;
+  if (!count) return [];
+  const { a, b, width } = bridge;
+  const span = bridgeSpan(a, b);
+  const alongX = (b.x - a.x) / span, alongZ = (b.z - a.z) / span;
+  const spacing = span / (count + 1);
+  const offset = width * 0.3;
+  const halfWidth = THREE.MathUtils.clamp(width * 0.075, 0.075, 0.24);
+  const halfDepth = Math.min(halfWidth, spacing * 0.28);
+  const foot = (x: number, z: number) => {
+    let lowest = Infinity;
+    for (const dx of [-halfWidth, halfWidth]) {
+      for (const dz of [-halfDepth, halfDepth]) {
+        const cornerX = x + dx, cornerZ = z + dz;
+        lowest = Math.min(lowest, groundHeight(a.x + cornerX * alongZ + cornerZ * alongX,
+          a.z - cornerX * alongX + cornerZ * alongZ));
+      }
+    }
+    return lowest - a.y - 0.15; // Sink the piles slightly into the bed on uneven ground.
+  };
+  return Array.from({ length: count }, (_, i) => {
+    const z = (i + 1) * spacing;
+    return { z, offset, halfWidth, halfDepth, bottoms: [foot(-offset, z), foot(offset, z)] };
+  });
+}
 
 function ring(left: number, right: number, top: number, bottom: number, z: number): Ring {
   return [[left, top, z], [right, top, z], [right, bottom, z], [left, bottom, z]];
@@ -72,7 +108,7 @@ class WoodBuffers {
   }
 }
 
-/** Weld the physics strips and omit decorative spindles and posts from the collider. */
+/** Weld the vertices across the four strips of a solid collision beam. */
 function addCollisionBeam(sections: Ring[], positions: number[], indices: number[]): void {
   const start = positions.length / 3;
   sections.forEach((section, index) => {
@@ -91,7 +127,7 @@ function addCollisionBeam(sections: Ring[], positions: number[], indices: number
 }
 
 /** Local X is across the deck, local +Z is from the first landing to the second. */
-export function buildBridge(bridge: BridgeDef, withCollision: boolean, lod: 0 | 1 = 0) {
+export function buildBridge(bridge: BridgeDef, withCollision: boolean, lod: 0 | 1 = 0, supports: readonly BridgeSupport[] = []) {
   const span = bridgeSpan(bridge.a, bridge.b);
   const detailed = lod === 0;
   const fullSegments = bridgeSegments(span);
@@ -112,6 +148,11 @@ export function buildBridge(bridge: BridgeDef, withCollision: boolean, lod: 0 | 
   }
   const profile = (left: number, right: number, top: number, bottom: number) =>
     heights.map((height, i) => ring(left, right, height + top, height + bottom, span * i / segments));
+  const deckAt = (z: number) => {
+    const sample = z / span * segments;
+    const i = Math.min(segments - 1, Math.floor(sample));
+    return THREE.MathUtils.lerp(heights[i], heights[i + 1], sample - i);
+  };
 
   const slab = profile(-half, half, 0, -thickness);
   wood.beam(slab, distance, true);
@@ -162,6 +203,35 @@ export function buildBridge(bridge: BridgeDef, withCollision: boolean, lod: 0 | 
         wood.box(x - radius, x + radius, height + railHeight - handrailDepth * 0.45,
           height + baseRailTop - 0.025, at - radius, at + radius);
       }
+    }
+  }
+
+  wood.tint.setHex(0x997554);
+  for (const { z, offset, halfWidth, halfDepth, bottoms } of supports) {
+    const z0 = z - halfDepth, z1 = z + halfDepth;
+    const along = [z0];
+    const step = span / segments;
+    for (let i = Math.floor(z0 / step) + 1; i * step < z1; i++) {
+      const at = i * step;
+      if (at - z0 > 1e-6 && z1 - at > 1e-6) along.push(at);
+    }
+    along.push(z1);
+    // Match every bend of the deck so that the cap stays underneath even on short, steep arches.
+    const underside = along.map((at) => deckAt(at) - thickness);
+    const capWidth = Math.min(half, offset + halfWidth + 0.07);
+    const cap = along.map((at, i) => ring(-capWidth, capWidth,
+      underside[i] + 0.025, underside[i] - SUPPORT_CAP_HEIGHT, at));
+    wood.beam(cap, along);
+    if (withCollision && detailed) addCollisionBeam(cap, collisionVertices, collisionIndices);
+
+    const pileTop = underside.map((y) => y - SUPPORT_CAP_HEIGHT + 0.02);
+    const minPileTop = Math.min(...pileTop);
+    for (const [i, bottom] of bottoms.entries()) {
+      if (bottom >= minPileTop - 0.04) continue;
+      const x = i === 0 ? -offset : offset;
+      const pile = along.map((at, index) => ring(x - halfWidth, x + halfWidth, pileTop[index], bottom, at));
+      wood.beam(pile, along);
+      if (withCollision && detailed) addCollisionBeam(pile, collisionVertices, collisionIndices);
     }
   }
 

@@ -20,8 +20,12 @@ export enum BuildingPieceType {
   WOOD_WALL_WINDOW_ROUND = 'WOOD_WALL_WINDOW_ROUND',
   WOOD_WALL_DOORWAY_2X2 = 'WOOD_WALL_DOORWAY_2X2',
   WOOD_WALL_DOORWAY_1X2 = 'WOOD_WALL_DOORWAY_1X2',
+  WOOD_WALL_DOORWAY_ARCH_1X2 = 'WOOD_WALL_DOORWAY_ARCH_1X2',
+  WOOD_WALL_DOORWAY_ARCH_2X2 = 'WOOD_WALL_DOORWAY_ARCH_2X2',
+  WOOD_DOOR_ARCH = 'WOOD_DOOR_ARCH',
   WOOD_DOOR_SINGLE = 'WOOD_DOOR_SINGLE',
   WOOD_DOOR_DOUBLE = 'WOOD_DOOR_DOUBLE',
+  DOOR_FRENCH_2X2 = 'DOOR_FRENCH_2X2',
   DOOR_GRAND_SIDELITES_2X2 = 'DOOR_GRAND_SIDELITES_2X2',
   DOOR_WHITE_2PANEL_1X2 = 'DOOR_WHITE_2PANEL_1X2',
   DOOR_COTTAGE_WINDOW_1X2 = 'DOOR_COTTAGE_WINDOW_1X2',
@@ -208,9 +212,13 @@ export const PIECE_TRAITS: Record<BuildingPieceType, PieceTraits> = {
 
   [T.WOOD_WALL_DOORWAY_2X2]: { kind: 'doorway', wallSize: [2, 2] },
   [T.WOOD_WALL_DOORWAY_1X2]: { kind: 'doorway', wallSize: [1, 2] },
+  [T.WOOD_WALL_DOORWAY_ARCH_1X2]: { kind: 'doorway', wallSize: [1, 2], shape: T.WOOD_WALL_DOORWAY_1X2 },
+  [T.WOOD_WALL_DOORWAY_ARCH_2X2]: { kind: 'doorway', wallSize: [2, 2], shape: T.WOOD_WALL_DOORWAY_2X2 },
+  [T.WOOD_DOOR_ARCH]: { kind: 'door', swing: true, wallSize: [1, 2] },
 
   [T.WOOD_DOOR_SINGLE]: { kind: 'door', swing: true, wallSize: [1, 2] },
   [T.WOOD_DOOR_DOUBLE]: { kind: 'door', swing: true, wallSize: [2, 2] },
+  [T.DOOR_FRENCH_2X2]: { kind: 'door', swing: true, wallSize: [2, 2], shape: T.WOOD_DOOR_DOUBLE },
   [T.DOOR_GRAND_SIDELITES_2X2]: { kind: 'door', swing: true, wallSize: [2, 2] },
   [T.DOOR_WHITE_2PANEL_1X2]: { kind: 'door', swing: true, wallSize: [1, 2] },
   [T.DOOR_COTTAGE_WINDOW_1X2]: { kind: 'door', swing: true, wallSize: [1, 2] },
@@ -285,8 +293,8 @@ export function isGreenhousePiece(type: BuildingPieceType): boolean {
 }
 
 /**
- * The wooden piece whose shape (size, sockets, snapping, roof config) a glass piece shares.
- * Every non-glass type maps to itself, so size/snap lookups can switch on `shapeOf(type)`.
+ * The base piece a variant shares for shape-based lookups such as snapping and sockets.
+ * Pieces without a base shape map to themselves.
  */
 export function shapeOf(type: BuildingPieceType): BuildingPieceType {
   return PIECE_TRAITS[type]?.shape ?? type;

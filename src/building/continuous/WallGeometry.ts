@@ -1,9 +1,9 @@
 import * as THREE from 'three';
-import { BuiltPiece, BuildingPieceType, getWallSize, isDoorPiece, isDoorwayPiece } from '../types/BuildingTypes';
+import { BuiltPiece, BuildingPieceType, getWallSize } from '../types/BuildingTypes';
 import { BAY_EAVE_Y, WALL_THICKNESS } from '../config/BuildingConstants';
 import { MeshBuffers } from './MeshBuffers';
-import { SolvedWall, WallRow } from './WallJoints';
-import { openingContour } from '../OpeningContour';
+import { SolvedWall, WallRow, WallSeg } from './WallJoints';
+import { archedDoorContour, openingContour } from '../OpeningContour';
 import { clipPolygonByPlane, convexObstacle, subtractConvexPolygon, slabCoversWallTop, subtractObstacles, WallObstacle } from './FloorGeometry';
 
 /**
@@ -18,10 +18,10 @@ import { clipPolygonByPlane, convexObstacle, subtractConvexPolygon, slabCoversWa
 /** Trim (edges, caps, reveals) checker tile size, m */
 const TRIM_TILE = 0.5;
 const EPS = 1e-4;
+export const WALL_OPENING_NEIGHBOUR_MARGIN = 2.5;
 export interface WallOpening {
   /** Convex opening in local horizontal metres and world height. */
   outline: WallObstacle;
-  piece: BuiltPiece;
 }
 
 /** Openings (windows, doors, doorways) in `opening pieces` that cut through `wall`. */
@@ -42,13 +42,15 @@ export function findWallOpenings(wall: BuiltPiece, openingPieces: BuiltPiece[]):
     if (Math.abs(lx) >= (w + ow) / 2 - EPS || Math.abs(delta.y) >= (h + oh) / 2 - EPS) continue;
     const profile = op.type === BuildingPieceType.WOOD_WALL_WINDOW_ROUND ? 'round'
       : op.type === BuildingPieceType.WOOD_WALL_WINDOW_ARCH || op.type === BuildingPieceType.WOOD_WALL_WINDOW_PALLADIAN ? 'arch' : 'rect';
-    const points = openingContour(profile, ow, oh);
+    const points = op.type === BuildingPieceType.WOOD_DOOR_ARCH
+      ? archedDoorContour()
+      : openingContour(profile, ow, oh);
     // Keep the wall behind the solid canopy, including the corners above the hips.
     if (op.type === BuildingPieceType.WOOD_WALL_WINDOW_BAY) {
       for (const p of points) p.y = Math.min(p.y, BAY_EAVE_Y);
     }
     for (const p of points) { p.x += lx; p.y += op.position.y; }
-    out.push({ outline: convexObstacle(points, 0, 0), piece: op });
+    out.push({ outline: convexObstacle(points, 0, 0) });
   }
   return out;
 }
@@ -216,8 +218,7 @@ function emitReveals(b: MeshBuffers, row: WallRow, ops: WallOpening[], along: (p
         }
       }
       if (hi <= lo) continue;
-      if (Math.abs(a.y - e.y) < EPS && (a.y <= wallBase + EPS || a.y >= wallTop - EPS ||
-        (a.y === op.outline.minZ && (isDoorPiece(op.piece.type) || isDoorwayPiece(op.piece.type))))) continue;
+      if (Math.abs(a.y - e.y) < EPS && (a.y <= wallBase + EPS || a.y >= wallTop - EPS)) continue;
       const p = a.clone().lerp(e, lo), q = a.clone().lerp(e, hi);
       const u = p.distanceTo(q) / TRIM_TILE, v = WALL_THICKNESS / TRIM_TILE;
       b.quad(point(row.startLeft,row.endLeft,p), point(row.startLeft,row.endLeft,q),
@@ -240,6 +241,32 @@ function sections(ops: WallOpening[], axis: 'x' | 'y', value: number) {
     }
     return hits.length ? [{ minX: Math.min(...hits), maxX: Math.max(...hits) }] : [];
   });
+}
+
+/** The solid parts of a wall's footprint at the height where it meets a floor. */
+export function wallFootprintAtHeight(footprint: WallObstacle, seg: WallSeg, openings: WallOpening[], y: number): WallObstacle[] {
+  const holes = sections(openings, 'y', y).filter(({ minX, maxX }) => maxX - minX > EPS);
+  if (!holes.length) return [footprint];
+
+  const origin = seg.p1.clone().addScaledVector(seg.dir, seg.halfW);
+  const offset = seg.dir.dot(origin);
+  const xs = footprint.vertices.map(p => seg.dir.dot(p) - offset);
+  const min = Math.min(...xs);
+  const max = Math.max(...xs);
+  const reverse = seg.dir.clone().negate();
+  const pieces: WallObstacle[] = [];
+  for (const [lo, hi] of solidIntervals(min, max, holes)) {
+    let poly = footprint.vertices;
+    if (lo > min + EPS) poly = clipPolygonByPlane(poly, origin.clone().addScaledVector(seg.dir, lo), seg.dir);
+    if (hi < max - EPS) poly = clipPolygonByPlane(poly, origin.clone().addScaledVector(seg.dir, hi), reverse);
+    if (poly === footprint.vertices) {
+      pieces.push(footprint);
+    } else {
+      const vertices = poly.filter((p, i) => p.distanceToSquared(poly[(i + 1) % poly.length]) > EPS * EPS);
+      if (vertices.length >= 3) pieces.push(convexObstacle(vertices, footprint.yBase, footprint.yTop));
+    }
+  }
+  return pieces;
 }
 
 function emitCaps(b: MeshBuffers, row: WallRow, ops: WallOpening[], halfW: number): void {

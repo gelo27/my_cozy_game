@@ -95,8 +95,10 @@ export function getPieceDimensions(type: BuildingPieceType, piece?: BuiltPiece):
       return new THREE.Vector3(2.0, 1.0, 0.12);
     case BuildingPieceType.WOOD_WALL_WINDOW_2X2:
       return new THREE.Vector3(2.0, 2.0, 0.12);
+    case BuildingPieceType.WOOD_DOOR_DOUBLE:
     case BuildingPieceType.WOOD_WALL_DOORWAY_2X2:
       return new THREE.Vector3(2.0, 2.0, 0.12);
+    case BuildingPieceType.WOOD_DOOR_ARCH:
     case BuildingPieceType.WOOD_WALL_DOORWAY_1X2:
       return new THREE.Vector3(1.0, 2.0, 0.12);
     case BuildingPieceType.WOOD_WALL_WINDOW_2X4:
@@ -171,7 +173,9 @@ export function getPieceExtensionConfigs(type: BuildingPieceType, piece?: BuiltP
     case BuildingPieceType.WOOD_WALL_WINDOW_BAY:
     case BuildingPieceType.WOOD_WALL_WINDOW_ROUND:
     case BuildingPieceType.WOOD_WALL_WINDOW_2X4:
+    case BuildingPieceType.WOOD_DOOR_ARCH:
     case BuildingPieceType.WOOD_WALL_DOORWAY_1X2:
+    case BuildingPieceType.WOOD_DOOR_DOUBLE:
     case BuildingPieceType.WOOD_WALL_DOORWAY_2X2: {
       const W = dim.x;
       const H = dim.y;

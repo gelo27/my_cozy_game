@@ -15,6 +15,8 @@ import { DEFAULT_FLOOR_FACES } from './DefaultFloorMaterials';
 import type { PieceMeshTemplate } from './meshes/PieceMeshTemplate';
 import { buildGreenhouseWallGeometry, GH_LEAF_W, GH_LEAF_H, GH_LEAF_Y, GH_HINGE_X, pushBox, greenhouseDoorLeafParts, greenhouseDoorFrameParts, mergeGreenhouseParts, buildGreenhouseDoorGeometry, buildGreenhouseDoorFrame, buildGreenhouseDoorLeaf } from './meshes/GreenhouseGeometry';
 import { buildBayWindowGeometry, buildWindowPieceGeometry, buildSingleHungWindowPieceGeometry, buildArchedWindowPieceGeometry, buildOuterDoorFrameGeometry, buildDoorwayWallGeometry, buildSingleDoorGeometry, buildDoubleDoorGeometry, buildGrandSideliteDoorFrameGeometry, buildGrandMahoganyDoorLeaf, buildWhite2PanelDoorFrameGeometry, buildWhite2PanelDoorLeaf, buildCottageWindowDoorFrameGeometry, buildCottageWindowDoorLeaf, buildColonial6PanelDoorFrameGeometry, buildColonial6PanelDoorLeaf } from './meshes/OpeningGeometry';
+import { getArchedDoorFrame, getArchedDoorLeaf, getFrenchDoorFrame, getFrenchDoorLeaves } from './meshes/OpeningGeometry';
+import { ARCH_DOOR_HINGE_X } from '../OpeningContour';
 import { buildStraightRailingGeometry, buildStairRailingGeometry, buildWhiteDecorativeFenceGeometry } from './meshes/RailingGeometry';
 
 // Textures, materials, unit sizes and the mesh template type live in their own modules;
@@ -49,8 +51,7 @@ function windowPieceDef(type: BuildingPieceType, name: string, ukrainianName: st
   };
 }
 
-export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
-  ...FURNITURE_PIECE_DEFS,
+const BASE_BUILDING_PIECES = {
   [BuildingPieceType.WOOD_FLOOR_2X2]: {
     type: BuildingPieceType.WOOD_FLOOR_2X2,
     name: 'Wood Floor 2x2m',
@@ -2121,9 +2122,42 @@ export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
     description: 'Засклений односхилий дах для прибудованої до стіни теплиці.',
     sockets: [],
   },
+} satisfies Partial<Record<BuildingPieceType, BuildingPieceDef>>;
+
+export const BUILDING_PIECES: Record<BuildingPieceType, BuildingPieceDef> = {
+  ...FURNITURE_PIECE_DEFS,
+  ...BASE_BUILDING_PIECES,
+  [BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_1X2]: {
+    ...BASE_BUILDING_PIECES[BuildingPieceType.WOOD_WALL_DOORWAY_1X2],
+    type: BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_1X2,
+    name: 'Arched Opening 1×2 m',
+    ukrainianName: 'Арковий проріз 1×2 м',
+    description: 'Вузький відкритий прохід із заокругленою перемичкою.',
+  },
+  [BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_2X2]: {
+    ...BASE_BUILDING_PIECES[BuildingPieceType.WOOD_WALL_DOORWAY_2X2],
+    type: BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_2X2,
+    name: 'Arched Opening 2×2 m',
+    ukrainianName: 'Арковий проріз 2×2 м',
+    description: 'Широкий відкритий прохід з пологою аркою.',
+  },
+  [BuildingPieceType.WOOD_DOOR_ARCH]: {
+    ...BASE_BUILDING_PIECES[BuildingPieceType.WOOD_DOOR_SINGLE],
+    type: BuildingPieceType.WOOD_DOOR_ARCH,
+    name: 'Arched Wood Door 1×2 m',
+    ukrainianName: 'Аркові дерев’яні двері 1×2 м',
+    description: 'Дерев’яні двері з арковим віконцем і латунною ручкою.',
+  },
+  [BuildingPieceType.DOOR_FRENCH_2X2]: {
+    ...BASE_BUILDING_PIECES[BuildingPieceType.WOOD_DOOR_DOUBLE],
+    type: BuildingPieceType.DOOR_FRENCH_2X2,
+    name: 'French Double Doors 2×2 m',
+    ukrainianName: 'Французькі двостулкові двері 2×2 м',
+    description: 'Білі засклені стулки з тонкими перемичками та металевими ручками.',
+  },
 };
 
-// Glass pieces snap exactly like their wooden twins
+// Variants snap like the base pieces that share their shape.
 for (const def of Object.values(BUILDING_PIECES)) {
   const twin = shapeOf(def.type);
   if (twin !== def.type) def.sockets = BUILDING_PIECES[twin].sockets;
@@ -2255,6 +2289,28 @@ function buildTemplateForPiece(type: BuildingPieceType): PieceMeshTemplate {
 
     case BuildingPieceType.WOOD_WALL_DOORWAY_1X2: {
       return buildDoorwayWallGeometry(1.0, MODULE_SIZE);
+    }
+
+    case BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_1X2:
+      return buildDoorwayWallGeometry(1, MODULE_SIZE, true);
+    case BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_2X2:
+      return buildDoorwayWallGeometry(MODULE_SIZE, MODULE_SIZE, true);
+    case BuildingPieceType.WOOD_DOOR_ARCH: {
+      const frame = getArchedDoorFrame();
+      const leaf = getArchedDoorLeaf();
+      return {
+        geometry: mergeGeometries([frame.geometry, leaf.geometry])!,
+        materials: frame.materials,
+        boundingBox: new THREE.Box3(),
+      };
+    }
+    case BuildingPieceType.DOOR_FRENCH_2X2: {
+      const frame = getFrenchDoorFrame();
+      const leaves = getFrenchDoorLeaves().map(({ geometry }, i) =>
+        geometry.toNonIndexed().translate(i === 0 ? -0.45 : 0.45, -0.06, 0));
+      const geometry = mergeGeometries([frame.geometry, ...leaves])!;
+      leaves.forEach(leaf => leaf.dispose());
+      return { geometry, materials: frame.materials, boundingBox: new THREE.Box3() };
     }
 
     case BuildingPieceType.WOOD_DOOR_SINGLE: {
@@ -2681,6 +2737,36 @@ export function createPieceMeshGroup(
   group.name = `BuildingPiece_${type}`;
 
   const template = getPieceMeshTemplate(type);
+
+  if (!isGhost && type === BuildingPieceType.WOOD_DOOR_ARCH) {
+    const frame = getArchedDoorFrame();
+    const leaf = getArchedDoorLeaf();
+    group.add(new THREE.Mesh(frame.geometry, frame.materials[0]));
+    const pivot = new THREE.Group();
+    pivot.name = 'doorPivot';
+    pivot.position.x = ARCH_DOOR_HINGE_X;
+    const panel = new THREE.Mesh(leaf.geometry, leaf.materials);
+    panel.position.x = -ARCH_DOOR_HINGE_X;
+    pivot.add(panel);
+    group.add(pivot);
+    return group;
+  }
+
+  if (!isGhost && type === BuildingPieceType.DOOR_FRENCH_2X2) {
+    const frame = getFrenchDoorFrame();
+    group.add(new THREE.Mesh(frame.geometry, frame.materials[0]));
+    getFrenchDoorLeaves().forEach((leaf, i) => {
+      const side = i === 0 ? -1 : 1;
+      const pivot = new THREE.Group();
+      pivot.name = side < 0 ? 'doorPivotLeft' : 'doorPivotRight';
+      pivot.position.x = side * 0.9;
+      const panel = new THREE.Mesh(leaf.geometry, leaf.materials);
+      panel.position.set(-side * 0.45, -0.06, 0);
+      pivot.add(panel);
+      group.add(pivot);
+    });
+    return group;
+  }
 
   // If this is a real placed door, assemble interactive hinge pivot groups with static outer frame (top, left, right)
   if (!isGhost && type === BuildingPieceType.WOOD_DOOR_SINGLE) {

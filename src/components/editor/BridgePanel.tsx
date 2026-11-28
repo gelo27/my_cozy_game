@@ -2,7 +2,7 @@ import { Crosshair, Plus, Trash2 } from 'lucide-react';
 import { Vector3 } from 'three';
 import { CHARACTER_CONFIG } from '../../config/constants';
 import type { GameEngine } from '../../engine/GameEngine';
-import { BRIDGE_RANGES, MAX_BRIDGE_SPAN, MIN_BRIDGE_SPAN, bridgeMaxSlope, bridgeSpan } from '../../world/BridgeTypes';
+import { BRIDGE_RANGES, MAX_BRIDGE_SPAN, MAX_BRIDGE_SUPPORTS, MIN_BRIDGE_SPAN, bridgeMaxSlope, bridgeSpan } from '../../world/BridgeTypes';
 import { chip, NumberField, Section, Slider } from './EditorWidgets';
 
 const metres = (value: number) => `${value.toFixed(2)} м`;
@@ -102,6 +102,8 @@ export function BridgePanel({ engine }: { engine: GameEngine }) {
           <Slider key={key} label={label} value={draft[key]} {...BRIDGE_RANGES[key]} fmt={metres}
             onChange={(value) => tool.setSettings({ [key]: value })} />
         ))}
+        <Slider label="Опори під мостом" value={draft.supportCount ?? 0} min={0} max={MAX_BRIDGE_SUPPORTS} step={1}
+          fmt={(count) => count ? String(count) : 'Без опор'} onChange={(supportCount) => tool.setSettings({ supportCount })} />
       </Section>
       <div className="flex flex-wrap gap-1">
         <button type="button" disabled={!tool.canApply} className={`${chip(tool.canApply)} disabled:opacity-40`}

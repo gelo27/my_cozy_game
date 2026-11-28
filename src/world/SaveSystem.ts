@@ -70,6 +70,7 @@ export interface WorldSaveData {
   vehicle: { p: [number, number, number]; yaw: number } | null;
   moped?: { p: [number, number, number]; yaw: number };
   boat?: { p: [number, number, number]; yaw: number };
+  bulldozer?: { p: [number, number, number]; yaw: number };
   exploration?: ExplorationSaveData;
   pets: PetSaveData[];
   /** Farmhands (missing in older saves: the starting crew stays). */
@@ -295,6 +296,7 @@ function isWorldSaveData(value: unknown): value is WorldSaveData {
       (!Array.isArray(value.pets) || value.pets.length > 1000 || !value.pets.every(isPetSave))) return false;
   if (value.moped !== undefined && !isVehicleSave(value.moped)) return false;
   if (value.boat !== undefined && !isVehicleSave(value.boat)) return false;
+  if (value.bulldozer !== undefined && !isVehicleSave(value.bulldozer)) return false;
   if (value.fields !== undefined &&
       (!Array.isArray(value.fields) || value.fields.length > 100_000 ||
         !value.fields.every((field) => isRecord(field) && isFiniteNumber(field.gx) &&
@@ -384,7 +386,9 @@ export class SaveSystem {
     const ride = w.vehicle.isPlayerInside ? w.vehicle : w.moped.isPlayerInside ? w.moped : null;
     // A save made in the caves resumes outside the nearest cave mouth;
     // a save made at sea resumes on the pier
-    const p = forRollback ? w.character.getPosition() : w.boat.isPlayerInside
+    const p = forRollback ? w.character.getPosition() : w.bulldozer.isPlayerInside
+      ? w.bulldozer.getExitPosition()
+      : w.boat.isPlayerInside
       ? w.boat.dock.clone().add(new THREE.Vector3(0, 1.2, 0))
       : ride
       ? ride.getPosition().add(new THREE.Vector3(1.5, 1.2, 0))
@@ -426,6 +430,7 @@ export class SaveSystem {
       vehicle: { p: [vt.x, vt.y + (forRollback ? 0 : 0.3), vt.z], yaw: Math.atan2(fwd.x, fwd.z) },
       moped: { p: w.moped.getPosition().add(new THREE.Vector3(0, forRollback ? 0 : 0.2, 0)).toArray(), yaw: w.moped.getYaw() },
       boat: { p: w.boat.getPosition().toArray() as [number, number, number], yaw: w.boat.getYaw() },
+      bulldozer: { p: w.bulldozer.getPosition().toArray(), yaw: w.bulldozer.getYaw() },
       pets: w.gameplay.pets.serialize(),
       workers: w.gameplay.workers?.serialize(),
       authoredRocks: w.rocks.serializeAuthored(),
@@ -514,6 +519,7 @@ export class SaveSystem {
     }
     if (data.moped) w.moped.place(new THREE.Vector3(...data.moped.p), data.moped.yaw);
     if (data.boat) w.boat.place(new THREE.Vector3(...data.boat.p), data.boat.yaw);
+    w.bulldozer.place(data.bulldozer ? new THREE.Vector3(...data.bulldozer.p) : undefined, data.bulldozer?.yaw);
     if (data.pets?.length || (restoring && data.pets)) w.gameplay.pets.deserialize(data.pets);
     w.gameplay.storage?.deserialize(data.storage && mergeOreStacks(data.storage));
     if (data.workers && w.gameplay.workers) {
@@ -528,7 +534,7 @@ export class SaveSystem {
   }
 
   /** Called after a save was applied (the engine then uploads the new world to the GPU in one go). */
-  public onApplied: (() => void) | null = null;
+  public onApplied: ((restoring: boolean) => void) | null = null;
 
   public get needsRecovery(): boolean {
     return this.recoveryRequired;
@@ -555,20 +561,20 @@ export class SaveSystem {
         this.apply(previous, true);
         exploration.inCave = previousCave;
         gameplay.anchorOverride = previousAnchor;
-        this.notifyApplied();
+        this.notifyApplied(true);
       } catch (restoreError) {
         this.recoveryRequired = true;
         console.error('[SaveSystem] failed to restore the previous world', restoreError);
       }
       return false;
     }
-    this.notifyApplied();
+    this.notifyApplied(false);
     return true;
   }
 
-  private notifyApplied(): void {
+  private notifyApplied(restoring: boolean): void {
     try {
-      this.onApplied?.();
+      this.onApplied?.(restoring);
     } catch (error) {
       console.error('[SaveSystem] post-load notification failed', error);
     }

@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { DEFAULT_FLOOR_MATERIAL } from '../building/config/DefaultFloorMaterials';
 import { COLLISION_GROUPS } from '../config/constants';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
-import { buildBridge } from './BridgeGeometry';
+import { buildBridge, sampleBridgeSupports, type BridgeSupport } from './BridgeGeometry';
+import type { TerrainSystem } from './TerrainSystem';
 import { isMobileDevice } from './WorldSettings';
 import type { BridgeDef } from './BridgeTypes';
 
@@ -20,6 +21,7 @@ interface PlacedBridge {
   mesh: BridgeMesh;
   body: Body;
   geometry: [THREE.BufferGeometry, THREE.BufferGeometry];
+  supports: readonly BridgeSupport[];
   inverseSpanSquared: number;
   editorVisible: boolean;
   lod: BridgeLod;
@@ -28,13 +30,17 @@ interface PlacedBridge {
 export class BridgeSystem {
   private readonly group = new THREE.Group();
   private readonly bridges = new Map<string, PlacedBridge>();
+  private terrainRevision: number;
+  private nextSupportRefresh = 0;
   public revision = 0;
   private readonly material = new THREE.MeshLambertMaterial({
     map: DEFAULT_FLOOR_MATERIAL.map,
     vertexColors: true,
   });
 
-  constructor(scene: THREE.Scene, private readonly physics: PhysicsWorld) {
+  constructor(scene: THREE.Scene, private readonly physics: PhysicsWorld,
+    private readonly terrain: Pick<TerrainSystem, 'getHeight' | 'revision'>) {
+    this.terrainRevision = terrain.revision;
     this.group.name = 'WoodenBridges';
     scene.add(this.group);
   }
@@ -61,51 +67,84 @@ export class BridgeSystem {
     const previous = this.bridges.get(id);
     if (def === previous?.def) return;
     if (def) {
-      const built = buildBridge(def, true);
-      const coarse = buildBridge(def, false, 1).geometry;
-      const positions = built.collisionVertices;
-      const sin = Math.sin(built.yaw);
-      const cos = Math.cos(built.yaw);
-      for (let i = 0; i < positions.length; i += 3) {
-        const x = positions[i];
-        const z = positions[i + 2];
-        positions[i] = x * cos + z * sin;
-        positions[i + 2] = z * cos - x * sin;
-      }
-      let collision: ReturnType<PhysicsWorld['createStaticTrimesh']>;
-      try {
-        collision = this.physics.createStaticTrimesh(
-          built.origin, new Float32Array(positions), new Uint32Array(built.collisionIndices),
-          COLLISION_GROUPS.ENVIRONMENT, this.physics.rapier.TriMeshFlags.FIX_INTERNAL_EDGES,
-        );
-      } catch (error) {
-        built.geometry.dispose();
-        coarse.dispose();
-        throw error;
-      }
-      (collision.collider as typeof collision.collider & { userData?: { surface: 'wood' } }).userData = { surface: 'wood' };
-
-      const mesh = this.createMesh(built);
-      mesh.name = def.id;
-      this.group.add(mesh);
-      this.bridges.set(id, {
-        def, mesh, body: collision.body,
-        geometry: [built.geometry, coarse],
-        inverseSpanSquared: 1 / ((def.b.x - def.a.x) ** 2 + (def.b.z - def.a.z) ** 2),
-        editorVisible: true, lod: 0,
-      });
-    } else {
+      this.replace(id, def, this.sampleSupports(def));
+    } else if (previous) {
       this.bridges.delete(id);
-    }
-    if (previous) {
-      previous.mesh.removeFromParent();
-      for (const geometry of previous.geometry) geometry.dispose();
-      this.physics.removeRigidBody(previous.body);
+      this.releasePlaced(previous);
     }
     this.revision++;
   }
 
+  private sampleSupports(def: BridgeDef): BridgeSupport[] {
+    return sampleBridgeSupports(def, (x, z) => this.terrain.getHeight(x, z));
+  }
+
+  private replace(id: string, def: BridgeDef, supports: readonly BridgeSupport[]): void {
+    const previous = this.bridges.get(id);
+    const built = buildBridge(def, true, 0, supports);
+    const coarse = buildBridge(def, false, 1, supports).geometry;
+    const positions = built.collisionVertices;
+    const sin = Math.sin(built.yaw);
+    const cos = Math.cos(built.yaw);
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i];
+      const z = positions[i + 2];
+      positions[i] = x * cos + z * sin;
+      positions[i + 2] = z * cos - x * sin;
+    }
+    let collision: ReturnType<PhysicsWorld['createStaticTrimesh']>;
+    try {
+      collision = this.physics.createStaticTrimesh(
+        built.origin, new Float32Array(positions), new Uint32Array(built.collisionIndices),
+        COLLISION_GROUPS.ENVIRONMENT, this.physics.rapier.TriMeshFlags.FIX_INTERNAL_EDGES,
+      );
+    } catch (error) {
+      built.geometry.dispose();
+      coarse.dispose();
+      throw error;
+    }
+    (collision.collider as typeof collision.collider & { userData?: { surface: 'wood' } }).userData = { surface: 'wood' };
+
+    const mesh = this.createMesh(built);
+    mesh.name = def.id;
+    const lod = previous?.lod ?? 0;
+    const editorVisible = previous?.editorVisible ?? true;
+    mesh.visible = editorVisible && lod !== 2;
+    if (lod === 1) mesh.geometry = coarse;
+    this.group.add(mesh);
+    this.bridges.set(id, {
+      def, mesh, body: collision.body,
+      geometry: [built.geometry, coarse],
+      supports,
+      inverseSpanSquared: 1 / ((def.b.x - def.a.x) ** 2 + (def.b.z - def.a.z) ** 2),
+      editorVisible, lod,
+    });
+    if (previous) this.releasePlaced(previous);
+  }
+
+  private releasePlaced(bridge: PlacedBridge): void {
+    bridge.mesh.removeFromParent();
+    for (const geometry of bridge.geometry) geometry.dispose();
+    this.physics.removeRigidBody(bridge.body);
+  }
+
+  private refreshSupports(): void {
+    if (this.terrainRevision === this.terrain.revision) return;
+    const now = performance.now();
+    if (now < this.nextSupportRefresh) return;
+    this.nextSupportRefresh = now + 250;
+    this.terrainRevision = this.terrain.revision;
+    for (const [id, { def, supports }] of this.bridges) {
+      if (!supports.length) continue;
+      const updated = this.sampleSupports(def);
+      if (updated.some(({ bottoms }, i) => bottoms.some((y, side) => Math.abs(y - supports[i].bottoms[side]) > 0.01))) {
+        this.replace(id, def, updated);
+      }
+    }
+  }
+
   public updateLod(camera: THREE.Vector3): void {
+    this.refreshSupports();
     for (const bridge of this.bridges.values()) {
       if (!bridge.editorVisible) continue;
       const { a, b } = bridge.def;
@@ -132,7 +171,7 @@ export class BridgeSystem {
   }
 
   public preview(def: BridgeDef): BridgeMesh {
-    return this.createMesh(buildBridge(def, false));
+    return this.createMesh(buildBridge(def, false, 0, this.sampleSupports(def)));
   }
 
   private createMesh(built: ReturnType<typeof buildBridge>): BridgeMesh {

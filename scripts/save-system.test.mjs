@@ -17,6 +17,12 @@ let BridgeSystem;
 let StaticShadows;
 let terrainConstants;
 let waterSurfaceUniforms;
+let BulldozerController;
+let interactionFocus;
+let createBulldozerClearing;
+let FarmingManager;
+let PropTreeField;
+let FlowerBeds;
 
 before(async () => {
   server = await createServer({
@@ -40,6 +46,12 @@ before(async () => {
     ({ StaticShadows } = await server.ssrLoadModule('/src/world/StaticShadows.ts'));
     terrainConstants = await server.ssrLoadModule('/src/world/TerrainSystem.ts');
     ({ waterSurfaceUniforms } = await server.ssrLoadModule('/src/world/WaterSurface.ts'));
+    ({ BulldozerController } = await server.ssrLoadModule('/src/vehicle/BulldozerController.ts'));
+    ({ interactionFocus } = await server.ssrLoadModule('/src/gameplay/InteractionFocus.ts'));
+    ({ createBulldozerClearing } = await server.ssrLoadModule('/src/vehicle/BulldozerClearing.ts'));
+    ({ FarmingManager } = await server.ssrLoadModule('/src/farming/FarmingManager.ts'));
+    ({ PropTreeField } = await server.ssrLoadModule('/src/gathering/PropTreeField.ts'));
+    ({ FlowerBeds } = await server.ssrLoadModule('/src/gathering/FlowerBeds.ts'));
   } finally {
     delete globalThis.document;
   }
@@ -47,6 +59,299 @@ before(async () => {
 
 after(async () => {
   await server?.close();
+});
+
+test('blade grades across a chunk edge, softens its sides and skips an unchanged pass', () => {
+  const terrain = Object.create(terrainConstants.TerrainSystem.prototype);
+  const size = starter.terrain.size;
+  terrain.heights = new Float32Array((size + 1) ** 2).fill(30);
+  const edits = [];
+  terrain.markHeightsDirty = (...rect) => edits.push(rect);
+  const at = (x, z) => terrain.heights[(z + size / 2) * (size + 1) + x + size / 2];
+  assert.equal(terrain.gradeStrip(-1, 64, 1, 64, 1.85, 30), false);
+  assert.equal(terrain.gradeStrip(-1, 64, 1, 64, 1.85, 29.75), true);
+  assert.equal(at(0, 64), 29.75);
+  assert.ok(at(0, 65) > 29.75 && at(0, 65) < 30);
+  assert.equal(at(0, 66), 30);
+  const [[x0, z0, x1, z1]] = edits;
+  assert.ok(x0 < size / 2 && x1 > size / 2 && z0 < size / 2 + 64 && z1 > size / 2 + 64);
+});
+
+test('a graded strip collects plants and field resources once and exposes dirt only in its path', () => {
+  const terrain = Object.create(terrainConstants.TerrainSystem.prototype);
+  const size = starter.terrain.size;
+  terrain.heights = new Float32Array((size + 1) ** 2).fill(30);
+  terrain.tiles = new Uint8Array(size ** 2);
+  const textureUpdates = [];
+  terrain.markSplatDirty = (...bounds) => textureUpdates.push(bounds);
+  const makePlant = (id, type, x, z) => ({ id, type, position: new Vector3(x, 30, z), grounded: true, rotationY: 0 });
+  const outside = makePlant(4, 'tree_pine', 3, 66);
+  const plants = new Map([
+    [1, makePlant(1, 'tree_pine', 0, 64)],
+    [2, makePlant(2, 'bush', 1, 65)],
+    [3, makePlant(3, 'flowers', 2, 64)],
+    [5, makePlant(5, 'couch_grass', 3, 64)],
+    [outside.id, outside],
+  ]);
+  const props = {
+    forEachNear: (_x, _z, _r, visit) => plants.forEach(visit),
+    get: id => plants.get(id),
+    remove: id => plants.delete(id),
+  };
+  const propTrees = new PropTreeField(props, null);
+  const flowers = Object.assign(Object.create(FlowerBeds.prototype), { props });
+  const field = { id: 'crop', gx: 2, gz: 64, center: new Vector3(3.5, 30, 65.5), crop: { cropType: 'wheat', stage: 1 } };
+  const other = { id: 'next', gx: 1, gz: 66, center: new Vector3(2.5, 30, 67.5), crop: null };
+  const fields = new Map([[field.id, field], [other.id, other]]);
+  const farming = Object.assign(Object.create(FarmingManager.prototype), {
+    fields: {
+      forEachInBounds: (_x0, _z0, _x1, _z1, visit) => fields.forEach(visit),
+      removeField: id => {
+        const removed = fields.delete(id);
+        terrain.tiles[(64 + size / 2) * size + 2 + size / 2] = 0;
+        return removed;
+      },
+    },
+  });
+  const rewards = [];
+  const clear = createBulldozerClearing({
+    terrain, props, propTrees, flowers, farming,
+    orchard: { clearForGrading: noop }, nursery: { clearForGrading: noop },
+    collect: items => rewards.push(items),
+  });
+  const pavingIndex = (64 + size / 2) * size + 1 + size / 2;
+  terrain.tiles[pavingIndex] = 3;
+  clear(0, 64, 4, 64, 1.85);
+  clear(0, 64, 4, 64, 1.85);
+  assert.deepEqual([...plants.keys()], [outside.id]);
+  assert.deepEqual([...fields.keys()], [other.id]);
+  assert.equal(rewards.length, 1);
+  const loot = Object.fromEntries(rewards[0].map(({ itemId, amount }) => [itemId, amount]));
+  assert.ok(loot.wood > 1);
+  assert.equal(loot.pine_cone, 1);
+  assert.equal(loot.bush_sapling, 1);
+  assert.equal(loot.tulip_purple, 1);
+  assert.equal(loot.wheat_seed, 3);
+  assert.equal(terrain.getTile(2, 64), 1);
+  assert.equal(terrain.getTile(1, 64), 3);
+  assert.equal(terrain.getTile(3, 66), 0);
+  assert.equal(textureUpdates.length, 1);
+});
+
+test('raycast bulldozer pivots, protects structures and clears a tall ridge before reaching it', async () => {
+  await RAPIER.init();
+  const world = new RAPIER.World({ x: 0, y: -22, z: 0 });
+  const packCollisionGroups = (membership, filter) => (membership << 16) | filter;
+  const floor = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+  world.createCollider(RAPIER.ColliderDesc.cuboid(70, 1, 70).setTranslation(0, 29, 0)
+    .setCollisionGroups(packCollisionGroups(0x21, 0xffff)), floor);
+  let grades = 0;
+  let commits = 0;
+  const terrain = {
+    getHeight: () => 30,
+    gradeStrip: () => { grades++; return true; },
+    commit: () => { commits++; },
+  };
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const canvas = {
+    createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+    putImageData: noop, beginPath: noop, arc: noop, fill: noop, fillText: noop,
+  };
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true, value: { createElement: () => ({ getContext: () => canvas }) },
+  });
+  let dozer;
+  try {
+    const physics = { rapier: RAPIER, world, packCollisionGroups, removeRigidBody: body => world.removeRigidBody(body) };
+    dozer = new BulldozerController(physics, new Scene(), terrain, new Vector3(0, 30.35, 0));
+    const camera = { targetYaw: 0 };
+    const character = {
+      body: { translation: () => ({ x: 0, y: 31, z: 1.8 }), setBodyType: noop, setTranslation: noop },
+      collider: { setEnabled: noop }, model: { group: { visible: true } }, respawn: noop,
+    };
+    const movement = { forward: 0, right: 0, jump: false, interactJustPressed: false, bladeToggleJustPressed: false };
+    const tick = (count, afterTick = noop) => {
+      for (let i = 0; i < count; i++) {
+        dozer.update(1 / 60, { movement }, camera, character, true);
+        movement.interactJustPressed = movement.bladeToggleJustPressed = false;
+        dozer.step(1 / 60);
+        world.step();
+        dozer.syncVisuals(1 / 60);
+        afterTick(i);
+      }
+    };
+    tick(45);
+    interactionFocus.resolve(new Vector3(0, 31, 1.8), new Vector3(0, 0, -1));
+    movement.interactJustPressed = true;
+    tick(1);
+    assert.equal(dozer.getControls(), 'raised');
+    movement.right = 1;
+    tick(50);
+    assert.ok(dozer.getYaw() < -0.65, `expected a quick right pivot, yaw=${dozer.getYaw()}`);
+    assert.ok(Math.hypot(dozer.getPosition().x, dozer.getPosition().z) < 0.4);
+    dozer.place(new Vector3(0, 30.12, 0));
+    movement.right = 0;
+    movement.forward = 1;
+    tick(50);
+    assert.ok(dozer.getPosition().z > 1, `expected forward movement, z=${dozer.getPosition().z}`);
+    assert.equal(grades, 0);
+    const treeZ = dozer.getPosition().z + 2.45;
+    const tree = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+    const trunk = world.createCollider(RAPIER.ColliderDesc.cylinder(0.9, 0.26).setTranslation(0, 30.9, treeZ), tree);
+    trunk.userData = { bladeClearable: true };
+    let clearedTrunk = false;
+    dozer.onGradeStrip = (_ax, az, _bx, bz, halfWidth) => {
+      if (clearedTrunk || treeZ > Math.max(az, bz) + halfWidth || treeZ < Math.min(az, bz) - halfWidth) return;
+      world.removeRigidBody(tree);
+      clearedTrunk = true;
+    };
+    movement.bladeToggleJustPressed = true;
+    tick(60);
+    assert.ok(grades > 0, 'expected forward grading');
+    assert.equal(clearedTrunk, true, 'a tree collider should allow blade clearing');
+    dozer.onGradeStrip = null;
+    const wall = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+    world.createCollider(RAPIER.ColliderDesc.cuboid(3, 1, 0.3).setTranslation(0, 31, dozer.getPosition().z + 4), wall);
+    tick(105);
+    assert.equal(dozer.getControls(), 'blocked');
+    movement.bladeToggleJustPressed = true;
+    movement.jump = true;
+    tick(35);
+    assert.equal(dozer.getControls(), 'raised');
+    assert.equal(commits, 1);
+    assert.ok(dozer.speedKmh < 0.5);
+    movement.interactJustPressed = true;
+    tick(1);
+    assert.equal(dozer.getControls(), 'off');
+    assert.equal(character.model.group.visible, true);
+
+    // A 3.6 m ridge with a steep face starts just ahead of the lowered blade.
+    world.removeRigidBody(floor);
+    world.removeRigidBody(wall);
+    const land = Object.create(terrainConstants.TerrainSystem.prototype);
+    const size = starter.terrain.size;
+    const index = (x, z) => (z + size / 2) * (size + 1) + x + size / 2;
+    land.heights = new Float32Array((size + 1) ** 2).fill(30);
+    for (let x = -5; x <= 5; x++) {
+      for (let z = 3; z <= 5; z++) land.heights[index(x, z)] = 33.6;
+    }
+    let dirty = false;
+    let ridgeCollider;
+    let aheadCuts = 0;
+    land.markHeightsDirty = () => { dirty = true; };
+    const rebuildRidge = () => {
+      if (ridgeCollider) world.removeCollider(ridgeCollider, false);
+      const heights = new Float32Array(25 ** 2);
+      for (let x = 0; x <= 24; x++) {
+        for (let z = 0; z <= 24; z++) heights[x * 25 + z] = land.heights[index(x - 12, z - 12)];
+      }
+      ridgeCollider = world.createCollider(RAPIER.ColliderDesc.heightfield(24, 24, heights, { x: 24, y: 1, z: 24 })
+        .setCollisionGroups(packCollisionGroups(0x21, 0xffff)));
+      dirty = false;
+    };
+    rebuildRidge();
+    terrain.getHeight = land.getHeight.bind(land);
+    terrain.gradeStrip = (...args) => {
+      const changed = land.gradeStrip(...args);
+      if (changed && args[6]) aheadCuts++;
+      return changed;
+    };
+    terrain.commit = () => { if (dirty) rebuildRidge(); };
+    dozer.place(new Vector3(0, 30.35, 0.7));
+    movement.forward = 0;
+    movement.jump = false;
+    tick(55);
+    interactionFocus.resolve(new Vector3(0, 31, 1.8), new Vector3(0, 0, -1));
+    movement.interactJustPressed = true;
+    tick(1);
+    assert.equal(dozer.getControls(), 'raised');
+    movement.bladeToggleJustPressed = true;
+    tick(30);
+    assert.equal(aheadCuts, 0, 'an idle blade should leave the ridge alone');
+    const startZ = dozer.getPosition().z;
+    movement.forward = 1;
+    tick(5);
+    assert.ok(aheadCuts > 0, 'the blade should cut at the start of the approach');
+    assert.ok(dozer.getPosition().z - startZ < 0.25, 'the chassis should still be on the approach');
+    assert.ok(land.getHeight(0, 3) < 30.15, 'the face should already be cut down');
+    assert.equal(dirty, false, 'the new heightfield should already be available to physics');
+    let slowestOnRidge = Infinity;
+    const updateRidge = i => {
+      if (dirty && i % 15 === 14) rebuildRidge();
+      const z = dozer.getPosition().z;
+      if (z > 2.1 && z < 5.5) slowestOnRidge = Math.min(slowestOnRidge, dozer.body.linvel().z);
+    };
+    tick(160, updateRidge);
+    assert.ok(land.getHeight(0, 4) < 30.3, 'the centre of the ridge should be graded to the approach height');
+    assert.ok(dozer.getPosition().z > 5.5, `the dozer should keep moving past the ridge, z=${dozer.getPosition().z}`);
+    assert.ok(Number.isFinite(slowestOnRidge) && slowestOnRidge > 0.5, `the chassis stalled on the ridge, speed=${slowestOnRidge}`);
+    assert.ok(dozer.body.linvel().z > 3.15, 'the lowered blade should allow the faster working speed');
+
+    // The same preview should fill a deep dry pit before the front tracks lose support.
+    land.heights.fill(30);
+    for (let x = -5; x <= 5; x++) {
+      for (let z = 3; z <= 7; z++) land.heights[index(x, z)] = 25;
+    }
+    rebuildRidge();
+    dozer.place(new Vector3(0, 30.35, 0.7));
+    movement.forward = 0;
+    tick(45);
+    movement.bladeToggleJustPressed = true;
+    movement.forward = 1;
+    tick(5);
+    assert.ok(land.getHeight(0, 3) > 28.95, 'rapid grading should add four metres before the tracks enter the pit');
+    assert.equal(dirty, false, 'the filled heightfield should be available to physics immediately');
+    let lowestInPit = Infinity;
+    tick(190, i => {
+      if (dirty && i % 15 === 14) rebuildRidge();
+      const position = dozer.getPosition();
+      if (position.z > 2.1 && position.z < 8) lowestInPit = Math.min(lowestInPit, position.y);
+      if (position.z > 8.8) movement.forward = 0;
+    });
+    assert.ok(dozer.getPosition().z > 8, 'the dozer should drive across the pit on the fill');
+    assert.ok(Number.isFinite(lowestInPit) && lowestInPit > 29.5, `the chassis dropped into the fill, y=${lowestInPit}`);
+    assert.ok(land.getHeight(0, 6) > 29.7, 'successive stamps should bring the pit to the working level');
+
+    land.heights.fill(30);
+    rebuildRidge();
+    dozer.place(new Vector3(0, 30.35, -5));
+    movement.forward = 1;
+    tick(85);
+    assert.ok(dozer.body.linvel().z > 5.6, 'the raised blade should allow the faster travel speed');
+
+    // The tracks should carry it through uneven ground with the blade raised, in either direction.
+    land.heights.fill(30);
+    for (let x = -4; x <= 4; x++) {
+      land.heights[index(x, 2)] = 30.7;
+      land.heights[index(x, 4)] = 30.96;
+      land.heights[index(x, 6)] = x > 0 ? 30.86 : 30.5;
+      land.heights[index(x, 7)] = 30.32;
+    }
+    rebuildRidge();
+    dozer.place(new Vector3(0, 30.35, -0.2));
+    movement.forward = 0;
+    tick(40);
+    const previousCuts = aheadCuts;
+    assert.equal(dozer.getControls(), 'raised');
+    movement.forward = 1;
+    tick(215, () => { if (dozer.getPosition().z > 8.6) movement.forward = 0; });
+    const forwardEnd = dozer.getPosition().z;
+    assert.ok(forwardEnd > 7.8, JSON.stringify({
+      position: dozer.getPosition(), yaw: dozer.getYaw(), velocity: dozer.body.linvel(),
+      rotation: dozer.body.rotation(), contacts: Array.from({ length: 6 }, (_, i) => dozer.vehicle.wheelIsInContact(i)),
+    }));
+    movement.forward = -1;
+    tick(340);
+    assert.ok(dozer.getPosition().z < 1, `the raised dozer got stuck reversing, z=${dozer.getPosition().z}, speed=${dozer.body.linvel().z}`);
+    assert.equal(aheadCuts, previousCuts);
+    assert.ok(land.getHeight(0, 4) > 30.9);
+  } finally {
+    interactionFocus.clear();
+    dozer?.dispose();
+    world.free();
+    if (descriptor) Object.defineProperty(globalThis, 'document', descriptor);
+    else delete globalThis.document;
+  }
 });
 
 function setup(t) {
@@ -100,6 +405,7 @@ function setup(t) {
     } },
     moped: { getPosition: () => new Vector3(), getYaw: () => 0, place: noop },
     boat: { getPosition: () => new Vector3(), getYaw: () => 0, place: noop },
+    bulldozer: { getPosition: () => new Vector3(), getYaw: () => 0, place: noop },
     farmingManager: { serializeFields: () => [], deserializeFields: noop },
     orchard: { serialize: () => starter.orchard, deserialize: noop },
     nursery: { serialize: () => starter.nursery, deserialize: noop },
@@ -260,7 +566,7 @@ test('bridge swaps indexed geometry in a single mesh and keeps its collider whil
     rapier: { TriMeshFlags: { FIX_INTERNAL_EDGES: 1 } },
     createStaticTrimesh: () => ({ body, collider: {} }),
     removeRigidBody: (value) => removed.push(value),
-  });
+  }, { revision: 0, getHeight: () => 0 });
   const def = { ...testBridge(), a: { x: 0, y: 0, z: 0 }, b: { x: 0, y: 0, z: 64 } };
   bridges.set(def.id, def);
   const [group] = scene.children;
@@ -291,6 +597,57 @@ test('bridge swaps indexed geometry in a single mesh and keeps its collider whil
   assert.equal(mesh.geometry, detail);
   bridges.dispose();
   assert.deepEqual(removed, [body]);
+});
+
+test('bridge supports reach uneven ground in both LODs and share the bridge collider', async () => {
+  await RAPIER.init();
+  const scene = new Scene();
+  const physics = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+  let collider;
+  let lift = 0;
+  const terrain = { revision: 0, getHeight: (x) => (x < 0 ? -3 : -1) + lift };
+  const bridges = new BridgeSystem(scene, {
+    rapier: RAPIER,
+    createStaticTrimesh: (origin, vertices, indices, _group, flags) => {
+      const body = physics.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(origin.x, origin.y, origin.z));
+      collider = physics.createCollider(RAPIER.ColliderDesc.trimesh(vertices, indices, flags), body);
+      return { body, collider };
+    },
+    removeRigidBody: (body) => physics.removeRigidBody(body),
+  }, terrain);
+  const def = { ...testBridge(), a: { x: 0, y: 4, z: 0 }, b: { x: 0, y: 4, z: 12 }, supportCount: 2, railings: false };
+  try {
+    bridges.set(def.id, def);
+    const group = scene.children[0];
+    const mesh = group.children[0];
+    const lowest = (geometry) => {
+      geometry.computeBoundingBox();
+      return geometry.boundingBox.min.y + def.a.y;
+    };
+    const preview = bridges.preview(def);
+    assert.deepEqual(preview.geometry.attributes.position.array, mesh.geometry.attributes.position.array);
+    bridges.releaseMesh(preview);
+    assert.ok(Math.abs(lowest(mesh.geometry) - (-3.15)) < 1e-5);
+    const sideRay = (z) => new RAPIER.Ray({ x: -2, y: 0, z }, { x: 1, y: 0, z: 0 });
+    assert.ok(collider.castRay(sideRay(4), 4, true) > 0);
+    assert.ok(collider.castRay(sideRay(8), 4, true) > 0);
+    assert.equal(collider.castRay(sideRay(6), 4, true), -1);
+
+    const camera = new Vector3(70, 4, 6);
+    bridges.updateLod(camera);
+    assert.equal(group.children.length, 1);
+    assert.equal(group.children[0], mesh);
+    assert.ok(Math.abs(lowest(mesh.geometry) - (-3.15)) < 1e-5);
+    lift = 1;
+    terrain.revision++;
+    bridges.updateLod(camera);
+    assert.equal(group.children.length, 1);
+    assert.ok(Math.abs(lowest(group.children[0].geometry) - (-2.15)) < 1e-5);
+    assert.equal(physics.colliders.len(), 1);
+  } finally {
+    bridges.dispose();
+    physics.free();
+  }
 });
 
 test('diagonal bridge bakes a soft deck footprint into terrain chunks and clears it on removal', () => {
@@ -330,17 +687,22 @@ test('diagonal bridge bakes a soft deck footprint into terrain chunks and clears
 
 test('bridge saves preserve the full recipe and reject duplicate IDs and invalid spans', (t) => {
   const { slots, saves, world } = setup(t);
-  const bridge = { ...testBridge(), shape: 'eased', railings: false };
+  const bridge = { ...testBridge(), shape: 'eased', railings: false, supportCount: 3 };
   slots.set('cozyfarm.save.bridges', JSON.stringify({ ...starter, bridges: [bridge] }));
   assert.equal(saves.load('bridges'), true);
   assert.equal(saves.save('bridge-roundtrip'), true);
   assert.deepEqual(JSON.parse(slots.get('cozyfarm.save.bridge-roundtrip')).bridges, [bridge]);
 
-  for (const bridges of [[bridge, bridge], [{ ...bridge, b: bridge.a }], [{ ...bridge, rise: 12 }]]) {
+  for (const bridges of [[bridge, bridge], [{ ...bridge, b: bridge.a }], [{ ...bridge, rise: 12 }],
+    ...[-1, 1.5, 9, '2'].map((supportCount) => [{ ...bridge, supportCount }])]) {
     slots.set('cozyfarm.save.bad-bridges', JSON.stringify({ ...starter, bridges }));
     assert.equal(saves.load('bad-bridges'), false);
     assert.deepEqual(world.bridges.serialize(), [bridge]);
   }
+  const { supportCount: _supportCount, ...oldBridge } = bridge;
+  slots.set('cozyfarm.save.old-bridge', JSON.stringify({ ...starter, bridges: [oldBridge] }));
+  assert.equal(saves.load('old-bridge'), true);
+  assert.deepEqual(world.bridges.serialize(), [oldBridge]);
   const legacySave = { ...starter };
   delete legacySave.bridges;
   slots.set('cozyfarm.save.no-bridges', JSON.stringify(legacySave));

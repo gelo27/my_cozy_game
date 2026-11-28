@@ -589,6 +589,7 @@ export class PropSystem {
   public readonly group = new THREE.Group();
   private readonly batches = new Map<string, PropBatch>();
   private readonly props = new Map<number, PropInstance>();
+  private readonly unbatchedProps = new Set<PropInstance>();
   private readonly batchOf = new Map<number, PropBatch>();
   private readonly editorHidden = new Set<number>();
   public editorTopologyRevision = 0;
@@ -619,6 +620,7 @@ export class PropSystem {
   private terrainRevision = -1;
   /** Bumped on any add/remove/move so UIs can refresh their lists. */
   public revision = 0;
+  public treeMapRevision = 0;
   /**
    * Navigation: solid props added / removed / moved since the navigator last looked (it forgets
    * only the cells around them), and a revision for bulk changes that drop its whole cache.
@@ -1195,6 +1197,7 @@ export class PropSystem {
         tilt: Array.isArray(tilt) && tilt.length === 2 && tilt.every(Number.isFinite) && (tilt[0] || tilt[1]) ? [tilt[0], tilt[1]] : undefined,
       };
       this.props.set(id, prop);
+      this.unbatchedProps.add(prop);
       this.editorTopologyRevision++;
       this.webs.add(prop);
       this.revision++;
@@ -1208,6 +1211,7 @@ export class PropSystem {
         head: def.chain === 'lily' && head ? species.clampHead(head) : undefined,
       };
       this.props.set(id, prop);
+      this.unbatchedProps.add(prop);
       this.editorTopologyRevision++;
       this.chainField(def.chain).add(prop);
       this.revision++;
@@ -1228,6 +1232,7 @@ export class PropSystem {
     this.props.set(id, prop);
     this.editorTopologyRevision++;
     this.attach(prop, batch);
+    if (TREE_TYPES.has(type)) this.treeMapRevision++;
     this.createBody(prop, batch.def);
     this.noteSolid(prop);
     if (type === HEDGE_TYPE) this.refreshHedges(x, z, scale);
@@ -1249,6 +1254,8 @@ export class PropSystem {
     this.poses.delete(id);
     this.transient.delete(id);
     this.props.delete(id);
+    if (TREE_TYPES.has(prop.type)) this.treeMapRevision++;
+    this.unbatchedProps.delete(prop);
     if (prop.type === HEDGE_TYPE) this.refreshHedges(prop.position.x, prop.position.z, prop.scale);
     this.editorHidden.delete(id);
     this.editorTopologyRevision++;
@@ -1279,6 +1286,7 @@ export class PropSystem {
   public setSolid(id: number, solid: boolean): void {
     const prop = this.props.get(id);
     if (!prop) return;
+    if (TREE_TYPES.has(prop.type)) this.treeMapRevision++;
     const body = this.bodies.get(id);
     if (!solid) {
       if (body) this.physics.removeRigidBody(body);
@@ -1362,6 +1370,7 @@ export class PropSystem {
     prop.position.copy(position);
     prop.rotationY = rotationY;
     prop.scale = scale;
+    if (TREE_TYPES.has(prop.type)) this.treeMapRevision++;
     if (tilt && canTiltProp(prop.type)) prop.tilt = tilt[0] || tilt[1] ? [tilt[0], tilt[1]] : undefined;
     const kind = PROP_DEF_MAP.get(prop.type)?.chain;
     if (kind) {
@@ -1541,11 +1550,17 @@ export class PropSystem {
     }
     if (this.terrainRevision === this.terrain.revision) return;
     const first = this.terrainRevision === -1;
+    const rect = this.terrainRevision + 1 === this.terrain.revision ? this.terrain.lastHeightChange : null;
     this.terrainRevision = this.terrain.revision;
     if (first) return;
+    const x0 = rect ? rect.x0 - WORLD_HALF - 1 : -Infinity;
+    const x1 = rect ? rect.x1 - WORLD_HALF + 1 : Infinity;
+    const z0 = rect ? rect.z0 - WORLD_HALF - 1 : -Infinity;
+    const z1 = rect ? rect.z1 - WORLD_HALF + 1 : Infinity;
     const movedHedges: PropInstance[] = [];
-    for (const prop of this.props.values()) {
-      if (!prop.grounded) continue;
+    const syncProp = (prop: PropInstance) => {
+      const { x, z } = prop.position;
+      if (!prop.grounded || x < x0 || x > x1 || z < z0 || z > z1) return;
       const y = this.terrain.getHeight(prop.position.x, prop.position.z);
       if (Math.abs(y - prop.position.y) > 0.01) {
         const delta = y - prop.position.y;
@@ -1561,7 +1576,7 @@ export class PropSystem {
             const kind = PROP_DEF_MAP.get(prop.type)?.chain;
             if (kind) this.chainField(kind).refresh(prop);
           }
-          continue;
+          return;
         }
         this.writeMatrix(batch, this.slotOf.get(prop.id)!, prop);
         const body = this.bodies.get(prop.id);
@@ -1570,6 +1585,16 @@ export class PropSystem {
           body.setTranslation({ x: at.x, y: at.y + delta, z: at.z }, false);
         }
       }
+    };
+    if (rect) {
+      for (const batch of this.batches.values()) {
+        if (batch.cx < Math.floor(x0 / batch.size) || batch.cx > Math.floor(x1 / batch.size) ||
+            batch.cz < Math.floor(z0 / batch.size) || batch.cz > Math.floor(z1 / batch.size)) continue;
+        for (const id of batch.ids) syncProp(this.props.get(id)!);
+      }
+      for (const prop of this.unbatchedProps) syncProp(prop);
+    } else {
+      for (const prop of this.props.values()) syncProp(prop);
     }
     for (const hedge of movedHedges) this.refreshHedges(hedge.position.x, hedge.position.z, hedge.scale);
   }
@@ -1606,7 +1631,10 @@ export class PropSystem {
         : this.physics.createStaticBox(pos, new THREE.Vector3(c.w * s, c.h * s, c.d * s), rot);
     // Step sounds: rocks and stone stations sound like stone, everything else is timber
     const stone = /rock|stone|mill|quern|campfire|well/.test(def.id);
-    (res.collider as unknown as { userData: unknown }).userData = { surface: stone ? 'stone' : 'wood' };
+    (res.collider as unknown as { userData: unknown }).userData = {
+      surface: stone ? 'stone' : 'wood',
+      bladeClearable: TREE_TYPES.has(def.id) || def.id === 'bush' || def.id === HEDGE_TYPE,
+    };
     this.bodies.set(prop.id, res.body);
   }
 

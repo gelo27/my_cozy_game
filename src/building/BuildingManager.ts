@@ -6,8 +6,6 @@ import {
   BuildingPieceType,
   BuiltPiece,
   isDoorPiece,
-  isDoorwayPiece,
-  isWindowPiece,
   isWindowOrDoorPiece,
   isSolidWallPiece,
   getWallHalfWidth,
@@ -21,6 +19,7 @@ import {
   isFloorPiece,
   isFoundationPiece,
   getWallSize,
+  pieceTraits,
 } from './types/BuildingTypes';
 import { GreenhouseBatch } from './GreenhouseBatch';
 import { houseRoofRects } from './RoofFootprint';
@@ -41,6 +40,11 @@ import { COLLISION_GROUPS } from '../config/constants';
 import { ParticleManager } from '../particles/ParticleManager';
 import { audioEngine } from '../audio/AudioEngine';
 import { ContinuousWallSystem } from './ContinuousWallSystem';
+import { emitWall, findWallOpenings, WALL_OPENING_NEIGHBOUR_MARGIN } from './continuous/WallGeometry';
+import { describeWallSeg, solveWall } from './continuous/WallJoints';
+import { MeshBuffers } from './continuous/MeshBuffers';
+import { ARCH_DOOR_HINGE_X, doorwayClearance } from './OpeningContour';
+import { getArchedDoorFrame, getArchedDoorPanelCollider } from './config/meshes/OpeningGeometry';
 import { WallPaintingSystem, WallCellHitInfo, PaintChangeScope } from './WallPaintingSystem';
 import { computeFlippedWalls } from './WallSides';
 import { setWallPieceFlipped } from './config/DefaultWallMaterials';
@@ -122,6 +126,8 @@ export class BuildingManager {
   public pieces: Map<string, BuiltPiece> = new Map();
   /** Bumped whenever colliders change (place, remove, move): navigation re-samples. */
   public revision = 0;
+  /** Invalidates the world map's cached roof layer after an authored roof edit. */
+  public roofMapRevision = 0;
   /** Door open/close only changes colliders around that door, so navigation forgets just those cells. */
   public onDoorToggled: ((piece: BuiltPiece) => void) | null = null;
   public group: THREE.Group;
@@ -395,6 +401,7 @@ export class BuildingManager {
     const piece = this.pieces.get(pieceId);
     if (!piece || !isProceduralRoofPiece(piece.type) || isGlassRoofPiece(piece.type)) return false;
     piece.roofStyle = style;
+    this.roofMapRevision++;
     this.dressRoof(piece);
     return true;
   }
@@ -581,6 +588,7 @@ export class BuildingManager {
     this.staticBatch.markPiece(builtPiece);
     this.cachedPiecesArray = null; // Invalidate cached pieces array
     this.revision++;
+    if (pieceTraits(type)?.kind === 'roof') this.roofMapRevision++;
 
     if (isProceduralRoofPiece(type)) {
       this.rebuildRoofPhysicsCollider(builtPiece);
@@ -676,6 +684,7 @@ export class BuildingManager {
       this.rebuildRoofPhysicsCollider(piece);
       // Final size: dependants (roof shelter on the ground, baked shade) follow the revision
       this.revision++;
+      this.roofMapRevision++;
     }
 
     return piece;
@@ -921,7 +930,9 @@ export class BuildingManager {
     const quaternion = new THREE.Quaternion().setFromEuler(currentEuler);
     if (isPieceBelowSurface(piece.type, position, quaternion)) return false;
     const moved = !piece.position.equals(position);
-    const old = moved ? { ...piece, position: piece.position.clone(), quaternion: piece.quaternion.clone() } : null;
+    const old = moved || (isWindowOrDoorPiece(piece.type) && !quaternion.equals(piece.quaternion))
+      ? { ...piece, position: piece.position.clone(), quaternion: piece.quaternion.clone() }
+      : null;
     this.spatialGrid.remove(piece);
     if (old) this.continuousWallSystem.invalidatePieceArea(old);
     piece.position.copy(position);
@@ -971,18 +982,14 @@ export class BuildingManager {
     this.staticBatch.markPiece(piece);
     this.cachedPiecesArray = null;
     this.revision++;
+    if (pieceTraits(piece.type)?.kind === 'roof') this.roofMapRevision++;
 
     // 7. Baked meshes around it (a turned window moves its hole; a turned pending wall re-cuts the floor)
     this.continuousWallSystem.pieceChanged(piece);
     if (old && !isSolidWallPiece(old.type)) this.rebuildWallCollidersAroundPiece(old);
 
     // 8. Recompute wall colliders if wall/opening rotated
-    if (
-      isSolidWallPiece(piece.type) ||
-      isWindowPiece(piece.type) ||
-      isDoorPiece(piece.type) ||
-      isDoorwayPiece(piece.type)
-    ) {
+    if (isSolidWallPiece(piece.type) || isWindowOrDoorPiece(piece.type)) {
       this.rebuildWallCollidersAroundPiece(piece);
     }
 
@@ -992,6 +999,8 @@ export class BuildingManager {
   public getPiece(pieceId: string): BuiltPiece | null {
     return this.pieces.get(pieceId) || null;
   }
+
+  private static readonly DOOR_OPEN_ANGLE = Math.PI * 0.55;
 
   /**
    * Toggles door open/closed state with hinge rotation animation and collider updates.
@@ -1003,7 +1012,7 @@ export class BuildingManager {
 
     piece.isOpen = !piece.isOpen;
     const isOpen = piece.isOpen;
-    const openAngle = Math.PI * 0.55;
+    const openAngle = BuildingManager.DOOR_OPEN_ANGLE;
 
     let swingMultiplier = 1;
     if (isOpen) {
@@ -1085,8 +1094,10 @@ export class BuildingManager {
       if (!isSwingDoorPiece(piece.type)) continue;
       const n = new THREE.Vector3(0, 0, 1).applyQuaternion(piece.quaternion);
       const isGlass = piece.type === BuildingPieceType.GLASS_DOOR_1X3;
+      const isDouble = shapeOf(piece.type) === BuildingPieceType.WOOD_DOOR_DOUBLE;
       const half =
-        piece.type === BuildingPieceType.WOOD_DOOR_DOUBLE ? 0.9 : piece.type === BuildingPieceType.DOOR_GRAND_SIDELITES_2X2 ? 0.46 : isGlass ? 0.43 : 0.42;
+        isDouble ? 0.9 : piece.type === BuildingPieceType.DOOR_GRAND_SIDELITES_2X2 ? 0.46
+          : piece.type === BuildingPieceType.WOOD_DOOR_ARCH ? -ARCH_DOOR_HINGE_X : isGlass ? 0.43 : 0.42;
       out.push({
         id: piece.id,
         x: piece.position.x,
@@ -1099,7 +1110,7 @@ export class BuildingManager {
         // Swing multiplier 1 puts the open leaves on the door's -Z side (see rebuildDoorPhysicsCollider)
         swing: piece.isOpen ? -(piece.lastSwingMultiplier || 1) : 0,
         // Leaf length: one leaf spans the opening, a double door's two leaves half of it each
-        reach: piece.type === BuildingPieceType.WOOD_DOOR_DOUBLE ? half : half * 2,
+        reach: isDouble ? half : half * 2,
       });
     }
     return out;
@@ -1172,7 +1183,26 @@ export class BuildingManager {
 
       const isSingleDoorType = isDoorPiece(piece.type) && getWallSize(piece.type)[0] < 2;
 
-      if (piece.type === BuildingPieceType.GLASS_DOOR_1X3) {
+      if (piece.type === BuildingPieceType.WOOD_DOOR_ARCH) {
+        const frameDesc = this.meshColliderDesc(getArchedDoorFrame().geometry, colGroup);
+        this.physics.world.createCollider(frameDesc, piece.staticBody);
+        const sensor = this.physics.rapier.ColliderDesc.cuboid(0.8, 1.2, 1.3)
+          .setSensor(true).setCollisionGroups(sensorColGroup);
+        const trigger = this.physics.world.createCollider(sensor, piece.staticBody);
+        (trigger as any).userData = { isDoorSensor: true, pieceId: piece.id };
+
+        const leaf = getArchedDoorPanelCollider().getAttribute('position').array as Float32Array;
+        const desc = this.physics.rapier.ColliderDesc.convexHull(leaf)!
+          .setFriction(0.6).setCollisionGroups(colGroup);
+        if (piece.isOpen) {
+          const angle = BuildingManager.DOOR_OPEN_ANGLE * swingMultiplier;
+          const rotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+          const offset = new THREE.Vector3(-ARCH_DOOR_HINGE_X, 0, 0).applyQuaternion(rotation);
+          desc.setRotation(rotation).setTranslation(ARCH_DOOR_HINGE_X + offset.x, 0, offset.z);
+        }
+        piece.staticCollider = this.physics.world.createCollider(desc, piece.staticBody);
+        if (piece.isOpen) NPC_GHOST_COLLIDERS.add(piece.staticCollider.handle);
+      } else if (piece.type === BuildingPieceType.GLASS_DOOR_1X3) {
         // Greenhouse door, 3m panel: transom above a 0.86 x 2.25m opening (leaf centre y = -0.355)
         const transomDesc = this.physics.rapier.ColliderDesc.cuboid(0.5, 0.36, WALL_THICKNESS / 2.0)
           .setTranslation(0, 1.14, 0)
@@ -1291,7 +1321,7 @@ export class BuildingManager {
             .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
           piece.staticCollider = this.physics.world.createCollider(desc, piece.staticBody);
         }
-      } else if (piece.type === BuildingPieceType.WOOD_DOOR_DOUBLE) {
+      } else if (shapeOf(piece.type) === BuildingPieceType.WOOD_DOOR_DOUBLE) {
         // Permanent outer frame colliders
         const topHeaderDesc = this.physics.rapier.ColliderDesc.cuboid(1.0, 0.06, WALL_THICKNESS / 2.0)
           .setTranslation(0, 0.94, 0)
@@ -1316,24 +1346,18 @@ export class BuildingManager {
         (sensorCollider as any).userData = { isDoorSensor: true, pieceId: piece.id };
 
         if (piece.isOpen) {
-          const leftRotY = swingMultiplier === 1 ? -Math.PI / 2 : Math.PI / 2;
-          const rightRotY = swingMultiplier === 1 ? Math.PI / 2 : -Math.PI / 2;
-          const offsetZ = swingMultiplier === 1 ? -0.45 : 0.45;
-
-          const leftQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), leftRotY);
-          const leftDesc = this.physics.rapier.ColliderDesc.cuboid(0.45, 0.94, 0.03)
-            .setTranslation(-0.90, -0.06, offsetZ)
-            .setRotation({ x: leftQuat.x, y: leftQuat.y, z: leftQuat.z, w: leftQuat.w })
-            .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-          NPC_GHOST_COLLIDERS.add(this.physics.world.createCollider(leftDesc, piece.staticBody).handle);
-
-          const rightQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rightRotY);
-          const rightDesc = this.physics.rapier.ColliderDesc.cuboid(0.45, 0.94, 0.03)
-            .setTranslation(0.90, -0.06, offsetZ)
-            .setRotation({ x: rightQuat.x, y: rightQuat.y, z: rightQuat.z, w: rightQuat.w })
-            .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-          piece.staticCollider = this.physics.world.createCollider(rightDesc, piece.staticBody);
-          NPC_GHOST_COLLIDERS.add(piece.staticCollider.handle);
+          const axis = new THREE.Vector3(0, 1, 0);
+          const angle = BuildingManager.DOOR_OPEN_ANGLE * swingMultiplier;
+          for (const side of [-1, 1]) {
+            const rotation = new THREE.Quaternion().setFromAxisAngle(axis, -side * angle);
+            const offset = new THREE.Vector3(-side * 0.45, -0.06, 0).applyQuaternion(rotation);
+            const desc = this.physics.rapier.ColliderDesc.cuboid(0.45, 0.94, 0.03)
+              .setTranslation(side * 0.9 + offset.x, offset.y, offset.z)
+              .setRotation(rotation)
+              .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
+            piece.staticCollider = this.physics.world.createCollider(desc, piece.staticBody);
+            NPC_GHOST_COLLIDERS.add(piece.staticCollider.handle);
+          }
         } else {
           const desc = this.physics.rapier.ColliderDesc.cuboid(0.90, 0.94, 0.03)
             .setTranslation(0, -0.06, 0)
@@ -1355,35 +1379,22 @@ export class BuildingManager {
    * allowing player passage through doorways and clean raycast selection/targeting of placed windows.
    */
   public rebuildWallCollidersAroundPiece(piece: BuiltPiece): void {
-    const isOpening = isDoorPiece(piece.type) || isDoorwayPiece(piece.type) || isWindowPiece(piece.type);
-    const isWall = isSolidWallPiece(piece.type);
-
-    if (!isOpening && !isWall) return;
-
-    const wallsToRebuild: BuiltPiece[] = [];
-    if (isWall) {
-      wallsToRebuild.push(piece);
-    } else if (isOpening) {
-      for (const other of this.pieces.values()) {
-        if (!isSolidWallPiece(other.type)) continue;
-        const dy = Math.abs(other.position.y - piece.position.y);
-        if (dy > 2.5) continue;
-        const delta = piece.position.clone().sub(other.position);
-        const wallNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(other.quaternion);
-        if (Math.abs(delta.dot(wallNormal)) > 0.35) continue;
-        const wallTangent = new THREE.Vector3(1, 0, 0).applyQuaternion(other.quaternion);
-        const localX = Math.abs(delta.dot(wallTangent));
-        const wHalfW = getWallHalfWidth(other.type);
-        const oHalfW = getWallHalfWidth(piece.type);
-        if (localX < wHalfW + oHalfW) {
-          wallsToRebuild.push(other);
-        }
+    if (isSolidWallPiece(piece.type)) {
+      this.rebuildSolidWallCollider(piece);
+    } else if (isWindowOrDoorPiece(piece.type)) {
+      const radius = getWallHalfWidth(piece.type) + WALL_OPENING_NEIGHBOUR_MARGIN;
+      for (const wall of this.getPiecesTouchingRadius(piece.position, radius)) {
+        if (isSolidWallPiece(wall.type) && findWallOpenings(wall, [piece]).length) this.rebuildSolidWallCollider(wall);
       }
     }
+  }
 
-    for (const wall of wallsToRebuild) {
-      this.rebuildSolidWallCollider(wall);
-    }
+  private meshColliderDesc(geometry: THREE.BufferGeometry, collisionGroups: number): RAPIER.ColliderDesc {
+    const vertices = geometry.getAttribute('position').array as Float32Array;
+    const index = geometry.getIndex();
+    const indices = index ? new Uint32Array(index.array) : Uint32Array.from({ length: vertices.length / 3 }, (_, i) => i);
+    return this.physics.rapier.ColliderDesc.trimesh(vertices, indices, RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES)
+      .setFriction(0.6).setCollisionGroups(collisionGroups);
   }
 
   public rebuildSolidWallCollider(wall: BuiltPiece): void {
@@ -1405,41 +1416,33 @@ export class BuildingManager {
     const colGroup = this.physics.packCollisionGroups(COLLISION_GROUPS.ENVIRONMENT, 0xffff);
     const wallHalfW = getWallHalfWidth(wall.type);
     const wallHalfH = getWallHalfHeight(wall.type);
-    const wallTangent = new THREE.Vector3(1, 0, 0).applyQuaternion(wall.quaternion);
-    const wallNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(wall.quaternion);
-
-    // Find all doors/doorways/windows cutting this wall
-    const overlappingOpenings: Array<{ minX: number; maxX: number; minY: number; maxY: number }> = [];
-    for (const other of this.pieces.values()) {
-      if (!isDoorPiece(other.type) && !isDoorwayPiece(other.type) && !isWindowPiece(other.type)) continue;
-      const dy = Math.abs(other.position.y - wall.position.y);
-      if (dy > wallHalfH + getWallHalfHeight(other.type) + 0.5) continue;
-      const delta = other.position.clone().sub(wall.position);
-      if (Math.abs(delta.dot(wallNormal)) > 0.35) continue;
-
-      const otherTangent = new THREE.Vector3(1, 0, 0).applyQuaternion(other.quaternion);
-      if (Math.abs(otherTangent.dot(wallTangent)) < 0.707) continue;
-
-      const localX = delta.dot(wallTangent);
-      const localY = delta.y;
-      const oHalfW = getWallHalfWidth(other.type);
-      const oHalfH = getWallHalfHeight(other.type);
-
-      const oMinX = localX - oHalfW;
-      const oMaxX = localX + oHalfW;
-      const oMinY = localY - oHalfH;
-      const oMaxY = localY + oHalfH;
-
-      // Check overlap with wall rectangular bounds [-wallHalfW, wallHalfW] x [-wallHalfH, wallHalfH]
-      if (oMaxX > -wallHalfW + 0.02 && oMinX < wallHalfW - 0.02 && oMaxY > -wallHalfH + 0.02 && oMinY < wallHalfH - 0.02) {
-        overlappingOpenings.push({
-          minX: Math.max(-wallHalfW, oMinX),
-          maxX: Math.min(wallHalfW, oMaxX),
-          minY: Math.max(-wallHalfH, oMinY),
-          maxY: Math.min(wallHalfH, oMaxY),
-        });
+    const nearby = this.getPiecesTouchingRadius(wall.position, wallHalfW + WALL_OPENING_NEIGHBOUR_MARGIN);
+    const openings = findWallOpenings(wall, nearby.filter((p) => isWindowOrDoorPiece(p.type)));
+    if (openings.some(({ outline }) => outline.vertices.length > 4)) {
+      const mesh = new MeshBuffers();
+      emitWall(mesh, solveWall(describeWallSeg(wall), []), openings, { edge: 0, faceKey: () => '' });
+      wall.staticCollider = undefined;
+      if (mesh.indices.length > 0) {
+        const inverse = wall.quaternion.clone().invert();
+        const vertex = new THREE.Vector3();
+        for (let i = 0; i < mesh.positions.length; i += 3) {
+          vertex.fromArray(mesh.positions, i).sub(wall.position).applyQuaternion(inverse).toArray(mesh.positions, i);
+        }
+        const desc = this.physics.rapier.ColliderDesc.trimesh(
+          Float32Array.from(mesh.positions), Uint32Array.from(mesh.indices), RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES,
+        ).setFriction(0.6).setCollisionGroups(colGroup);
+        wall.staticCollider = this.physics.world.createCollider(desc, wall.staticBody);
+        (wall.staticCollider as any).userData = { pieceId: wall.id, pieceType: wall.type };
       }
+      return;
     }
+
+    const overlappingOpenings = openings.map(({ outline }) => ({
+      minX: Math.max(-wallHalfW, outline.minX),
+      maxX: Math.min(wallHalfW, outline.maxX),
+      minY: Math.max(-wallHalfH, outline.minZ - wall.position.y),
+      maxY: Math.min(wallHalfH, outline.maxZ - wall.position.y),
+    }));
 
     // If no openings overlap, generate standard full solid wall cuboid
     if (overlappingOpenings.length === 0) {
@@ -1625,6 +1628,7 @@ export class BuildingManager {
     this.staticBatch.removePiece(piece);
     this.cachedPiecesArray = null;
     this.revision++;
+    if (pieceTraits(piece.type)?.kind === 'roof') this.roofMapRevision++;
 
     // 4. Sound & Particles
     const isWood = piece.type !== BuildingPieceType.STONE_FOUNDATION_2X2;
@@ -1740,6 +1744,10 @@ export class BuildingManager {
         if (x > 0) return this.physics.world.createCollider(post, body);
         this.physics.world.createCollider(post, body);
       }
+    }
+
+    if (type === BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_1X2 || type === BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_2X2) {
+      return this.physics.world.createCollider(this.meshColliderDesc(getPieceMeshTemplate(type).geometry, colGroup), body);
     }
 
     // Glass greenhouse pieces collide exactly like their wooden twins
@@ -1960,40 +1968,22 @@ export class BuildingManager {
         break;
       }
 
-      case BuildingPieceType.WOOD_WALL_DOORWAY_2X2: {
-        const lintelDesc = this.physics.rapier.ColliderDesc.cuboid(1.0, 0.15, WALL_THICKNESS / 2.0)
-          .setTranslation(0, 0.85, 0)
-          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-        this.physics.world.createCollider(lintelDesc, body);
-
-        const leftDesc = this.physics.rapier.ColliderDesc.cuboid(0.1, 0.85, WALL_THICKNESS / 2.0)
-          .setTranslation(-0.9, -0.15, 0)
-          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-        this.physics.world.createCollider(leftDesc, body);
-
-        const rightDesc = this.physics.rapier.ColliderDesc.cuboid(0.1, 0.85, WALL_THICKNESS / 2.0)
-          .setTranslation(0.9, -0.15, 0)
-          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-        return this.physics.world.createCollider(rightDesc, body);
-      }
-
+      case BuildingPieceType.WOOD_WALL_DOORWAY_2X2:
       case BuildingPieceType.WOOD_WALL_DOORWAY_1X2: {
-        const lintelDesc = this.physics.rapier.ColliderDesc.cuboid(0.5, 0.15, WALL_THICKNESS / 2.0)
-          .setTranslation(0, 0.85, 0)
-          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-        this.physics.world.createCollider(lintelDesc, body);
-
-        const leftDesc = this.physics.rapier.ColliderDesc.cuboid(0.06, 0.85, WALL_THICKNESS / 2.0)
-          .setTranslation(-0.44, -0.15, 0)
-          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-        this.physics.world.createCollider(leftDesc, body);
-
-        const rightDesc = this.physics.rapier.ColliderDesc.cuboid(0.06, 0.85, WALL_THICKNESS / 2.0)
-          .setTranslation(0.44, -0.15, 0)
-          .setFriction(0.6).setRestitution(0.0).setCollisionGroups(colGroup);
-        return this.physics.world.createCollider(rightDesc, body);
+        const [width, height] = getWallSize(type);
+        const { halfWidth, top } = doorwayClearance(width, height);
+        const headerHalf = (height / 2 - top) / 2;
+        const jambHalf = (width / 2 - halfWidth) / 2;
+        const postHalf = (top + height / 2) / 2;
+        const cuboid = (hw: number, hh: number, x: number, y: number) =>
+          this.physics.rapier.ColliderDesc.cuboid(hw, hh, WALL_THICKNESS / 2)
+            .setTranslation(x, y, 0).setFriction(0.6).setCollisionGroups(colGroup);
+        this.physics.world.createCollider(cuboid(width / 2, headerHalf, 0, top + headerHalf), body);
+        this.physics.world.createCollider(cuboid(jambHalf, postHalf, -halfWidth - jambHalf, top - postHalf), body);
+        return this.physics.world.createCollider(cuboid(jambHalf, postHalf, halfWidth + jambHalf, top - postHalf), body);
       }
 
+      case BuildingPieceType.WOOD_DOOR_ARCH:
       case BuildingPieceType.WOOD_DOOR_SINGLE:
       case BuildingPieceType.DOOR_WHITE_2PANEL_1X2:
       case BuildingPieceType.DOOR_COTTAGE_WINDOW_1X2:

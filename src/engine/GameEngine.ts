@@ -114,6 +114,8 @@ import { ConsoleLogEntry } from '../components/ConsoleFooter';
 import { VehicleController } from '../vehicle/VehicleController';
 import { MopedController } from '../vehicle/MopedController';
 import { BoatController } from '../vehicle/BoatController';
+import { BulldozerController } from '../vehicle/BulldozerController';
+import { createBulldozerClearing } from '../vehicle/BulldozerClearing';
 import { buildLighthousePier } from '../world/Pier';
 import { getIslandSites } from '../world/IslandSites';
 import { WildlifeSystem } from '../wildlife/WildlifeSystem';
@@ -239,6 +241,7 @@ export interface GameWorld {
   vehicle: VehicleController;
   moped: MopedController;
   boat: BoatController;
+  bulldozer: BulldozerController;
   wildlife: WildlifeSystem;
   shadows: StaticShadows;
   interiors: InteriorLighting;
@@ -272,6 +275,12 @@ export class GameEngine {
   public readonly camera: ThirdPersonCamera;
   public readonly input: InputManager;
   public world: GameWorld | null = null;
+  private readonly stepWorldPhysics = (dt: number): void => {
+    const w = this.world;
+    if (!w) return;
+    w.orchard.applyWaterPhysics(dt);
+    w.bulldozer.step(dt);
+  };
   public mode: EngineMode = 'play';
 
   private readonly scene = new THREE.Scene();
@@ -462,6 +471,7 @@ export class GameEngine {
     this.input.dispose();
     this.world?.editor.dispose();
     this.world?.bridges.dispose();
+    this.world?.bulldozer.dispose();
     this.world?.props.disposeGeneratedRocks();
     this.world?.debugRenderer.dispose();
     this.world?.character.swimAbility?.waterParticles?.dispose();
@@ -502,7 +512,7 @@ export class GameEngine {
     const spawn = SPAWN_POSITION.clone();
     spawn.y = Math.max(w.terrain.getHeight(spawn.x, spawn.z), worldSettings.waterLevel) + 1.5;
     const { pos, atBed } = w.gameplay.respawnTarget(spawn);
-    for (const ride of [w.vehicle, w.moped, w.boat]) if (ride.isPlayerInside) ride.exit(w.character, this.camera);
+    for (const ride of [w.vehicle, w.moped, w.boat, w.bulldozer]) if (ride.isPlayerInside) ride.exit(w.character, this.camera);
     if (w.gameplay.fishing.busy) w.gameplay.fishing.cancel();
     w.gameplay.openPanel(null);
     w.exploration.teleport(w.character, this.camera, pos, () => this.callbacks.onNotify(t(atBed ? 'respawn.bed' : 'respawn.spawn'), 'info'));
@@ -576,6 +586,7 @@ export class GameEngine {
     const { character, editor } = this.world;
     if (mode === 'play' && editor.hasUnsavedEdits && !window.confirm('Є незбережені зміни світу. Повернутися до гри без збереження?')) return;
     if (mode === 'editor') {
+      if (this.world.bulldozer.isPlayerInside) this.world.bulldozer.exit(character, this.camera);
       if (character.buildAbility?.isBuildModeActive) character.buildAbility.toggleBuildMode();
       if (character.buildAbility?.isPaintingModeActive) character.buildAbility.togglePaintingMode();
       this.world.gameplay.fishing.cancel();
@@ -738,6 +749,20 @@ export class GameEngine {
       const mopedSpawn = new THREE.Vector3(2.4, 0, -1.6);
       mopedSpawn.y = terrain.getHeight(mopedSpawn.x, mopedSpawn.z) + 0.45;
       const moped = new MopedController(physics, scene, terrain, mopedSpawn, -Math.PI / 2);
+      const dozerSpawn = new THREE.Vector3(-5, 0, 6);
+      dozerSpawn.y = terrain.getHeight(dozerSpawn.x, dozerSpawn.z) + 0.35;
+      const bulldozer = new BulldozerController(physics, scene, terrain, dozerSpawn, -Math.PI / 2);
+      bulldozer.onGradeStrip = createBulldozerClearing({
+        terrain, props, propTrees, orchard, nursery, flowers: flowerBeds, farming: farmingManager,
+        collect: (items) => {
+          for (const reward of items) {
+            const item = inventoryManager.getItem(reward.itemId);
+            reward.amount = item ? Math.min(reward.amount, item.maxStack - item.count) : 0;
+          }
+          const received = items.filter(({ amount }) => amount > 0);
+          if (received.length) giveResources(received);
+        },
+      });
       const gameplay = new GameplayManager(scene, character, inventoryManager, props, weather, terrain, particleManager);
       gameplay.onNotify = (text, type) => callbacks.onNotify(text, type);
       // Pests and pebbles query walls / sight lines through physics; the slingshot aims where the camera looks
@@ -821,7 +846,7 @@ export class GameEngine {
       water.setBoatHull(boat.model.hull);
       boat.dock.copy(pier.end).lerp(pier.start, 0.25);
       const wildlife = new WildlifeSystem(scene, terrain, props, weather);
-      const bridges = new BridgeSystem(scene, physics);
+      const bridges = new BridgeSystem(scene, physics, terrain);
       const shadows = new StaticShadows(terrain, props, forest, rocks, propTrees, buildingManager, bridges);
       shadows.orchard = orchard;
       const interiors = new InteriorLighting(physics, buildingManager);
@@ -886,6 +911,7 @@ export class GameEngine {
         vehicle,
         moped,
         boat,
+        bulldozer,
         wildlife,
         shadows,
         interiors,
@@ -900,7 +926,10 @@ export class GameEngine {
       this.world.saves = new SaveSystem(this.world);
       // A save loaded during play uploads its world before the next frame (the start-up load is
       // covered by prewarmShaders)
-      this.world.saves.onApplied = () => {
+      this.world.saves.onApplied = (restoring) => {
+        if (bulldozer.isPlayerInside && !restoring) {
+          bulldozer.exit(character, this.camera, character.getPosition());
+        }
         this.gpuWarmupPending = true;
         editor.clearHistory();
       };
@@ -1107,6 +1136,7 @@ export class GameEngine {
       vehicle.notifyMouseLook();
       moped.notifyMouseLook();
       w.boat.notifyMouseLook();
+      w.bulldozer.notifyMouseLook();
     }
     const mouseScroll = inputManager.consumeMouseScroll();
     // Float in the water: the wheel raises / lowers the hook instead of zooming
@@ -1117,8 +1147,11 @@ export class GameEngine {
     const truckDriving = !editing && vehicle.update(dt, inputManager, tpCamera, character);
     const mopedDriving = !editing && !truckDriving && moped.update(dt, inputManager, tpCamera, character);
     const boatDriving = !editing && !truckDriving && !mopedDriving && w.boat.update(dt, inputManager, tpCamera, character);
-    const isDriving = truckDriving || mopedDriving || boatDriving;
-    const ride = truckDriving ? vehicle : mopedDriving ? moped : boatDriving ? w.boat : null;
+    const dozerDriving = !editing && w.bulldozer.update(dt, inputManager, tpCamera, character,
+      !truckDriving && !mopedDriving && !boatDriving && !w.gameplay.sleeping && !w.exploration.inCave &&
+      !character.isRagdoll && !character.telemetry.isBuildModeActive && !isPaintingMode && uiScreens.current === null);
+    const isDriving = truckDriving || mopedDriving || boatDriving || dozerDriving;
+    const ride = truckDriving ? vehicle : mopedDriving ? moped : boatDriving ? w.boat : dozerDriving ? w.bulldozer : null;
     {
       const pos = character.getPosition();
       const canLock = !editing && !isDriving && !w.gameplay.sleeping && !character.telemetry.isBuildModeActive && !isPaintingMode;
@@ -1129,7 +1162,7 @@ export class GameEngine {
 
     hitchLog.mark(1);
     const pStart = performance.now();
-    if (dt > 0) physics.step(dt, w.orchard.applyWaterPhysics);
+    if (dt > 0) physics.step(dt, this.stepWorldPhysics);
     const stepTime = performance.now() - pStart;
     this.lastStepMs = stepTime;
     hitchLog.mark(2);
@@ -1137,6 +1170,7 @@ export class GameEngine {
     moped.syncVisuals(dt);
     w.boat.night = w.weather.nightFactor;
     w.boat.syncVisuals(dt);
+    w.bulldozer.syncVisuals(dt);
 
     // Asleep in bed: the player stays put until morning
     if (!editing && !isDriving && !w.gameplay.sleeping) {
@@ -1666,7 +1700,7 @@ export class GameEngine {
   }
 
   /** Listener at the camera; ambience (rain, wind, campfire, engine) around the player. */
-  private updateAudio(dt: number, playerPos: THREE.Vector3, ride: VehicleController | MopedController | BoatController | null): void {
+  private updateAudio(dt: number, playerPos: THREE.Vector3, ride: VehicleController | MopedController | BoatController | BulldozerController | null): void {
     const w = this.world;
     if (!w) return;
     const camera = this.camera.camera;
@@ -1929,7 +1963,7 @@ export class GameEngine {
   /** Brings the scooter to the player (V key / HUD button). Not underground or while riding. */
   public callMoped(): void {
     const w = this.world;
-    if (!w || w.moped.isPlayerInside || w.vehicle.isPlayerInside || w.boat.isPlayerInside || this.mode !== 'play') return;
+    if (!w || w.moped.isPlayerInside || w.vehicle.isPlayerInside || w.boat.isPlayerInside || w.bulldozer.isPlayerInside || this.mode !== 'play') return;
     const ok = !w.exploration.inCave && w.moped.callTo(w.character);
     this.callbacks.onNotify(t(ok ? 'moped.called' : 'moped.cantCall'), ok ? 'info' : 'warning');
   }

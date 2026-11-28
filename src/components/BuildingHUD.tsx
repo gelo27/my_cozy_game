@@ -244,6 +244,35 @@ const PIECE_ITEMS: PieceItemConfig[] = [
     dimBadge: '1x2м (Колоніальні)',
   },
 
+  {
+    type: BuildingPieceType.WOOD_DOOR_ARCH,
+    category: PieceCategory.DOORS,
+    slot: 9,
+    icon: <DoorClosed className="w-5 h-5" />,
+    dimBadge: '1×2 м',
+  },
+  {
+    type: BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_1X2,
+    category: PieceCategory.DOORS,
+    slot: 10,
+    icon: <DoorOpen className="w-5 h-5" />,
+    dimBadge: '1×2 м',
+  },
+  {
+    type: BuildingPieceType.WOOD_WALL_DOORWAY_ARCH_2X2,
+    category: PieceCategory.DOORS,
+    slot: 11,
+    icon: <DoorOpen className="w-5 h-5" />,
+    dimBadge: '2×2 м',
+  },
+  {
+    type: BuildingPieceType.DOOR_FRENCH_2X2,
+    category: PieceCategory.DOORS,
+    slot: 12,
+    icon: <DoorClosed className="w-5 h-5" />,
+    dimBadge: '2×2 м',
+  },
+
   // Stairs
   {
     type: BuildingPieceType.WOOD_STAIRS_2X2,

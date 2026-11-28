@@ -8,6 +8,7 @@ import { COLLISION_GROUPS } from '../config/constants';
 import { GRASSY_TILES, TerrainTileType, TILE_DEFINITIONS, sanitizeTile } from '../terrain/types/TerrainTypes';
 import { paintCurbTexture, paintPavingTexture } from '../terrain/PavingTextures';
 import { PAVING_FLAG, PAVING_TYPES, writeTerrainTileRules } from '../terrain/PavingRules';
+import { stripDistanceSq } from '../terrain/TerrainStrip';
 import { MAX_SEA_FLOOR_DEPTH, MIN_SEA_FLOOR_DEPTH, SEA_BED_COLLIDER_OFFSET, SEA_FLOOR_Y, WORLD_HALF, WORLD_LIMIT, WORLD_SIZE, isMobileDevice, worldSettings } from './WorldSettings';
 import { coastRadius, islandHeight } from './IslandGenerator';
 import { riverWorld, unionRect, GridRect } from './rivers/RiverWorld';
@@ -190,6 +191,8 @@ export class TerrainSystem {
   };
   /** Bumped on every height edit so dependants (props, water) can re-snap lazily. */
   public revision = 0;
+  public lastHeightChange: GridRect | null = null;
+  private waterHeightChanges: GridRect | null = null;
   /** Bumped whenever a tile changes (grass density follows it). */
   public tileRevision = 0;
   /** Told which cells' tiles changed (inclusive cell rect), e.g. so the 3D grass redoes only them. */
@@ -369,6 +372,32 @@ export class TerrainSystem {
     }
   }
 
+  /** Exposes dirt in the blade's footprint. One terrain texture update for the changed tiles. */
+  public paintGradedStrip(ax: number, az: number, bx: number, bz: number, halfWidth: number): void {
+    const dx = bx - ax, dz = bz - az;
+    const inverseLengthSq = 1 / (dx * dx + dz * dz);
+    if (!Number.isFinite(inverseLengthSq)) return;
+    const radiusSq = halfWidth * halfWidth;
+    const x0 = Math.max(0, Math.ceil(Math.min(ax, bx) + WORLD_HALF - halfWidth - 0.5));
+    const z0 = Math.max(0, Math.ceil(Math.min(az, bz) + WORLD_HALF - halfWidth - 0.5));
+    const x1 = Math.min(N - 1, Math.floor(Math.max(ax, bx) + WORLD_HALF + halfWidth - 0.5));
+    const z1 = Math.min(N - 1, Math.floor(Math.max(az, bz) + WORLD_HALF + halfWidth - 0.5));
+    let minX = N, minZ = N, maxX = -1, maxZ = -1;
+    for (let iz = z0; iz <= z1; iz++) {
+      for (let ix = x0; ix <= x1; ix++) {
+        const i = iz * N + ix;
+        if (!GRASSY_TILES.has(this.tiles[i])) continue;
+        const x = ix - WORLD_HALF + 0.5, z = iz - WORLD_HALF + 0.5;
+        if (stripDistanceSq(x, z, ax, az, dx, dz, inverseLengthSq) >= radiusSq ||
+            this.getHeight(x, z) <= riverWorld.waterLevelAt(x, z) + 0.15) continue;
+        this.tiles[i] = TerrainTileType.DIRT_ROAD;
+        minX = Math.min(minX, ix); maxX = Math.max(maxX, ix);
+        minZ = Math.min(minZ, iz); maxZ = Math.max(maxZ, iz);
+      }
+    }
+    if (maxX >= 0) this.markSplatDirty(minX, minZ, maxX, maxZ);
+  }
+
   /** Flood fill of connected same-type cells (capped). */
   public fillTiles(x: number, z: number, type: TerrainTileType, maxCells = 6000): void {
     const sx = Math.floor(x) + WORLD_HALF;
@@ -460,6 +489,51 @@ export class TerrainSystem {
     this.markHeightsDirty(minX, minZ, maxX, maxZ);
   }
 
+  /** Grade the ground swept by a blade, in world metres. One dirty rectangle per pass segment. */
+  public gradeStrip(ax: number, az: number, bx: number, bz: number, halfWidth: number, level: number, rapid = false): boolean {
+    const dx = bx - ax, dz = bz - az;
+    const lengthSq = dx * dx + dz * dz;
+    if (lengthSq < 1e-6) return false;
+    const inverseLengthSq = 1 / lengthSq;
+    const x0 = Math.max(0, Math.ceil(Math.min(ax, bx) + WORLD_HALF - halfWidth));
+    const x1 = Math.min(N, Math.floor(Math.max(ax, bx) + WORLD_HALF + halfWidth));
+    const z0 = Math.max(0, Math.ceil(Math.min(az, bz) + WORLD_HALF - halfWidth));
+    const z1 = Math.min(N, Math.floor(Math.max(az, bz) + WORLD_HALF + halfWidth));
+    const core = Math.max(0, halfWidth - 0.95);
+    let minX = N + 1, minZ = N + 1, maxX = -1, maxZ = -1;
+
+    for (let iz = z0; iz <= z1; iz++) {
+      for (let ix = x0; ix <= x1; ix++) {
+        const x = ix - WORLD_HALF, z = iz - WORLD_HALF;
+        const distance = Math.sqrt(stripDistanceSq(x, z, ax, az, dx, dz, inverseLengthSq));
+        if (distance >= halfWidth) continue;
+        const i = iz * V + ix;
+        const old = this.heights[i];
+        // Preserve the existing waterline.
+        const bank = riverWorld.waterLevelAt(x, z) + 0.15;
+        if (old <= bank) continue;
+        const target = Math.max(level, bank);
+        const edge = 1 - THREE.MathUtils.smoothstep(distance, core, halfWidth);
+        const change = THREE.MathUtils.clamp(target - old, rapid ? -4 : -1.8, rapid ? 4 : 1.5) * edge;
+        if (Math.abs(change) < 0.005) continue;
+        this.heights[i] = old + change;
+        minX = Math.min(minX, ix);
+        minZ = Math.min(minZ, iz);
+        maxX = Math.max(maxX, ix);
+        maxZ = Math.max(maxZ, iz);
+      }
+    }
+    if (maxX < 0) return false;
+    this.markHeightsDirty(minX, minZ, maxX, maxZ);
+    return true;
+  }
+
+  public takeWaterHeightChanges(): GridRect | null {
+    const changes = this.waterHeightChanges;
+    this.waterHeightChanges = null;
+    return changes;
+  }
+
   private markHeightsDirty(minX: number, minZ: number, maxX: number, maxZ: number): void {
     this.updateRockHeights(minX, minZ, maxX, maxZ);
     this.rebuildPuddleMask(minX - 6, minZ - 6, maxX + 6, maxZ + 6);
@@ -474,6 +548,8 @@ export class TerrainSystem {
         this.physicsDirtyChunks.add(cz * CHUNKS + cx);
       }
     }
+    this.lastHeightChange = { x0: minX, z0: minZ, x1: maxX, z1: maxZ };
+    this.waterHeightChanges = unionRect(this.waterHeightChanges, this.lastHeightChange);
     this.revision++;
     this.saveEdits++;
     this.onHeightsDirty?.(minX, minZ, maxX, maxZ);

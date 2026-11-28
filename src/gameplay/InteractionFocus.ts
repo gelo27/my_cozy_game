@@ -9,6 +9,7 @@ export type InteractKind =
   | 'play'
   | 'truck'
   | 'moped'
+  | 'bulldozer'
   | 'boat';
 
 /** Extra weight for targets that must win whenever they are offered (an object in hand, a tool's aim). */

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { riverWorld } from './rivers/RiverWorld';
+import { riverWorld, type GridRect } from './rivers/RiverWorld';
 import { SEA_FLOOR_Y, WORLD_SIZE } from './WorldSettings';
 import { waterSettings } from './WaterSettings';
 import { DUCKWEED_GLSL, duckweedUniforms } from './Duckweed';
@@ -381,6 +381,7 @@ export function setWaterBridgeShade(x: number, z: number, size: number, shade: F
 }
 
 const shoreData = new Uint8Array(V * V).fill(255);
+const shoreLand = new Uint8Array(V * V);
 const shoreTex = new THREE.DataTexture(shoreData, V, V, THREE.RedFormat, THREE.UnsignedByteType);
 shoreTex.magFilter = shoreTex.minFilter = THREE.LinearFilter;
 shoreTex.colorSpace = THREE.NoColorSpace;
@@ -431,11 +432,30 @@ function edt1d(f: Float64Array, d: Float64Array, n: number): void {
  * land vertices, made smooth with two small blurs so the shore lines follow flowing curves
  * instead of the 1 m grid). A few milliseconds; done only when the terrain or the level changes.
  */
-export function setWaterTerrain(heights: Float32Array | number[], seaLevel: number): void {
+export function setWaterTerrain(heights: Float32Array | number[], seaLevel: number, rect?: GridRect): void {
+  if (rect) {
+    let shoreChanged = false;
+    let bedChanged = false;
+    for (let z = rect.z0; z <= Math.min(V - 1, rect.z1); z++) {
+      for (let x = rect.x0; x <= Math.min(V - 1, rect.x1); x++) {
+        const i = z * V + x;
+        if (shoreLand[i] !== Number(heights[i] >= seaLevel)) shoreChanged = true;
+        const sample = THREE.DataUtils.toHalfFloat(heights[i]);
+        if (bedData[i * 2] === sample) continue;
+        bedData[i * 2] = sample;
+        bedChanged = true;
+      }
+    }
+    if (!shoreChanged) {
+      if (bedChanged) bedTex.needsUpdate = true;
+      return;
+    }
+  }
   const n = V * V;
   for (let i = 0; i < n; i++) {
     bedData[i * 2] = THREE.DataUtils.toHalfFloat(heights[i]);
-    grid[i] = heights[i] >= seaLevel ? 0 : INF;
+    shoreLand[i] = Number(heights[i] >= seaLevel);
+    grid[i] = shoreLand[i] ? 0 : INF;
   }
   bedTex.needsUpdate = true;
   // Columns, then rows

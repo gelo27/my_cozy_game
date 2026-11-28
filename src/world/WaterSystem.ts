@@ -167,9 +167,11 @@ diffuseColor.rgb *= texture2D(uBedSand, vCauPos.xz * 0.5).rgb
     const level = worldSettings.waterLevel;
     if (this.terrain && (this.terrain.revision !== this.terrainRevision || level !== this.terrainLevel) && this.heightTimer <= 0) {
       this.heightTimer = HEIGHT_REFRESH;
+      const changes = this.terrain.takeWaterHeightChanges();
+      const local = this.terrainRevision >= 0 && this.terrainLevel === level;
       this.terrainRevision = this.terrain.revision;
       this.terrainLevel = level;
-      setWaterTerrain(this.terrain.heights, level);
+      setWaterTerrain(this.terrain.heights, level, local ? changes ?? undefined : undefined);
     }
   }
 }

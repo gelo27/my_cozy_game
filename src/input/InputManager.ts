@@ -11,6 +11,7 @@ export interface MovementInput {
   reset: boolean;
   interact: boolean;
   interactJustPressed: boolean;
+  bladeToggleJustPressed?: boolean;
   weapon1JustPressed: boolean;
   weapon2JustPressed: boolean;
   weapon3JustPressed: boolean;
@@ -131,6 +132,7 @@ export class InputManager {
     interactHeld: false,
     chopJustPressed: false,
     chopHeld: false,
+    bladeToggleJustPressed: false,
     buildToggleJustPressed: false,
     buildRotateJustPressed: false,
     buildSnapToggleJustPressed: false,
@@ -196,7 +198,7 @@ export class InputManager {
     const isDragGesture = this.isDragging || this.dragDistance > 6 || clickDuration > 450;
 
     if (e.button === 0) {
-      this.mouseShootJustReleased = !isDragGesture && !isUI;
+      this.mouseShootJustReleased = this.isMouseDown && !isDragGesture && !isUI;
       if ((this.isBuildMode || this.isPaintMode) && !isDragGesture && !isUI) {
         this.mouseBuildPlaceJustPressed = true;
         this.mouseBuildPlaceShift = e.shiftKey;
@@ -516,6 +518,7 @@ export class InputManager {
       reset: false, // Disabling old reset on R
       interact: interactDown,
       interactJustPressed,
+      bladeToggleJustPressed: this.mouseShootJustReleased || this.touchState.bladeToggleJustPressed,
       weapon1JustPressed,
       weapon2JustPressed,
       weapon3JustPressed,
@@ -554,6 +557,7 @@ export class InputManager {
     this.touchState.jumpJustPressed = false;
     this.touchState.dashJustPressed = false;
     this.touchState.interactJustPressed = false;
+    this.touchState.bladeToggleJustPressed = false;
     this.touchState.chopJustPressed = false;
     this.touchState.buildToggleJustPressed = false;
     this.touchState.buildRotateJustPressed = false;

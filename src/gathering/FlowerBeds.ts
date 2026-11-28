@@ -92,15 +92,17 @@ export class FlowerBeds {
   }
 
   /** Pulls the clump out; returns the inventory item it gives (null if it's gone already). */
-  public pick(id: number): string | null {
+  public pick(id: number, feedback = true): string | null {
     const p = this.props.get(id);
     if (!p || p.type !== 'flowers') return null;
     const color = tulipColorOfYaw(p.rotationY);
-    const at = p.position.clone();
     this.sway?.forget(id);
     this.props.remove(id);
-    this.particles?.emitDirtClods(at.setY(at.y + 0.1), 6);
-    audioEngine.at(at).playPlantSeed();
+    if (feedback) {
+      const at = p.position.clone();
+      this.particles?.emitDirtClods(at.setY(at.y + 0.1), 6);
+      audioEngine.at(at).playPlantSeed();
+    }
     return TULIP_ITEM_IDS[color];
   }
 

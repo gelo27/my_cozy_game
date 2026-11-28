@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { BuildingPieceType, BuiltPiece, WallGridInfo, isWindowOrDoorPiece, isSolidWallPiece, getWallHalfWidth, getWallHalfHeight } from './types/BuildingTypes';
+import { BuildingPieceType, BuiltPiece, WallGridInfo, isWindowPiece, isWindowOrDoorPiece, isSolidWallPiece, getWallHalfWidth, getWallHalfHeight } from './types/BuildingTypes';
 import { BUILDING_PIECES, FLOOR_THICKNESS, HALF_SIZE, MODULE_SIZE, WALL_THICKNESS } from './config/BuildingPiecesConfig';
 import { BUILDING_CONFIG } from '../config/constants';
 import { CandidatePlacement, getFloorHalfSize, getStairsHalfHeight, getRailingHalfWidth, getRoofDimensions, getPlacedRoofExtent } from './SnapShapes';
@@ -111,12 +111,14 @@ export function generateCandidatesForPair(
     const maxX = maxGridX - previewHalfW;
     snappedLocalX = minX <= maxX ? THREE.MathUtils.clamp(snappedLocalX, minX, maxX) : (minGridX + maxGridX) / 2;
 
-    // Vertical snapping across the wall face (applies to windows, doorways, and doors: 0.5m step)
+    // Walk-through openings sit at the wall base; windows can move up the face.
     const rawHitY = hitPoint.clone().sub(targetPiece.position).dot(targetUp);
     const minAllowedY = minGridY + previewHalfH;
     const maxAllowedY = maxGridY - previewHalfH;
     const snappedOffsetFromMin = Math.round((rawHitY - minAllowedY) / step) * step;
-    const snappedLocalY = THREE.MathUtils.clamp(minAllowedY + snappedOffsetFromMin, minAllowedY, maxAllowedY);
+    const snappedLocalY = isWindowPiece(previewType)
+      ? THREE.MathUtils.clamp(minAllowedY + snappedOffsetFromMin, minAllowedY, maxAllowedY)
+      : minAllowedY;
 
     const candidatePos = targetPiece.position.clone()
       .addScaledVector(targetRight, snappedLocalX)

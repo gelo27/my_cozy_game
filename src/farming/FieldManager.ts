@@ -337,6 +337,19 @@ export class FieldManager {
     return this.fields.get(id) ?? null;
   }
 
+  /** Visit fields overlapping a small local bounds, including old fractional placements. */
+  public forEachInBounds(x0: number, z0: number, x1: number, z1: number, visit: (field: FarmField) => void): void {
+    for (let z = Math.ceil(z0 - FIELD_CELLS); z <= Math.floor(z1); z++) {
+      for (let x = Math.ceil(x0 - FIELD_CELLS); x <= Math.floor(x1); x++) {
+        const field = this.fieldsByOrigin.get(`${x}:${z}`);
+        if (field) visit(field);
+      }
+    }
+    for (const field of this.fractionalFields) {
+      if (field.gx + FIELD_CELLS >= x0 && field.gx <= x1 && field.gz + FIELD_CELLS >= z0 && field.gz <= z1) visit(field);
+    }
+  }
+
   /** Distance from a point to the field's rectangle on the ground (0 inside). */
   public distanceTo(field: FarmField, x: number, z: number): number {
     const dx = Math.max(field.gx - x, 0, x - (field.gx + FIELD_CELLS));

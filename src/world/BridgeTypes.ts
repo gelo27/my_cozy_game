@@ -3,6 +3,7 @@ import { WORLD_HALF } from './WorldSettings';
 export const MAX_BRIDGES = 128;
 export const MIN_BRIDGE_SPAN = 1;
 export const MAX_BRIDGE_SPAN = 64;
+export const MAX_BRIDGE_SUPPORTS = 8;
 export const BRIDGE_LANDING_LIFT = 0.025;
 
 export interface BridgePoint {
@@ -18,6 +19,8 @@ export interface BridgeSettings {
   railHeight: number;
   railings: boolean;
   shape: 'round' | 'eased';
+  /** Number of support pairs along the span. Older saves omit this. */
+  supportCount?: number;
 }
 
 export interface BridgeDef extends BridgeSettings {
@@ -33,6 +36,7 @@ export const BRIDGE_DEFAULTS: Readonly<BridgeSettings> = {
   railHeight: 0.9,
   railings: true,
   shape: 'round',
+  supportCount: 0,
 };
 
 export const BRIDGE_RANGES = {
@@ -85,7 +89,9 @@ export function isBridgeDef(value: unknown): value is BridgeDef {
   if (!isRecord(value) || typeof value.id !== 'string' || !/^bridge_[\w-]{1,48}$/.test(value.id) ||
       !isPoint(value.a) || !isPoint(value.b) || typeof value.railings !== 'boolean' ||
       (value.shape !== 'round' && value.shape !== 'eased')) return false;
-  return inRange(bridgeSpan(value.a, value.b), MIN_BRIDGE_SPAN, MAX_BRIDGE_SPAN) &&
+  const count = value.supportCount;
+  return (count === undefined || (inRange(count, 0, MAX_BRIDGE_SUPPORTS) && Number.isInteger(count))) &&
+    inRange(bridgeSpan(value.a, value.b), MIN_BRIDGE_SPAN, MAX_BRIDGE_SPAN) &&
     Object.entries(BRIDGE_RANGES).every(([key, { min, max }]) => inRange(value[key], min, max));
 }
 

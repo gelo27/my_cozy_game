@@ -70,6 +70,7 @@ export interface WoodLog {
 
 export class ForestZone {
   public group: THREE.Group;
+  public canopyRevision = 0;
   private physics: PhysicsWorld;
   private particleManager: ParticleManager | null;
 
@@ -224,6 +225,12 @@ export class ForestZone {
   /** Standing trees (for baked ground shadows): base position and trunk height. */
   public forEachStandingTree(fn: (pos: THREE.Vector3, trunkHeight: number) => void): void {
     for (const t of this.trees) if (!t.isFelled) fn(t.position, t.trunkHeight);
+  }
+
+  public forEachCanopy(fn: (x: number, z: number, radius: number) => void): void {
+    for (const t of this.trees) {
+      if (!t.isFelled) fn(t.position.x, t.position.z, 4.2 * t.scale);
+    }
   }
 
   public setParticleManager(pm: ParticleManager): void {
@@ -960,6 +967,7 @@ export class ForestZone {
    */
   private fellTree(tree: TreeData, chopDirection: THREE.Vector3): void {
     tree.isFelled = true;
+    this.canopyRevision++;
 
     // 1. Remove static rigid body (Rapier automatically cleans up attached colliders)
     this.physics.removeRigidBody(tree.staticBody);
@@ -1256,6 +1264,7 @@ export class ForestZone {
     tree.staticCollider = collider;
 
     tree.isFelled = false;
+    this.canopyRevision++;
     tree.health = tree.maxHealth;
     tree.notchAngle = undefined;
     tree.trunkMesh.geometry = this.sharedTrunkGeos[0];
@@ -1304,5 +1313,6 @@ export class ForestZone {
 
     // Re-spawn standing trees
     this.spawnForestTrees();
+    this.canopyRevision++;
   }
 }

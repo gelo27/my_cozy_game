@@ -1,3 +1,4 @@
+import { DataUtils, MathUtils } from 'three';
 import { TerrainTileType } from '../terrain/types/TerrainTypes';
 import { WORLD_SIZE, worldSettings } from '../world/WorldSettings';
 import type { TerrainSystem } from '../world/TerrainSystem';
@@ -8,8 +9,7 @@ export const EXPLORE_GRID = 128;
 
 /**
  * Paints the island as a hand-drawn style map straight from the heightmap: one pixel per metre,
- * water by depth, sand, grass by height, rock on steep or high ground, hill shading and contour lines.
- * It is a single 750x750 canvas, redrawn only when the terrain changed.
+ * water by depth, painted ground, shore sand, hill shading and contour lines.
  */
 export function renderTerrainMap(terrain: TerrainSystem): HTMLCanvasElement {
   const N = WORLD_SIZE;
@@ -20,13 +20,15 @@ export function renderTerrainMap(terrain: TerrainSystem): HTMLCanvasElement {
   const img = ctx.createImageData(N, N);
   const h = terrain.heights;
   const sea = worldSettings.waterLevel;
+  const riverShading = riverWorld.texture.image.data;
   const at = (x: number, z: number) => h[Math.min(N, Math.max(0, z)) * V + Math.min(N, Math.max(0, x))];
 
   for (let z = 0; z < N; z++) {
     for (let x = 0; x < N; x++) {
       const y = at(x, z);
       // Rivers hold their own surface above the sea
-      const rs = riverWorld.surface[z * V + x];
+      const vertex = z * V + x;
+      const rs = riverWorld.surface[vertex];
       const water = rs > sea ? rs : sea;
       const dx = at(x + 1, z) - at(x - 1, z);
       const dz = at(x, z + 1) - at(x, z - 1);
@@ -38,8 +40,6 @@ export function renderTerrainMap(terrain: TerrainSystem): HTMLCanvasElement {
         r = 120 - d * 78;
         g = 190 - d * 100;
         b = 200 - d * 60;
-      } else if (y < water + 0.7) {
-        r = 232; g = 214; b = 160;
       } else {
         const t = Math.min(1, (y - water) / 16);
         r = 120 - t * 30;
@@ -62,9 +62,33 @@ export function renderTerrainMap(terrain: TerrainSystem): HTMLCanvasElement {
         else if (tile === TerrainTileType.BIRCH_GRASS) { r = 132; g = 186; b = 80; }
         else if (tile === TerrainTileType.FLOWER_GRASS) { r += (240 - r) * 0.15; g += (240 - g) * 0.15; b += (230 - b) * 0.15; } // the meadow, a touch paler
         else if (tile === TerrainTileType.GRAVEL) { r = 150; g = 145; b = 136; }
+        else if (tile === TerrainTileType.SIDEWALK_PAVERS || tile === TerrainTileType.LIMESTONE_PAVERS) { r = 182; g = 173; b = 151; }
+        else if (tile === TerrainTileType.CLINKER_HERRINGBONE) { r = 158; g = 102; b = 77; }
+        else if (tile === TerrainTileType.GRANITE_SETTS) { r = 127; g = 121; b = 115; }
+        else if (tile === TerrainTileType.SANDSTONE_FLAGSTONE) { r = 187; g = 151; b = 111; }
         else if (tile === TerrainTileType.ICE) { r = 176; g = 212; b = 232; }
         else if (tile === TerrainTileType.MUD) { r = 96; g = 72; b = 52; }
         else if (tile === TerrainTileType.PUDDLE) { r = 92; g = 110; b = 128; }
+
+        // Use the terrain shader's shore falloff and its bank/estuary mask.
+        const shoreIndex = vertex * 4;
+        const bankWeight = DataUtils.fromHalfFloat(riverShading[shoreIndex + 1]);
+        const shoreWater = bankWeight > 0.5
+          ? Math.max(sea, DataUtils.fromHalfFloat(riverShading[shoreIndex]))
+          : sea;
+        const shoreHeight = y - shoreWater;
+        if (shoreHeight < 0.55) {
+          const riverBank = MathUtils.smoothstep(bankWeight, 0.35, 0.75)
+            * MathUtils.smoothstep(shoreWater - sea, 0.12, 0.45)
+            * (1 - DataUtils.fromHalfFloat(riverShading[shoreIndex + 2]));
+          const coastalSand = 1 - MathUtils.smoothstep(shoreHeight, 0.15, 0.55);
+          const riverShore = (1 - MathUtils.smoothstep(shoreHeight, 0.08, 0.32))
+            * MathUtils.smoothstep(bankWeight, 0.8, 0.97);
+          const sand = MathUtils.lerp(coastalSand, riverShore, riverBank);
+          r = MathUtils.lerp(r, 232, sand);
+          g = MathUtils.lerp(g, 214, sand);
+          b = MathUtils.lerp(b, 160, sand);
+        }
       }
       // Hill shading with light from the north-west
       if (y >= water) {

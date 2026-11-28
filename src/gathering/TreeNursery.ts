@@ -285,6 +285,18 @@ export class TreeNursery {
     this.revision++;
   }
 
+  public clearForGrading(covers: (x: number, z: number) => boolean, give: (itemId: string, amount: number) => void): void {
+    for (let i = this.saplings.length - 1; i >= 0; i--) {
+      const plant = this.saplings[i];
+      if (!covers(plant.x, plant.z)) continue;
+      this.saplings.splice(i, 1);
+      plant.mesh?.removeFromParent();
+      this.revision++;
+      const item = plant.type === HEDGE_TYPE ? HEDGE_TYPE : SEED_OF_TREE[plant.type];
+      if (item) give(item, 1);
+    }
+  }
+
   /** Sleeping skips hours: the saplings grow on. */
   public fastForward(seconds: number): void {
     for (const s of this.saplings) s.age = Math.min(GROW_SECONDS[s.type] ?? 300, s.age + seconds);
